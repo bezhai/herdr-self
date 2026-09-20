@@ -952,6 +952,13 @@ impl App {
                     },
                 }
             }
+            Method::NotificationShowTargeted(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "unsupported_method",
+                    "targeted notifications require a negotiated client shell",
+                );
+            }
             Method::NotificationShow(params) => {
                 return self.handle_notification_show(request.id, params);
             }

@@ -161,6 +161,7 @@ pub(crate) struct ClientConnection {
     pub(crate) render_pending: bool,
     /// Whether this connection receives pane surfaces and may affect presentation state.
     pub(crate) shell_surface_active: bool,
+    pub(crate) targeted_notifications: bool,
     /// Whether this shell wants host mouse capture without pane demand.
     pub(crate) shell_mouse_capture: bool,
     /// Last host mouse capture mode sent to this client.
@@ -238,6 +239,7 @@ impl ClientConnection {
             host_keyboard_report_all_active: None,
             render_pending: false,
             shell_surface_active: true,
+            targeted_notifications: false,
             shell_mouse_capture: false,
             host_mouse_capture_active: None,
             host_sgr_pixels_active: None,

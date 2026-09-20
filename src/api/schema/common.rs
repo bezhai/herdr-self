@@ -101,8 +101,34 @@ pub enum ReadFormat {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NotificationTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_endpoint_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct NotificationShowTargetedParams {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<crate::config::ToastHerdrPosition>,
+    #[serde(default, skip_serializing_if = "NotificationShowSound::is_none")]
+    pub sound: NotificationShowSound,
+    pub target: NotificationTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NotificationShowParams {
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<NotificationTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

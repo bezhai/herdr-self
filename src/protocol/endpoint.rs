@@ -15,6 +15,18 @@ use super::{ClientShellSnapshot, ClientSurfaceSize, ServerMessage};
 pub const ENDPOINT_PROTOCOL_GENERATION: u32 = 1;
 pub const ENDPOINT_HELLO_KIND: &str = "endpoint.hello.v1";
 pub const ENDPOINT_WELCOME_KIND: &str = "endpoint.welcome.v1";
+pub const NOTIFICATION_CODEC_V1: &str = "notification.targeted.v1";
+
+/// JSON-only extension; never include this type in a frozen core codec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TargetedNotification {
+    pub event: super::SemanticNotification,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<crate::api::schema::NotificationTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub boot_id: Option<String>,
+}
+
 pub const SNAPSHOT_CODEC_V1: &str = "shell.snapshot.v1";
 pub const ENDPOINT_SNAPSHOT_KIND: &str = SNAPSHOT_CODEC_V1;
 pub const SURFACE_CODEC_V1: &str = "shell.surface.v1";
@@ -60,6 +72,8 @@ pub struct EndpointClientHello {
     pub input_codecs: Vec<String>,
     #[serde(default)]
     pub blob_codecs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notification_codecs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -86,6 +100,8 @@ pub struct EndpointServerWelcome {
     pub surface_codec: String,
     pub input_codec: String,
     pub blob_codec: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notification_codec: Option<String>,
     #[serde(default)]
     pub methods: Vec<String>,
     #[serde(default)]
@@ -143,6 +159,7 @@ impl EndpointServerWelcome {
             surface_codec: SURFACE_CODEC_V1.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
+            notification_codec: None,
             methods,
             capabilities: vec![
                 super::surface_reuse::CAPABILITY.into(),
@@ -164,6 +181,7 @@ impl EndpointServerWelcome {
             surface_codec: SURFACE_CODEC_V1.into(),
             input_codec: INPUT_CODEC_V1.into(),
             blob_codec: BLOB_CODEC_V1.into(),
+            notification_codec: None,
             methods: Vec::new(),
             capabilities: Vec::new(),
             error: Some(EndpointHandshakeError {
@@ -195,6 +213,7 @@ mod tests {
             surface_codecs: vec![SURFACE_CODEC_V1.into()],
             input_codecs: vec![INPUT_CODEC_V1.into()],
             blob_codecs: vec![BLOB_CODEC_V1.into()],
+            notification_codecs: Vec::new(),
         }
     }
 
@@ -224,6 +243,24 @@ mod tests {
             agents: Vec::new(),
             commands: Vec::new(),
         }
+    }
+
+    #[test]
+    fn old_peers_default_to_the_unchanged_notification_lane() {
+        let hello: EndpointClientHello = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-hello-v1.json"
+        )))
+        .unwrap();
+        let welcome: EndpointServerWelcome = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-welcome-v1.json"
+        )))
+        .unwrap();
+        assert!(hello.notification_codecs.is_empty());
+        assert!(welcome.notification_codec.is_none());
+        assert!(hello.supports_required_codecs());
+        assert_eq!(welcome.generation, ENDPOINT_PROTOCOL_GENERATION);
     }
 
     #[test]

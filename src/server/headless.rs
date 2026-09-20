@@ -1675,6 +1675,15 @@ impl HeadlessServer {
 
     /// Sends an ephemeral semantic event to every connected client-rendered shell.
     fn send_to_client_shells(&mut self, msg: ServerMessage) -> bool {
+        if let ServerMessage::SemanticNotification(event) = msg {
+            let target = crate::api::schema::NotificationTarget {
+                machine_endpoint_id: None,
+                workspace_id: event.workspace_id.clone(),
+                tab_id: event.tab_id.clone(),
+                pane_id: event.pane_id.clone(),
+            };
+            return self.send_semantic_notification(event, Some(target), false);
+        }
         let serialized = match Self::frame_server_message(&msg) {
             Ok(framed) => framed,
             Err(err) => {
@@ -1970,6 +1979,7 @@ impl HeadlessServer {
                 surface_active,
                 surface_reuse,
                 surface_delta,
+                targeted_notifications,
                 writer,
             } => {
                 if self.handoff_in_progress {
@@ -2015,6 +2025,7 @@ impl HeadlessServer {
                 connection.shell_uses_endpoint_keybindings = endpoint_keybindings;
                 connection.shell_mouse_capture = mouse_capture;
                 connection.shell_surface_active = surface_active;
+                connection.targeted_notifications = targeted_notifications;
                 connection.render_state.enable_surface_reuse(surface_reuse);
                 connection.render_state.enable_surface_delta(surface_delta);
                 connection.shell_projection_revision = 1;
@@ -2996,6 +3007,23 @@ impl HeadlessServer {
                 wait_for_live_handoff_response_write(msg.response_write_complete);
                 self.finish_live_handoff_shutdown();
             }
+            return true;
+        }
+
+        if let api::schema::Method::NotificationShowTargeted(params) = &msg.request.method {
+            let notification = api::schema::NotificationShowParams {
+                title: params.title.clone(),
+                body: params.body.clone(),
+                position: params.position,
+                sound: params.sound,
+                target: Some(params.target.clone()),
+            };
+            let response = self.handle_notification_show_targeted_api(
+                msg.request.id.clone(),
+                notification,
+                true,
+            );
+            let _ = msg.respond_to.send(response);
             return true;
         }
 

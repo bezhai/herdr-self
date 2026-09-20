@@ -2369,6 +2369,16 @@
             "sound": {
               "$ref": "#/schemas/request/$defs/NotificationShowSound"
             },
+            "target": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/NotificationTarget"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "title": {
               "type": "string"
             }
@@ -2385,6 +2395,69 @@
             "request"
           ],
           "type": "string"
+        },
+        "NotificationShowTargetedParams": {
+          "properties": {
+            "body": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "position": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/ToastHerdrPosition"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "sound": {
+              "$ref": "#/schemas/request/$defs/NotificationShowSound"
+            },
+            "target": {
+              "$ref": "#/schemas/request/$defs/NotificationTarget"
+            },
+            "title": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "title",
+            "target"
+          ],
+          "type": "object"
+        },
+        "NotificationTarget": {
+          "properties": {
+            "machine_endpoint_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tab_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "workspace_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
         },
         "OutputMatch": {
           "oneOf": [
@@ -4851,6 +4924,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/NotificationShowParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "notification.show_targeted",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/NotificationShowTargetedParams"
             }
           },
           "required": [

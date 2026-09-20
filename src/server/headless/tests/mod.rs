@@ -693,6 +693,7 @@ async fn client_shell_attach_seeds_workspace() {
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id: 6,
             surface_cols: 80,
             surface_rows: 23,
@@ -725,6 +726,7 @@ async fn client_shell_endpoint_request_uses_the_selected_connection() {
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id,
             surface_cols: 80,
             surface_rows: 23,
@@ -843,6 +845,7 @@ async fn client_shell_pairs_agent_view_set_replacement_and_clear_with_snapshots(
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id: 77,
             surface_cols: 80,
             surface_rows: 23,
@@ -953,6 +956,7 @@ async fn client_shell_receives_metadata_then_shell_free_pane_surface() {
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id: 7,
             surface_cols: 80,
             surface_rows: 23,
@@ -1122,6 +1126,7 @@ fn connect_test_shell(
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id,
             surface_cols,
             surface_rows,
@@ -1585,6 +1590,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id: 13,
             surface_cols: 80,
             surface_rows: 23,
@@ -1611,6 +1617,7 @@ async fn client_shell_config_diagnostics_follow_keybinding_ownership() {
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id: 14,
             surface_cols: 80,
             surface_rows: 23,
@@ -2515,6 +2522,7 @@ async fn public_api_focus_replaces_every_client_shell_projection() {
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id: 9,
             surface_cols: 80,
             surface_rows: 23,
@@ -2767,6 +2775,7 @@ async fn client_shell_streams_and_targets_popup_terminal_content() {
         server.handle_server_event(ServerEvent::ClientShellConnected {
             surface_reuse: false,
             surface_delta: false,
+            targeted_notifications: false,
             client_id: 12,
             surface_cols: 80,
             surface_rows: 23,
@@ -6181,6 +6190,7 @@ fn notification_show_uses_client_shell_policy_independent_of_server_delivery() {
     let response = server.handle_notification_show_api(
         "notify-shell".into(),
         api::schema::NotificationShowParams {
+            target: None,
             title: "plugin title".into(),
             body: Some("plugin body".into()),
             position: Some(crate::config::ToastHerdrPosition::TopLeft),
@@ -6464,6 +6474,7 @@ fn notification_show_api_forwards_one_semantic_client_notification() {
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
+                target: None,
                 title: "build failed".into(),
                 body: Some("api workspace".into()),
                 position: Some(crate::config::ToastHerdrPosition::TopLeft),
@@ -6527,6 +6538,7 @@ fn notification_show_api_preserves_colon_in_forwarded_title() {
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
+                target: None,
                 title: "build: failed".into(),
                 body: Some("api workspace".into()),
                 position: None,
@@ -6573,6 +6585,7 @@ fn notification_show_api_validates_empty_title_before_disabled_delivery() {
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
+                target: None,
                 title: "\n\t".into(),
                 body: None,
                 position: None,
@@ -6604,6 +6617,7 @@ fn notification_show_api_reports_no_foreground_client() {
         request: api::schema::Request {
             id: "notify".into(),
             method: api::schema::Method::NotificationShow(api::schema::NotificationShowParams {
+                target: None,
                 title: "build failed".into(),
                 body: None,
                 position: None,
@@ -6654,6 +6668,7 @@ fn notification_show_api_includes_sound_in_semantic_event() {
                 id: "notify".into(),
                 method: api::schema::Method::NotificationShow(
                     api::schema::NotificationShowParams {
+                        target: None,
                         title: "build failed".into(),
                         body: None,
                         position: None,
@@ -6910,4 +6925,167 @@ fn no_handle_internal_event_bypass_in_module() {
              handle_internal_event_with_forwarding (bypass risk):\n  {}",
         bypass_lines.join("\n  ")
     );
+}
+
+#[test]
+fn targeted_and_legacy_clients_each_receive_one_notification() {
+    let mut server = test_headless_server();
+    let mut receivers = Vec::new();
+    for (id, targeted) in [(1, false), (2, true)] {
+        let (writer, control, _frames) = test_client_writer();
+        let mut connection = ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            id,
+            RenderEncoding::SemanticFrame,
+            Some(writer),
+        );
+        connection.targeted_notifications = targeted;
+        server.clients.insert(id, connection);
+        receivers.push(control);
+    }
+    let event = protocol::SemanticNotification {
+        kind: protocol::SemanticNotificationKind::NeedsAttention,
+        title: "codex needs attention".into(),
+        body: None,
+        sound: None,
+        agent: Some("codex".into()),
+        workspace_id: Some("ws_1".into()),
+        tab_id: Some("tab_1".into()),
+        pane_id: Some("pane_1".into()),
+        position: None,
+    };
+    let legacy = ServerMessage::SemanticNotification(event.clone());
+    assert!(server.send_to_client_shells(legacy.clone()));
+    let expected = HeadlessServer::frame_server_message(&legacy).unwrap();
+    let received = receivers[0].recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(received, expected); // unchanged legacy bytes, no fixture rewrite
+    let modern = read_server_message(receivers[1].recv_timeout(Duration::from_secs(1)).unwrap());
+    let ServerMessage::EndpointControl { kind, data } = modern else {
+        panic!("targeted JSON control");
+    };
+    assert_eq!(kind, protocol::endpoint::NOTIFICATION_CODEC_V1);
+    let envelope: protocol::endpoint::TargetedNotification = serde_json::from_str(&data).unwrap();
+    assert_eq!(envelope.event, event);
+    assert_eq!(
+        envelope.boot_id.as_deref(),
+        Some(server.client_shell_boot_id.as_str())
+    );
+    assert_eq!(envelope.target.unwrap().pane_id.as_deref(), Some("pane_1"));
+    assert!(receivers
+        .iter()
+        .all(|receiver| receiver.try_recv().is_err()));
+}
+
+#[test]
+fn required_notification_target_is_not_silently_dropped_for_legacy_clients() {
+    let mut server = test_headless_server();
+    let (writer, control, _frames) = test_client_writer();
+    server.clients.insert(
+        1,
+        ClientConnection::new_with_mode(
+            ClientConnectionMode::ClientShell,
+            (80, 24),
+            crate::kitty_graphics::HostCellSize::default(),
+            1,
+            RenderEncoding::SemanticFrame,
+            Some(writer),
+        ),
+    );
+    let response = server.handle_notification_show_targeted_api(
+        "targeted".into(),
+        api::schema::NotificationShowParams {
+            title: "needs attention".into(),
+            body: None,
+            position: None,
+            sound: api::schema::NotificationShowSound::None,
+            target: Some(api::schema::NotificationTarget {
+                machine_endpoint_id: None,
+                workspace_id: None,
+                tab_id: None,
+                pane_id: Some("pane_1".into()),
+            }),
+        },
+        true,
+    );
+    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(value["error"]["code"], "unsupported_notification_target");
+    assert!(control.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn targeted_notification_advertised_endpoint_method_dispatches_and_replies() {
+    let mut server = test_headless_server();
+    let (writer, control, _frames) = test_client_writer();
+    let mut connection = ClientConnection::new_with_mode(
+        ClientConnectionMode::ClientShell,
+        (80, 24),
+        crate::kitty_graphics::HostCellSize::default(),
+        1,
+        RenderEncoding::SemanticFrame,
+        Some(writer),
+    );
+    connection.targeted_notifications = true;
+    server.clients.insert(1, connection);
+    let method = api::schema::Method::NotificationShowTargeted(
+        api::schema::NotificationShowTargetedParams {
+            title: "codex approval".into(),
+            body: Some("body".into()),
+            position: Some(config::ToastHerdrPosition::BottomLeft),
+            sound: api::schema::NotificationShowSound::Request,
+            target: api::schema::NotificationTarget {
+                machine_endpoint_id: None,
+                workspace_id: None,
+                tab_id: None,
+                pane_id: Some("pane_1".into()),
+            },
+        },
+    );
+    assert!(crate::server::client_commands::supports_client_shell_method(&method));
+    server.handle_client_shell_endpoint_request(
+        1,
+        server.client_shell_boot_id.clone(),
+        Box::new(api::schema::Request {
+            id: "targeted-method".into(),
+            method,
+        }),
+    );
+    let first = read_server_message(control.recv_timeout(Duration::from_secs(1)).unwrap());
+    let ServerMessage::EndpointControl { kind, data } = first else {
+        panic!("targeted notification");
+    };
+    assert_eq!(kind, protocol::endpoint::NOTIFICATION_CODEC_V1);
+    let notification: protocol::endpoint::TargetedNotification =
+        serde_json::from_str(&data).unwrap();
+    assert_eq!(
+        notification.target.unwrap().pane_id.as_deref(),
+        Some("pane_1")
+    );
+    assert_eq!(
+        notification.event.position,
+        Some(config::ToastHerdrPosition::BottomLeft)
+    );
+    assert_eq!(
+        notification.event.sound,
+        Some(protocol::SemanticNotificationSound::Request)
+    );
+    let ready = tokio::time::timeout(Duration::from_secs(2), server.server_event_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    server.handle_server_event(ready);
+    let response = read_server_message(control.recv_timeout(Duration::from_secs(1)).unwrap());
+    let ServerMessage::ClientShellEndpointResponseChunk {
+        data, request_id, ..
+    } = response
+    else {
+        panic!("endpoint response");
+    };
+    assert_eq!(request_id, "targeted-method");
+    let response: api::schema::SuccessResponse = serde_json::from_slice(&data).unwrap();
+    assert!(matches!(
+        response.result,
+        api::schema::ResponseResult::NotificationShow { shown: true, .. }
+    ));
 }

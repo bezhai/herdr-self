@@ -99,6 +99,7 @@ fn parse_notification_show_args(
     }
 
     Ok(NotificationShowParams {
+        target: None,
         title,
         body,
         position,
@@ -162,6 +163,7 @@ mod tests {
         assert_eq!(
             params,
             NotificationShowParams {
+                target: None,
                 title: "build failed".into(),
                 body: Some("api workspace".into()),
                 position: Some(ToastHerdrPosition::TopRight),

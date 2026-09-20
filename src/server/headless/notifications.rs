@@ -1,6 +1,47 @@
 use super::*;
 
 impl HeadlessServer {
+    pub(super) fn send_semantic_notification(
+        &mut self,
+        event: protocol::SemanticNotification,
+        target: Option<api::schema::NotificationTarget>,
+        required: bool,
+    ) -> bool {
+        let envelope = protocol::endpoint::TargetedNotification {
+            event: event.clone(),
+            target,
+            boot_id: Some(self.client_shell_boot_id.clone()),
+        };
+        let data = match serde_json::to_string(&envelope) {
+            Ok(data) => data,
+            Err(error) => {
+                warn!(%error, "failed to encode targeted notification");
+                return false;
+            }
+        };
+        let clients = self
+            .clients
+            .iter()
+            .filter_map(|(&id, client)| {
+                (client.is_shell_client() && (!required || client.targeted_notifications))
+                    .then_some((id, client.targeted_notifications))
+            })
+            .collect::<Vec<_>>();
+        let mut sent = false;
+        for (id, targeted) in clients {
+            let message = if targeted {
+                ServerMessage::EndpointControl {
+                    kind: protocol::endpoint::NOTIFICATION_CODEC_V1.into(),
+                    data: data.clone(),
+                }
+            } else {
+                ServerMessage::SemanticNotification(event.clone())
+            };
+            sent |= self.send_to_client(id, message);
+        }
+        sent
+    }
+
     fn pane_effective_state(&self, pane_id: crate::layout::PaneId) -> crate::detect::AgentState {
         self.app
             .state
@@ -246,7 +287,38 @@ impl HeadlessServer {
         id: String,
         params: api::schema::NotificationShowParams,
     ) -> String {
+        self.handle_notification_show_targeted_api(id, params, false)
+    }
+
+    pub(super) fn handle_notification_show_targeted_api(
+        &mut self,
+        id: String,
+        params: api::schema::NotificationShowParams,
+        required: bool,
+    ) -> String {
         use api::schema::NotificationShowReason;
+        if required
+            && !self
+                .clients
+                .values()
+                .any(|client| client.is_shell_client() && client.targeted_notifications)
+        {
+            return crate::server::client_commands::error_response(
+                id,
+                "unsupported_notification_target",
+                "no client negotiated targeted notifications",
+            );
+        }
+        if let Some(target) = &params.target {
+            if target.pane_id.is_none() && target.tab_id.is_none() && target.workspace_id.is_none()
+            {
+                return crate::server::client_commands::error_response(
+                    id,
+                    "invalid_params",
+                    "notification target needs a pane, tab or workspace",
+                );
+            }
+        }
 
         let Some(title) = sanitize_notification_text(&params.title, 80) else {
             return serde_json::to_string(&api::schema::ErrorResponse {
@@ -284,7 +356,7 @@ impl HeadlessServer {
                 Some(protocol::SemanticNotificationSound::Request)
             }
         };
-        let shown = self.send_to_client_shells(ServerMessage::SemanticNotification(
+        let shown = self.send_semantic_notification(
             protocol::SemanticNotification {
                 kind: protocol::SemanticNotificationKind::Custom,
                 title,
@@ -296,7 +368,9 @@ impl HeadlessServer {
                 pane_id: None,
                 position: params.position,
             },
-        ));
+            params.target,
+            required,
+        );
         if shown {
             self.app.mark_api_notification_shown(Instant::now());
         }

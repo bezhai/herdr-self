@@ -1139,6 +1139,7 @@ mod tests {
                 id: "notify".into(),
                 method: crate::api::schema::Method::NotificationShow(
                     crate::api::schema::NotificationShowParams {
+                        target: None,
                         title: "build failed".into(),
                         body: Some("api workspace".into()),
                         position: Some(crate::config::ToastHerdrPosition::TopLeft),
@@ -1175,6 +1176,7 @@ mod tests {
                 id: "notify".into(),
                 method: crate::api::schema::Method::NotificationShow(
                     crate::api::schema::NotificationShowParams {
+                        target: None,
                         title: "build failed".into(),
                         body: None,
                         position: None,
@@ -1211,6 +1213,7 @@ mod tests {
                 id: "notify".into(),
                 method: crate::api::schema::Method::NotificationShow(
                     crate::api::schema::NotificationShowParams {
+                        target: None,
                         title: "build failed".into(),
                         body: None,
                         position: None,
@@ -1244,6 +1247,7 @@ mod tests {
                 id: "notify".into(),
                 method: crate::api::schema::Method::NotificationShow(
                     crate::api::schema::NotificationShowParams {
+                        target: None,
                         title: "build failed".into(),
                         body: None,
                         position: None,

@@ -1456,3 +1456,18 @@ fn pane_link_resolve_round_trips() {
         result
     );
 }
+
+#[test]
+fn targeted_notification_method_requires_a_target_and_ordinary_method_accepts_optional_target() {
+    let request: Request = serde_json::from_value(serde_json::json!({
+        "id": "n", "method": "notification.show_targeted", "params": { "title": "codex approval", "target": {"pane_id": "pane_1"} }
+    })).unwrap();
+    assert!(
+        matches!(request.method, Method::NotificationShowTargeted(params) if params.target.pane_id.as_deref() == Some("pane_1"))
+    );
+    assert!(serde_json::from_value::<Request>(serde_json::json!({"id":"n", "method":"notification.show_targeted", "params":{"title":"notice"}})).is_err());
+    let request: Request = serde_json::from_value(serde_json::json!({"id":"n", "method":"notification.show", "params":{"title":"notice", "target":{"tab_id":"tab_1"}}})).unwrap();
+    assert!(
+        matches!(request.method, Method::NotificationShow(params) if params.target.as_ref().unwrap().tab_id.as_deref() == Some("tab_1"))
+    );
+}

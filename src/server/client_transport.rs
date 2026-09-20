@@ -400,6 +400,7 @@ pub(crate) enum ServerEvent {
         surface_active: bool,
         surface_reuse: bool,
         surface_delta: bool,
+        targeted_notifications: bool,
         writer: ClientWriter,
     },
     /// A client sent an input message.
@@ -767,6 +768,10 @@ pub(crate) fn handle_client_handshake(
                     hello.surface_active,
                     hello.surface_reuse,
                     hello.surface_delta,
+                    hello
+                        .notification_codecs
+                        .iter()
+                        .any(|codec| codec == crate::protocol::endpoint::NOTIFICATION_CODEC_V1),
                 )),
             )
         }
@@ -808,12 +813,16 @@ pub(crate) fn handle_client_handshake(
         RenderEncoding::TerminalAnsi
     };
     let welcome = if shell_options.is_some() {
-        let welcome = EndpointServerWelcome::compatible(
+        let mut welcome = EndpointServerWelcome::compatible(
             crate::server::client_commands::supported_client_shell_method_names()
                 .iter()
                 .map(|method| (*method).to_owned())
                 .collect(),
         );
+        if shell_options.as_ref().is_some_and(|options| options.7) {
+            welcome.notification_codec =
+                Some(crate::protocol::endpoint::NOTIFICATION_CODEC_V1.into());
+        }
         ServerMessage::EndpointControl {
             kind: ENDPOINT_WELCOME_KIND.into(),
             data: serde_json::to_string(&welcome).map_err(io::Error::other)?,
@@ -863,6 +872,7 @@ pub(crate) fn handle_client_handshake(
         surface_active,
         surface_reuse,
         surface_delta,
+        targeted_notifications,
     )) = shell_options
     {
         ServerEvent::ClientShellConnected {
@@ -878,6 +888,7 @@ pub(crate) fn handle_client_handshake(
             surface_active,
             surface_reuse,
             surface_delta,
+            targeted_notifications,
             writer,
         }
     } else {
@@ -1458,6 +1469,7 @@ mod tests {
             surface_codecs: vec![crate::protocol::endpoint::SURFACE_CODEC_V1.into()],
             input_codecs: vec![crate::protocol::endpoint::INPUT_CODEC_V1.into()],
             blob_codecs: vec![crate::protocol::endpoint::BLOB_CODEC_V1.into()],
+            notification_codecs: Vec::new(),
         };
         ClientMessage::EndpointControl {
             kind: ENDPOINT_HELLO_KIND.into(),
@@ -1971,10 +1983,85 @@ mod tests {
                 surface_active,
                 surface_reuse,
                 surface_delta,
+                targeted_notifications,
                 writer,
             } => {
                 assert!(!surface_reuse);
                 assert!(!surface_delta);
+                assert!(!targeted_notifications);
+                assert_eq!(client_id, 43);
+                assert_eq!((surface_cols, surface_rows), (80, 29));
+                assert_eq!((cell_width_px, cell_height_px), (8, 16));
+                assert!(pixel_mouse);
+                assert!(direct_graphics);
+                assert!(endpoint_keybindings);
+                assert!(mouse_capture);
+                assert!(surface_active);
+                drop(writer);
+            }
+            other => panic!("expected ClientShellConnected, got {other:?}"),
+        }
+
+        drop(client_stream);
+        should_quit.store(true, Ordering::Release);
+        handle
+            .join()
+            .expect("handshake thread join")
+            .expect("handshake thread result");
+    }
+
+    #[test]
+    fn targeted_notification_codec_is_negotiated_per_connection() {
+        let (mut client_stream, server_stream, _path) =
+            local_stream_pair("targeted-notification-handshake");
+        let (server_event_tx, mut server_event_rx) = mpsc::channel(4);
+        let should_quit = Arc::new(AtomicBool::new(false));
+        let handshake_quit = should_quit.clone();
+        let handle = std::thread::spawn(move || {
+            handle_client_handshake(server_stream, 43, &server_event_tx, &handshake_quit)
+        });
+
+        let mut hello = endpoint_hello(80, 29);
+        if let ClientMessage::EndpointControl { data, .. } = &mut hello {
+            let mut value: serde_json::Value = serde_json::from_str(data).unwrap();
+            value["notification_codecs"] =
+                serde_json::json!([crate::protocol::endpoint::NOTIFICATION_CODEC_V1]);
+            *data = serde_json::to_string(&value).unwrap();
+        }
+        protocol::write_message(&mut client_stream, &hello).expect("write shell hello");
+
+        let welcome: ServerMessage =
+            protocol::read_message(&mut client_stream, MAX_FRAME_SIZE).expect("read welcome");
+        let welcome = endpoint_welcome(welcome);
+        assert_eq!(welcome.generation, ENDPOINT_PROTOCOL_GENERATION);
+        assert!(welcome.error.is_none());
+        assert_eq!(
+            welcome.notification_codec.as_deref(),
+            Some(crate::protocol::endpoint::NOTIFICATION_CODEC_V1)
+        );
+        match server_event_rx
+            .blocking_recv()
+            .expect("client shell connected event")
+        {
+            ServerEvent::ClientShellConnected {
+                client_id,
+                surface_cols,
+                surface_rows,
+                cell_width_px,
+                cell_height_px,
+                pixel_mouse,
+                direct_graphics,
+                endpoint_keybindings,
+                mouse_capture,
+                surface_active,
+                surface_reuse,
+                surface_delta,
+                targeted_notifications,
+                writer,
+            } => {
+                assert!(!surface_reuse);
+                assert!(!surface_delta);
+                assert!(targeted_notifications);
                 assert_eq!(client_id, 43);
                 assert_eq!((surface_cols, surface_rows), (80, 29));
                 assert_eq!((cell_width_px, cell_height_px), (8, 16));
