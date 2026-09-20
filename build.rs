@@ -1,3 +1,6 @@
+#[path = "src/platform/macos/build_notifications.rs"]
+mod build_notifications;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -55,6 +58,11 @@ fn main() {
     let optimize = env::var("LIBGHOSTTY_VT_OPTIMIZE").unwrap_or_else(|_| "ReleaseFast".into());
     let simd = env_bool("LIBGHOSTTY_VT_SIMD").unwrap_or(true);
     let target = env::var("TARGET").expect("TARGET");
+    println!("cargo:rerun-if-changed=src/platform/macos/build_notifications.rs");
+    build_notifications::build(
+        &target,
+        &PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR")),
+    );
     let zig_target = zig_target(&target);
     let version_string = fs::read_to_string(vendored_dir.join("VERSION"))
         .expect("failed to read vendored libghostty-vt VERSION")

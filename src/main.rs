@@ -509,6 +509,12 @@ fn main() -> io::Result<()> {
             std::process::exit(2);
         }
     };
+    if raw_args
+        .get(1)
+        .is_some_and(|arg| arg == "--notification-callback")
+    {
+        return platform::run_notification_callback(&raw_args);
+    }
     if let Some(outcome) = cli::maybe_run_machine(&raw_args) {
         return finish_cli(outcome);
     }

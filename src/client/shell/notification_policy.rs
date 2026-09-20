@@ -102,6 +102,40 @@ impl ClientShellState {
         event: SemanticNotification,
         now: std::time::Instant,
     ) -> (Vec<ClientShellNotificationEffect>, bool) {
+        self.receive_targeted_notification(endpoint_id, event, None, None, now)
+    }
+
+    pub(crate) fn receive_targeted_notification(
+        &mut self,
+        endpoint_id: &ClientEndpointId,
+        mut event: SemanticNotification,
+        target: Option<crate::api::schema::NotificationTarget>,
+        boot_id: Option<String>,
+        now: std::time::Instant,
+    ) -> (Vec<ClientShellNotificationEffect>, bool) {
+        let current_boot = self.endpoint_boot_id(endpoint_id);
+        if boot_id
+            .as_deref()
+            .zip(current_boot)
+            .is_some_and(|(sent, current)| sent != current)
+        {
+            return (Vec::new(), false);
+        }
+        let mut target = target.unwrap_or_else(|| crate::api::schema::NotificationTarget {
+            machine_endpoint_id: None,
+            workspace_id: event.workspace_id.clone(),
+            tab_id: event.tab_id.clone(),
+            pane_id: event.pane_id.clone(),
+        });
+        // The authenticated source connection is authoritative, never the remote label.
+        target.machine_endpoint_id = Some(endpoint_id.storage_key());
+        event.workspace_id = target.workspace_id.clone();
+        event.tab_id = target.tab_id.clone();
+        event.pane_id = target.pane_id.clone();
+        let activation = crate::platform::NotificationActivation {
+            target,
+            boot_id: boot_id.or_else(|| current_boot.map(str::to_owned)),
+        };
         let delay = if event.kind == SemanticNotificationKind::Custom {
             0
         } else {
@@ -134,6 +168,7 @@ impl ClientShellState {
         // client-projected pane remains Done, even when delivery is immediate.
         let validate_state = delay > 0 || event.kind == SemanticNotificationKind::Finished;
         self.pending_notifications.push(ClientPendingNotification {
+            activation,
             endpoint_id: endpoint_id.clone(),
             event,
             deadline,
@@ -170,6 +205,14 @@ impl ClientShellState {
         let pending = std::mem::take(&mut self.pending_notifications);
         let mut effects = Vec::new();
         for pending in pending {
+            if pending
+                .activation
+                .boot_id
+                .as_deref()
+                .is_some_and(|boot| self.endpoint_boot_id(&pending.endpoint_id) != Some(boot))
+            {
+                continue;
+            }
             if pending.deadline > now {
                 self.pending_notifications.push(pending);
                 continue;
@@ -229,9 +272,16 @@ impl ClientShellState {
                     });
                 }
                 crate::config::ToastDelivery::System if !suppress_external => {
+                    let machine = if pending.endpoint_id.is_local() {
+                        crate::platform::hostname()
+                            .unwrap_or_else(|| self.endpoint_label(&pending.endpoint_id).to_owned())
+                    } else {
+                        self.endpoint_label(&pending.endpoint_id).to_owned()
+                    };
                     effects.push(ClientShellNotificationEffect::System {
-                        title: pending.event.title,
+                        title: format!("{} · {machine}", pending.event.title),
                         body: pending.event.body,
+                        activation: pending.activation,
                     });
                 }
                 crate::config::ToastDelivery::Terminal | crate::config::ToastDelivery::System => {}
@@ -315,5 +365,59 @@ impl ClientShellState {
                 NotificationValidation::Stale
             }
         }
+    }
+}
+
+impl ClientShellState {
+    pub(crate) fn resolve_notification_activation(
+        &self,
+        activation: &crate::platform::NotificationActivation,
+    ) -> Result<(ClientEndpointId, ClientEndpointFocusTarget), String> {
+        let endpoint = self
+            .endpoints
+            .iter()
+            .find(|endpoint| {
+                activation.target.machine_endpoint_id.as_deref()
+                    == Some(endpoint.endpoint_id.storage_key().as_str())
+            })
+            .ok_or_else(|| "Notification machine is no longer available".to_owned())?;
+        if !self.endpoint_is_online(&endpoint.endpoint_id) {
+            return Err(format!("{} is unavailable", endpoint.label));
+        }
+        let snapshot = endpoint
+            .snapshot
+            .as_deref()
+            .ok_or_else(|| "Notification machine has no current snapshot".to_owned())?;
+        if activation
+            .boot_id
+            .as_deref()
+            .is_some_and(|boot| boot != snapshot.boot_id)
+        {
+            return Err("Notification belongs to a previous server session".into());
+        }
+        let target = &activation.target;
+        let focus = if let Some(id) = &target.pane_id {
+            if !snapshot.panes.iter().any(|pane| &pane.pane_id == id) {
+                return Err("Notification pane is no longer available".into());
+            }
+            ClientEndpointFocusTarget::Pane(id.clone())
+        } else if let Some(id) = &target.tab_id {
+            if !snapshot.tabs.iter().any(|tab| &tab.tab_id == id) {
+                return Err("Notification tab is no longer available".into());
+            }
+            ClientEndpointFocusTarget::Tab(id.clone())
+        } else if let Some(id) = &target.workspace_id {
+            if !snapshot
+                .workspaces
+                .iter()
+                .any(|workspace| &workspace.workspace_id == id)
+            {
+                return Err("Notification workspace is no longer available".into());
+            }
+            ClientEndpointFocusTarget::Workspace(id.clone())
+        } else {
+            return Err("Notification has no navigation target".into());
+        };
+        Ok((endpoint.endpoint_id.clone(), focus))
     }
 }

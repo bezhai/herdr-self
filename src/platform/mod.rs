@@ -679,3 +679,125 @@ mod tests {
         );
     }
 }
+
+/// Client-bound notification intent. This JSON never enters a frozen core codec.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct NotificationActivation {
+    pub target: crate::api::schema::NotificationTarget,
+    #[serde(default)]
+    pub boot_id: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct NotificationCallback {
+    pub socket: std::path::PathBuf,
+    pub activation: NotificationActivation,
+}
+
+#[cfg(unix)]
+mod notification_callback;
+#[cfg(unix)]
+pub(crate) use notification_callback::{
+    send_notification_callback, start_notification_callback_listener, NotificationCallbackListener,
+};
+
+#[cfg(not(unix))]
+pub(crate) struct NotificationCallbackListener;
+#[cfg(not(unix))]
+impl NotificationCallbackListener {
+    pub(crate) fn path(&self) -> std::path::PathBuf {
+        std::path::PathBuf::new()
+    }
+}
+#[cfg(not(unix))]
+pub(crate) fn start_notification_callback_listener(
+    _deliver: impl Fn(NotificationActivation) -> Result<(), String> + Send + 'static,
+) -> std::io::Result<Option<NotificationCallbackListener>> {
+    Ok(None)
+}
+#[cfg(not(unix))]
+pub(crate) fn send_notification_callback(
+    _path: &std::path::Path,
+    _request: &NotificationActivation,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "notification callbacks are unavailable on this platform",
+    ))
+}
+
+pub(crate) fn show_targeted_desktop_notification(
+    title: &str,
+    body: Option<&str>,
+    callback: Option<&NotificationCallback>,
+) -> std::io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::show_targeted_desktop_notification(title, body, callback)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = callback;
+        show_desktop_notification(title, body)
+    }
+}
+
+pub(crate) fn run_notification_callback(args: &[String]) -> std::io::Result<()> {
+    if args.len() != 4 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "invalid notification callback arguments",
+        ));
+    }
+    let activation = serde_json::from_str(&args[3])
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    send_notification_callback(std::path::Path::new(&args[2]), &activation)
+}
+
+/// Bounded delivery worker keeps process launch and native IPC off the UI thread.
+pub(crate) fn queue_desktop_notification(
+    title: String,
+    body: Option<String>,
+    callback: Option<NotificationCallback>,
+) {
+    struct Delivery {
+        title: String,
+        body: Option<String>,
+        callback: Option<NotificationCallback>,
+    }
+    static WORKER: std::sync::OnceLock<Option<std::sync::mpsc::SyncSender<Delivery>>> =
+        std::sync::OnceLock::new();
+    let sender = WORKER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Delivery>(32);
+        match std::thread::Builder::new()
+            .name("desktop-notifications".into())
+            .spawn(move || {
+                while let Ok(delivery) = rx.recv() {
+                    match show_targeted_desktop_notification(
+                        &delivery.title,
+                        delivery.body.as_deref(),
+                        delivery.callback.as_ref(),
+                    ) {
+                        Ok(true) => {}
+                        Ok(false) => tracing::warn!("desktop notification service unavailable"),
+                        Err(error) => tracing::warn!(%error, "failed to emit desktop notification"),
+                    }
+                }
+            }) {
+            Ok(_) => Some(tx),
+            Err(error) => {
+                tracing::warn!(%error, "could not start desktop notification worker");
+                None
+            }
+        }
+    });
+    if let Some(sender) = sender {
+        if let Err(error) = sender.try_send(Delivery {
+            title,
+            body,
+            callback,
+        }) {
+            tracing::warn!(%error, "desktop notification queue unavailable");
+        }
+    }
+}

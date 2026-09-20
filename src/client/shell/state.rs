@@ -710,10 +710,12 @@ pub(crate) enum ClientShellNotificationEffect {
     System {
         title: String,
         body: Option<String>,
+        activation: crate::platform::NotificationActivation,
     },
 }
 
 pub(super) struct ClientPendingNotification {
+    pub(super) activation: crate::platform::NotificationActivation,
     pub(super) endpoint_id: ClientEndpointId,
     pub(super) event: SemanticNotification,
     pub(super) deadline: std::time::Instant,

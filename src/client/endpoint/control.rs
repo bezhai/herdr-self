@@ -8,6 +8,7 @@ pub(crate) struct DecodedAgentViewProjection {
 
 pub(crate) enum EndpointControlMessage {
     HealthPong,
+    Notification(crate::protocol::endpoint::TargetedNotification),
     AgentViewProjection(DecodedAgentViewProjection),
     Snapshot(Box<crate::protocol::ClientShellSnapshot>),
     Ignored,
@@ -17,6 +18,11 @@ pub(crate) fn decode_endpoint_control(
     kind: &str,
     data: &str,
 ) -> Result<EndpointControlMessage, String> {
+    if kind == crate::protocol::endpoint::NOTIFICATION_CODEC_V1 {
+        return Ok(serde_json::from_str(data)
+            .map(EndpointControlMessage::Notification)
+            .unwrap_or(EndpointControlMessage::Ignored));
+    }
     if kind == crate::protocol::endpoint::HEALTH_PONG_KIND {
         return Ok(EndpointControlMessage::HealthPong);
     }
@@ -68,6 +74,17 @@ pub(crate) fn protocol_failure_is_fatal(endpoint_id: &ClientEndpointId) -> bool 
 mod tests {
     use super::*;
     use crate::client::endpoint::ProfileId;
+
+    #[test]
+    fn malformed_and_future_notification_events_are_optional() {
+        for data in ["not JSON", r#"{"event":{"kind":"FutureNotification"}}"#] {
+            assert!(matches!(
+                decode_endpoint_control(crate::protocol::endpoint::NOTIFICATION_CODEC_V1, data)
+                    .unwrap(),
+                EndpointControlMessage::Ignored
+            ));
+        }
+    }
 
     #[test]
     fn unknown_optional_controls_are_ignored() {

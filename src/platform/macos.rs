@@ -730,41 +730,58 @@ fn unique_timestamp_nanos() -> u128 {
         .unwrap_or(0)
 }
 
-/// Show a native macOS notification.
-///
-/// Prefer `terminal-notifier` when it is installed because it can activate the
-/// hosting terminal on click. Fall back to built-in AppleScript notifications
-/// when it is not available.
+#[path = "macos/native_notifications.rs"]
+mod native_notifications;
+
 pub fn show_desktop_notification(title: &str, body: Option<&str>) -> std::io::Result<bool> {
-    show_desktop_notification_with_command(title, body, |program| Command::new(program))
+    show_targeted_desktop_notification(title, body, None)
 }
 
-fn show_desktop_notification_with_command(
+pub(super) fn show_targeted_desktop_notification(
     title: &str,
     body: Option<&str>,
-    mut command: impl FnMut(&str) -> Command,
+    callback: Option<&super::NotificationCallback>,
 ) -> std::io::Result<bool> {
-    if show_terminal_notifier_notification(title, body, &mut command).unwrap_or(false) {
-        return Ok(true);
+    match native_notifications::show(title, body, callback) {
+        Ok(true) => return Ok(true),
+        Ok(false) => tracing::warn!("native Herdr notification helper could not launch"),
+        Err(error) => tracing::warn!(%error, "native Herdr notification helper unavailable"),
     }
-
-    show_osascript_notification(title, body, &mut command)
+    let mut command = Command::new("terminal-notifier");
+    let bundle = verified_terminal_bundle_identifier(&mut |program| Command::new(program));
+    build_terminal_notifier_command(&mut command, title, body, bundle.as_deref());
+    if let Some(callback) = callback {
+        command
+            .arg("-execute")
+            .arg(notification_callback_command(callback)?);
+    }
+    run_notification_command(command)
 }
 
-fn show_terminal_notifier_notification(
-    title: &str,
-    body: Option<&str>,
-    command: &mut impl FnMut(&str) -> Command,
-) -> std::io::Result<bool> {
-    let activate_bundle_id = verified_terminal_bundle_identifier(command);
-    show_terminal_notifier_notification_with_options(
-        title,
-        body,
-        activate_bundle_id.as_deref(),
-        command,
-    )
+fn notification_callback_command(
+    callback: &super::NotificationCallback,
+) -> std::io::Result<String> {
+    fn quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+    let executable = std::env::current_exe()?;
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("non-UTF8 callback executable"))?;
+    let socket = callback
+        .socket
+        .to_str()
+        .ok_or_else(|| std::io::Error::other("non-UTF8 callback socket"))?;
+    let activation = serde_json::to_string(&callback.activation).map_err(std::io::Error::other)?;
+    Ok(format!(
+        "{} --notification-callback {} {}",
+        quote(executable),
+        quote(socket),
+        quote(&activation)
+    ))
 }
 
+#[cfg(test)]
 fn show_terminal_notifier_notification_with_options(
     title: &str,
     body: Option<&str>,
@@ -787,23 +804,6 @@ fn build_terminal_notifier_command(
     if let Some(bundle_id) = activate_bundle_id {
         cmd.arg("-activate").arg(bundle_id);
     }
-}
-
-fn show_osascript_notification(
-    title: &str,
-    body: Option<&str>,
-    command: &mut impl FnMut(&str) -> Command,
-) -> std::io::Result<bool> {
-    let mut cmd = command("/usr/bin/osascript");
-    cmd.arg("-e")
-        .arg("on run argv")
-        .arg("-e")
-        .arg("display notification (item 2 of argv) with title (item 1 of argv)")
-        .arg("-e")
-        .arg("end run")
-        .arg(title)
-        .arg(body.unwrap_or_default());
-    run_notification_command(cmd)
 }
 
 fn verified_terminal_bundle_identifier(
@@ -1325,32 +1325,38 @@ mod tests {
     }
 
     #[test]
-    fn desktop_notification_falls_back_to_osascript_when_terminal_notifier_fails() {
-        let path =
-            std::env::temp_dir().join(format!("herdr-osascript-args-{}", std::process::id()));
-        let script = r#"
-if [ "$0" = "terminal-notifier" ]; then
-  exit 1
-fi
-printf '%s\n' "$@" > "$HERDR_NOTIFY_ARGS"
-"#;
-        let mut command = |program: &str| {
-            let mut cmd = Command::new("sh");
-            cmd.arg("-c")
-                .arg(script)
-                .arg(program)
-                .env("HERDR_NOTIFY_ARGS", &path);
-            cmd
+    fn callback_shell_arguments_preserve_hostile_text() {
+        let callback = super::super::NotificationCallback {
+            socket: std::path::PathBuf::from("/tmp/client ' $(false) `false` socket"),
+            activation: super::super::NotificationActivation {
+                target: crate::api::schema::NotificationTarget {
+                    machine_endpoint_id: Some("ssh:example".into()),
+                    workspace_id: None,
+                    tab_id: None,
+                    pane_id: Some("pane '\n$(false) `false` 中文".into()),
+                },
+                boot_id: Some("boot".into()),
+            },
         };
-        let shown = show_desktop_notification_with_command("title", Some("body"), &mut command)
-            .expect("osascript fallback should run");
-
-        assert!(shown);
-        let args = std::fs::read_to_string(&path).expect("args file");
-        let _ = std::fs::remove_file(&path);
+        let command = notification_callback_command(&callback).unwrap();
+        // Substitute printf for the executable but leave every generated argument intact.
+        let executable = std::env::current_exe().unwrap();
+        let quoted = format!(
+            "'{}'",
+            executable.to_str().unwrap().replace('\'', "'\"'\"'")
+        );
+        let script = command.replacen(&quoted, "printf '%s\\0'", 1);
+        let output = Command::new("/bin/sh")
+            .args(["-c", &script])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let arguments = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
+        assert_eq!(arguments[0], b"--notification-callback");
+        assert_eq!(arguments[1], callback.socket.as_os_str().as_bytes());
         assert_eq!(
-            args,
-            "-e\non run argv\n-e\ndisplay notification (item 2 of argv) with title (item 1 of argv)\n-e\nend run\ntitle\nbody\n"
+            serde_json::from_slice::<super::super::NotificationActivation>(arguments[2]).unwrap(),
+            callback.activation
         );
     }
 

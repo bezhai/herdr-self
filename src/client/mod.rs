@@ -455,6 +455,22 @@ async fn run_client_loop(
 
     // Channel for events from the resize and server reader threads.
     let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<ClientLoopEvent>(256);
+    let callback_tx = event_tx.clone();
+    let notification_listener =
+        crate::platform::start_notification_callback_listener(move |activation| {
+            callback_tx
+                .try_send(ClientLoopEvent::NotificationActivation(activation))
+                .map_err(|error| error.to_string())
+        })
+        .unwrap_or_else(|error| {
+            warn!(%error, "notification clicks unavailable");
+            None
+        });
+    let callback_socket = notification_listener
+        .as_ref()
+        .map(crate::platform::NotificationCallbackListener::path);
+    let mut pending_notification_activation = None;
+
     let (supervisor_tx, mut supervisor_rx) =
         tokio::sync::mpsc::channel::<endpoint::EndpointSupervisorEvent>(64);
     // Keep Windows console draining independent of server-frame backpressure.
@@ -710,7 +726,16 @@ async fn run_client_loop(
                 shell.timer_delay(std::time::Instant::now())
             });
         let timer_deadline = client_timer.deadline(std::time::Instant::now(), timer_delay);
-        let immediate_event = scheduled_activation.take();
+        let immediate_event = scheduled_activation.take().or_else(|| {
+            pending_activation
+                .is_none()
+                .then(|| {
+                    pending_notification_activation
+                        .take()
+                        .map(ClientLoopEvent::NotificationActivation)
+                })
+                .flatten()
+        });
         #[cfg(windows)]
         let event = if let Some(event) = immediate_event {
             event
@@ -1243,6 +1268,32 @@ async fn run_client_loop(
                     });
                 }
             },
+            ClientLoopEvent::NotificationActivation(activation) => {
+                if let Some((endpoint_id, target)) = notifications::prepare_notification_activation(
+                    &mut state,
+                    &mut pending_notification_activation,
+                    activation,
+                    pending_activation.is_some(),
+                ) {
+                    if endpoint_catalog.select_endpoint(&endpoint_id) {
+                        if let Err(error) = endpoint_catalog.store_selection() {
+                            warn!(%error, "failed to persist notification endpoint");
+                        }
+                        begin_endpoint_activation(
+                            &mut state,
+                            &mut write_stream,
+                            &mut endpoint_commands,
+                            &mut pending_activation,
+                            &mut next_surface_serial,
+                            endpoint_id,
+                            Some(target),
+                            false,
+                            now,
+                            &mut scheduled_activation,
+                        )?;
+                    }
+                }
+            }
             ClientLoopEvent::ActivateEndpoint {
                 endpoint_id,
                 target,
@@ -1619,7 +1670,11 @@ async fn run_client_loop(
                                     .flatten();
                                 (effects, frame)
                             };
-                            handle_shell_notification_effects(effects, &state.sound_config);
+                            handle_shell_notification_effects(
+                                effects,
+                                &state.sound_config,
+                                callback_socket.as_deref(),
+                            );
                             if let Some(frame) = frame {
                                 state.present_frame(frame);
                             }
@@ -1890,6 +1945,34 @@ async fn run_client_loop(
                             continue;
                         }
                         let snapshot = match endpoint::decode_endpoint_control(&kind, &data) {
+                            Ok(endpoint::EndpointControlMessage::Notification(notification)) => {
+                                if let Some(shell) = state.shell.as_mut() {
+                                    let (effects, repaint) = shell.receive_targeted_notification(
+                                        &endpoint_id,
+                                        notification.event,
+                                        notification.target,
+                                        notification.boot_id,
+                                        now,
+                                    );
+                                    let frame = repaint
+                                        .then(|| {
+                                            shell.compose(
+                                                state.reported_size.0,
+                                                state.reported_size.1,
+                                            )
+                                        })
+                                        .flatten();
+                                    handle_shell_notification_effects(
+                                        effects,
+                                        &state.sound_config,
+                                        callback_socket.as_deref(),
+                                    );
+                                    if let Some(frame) = frame {
+                                        state.present_frame(frame);
+                                    }
+                                }
+                                continue;
+                            }
                             Ok(endpoint::EndpointControlMessage::HealthPong) => continue,
                             Ok(endpoint::EndpointControlMessage::AgentViewProjection(
                                 projection,
@@ -2121,7 +2204,11 @@ async fn run_client_loop(
                             .flatten();
                         (effects, outcome, frame)
                     };
-                    handle_shell_notification_effects(effects, &state.sound_config);
+                    handle_shell_notification_effects(
+                        effects,
+                        &state.sound_config,
+                        callback_socket.as_deref(),
+                    );
                     if finish_client_shell_input(
                         &mut state,
                         outcome,

@@ -2387,3 +2387,127 @@ fn navigator_foreign_tab_selection_keeps_the_tab_target() {
         }] if activated == &endpoint_id && tab_id == "tab_1"
     ));
 }
+
+fn notification_activation(
+    endpoint: &ClientEndpointId,
+    boot: &str,
+) -> crate::platform::NotificationActivation {
+    crate::platform::NotificationActivation {
+        target: crate::api::schema::NotificationTarget {
+            machine_endpoint_id: Some(endpoint.storage_key()),
+            workspace_id: Some("ws_1".into()),
+            tab_id: Some("tab_1".into()),
+            pane_id: Some("pane_1".into()),
+        },
+        boot_id: Some(boot.into()),
+    }
+}
+
+#[test]
+fn notification_click_checks_source_boot_and_most_specific_target() {
+    let (mut state, remote) = state_with_remote();
+    let activation = notification_activation(&remote, "remote-boot");
+    let (endpoint, target) = state.resolve_notification_activation(&activation).unwrap();
+    assert_eq!(endpoint, remote);
+    assert!(matches!(target, ClientEndpointFocusTarget::Pane(id) if id == "pane_1"));
+    assert_eq!(state.active_endpoint_id, ClientEndpointId::Local);
+    let mut missing = activation.clone();
+    missing.target.pane_id = Some("deleted".into());
+    assert!(state.resolve_notification_activation(&missing).is_err()); // no tab fallback
+    missing.target.pane_id = None;
+    assert!(matches!(
+        state.resolve_notification_activation(&missing).unwrap().1,
+        ClientEndpointFocusTarget::Tab(_)
+    ));
+    missing.target.tab_id = None;
+    assert!(matches!(
+        state.resolve_notification_activation(&missing).unwrap().1,
+        ClientEndpointFocusTarget::Workspace(_)
+    ));
+    missing.target.machine_endpoint_id = Some("ssh:unknown".into());
+    assert!(state.resolve_notification_activation(&missing).is_err());
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Reconnecting);
+    assert!(state.resolve_notification_activation(&activation).is_err());
+    state.set_endpoint_status(&remote, ClientEndpointStatus::Online);
+    let mut restarted = snapshot();
+    restarted.boot_id = "new-boot".into();
+    state.set_endpoint_snapshot(&remote, Box::new(restarted));
+    assert!(state.resolve_notification_activation(&activation).is_err());
+}
+
+#[test]
+fn targeted_notification_binds_real_machine_and_preserves_delayed_intent() {
+    let (mut state, remote) = state_with_remote();
+    let mut second_profile = remote_profile();
+    second_profile.id = ProfileId::parse("fedcba98765432100123456789abcdef").unwrap();
+    second_profile.label = "Other".into();
+    let other = ClientEndpointId::Ssh(second_profile.id.clone());
+    state.set_endpoint_catalog(&[remote_profile(), second_profile]);
+    state.set_endpoint_status(&other, ClientEndpointStatus::Online);
+    let mut other_snapshot = snapshot();
+    other_snapshot.boot_id = "other-boot".into();
+    state.set_endpoint_snapshot(&other, Box::new(other_snapshot));
+    state.config.toast_delivery = crate::config::ToastDelivery::System;
+    state.config.toast_delay_seconds = 2;
+    let mut projected = snapshot();
+    projected.boot_id = "remote-boot".into();
+    projected
+        .agents
+        .push(agent("codex", crate::api::schema::AgentStatus::Blocked, 1));
+    state.set_endpoint_snapshot(&remote, Box::new(projected));
+    let mut target = notification_activation(&remote, "remote-boot").target;
+    target.machine_endpoint_id = Some(other.storage_key());
+    let now = std::time::Instant::now();
+    let event = SemanticNotification {
+        kind: SemanticNotificationKind::NeedsAttention,
+        title: "codex needs attention".into(),
+        body: Some("approval".into()),
+        sound: None,
+        agent: Some("codex".into()),
+        workspace_id: None,
+        tab_id: None,
+        pane_id: None,
+        position: None,
+    };
+    let (effects, _) = state.receive_targeted_notification(
+        &remote,
+        event.clone(),
+        Some(target.clone()),
+        Some("remote-boot".into()),
+        now,
+    );
+    assert!(effects.is_empty());
+    let (effects, _) = state.tick_notifications(now + std::time::Duration::from_secs(2));
+    let [ClientShellNotificationEffect::System {
+        title, activation, ..
+    }] = &effects[..]
+    else {
+        panic!("delayed system effect");
+    };
+    assert_eq!(title, "codex needs attention · Build");
+    assert_eq!(
+        activation.target.machine_endpoint_id.as_deref(),
+        Some(remote.storage_key().as_str())
+    );
+    assert_eq!(activation.boot_id.as_deref(), Some("remote-boot"));
+    assert_eq!(activation.target.pane_id.as_deref(), Some("pane_1"));
+    assert_eq!(
+        state.resolve_notification_activation(activation).unwrap().0,
+        remote
+    );
+    // Delayed notifications from a replaced server must not obtain its new identity.
+    state.receive_targeted_notification(
+        &remote,
+        event,
+        Some(target),
+        Some("remote-boot".into()),
+        now,
+    );
+    let mut restarted = snapshot();
+    restarted.boot_id = "restarted".into();
+    state.set_endpoint_snapshot(&remote, Box::new(restarted));
+    assert!(state
+        .tick_notifications(now + std::time::Duration::from_secs(3))
+        .0
+        .is_empty());
+}
