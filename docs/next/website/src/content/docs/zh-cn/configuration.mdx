@@ -479,7 +479,7 @@ position = "bottom-right"
 
 选择 `herdr` 可使用应用内 toast，选择 `terminal` 可使用适合 SSH 场景的外层终端通知，选择 `system` 可使用本地操作系统通知服务，选择 `off` 可禁用弹出通知。Herdr 会抑制活动标签页的弹出通知。在[配置参考](/docs/config-reference/)中搜索 `ui.toast`，可查看位置、延迟行为和剪贴板反馈设置。
 
-在 macOS 上，`system` 会先尝试 `terminal-notifier`；如果它不可用或执行失败，则回退到 `/usr/bin/osascript`。该回退方式会在通知中心显示为 Script Editor，并且无法激活承载 Herdr 的终端。可运行 `brew install terminal-notifier` 安装 `terminal-notifier`。如果 Herdr 检测到受支持的终端，点击通知时它可以激活该终端应用。也可以选择 `terminal`，让受支持的外层终端负责发送通知。
+在 macOS 上，`system` 使用内嵌的原生 `Herdr.app`（`dev.herdr.notifications`），私有安装于 `~/Library/Application Support/Herdr Notifications/`。它会请求通知中心权限，不显示 Dock 图标，无需 Homebrew 辅助程序或运行时编译器。Agent 通知标题包含事件和机器名。点击定向通知后，原客户端切换到对应机器并聚焦 pane、tab 或 workspace；客户端已退出、目标已删除或服务器已重启时会报告不可用。对已运行且受支持的宿主终端，会尽力将其置前。原生安装或启动失败时可回退到已安装的 `terminal-notifier`；不再使用 AppleScript 通知。系统专注模式和权限仍决定是否显示横幅。Linux 和 Windows 保留现有系统通知实现。
 
 ## 声音
 

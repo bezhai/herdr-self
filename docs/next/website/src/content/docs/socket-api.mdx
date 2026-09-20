@@ -97,7 +97,7 @@ Raw socket method names use dot notation:
 | Area | Methods |
 | --- | --- |
 | Server | `ping`, `server.stop`, `server.reload_config`, `server.agent_manifests`, `server.reload_agent_manifests` |
-| Notification | `notification.show` |
+| Notification | `notification.show`, `notification.show_targeted` |
 | Client | `client.window_title.set`, `client.window_title.clear` |
 | Session | `session.snapshot` |
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
@@ -375,6 +375,14 @@ The response reports whether anything was shown:
 ```json
 {"id":"req_notify","result":{"type":"notification_show","shown":true,"reason":"shown"}}
 ```
+
+`notification.show` accepts an optional JSON `target`. Callers requiring target support should use the separately advertised `notification.show_targeted` method, with a required `target` containing `pane_id`, `tab_id`, or `workspace_id` (most specific wins). `machine_endpoint_id` is optional and is always rebound by the receiving client to its authenticated source connection. A legacy server rejects the new method instead of silently ignoring a required target. A server with no negotiated client returns `unsupported_notification_target`. The optional `notification.targeted.v1` codec carries the target and server boot identity; generation-1 core codecs remain unchanged.
+
+```json
+{"id":"req_targeted","method":"notification.show_targeted","params":{"title":"codex needs attention","target":{"pane_id":"ws_1:p1"}}}
+```
+
+A successful response means the event was queued to a client, not that the OS displayed a banner. macOS clicks return only to the originating client; they do not start a replacement TUI or focus another client.
 
 Possible reasons are `shown`, `disabled`, `rate_limited`, `no_foreground_client`, and `busy`. `disabled` means `ui.toast.delivery = "off"`. `busy` means an existing in-app toast was not replaced. Terminal and system delivery are best-effort through the current foreground attached Herdr client.
 

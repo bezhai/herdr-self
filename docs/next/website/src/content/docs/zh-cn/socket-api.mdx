@@ -93,7 +93,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 领域 | 方法 |
 | --- | --- |
 | 服务器 | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
-| 通知 | `notification.show` |
+| 通知 | `notification.show`, `notification.show_targeted` |
 | 客户端 | `client.window_title.set`、`client.window_title.clear` |
 | 会话 | `session.snapshot` |
 | 工作区 | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
@@ -263,6 +263,14 @@ herdr notification show "build failed" --body "api workspace" --position top-lef
 ```json
 {"id":"req_notify","result":{"type":"notification_show","shown":true,"reason":"shown"}}
 ```
+
+`notification.show` 接受可选 JSON `target`。必须支持目标的调用方应使用单独广告的 `notification.show_targeted`，并提供包含 `pane_id`、`tab_id` 或 `workspace_id` 的必填 `target`，按最具体目标优先处理。`machine_endpoint_id` 可选，客户端始终将其绑定到接收事件的实际连接。旧服务器会拒绝新方法，避免忽略必需目标后报告成功。没有已协商客户端时，服务器返回 `unsupported_notification_target`。可选 `notification.targeted.v1` codec 携带目标与服务器 boot 标识；generation-1 核心编码不变。
+
+```json
+{"id":"req_targeted","method":"notification.show_targeted","params":{"title":"codex needs attention","target":{"pane_id":"ws_1:p1"}}}
+```
+
+成功响应表示事件已排入客户端队列，不代表操作系统已显示横幅。macOS 点击仅返回原客户端，不启动替代 TUI，也不跳转其他客户端。
 
 可能的 reason 有 `shown`、`disabled`、`rate_limited`、`no_foreground_client` 和 `busy`。`disabled` 表示 `ui.toast.delivery = "off"`。`busy` 表示已有的应用内 toast 未被替换。terminal 和 system 投递是通过当前前台连接的 Herdr 客户端尽力而为的。
 

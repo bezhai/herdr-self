@@ -106,10 +106,11 @@ negotiation, legacy fallback, source binding, absent/unknown targets, stale boot
 IDs, callback framing and hostile text. No per-byte, pane-layout or render-loop
 work is added. Notification IPC runs off the render thread.
 
-Use repository `just` recipes when available and run requested `cargo build` and
-`cargo test` with the lockfile. Initial offline build cannot resolve `bincode`;
-the repository pins Rust 1.96.1 (not the PATH Rust 1.86). Do not change dependency
-versions to work around unavailable cache/network. Record exact results below.
+Use repository `just` recipes and run the complete `just check` gate. The
+repository pins Rust 1.96.1; prepend `$HOME/.cargo/bin` so the Homebrew Rust 1.86
+does not override rustup. Use Zig 0.16.0 and the Windows SDK configured by
+`just setup-windows-cross`. Do not change dependency versions or skip checks to
+work around unavailable tooling. Record exact results below.
 
 Manual macOS checks (use an isolated test session, never stop a real session):
 1. Build this branch; launch its binary in a terminal with system notification
@@ -136,5 +137,156 @@ Manual macOS checks (use an isolated test session, never stop a real session):
 
 ## Implementation and validation record
 
-Pending implementation. GUI notification delivery/cold-start permission behavior
-must be reviewed on an interactive macOS desktop; unit tests cannot certify it.
+Implemented in this branch (validation results are recorded below):
+
+- JSON-only `NotificationTarget` and `notification.targeted.v1`. Hello advertises
+  optional `notification_codecs`; welcome selects optional `notification_codec`.
+  The server records negotiation per connection and sends exactly one new JSON
+  control or original semantic event. Core generation remains 1, private protocol
+  remains 22, and frozen `wire.rs` types and generation-1 fixtures are unchanged.
+- Ordinary `notification.show` accepts optional target; the separately advertised
+  `notification.show_targeted` requires one. Required-target calls reject a server
+  with no negotiated client instead of falsely reporting delivery. The new
+  method has a separate shape digest; the published fixture is not rewritten.
+- Client policy binds machine identity to the actual source connection and keeps
+  target/boot identity through delayed effects. System titles include agent event
+  and the saved machine label (local hostname for Local).
+- Each Unix client owns a random private directory and callback socket (0700 and
+  0600). Requests are bounded to 16 KiB and a 750 ms total read deadline. ACK means
+  **queued**, not successful focus. A bounded client queue handles callbacks;
+  listener shutdown removes only its own socket/directory. Windows and fallback
+  reject the hidden callback command while retaining their existing senders.
+- Clicks select pane > tab > workspace, reject deleted most-specific targets,
+  unknown/offline machines and stale server boots, and enter the existing endpoint
+  activation transaction. A click during handoff waits with its original boot ID
+  and is revalidated before taking a fresh lease. An invalid click shows a local
+  notice without freezing a healthy active presentation.
+- Native sources are under `src/platform/macos/`. The build compiles for the Rust
+  target architecture and ad-hoc signs an LSUIElement `Herdr.app` with bundle ID
+  `dev.herdr.notifications`. Binary, plist and signature resources are embedded.
+  At runtime they are verified and installed atomically under a content-addressed
+  per-user `~/Library/Application Support/Herdr Notifications/` directory.
+  Private JSON request files go through LaunchServices, and UNUserNotificationCenter
+  stores structured callback data for subsequent clicks. Delivery process launch
+  runs in a bounded background worker, not the render loop.
+- No runtime compiler or new Rust dependency. No AppleScript notification fallback
+  or bundle spoofing. An installed terminal-notifier is only a fallback for native
+  installation/launch failure; its callback arguments are shell quoted. Linux,
+  Windows and unsupported-platform senders retain their existing behavior.
+
+Validation completed on 2026-09-20:
+
+- **Full `just check`: PASS, exit 0.** Rust/Nextest: 3,488 passed, 6 ignored by
+  the repository's default configuration. Maintenance Python tests: 141 passed;
+  hot-path architecture tests: 6 passed. Bun workflow/integration tests: 5 + 18
+  + 8 + 13 passed. Windows target Clippy passed. Documentation contracts: 7 passed.
+  Frozen generation-1 wire/fixture tests and the separately frozen new-method
+  shape digest passed without changing any existing fixture.
+- macOS Clippy passes with `-D warnings`. The native Objective-C helper builds for
+  arm64 and x86_64 with Apple SDK `-Wall -Wextra -Werror`. The debug Herdr binary
+  links successfully (arm64). Tests install the embedded bundle, verify its ad-hoc
+  signature with `codesign --verify --strict`, reject tampered files and verify
+  private directory permissions.
+- Notification tests cover source binding between two saved SSH endpoints with
+  colliding pane IDs, delayed effects, old-server defaults, mixed new/old clients,
+  required-target rejection and endpoint-method dispatch, stale/absent targets,
+  queued clicks across a boot change, non-freezing notices, private callback IPC,
+  size/time limits, cleanup, multiple listeners and hostile callback text.
+- Direct execution of the built binary's hidden callback command against an absent
+  socket returns a readable originating-client-unavailable error without starting
+  a TUI or contacting a server.
+- Validation tooling: Rust 1.96.1 via rustup, Zig 0.16.0, Bun 1.3.14 (the repository
+  CI version), and cargo-nextest. The initial PATH selected Homebrew Rust 1.86;
+  the initial Bun 1.2.19 lacked `Bun.YAML`. Both were corrected in the validation
+  command environment, without changing dependencies or test scripts. The user
+  accepted the Windows SDK license. Zig's host-tool build also needed a local
+  SDK overlay: `~/.local/share/herdr/windows-cross/usr` points to the Apple SDK's
+  `usr` directory so macOS build tools resolve libSystem while the cross target
+  keeps using Microsoft's SDK. No repository cross-build code was changed.
+- Full successful invocation (tool downloads are local, outside this repository):
+
+  ```sh
+  env PATH="/tmp/herdr-notification-tools/node_modules/.bin:$HOME/.cargo/bin:$PATH" \
+    ZIG=/tmp/zig-aarch64-macos-0.16.0/zig just check
+  ```
+
+  Log: `/tmp/herdr-notifications-check-final.log`. The user narrowed acceptance to
+  personal macOS use; no additional Linux/Windows desktop qualification is claimed.
+
+Interactive desktop validation remains **unverified**. Successful compilation,
+ad-hoc signature verification, bundle installation tests and API/IPC unit tests
+cannot certify a visible banner, macOS permission UX, or cold-launch response.
+
+Additional manual acceptance details:
+
+- In the macOS trials above, remove terminal-notifier from the test client's PATH
+  and verify the sender remains Herdr. Check System Settings > Notifications >
+  Herdr and test both permission grant and denial. Inspect Console for `Herdr
+  notification` errors when scheduling fails; an API `shown:true` only means the
+  event was queued to an eligible client.
+- After delivery, terminate only the test helper process, then click the retained
+  Notification Center entry. Verify the helper cold-launches, invokes the original
+  binary's hidden callback command, and focuses the originating client's target.
+- Run two clients and two saved SSH endpoints with colliding pane IDs. Click during
+  an existing endpoint switch, then repeat after restarting the notification's
+  server while the click waits. The stale click must show a notice, leave the
+  healthy active client usable and never select a reused ID.
+- Build a second helper revision while the first version is running and still has
+  delivered notifications. Verify new requests reach a functional helper and old
+  notification clicks still resolve through their stored socket/executable. Same
+  bundle-ID selection across content-addressed installs is a LaunchServices
+  lifecycle case that still needs desktop verification.
+- Exit the originating client and click its retained notification. The callback
+  must report unavailable; it must not attach a different client, launch a hidden
+  TUI, or create arbitrary terminal tabs. Raising the existing terminal is best
+  effort and does not promise exact terminal-window selection.
+- Linux/Windows desktop delivery is outside this personal macOS acceptance scope.
+  Their existing senders are unchanged; the repository check still contains its
+  standard Windows compilation gate.
+
+## Changed files
+
+This implementation touches 41 files; no frozen fixtures, dependency manifests,
+release-channel metadata or published documentation are changed.
+
+- `NOTIFICATIONS_PLAN.md`
+- `build.rs`
+- `docs/next/api/herdr-api.schema.json`
+- `docs/next/website/src/content/docs/configuration.mdx`
+- `docs/next/website/src/content/docs/ja/configuration.mdx`
+- `docs/next/website/src/content/docs/ja/socket-api.mdx`
+- `docs/next/website/src/content/docs/socket-api.mdx`
+- `docs/next/website/src/content/docs/zh-cn/configuration.mdx`
+- `docs/next/website/src/content/docs/zh-cn/socket-api.mdx`
+- `src/api/mod.rs`
+- `src/api/schema.rs`
+- `src/api/schema/common.rs`
+- `src/api/schema/tests.rs`
+- `src/api/server.rs`
+- `src/app/api.rs`
+- `src/app/mod.rs`
+- `src/cli/notification.rs`
+- `src/client/endpoint/control.rs`
+- `src/client/events.rs`
+- `src/client/handshake.rs`
+- `src/client/mod.rs`
+- `src/client/notifications.rs`
+- `src/client/shell/notification_policy.rs`
+- `src/client/shell/state.rs`
+- `src/client/shell/tests/endpoints.rs`
+- `src/main.rs`
+- `src/platform/macos.rs`
+- `src/platform/macos/Info.plist`
+- `src/platform/macos/build_notifications.rs`
+- `src/platform/macos/native_notifications.rs`
+- `src/platform/macos/notifications.m`
+- `src/platform/mod.rs`
+- `src/platform/notification_callback.rs`
+- `src/protocol/endpoint.rs`
+- `src/server/client_commands.rs`
+- `src/server/client_transport.rs`
+- `src/server/clients.rs`
+- `src/server/headless.rs`
+- `src/server/headless/notifications.rs`
+- `src/server/headless/tests/mod.rs`
+- `src/server/headless/tests/surface_interest.rs`

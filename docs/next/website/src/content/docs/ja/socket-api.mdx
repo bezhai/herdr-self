@@ -93,7 +93,7 @@ herdr pane read w1:p2 --source recent --lines 50
 | 領域 | メソッド |
 | --- | --- |
 | サーバー | `ping`、`server.stop`、`server.reload_config`、`server.agent_manifests`、`server.reload_agent_manifests` |
-| 通知 | `notification.show` |
+| 通知 | `notification.show`, `notification.show_targeted` |
 | クライアント | `client.window_title.set`、`client.window_title.clear` |
 | セッション | `session.snapshot` |
 | ワークスペース | `workspace.create`、`workspace.list`、`workspace.get`、`workspace.focus`、`workspace.rename`、`workspace.move`、`workspace.move_block`、`workspace.report_metadata`、`workspace.close` |
@@ -263,6 +263,14 @@ herdr notification show "build failed" --body "api workspace" --position top-lef
 ```json
 {"id":"req_notify","result":{"type":"notification_show","shown":true,"reason":"shown"}}
 ```
+
+`notification.show` は任意の JSON `target` を受け付けます。対象のサポートが必須の場合は、別途広告される `notification.show_targeted` を使用し、`pane_id`、`tab_id`、`workspace_id` のいずれかを含む必須の `target` を指定します。最も具体的な対象が優先されます。任意の `machine_endpoint_id` は受信クライアントが実際の接続元に再設定します。古いサーバーは新メソッドを拒否するため、対象を無視して成功を返すことはありません。対応クライアントがない場合は `unsupported_notification_target` を返します。任意の `notification.targeted.v1` codec が対象とサーバーの boot ID を運び、generation-1 のコア codec は変更しません。
+
+```json
+{"id":"req_targeted","method":"notification.show_targeted","params":{"title":"codex needs attention","target":{"pane_id":"ws_1:p1"}}}
+```
+
+成功応答はクライアントへのイベント投入を示し、OS のバナー表示を保証しません。macOS のクリックは元のクライアントにのみ戻り、代替 TUI の起動や別クライアントへの転送は行いません。
 
 reason の候補は `shown`、`disabled`、`rate_limited`、`no_foreground_client`、`busy` です。`disabled` は `ui.toast.delivery = "off"` を意味します。`busy` は既存のアプリ内トーストが置き換えられなかったことを意味します。terminal と system の配信は、現在フォアグラウンドでアタッチしている Herdr クライアントを通じたベストエフォートです。
 
