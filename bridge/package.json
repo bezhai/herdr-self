@@ -1,0 +1,1 @@
+{"name":"herdr-bridge","version":"0.1.0","private":true,"type":"module","scripts":{"start":"node server.mjs","test":"node --test test.mjs"},"dependencies":{"@larksuite/channel":"0.7.1","qrcode":"1.5.4"}}
