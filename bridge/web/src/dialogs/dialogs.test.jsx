@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { expect, test, vi } from 'vitest';
 import { AppDialog } from './AppDialog.jsx';
@@ -56,6 +56,8 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
   unmount();
 
   render(<AppDialog app={sampleState().apps[1]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByLabelText('应用名称').value).toBe('备用应用');
+  expect(screen.getByText('连接后以飞书机器人名称为准。')).toBeTruthy();
   expect(screen.getByLabelText('App ID').value).toBe('cli_spare');
   expect(screen.getByLabelText('API 环境').value).toBe('lark');
   await user.type(screen.getByLabelText('App Secret'), 'new-secret');
@@ -66,31 +68,65 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
   expect(screen.getByLabelText('App Secret').value).toBe('');
 });
 
-test('binding form lists every app and only connected machines, and saves a chat route with a working directory and agent kind', async () => {
-  const fetch = stubFetch({ '/api/bindings/save': { ok: true } });
+test('binding form shows its chat read-only, lists only connected machines and saves a group route with the link token', async () => {
+  const fetch = stubFetch({ '/api/bindings/save': { id: 'b-2' } });
   const onSaved = vi.fn();
   const user = userEvent.setup();
-  render(<BindingDialog state={sampleState()} onClose={vi.fn()} onSaved={onSaved} />);
-  expect(optionLabels('飞书应用')).toEqual(['工作助手', '备用应用']);
+  const state = sampleState();
+  render(<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={onSaved} />);
+  const source = screen.getByRole('group', { name: '来源 · 飞书' });
+  expect(within(source).getByText('工作助手')).toBeTruthy();
+  expect(within(source).getByText('群聊')).toBeTruthy();
+  expect(within(source).getByText('oc_group')).toBeTruthy();
+  expect(source.querySelector('img').getAttribute('src')).toBe('/api/apps/avatar?id=app-1&v=1700000000000');
+  expect(source.querySelectorAll('input, select')).toHaveLength(0);
+  expect(screen.queryByLabelText('飞书应用')).toBeNull();
+  expect(screen.queryByLabelText('Chat ID')).toBeNull();
+  expect(screen.getByLabelText('绑定名称').value).toBe('飞书群聊');
   expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work']);
   expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex']);
   expect(screen.getByLabelText('Agent 类型').value).toBe('claude');
-  expect(screen.getByLabelText(/仅 @机器人时触发/).checked).toBe(true);
-  expect(document.querySelectorAll('select')).toHaveLength(3);
+  expect(document.querySelectorAll('select')).toHaveLength(2);
+  expect(screen.getByLabelText('仅 @机器人时触发').checked).toBe(true);
+  expect(screen.queryByText(/私聊请取消/)).toBeNull();
   expect(screen.getByText(/^每个飞书话题会在 Herdr 中新开一个 tab/)).toBeTruthy();
-  expect(screen.queryByLabelText('话题根消息 ID')).toBeNull();
-  expect(screen.queryByLabelText('在话题中回复')).toBeNull();
 
-  await user.type(screen.getByLabelText('绑定名称'), '个人助手');
-  await user.selectOptions(screen.getByLabelText('飞书应用'), 'app-2');
-  await user.type(screen.getByLabelText('Chat ID'), 'oc_42');
+  await user.clear(screen.getByLabelText('绑定名称'));
+  await user.type(screen.getByLabelText('绑定名称'), '团队群');
   await user.selectOptions(screen.getByLabelText('机器 / Herdr 实例'), 'm-2');
   await user.type(screen.getByLabelText('工作目录'), '~/code/bridge');
   await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
-  await user.click(screen.getByLabelText(/仅 @机器人时触发/));
+  await user.click(screen.getByLabelText('仅 @机器人时触发'));
   await user.click(screen.getByRole('button', { name: '保存绑定' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ name: '个人助手', appId: 'app-2', machineId: 'm-2', chatId: 'oc_42', cwd: '~/code/bridge', kind: 'codex', requireMention: false });
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-group', name: '团队群', machineId: 'm-2', cwd: '~/code/bridge', kind: 'codex', requireMention: false });
+});
+
+test('binding form for a direct chat has no mention option and never requires one; an expired link shows the server error', async () => {
+  const fetch = stubFetch({ '/api/bindings/save': reply({ error: '绑定链接已失效，请在飞书里重新发消息' }, 400) });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  const state = sampleState();
+  render(<BindingDialog state={state} chat={state.pendingChats[1]} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(within(screen.getByRole('group', { name: '来源 · 飞书' })).getByText('私聊')).toBeTruthy();
+  expect(screen.getByLabelText('绑定名称').value).toBe('飞书私聊');
+  expect(screen.queryByLabelText('仅 @机器人时触发')).toBeNull();
+  expect(document.querySelector('input[type="checkbox"]')).toBeNull();
+
+  await user.type(screen.getByLabelText('工作目录'), '~/work');
+  await user.click(screen.getByRole('button', { name: '保存绑定' }));
+  expect(await screen.findByText('绑定链接已失效，请在飞书里重新发消息')).toBeTruthy();
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-p2p', name: '飞书私聊', machineId: 'm-1', cwd: '~/work', kind: 'claude', requireMention: false });
+  expect(onSaved).not.toHaveBeenCalled();
+});
+
+test('the source of a chat whose app has no avatar shows the Feishu icon', () => {
+  const state = sampleState();
+  render(<BindingDialog state={state} chat={{ ...state.pendingChats[0], appId: 'app-2' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const source = screen.getByRole('group', { name: '来源 · 飞书' });
+  expect(within(source).getByText('备用应用')).toBeTruthy();
+  expect(source.querySelector('img')).toBeNull();
+  expect(source.querySelector('use').getAttribute('href')).toBe('#i-feishu');
 });
 
 const registrationProps = () => ({ apps: sampleState().apps, previousId: 'r0', onRetry: vi.fn(), onDone: vi.fn(), onConfigure: vi.fn(), onManual: vi.fn(), onClose: vi.fn() });
@@ -100,7 +136,7 @@ test('registration dialog shows 完成 once the flow completes', async () => {
   const user = userEvent.setup();
   render(<RegistrationDialog registration={{ id: 'r1', status: 'completed', appId: 'app-1' }} {...props} />);
   expect(screen.getByRole('heading', { name: '飞书已连接' })).toBeTruthy();
-  expect(screen.getByText('WorkBot')).toBeTruthy();
+  expect(screen.getByText('工作助手')).toBeTruthy();
   expect(screen.queryByRole('button', { name: '手动接入' })).toBeNull();
   await user.click(screen.getByRole('button', { name: '完成' }));
   expect(props.onDone).toHaveBeenCalled();

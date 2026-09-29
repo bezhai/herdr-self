@@ -1,10 +1,11 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {spawn} from 'node:child_process';import net from 'node:net';
-import {normalizeMachine,remoteInvocation,herdr,quote,Store} from './core.mjs';import {normalizeApp,normalizeBinding,selectBinding,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
+import {normalizeMachine,remoteInvocation,herdr,quote,Store} from './core.mjs';import {normalizeApp,normalizeBinding,routable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
+import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';import {staticFile,sendStatic} from './web-assets.mjs';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
 
-function platformFixture(options){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-platform-')),store=new Store(dir),messages=[];return {dir,store,messages,platforms:new Platforms(store,{onMessage:(...args)=>messages.push(args),...options}),close(){fs.rmSync(dir,{recursive:true});}};}
+function platformFixture(options){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-platform-')),store=new Store(dir),messages=[],unbound=[];return {dir,store,messages,unbound,platforms:new Platforms(store,{onMessage:(...args)=>messages.push(args),onUnbound:(...args)=>unbound.push(args),...options}),close(){fs.rmSync(dir,{recursive:true});}};}
 const route={id:'b',name:'个人助手',enabled:true,appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false};
 const inbound={senderType:'user',senderId:'ou_user',chatId:'oc_1',messageId:'om_1',rawContentType:'text',content:'private prompt'};
 const allowed={id:'a',name:'bot',enabled:true,allowedUsers:['ou_user']};
@@ -44,23 +45,23 @@ test('SSH machine rejects option and shell injection; command arguments remain q
  const local=normalizeMachine({name:'local',type:'local',binary:'~/bin/herdr'});assert.deepEqual(remoteInvocation(local,['--cwd',{path:'~/w x'},{path:'/srv'},'~/text']),[os.homedir()+'/bin/herdr',['--cwd',os.homedir()+'/w x','/srv','~/text']]);
  assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',session:'../default'}));assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',port:-1}));assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',binary:'herdr'}),/Herdr 路径/);
 });
-test('a binding routes one chat of an app to a working directory and agent kind on a machine',()=>{
- const input={name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'codex',requireMention:false};
- const {id,...b}=normalizeBinding({...input,rootId:'om_1',paneId:'w1:p1'},[]);assert.match(id,/^[0-9a-f-]{36}$/);assert.deepEqual(b,{name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'codex',requireMention:false,enabled:true});
- assert.equal(normalizeBinding({...input,requireMention:undefined},[]).requireMention,true);assert.equal(normalizeBinding({...input,cwd:'/srv/app',kind:'claude'},[]).cwd,'/srv/app');
- for(const cwd of ['relative','/a b','~/$(id)','/x;y','',undefined])assert.throws(()=>normalizeBinding({...input,cwd},[]));assert.throws(()=>normalizeBinding({...input,cwd:'work'},[]),/工作目录/);
- for(const kind of ['bash','',undefined])assert.throws(()=>normalizeBinding({...input,kind},[]),/Agent 类型/);
- assert.throws(()=>normalizeBinding({...input,chatId:'chat'},[]),/Chat ID/);
- assert.throws(()=>normalizeBinding(input,[{appId:'a',chatId:'oc_1'}]),/该聊天已有绑定/);assert.equal(normalizeBinding(input,[{appId:'other',chatId:'oc_1'},{appId:'a',chatId:'oc_2'}]).chatId,'oc_1');
+test('a binding routes the pending chat of an app to a working directory and agent kind on a machine; app and chat never come from the client',()=>{
+ const chat={token:'t',appId:'a',chatId:'oc_1',chatType:'group'},input={name:'助手',appId:'forged',chatId:'oc_forged',machineId:'m',cwd:'~/code/x',kind:'codex',requireMention:false};
+ const {id,...b}=normalizeBinding({...input,rootId:'om_1',paneId:'w1:p1'},chat,[]);assert.match(id,/^[0-9a-f-]{36}$/);assert.deepEqual(b,{name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'codex',requireMention:false,enabled:true});
+ assert.equal(normalizeBinding({...input,requireMention:undefined},chat,[]).requireMention,true);assert.equal(normalizeBinding({...input,cwd:'/srv/app',kind:'claude'},chat,[]).cwd,'/srv/app');
+ for(const requireMention of [true,undefined])assert.equal(normalizeBinding({...input,requireMention},{...chat,chatType:'p2p'},[]).requireMention,false);
+ for(const cwd of ['relative','/a b','~/$(id)','/x;y','',undefined])assert.throws(()=>normalizeBinding({...input,cwd},chat,[]));assert.throws(()=>normalizeBinding({...input,cwd:'work'},chat,[]),/工作目录/);
+ for(const kind of ['bash','',undefined])assert.throws(()=>normalizeBinding({...input,kind},chat,[]),/Agent 类型/);
+ assert.throws(()=>normalizeBinding(input,chat,[{appId:'a',chatId:'oc_1'}]),/该聊天已有绑定/);assert.equal(normalizeBinding(input,chat,[{appId:'other',chatId:'oc_1'},{appId:'a',chatId:'oc_2'}]).chatId,'oc_1');
 });
-test('routing requires a human and the exact application and chat; mentions are left to topic handling',async()=>{
- const b={enabled:true,appId:'a',chatId:'oc_1',requireMention:true};
+test('Bridge takes text and rich text without resources from a person; mentions are left to topic handling',async()=>{
  const raw={sender:{sender_type:'user',sender_id:{open_id:'ou_user'}},message:{message_id:'om_message',chat_id:'oc_1',chat_type:'group',root_id:'om_root',message_type:'text',content:'{"text":"@_user_1 hi"}',mentions:[{key:'@_user_1',id:{open_id:'ou_bot'},name:'bot'}]}};
  const e=await normalize(raw,{botIdentity:{openId:'ou_bot',name:'bot'}});
- assert.equal(e.content.trim(),'hi');assert.equal(selectBinding([b],'a',e),b);assert.equal(selectBinding([b],'other',e),null);assert.equal(selectBinding([b],'a',{...e,senderType:'bot'}),null);
+ assert.equal(e.content.trim(),'hi');assert.equal(e.chatType,'group');assert.equal(e.mentionedBot,true);assert.equal(routable(e),true);assert.equal(routable({...e,senderType:'bot'}),false);
  const other=await normalize({...raw,message:{...raw.message,mentions:[{key:'@_user_1',id:{open_id:'ou_other'},name:'other'}]}},{botIdentity:{openId:'ou_bot',name:'bot'}});
- assert.equal(selectBinding([b],'a',other),b);assert.equal(selectBinding([b],'a',{...e,mentionedBot:false}),b);assert.equal(selectBinding([b],'a',{...e,resources:[{type:'image'}]}),null);
- for(const rootId of ['om_other',undefined])assert.equal(selectBinding([b],'a',{...e,rootId}),b);
+ assert.equal(other.mentionedBot,false);assert.equal(routable(other),true);assert.equal(routable({...e,resources:[{type:'image'}]}),false);assert.equal(routable({...e,rawContentType:'image'}),false);
+ const dm=await normalize({...raw,message:{...raw.message,chat_type:'p2p',root_id:undefined,mentions:[]}},{botIdentity:{openId:'ou_bot',name:'bot'}});
+ assert.equal(dm.chatType,'p2p');assert.equal(routable(dm),true);
 });
 test('secrets are preserved only for the same application and are not part of the app status',()=>{const old={id:'a',appId:'cli_old',appSecret:'saved'};assert.equal(normalizeApp({name:'bot',appId:'cli_old',allowedUsers:[]},old).appSecret,'saved');assert.throws(()=>normalizeApp({name:'bot',appId:'cli_new',allowedUsers:[]},old));
  const f=platformFixture();try{assert.ok(!('appSecret' in JSON.parse(JSON.stringify(f.platforms.status({...old,allowedUsers:[]})))));}finally{f.close();}
@@ -69,10 +70,17 @@ test('a routed message goes to the topic handler with its app and binding, wheth
  const f=platformFixture();try{f.store.data.bindings=[{...route,requireMention:true}];f.platforms.receive(allowed,inbound);
  assert.deepEqual(f.messages,[[allowed,f.store.data.bindings[0],inbound]]);assert.deepEqual(f.store.data.logs,[]);}finally{f.close();}
 });
-test('messages that match no binding or come from outside the allowlist are not passed on',()=>{
- const f=platformFixture();try{f.store.data.bindings=[route];
- for(const [app,msg] of [[allowed,{...inbound,senderId:'ou_other'}],[allowed,{...inbound,chatId:'oc_2'}],[{...allowed,id:'other'},inbound],[{...allowed,enabled:false},inbound],[allowed,{...inbound,content:'  '}]])f.platforms.receive(app,msg);
- assert.deepEqual(f.messages,[]);}finally{f.close();}
+test('messages from outside the allowlist, to a disabled app, of another kind or empty are not passed on',()=>{
+ const f=platformFixture();try{f.store.data.bindings=[route];const dm={...inbound,chatId:'oc_2',chatType:'p2p'};
+ for(const [app,msg] of [[allowed,{...inbound,senderId:'ou_other'}],[allowed,{...dm,senderId:'ou_other'}],[{...allowed,enabled:false},inbound],[{...allowed,enabled:false},dm],[allowed,{...inbound,content:'  '}],[allowed,{...dm,content:'  '}],[allowed,{...dm,senderType:'bot'}],[allowed,{...dm,resources:[{type:'image'}]}]])f.platforms.receive(app,msg);
+ assert.deepEqual([f.messages,f.unbound],[[],[]]);}finally{f.close();}
+});
+test('a chat without a binding asks for one on any direct message but only on group messages that mention the bot; a disabled binding blocks both',()=>{
+ const f=platformFixture();try{f.store.data.bindings=[route,{...route,id:'off',chatId:'oc_off',enabled:false}];
+  const dm={...inbound,chatId:'oc_dm',chatType:'p2p'},group={...inbound,chatId:'oc_group',chatType:'group',mentionedBot:false},mentioned={...group,messageId:'om_2',mentionedBot:true};
+  for(const [app,msg] of [[allowed,dm],[allowed,group],[allowed,mentioned],[allowed,{...mentioned,chatId:'oc_off'}],[allowed,{...dm,chatId:'oc_off'}],[{...allowed,id:'other'},{...inbound,chatType:'p2p'}]])f.platforms.receive(app,msg);
+  assert.deepEqual(f.unbound,[[allowed,dm],[allowed,mentioned],[{...allowed,id:'other'},{...inbound,chatType:'p2p'}]]);assert.deepEqual(f.messages,[]);
+ }finally{f.close();}
 });
 test('a state file with legacy message queues loads only machines, apps, bindings, topics and logs',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-'));try{
@@ -259,6 +267,137 @@ test('topics still starting when Bridge restarts are marked failed',()=>{
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 
+const minutes=n=>n*60000;
+function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}={}){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-pending-')),store=new Store(dir),replies=[],bound=[],clock={now:1000};
+ store.data.apps=[{...allowed}];store.data.machines=[{id:'m',name:'cpu2'}];store.save();
+ const lookup=(collection,error)=>id=>{const x=store.data[collection].find(y=>y.id===id);if(!x)throw Error(error);return x;};
+ const pending=new PendingChats(store,{reply:async(a,chatId,rootId,text)=>{replies.push([a.id,chatId,rootId,text]);},onBound:onBound||((...args)=>{bound.push(args);}),
+  app:lookup('apps','应用不存在'),machine:lookup('machines','机器连接不存在'),bridgeUrl,now:()=>clock.now});
+ return {dir,store,replies,bound,clock,pending,close(){fs.rmSync(dir,{recursive:true});}};
+}
+const firstDm={...inbound,chatType:'p2p',messageId:'om_first',content:'first private prompt'};
+const form={name:'飞书私聊',machineId:'m',cwd:'~/work',kind:'claude',requireMention:true};
+test('an unbound chat gets a pending record kept in memory only and one reply in the thread of its message with the binding link',async()=>{
+ const f=pendingFixture();try{
+  await f.pending.open(allowed,firstDm);
+  const [chat]=f.pending.list();assert.match(chat.token,/^[A-Za-z0-9_-]{22}$/);
+  assert.deepEqual(chat,{token:chat.token,appId:'a',chatId:'oc_1',chatType:'p2p',createdAt:1000,expiresAt:1000+minutes(30)});
+  assert.deepEqual(f.replies,[['a','oc_1','om_first',`这个聊天还没有连接到 Herdr，打开链接完成绑定：http://bridge.example:8080/?bind=${chat.token}`]]);
+  assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('first private prompt'));assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes(chat.token));
+  await f.pending.open(allowed,{...firstDm,chatId:'oc_group',chatType:'group',messageId:'om_group'});assert.deepEqual(f.pending.list().map(c=>[c.chatId,c.chatType]),[['oc_1','p2p'],['oc_group','group']]);
+ }finally{f.close();}
+});
+test('a chat with a live record gets no second reply and keeps its first message; once expired it gets a new token',async()=>{
+ const f=pendingFixture();try{
+  await f.pending.open(allowed,firstDm);const [{token}]=f.pending.list();
+  f.clock.now+=minutes(29);await f.pending.open(allowed,{...firstDm,messageId:'om_second',content:'second'});
+  assert.equal(f.replies.length,1);assert.deepEqual(f.pending.list().map(c=>c.token),[token]);
+  f.clock.now+=minutes(1);assert.deepEqual(f.pending.list(),[]);
+  await f.pending.open(allowed,{...firstDm,messageId:'om_third',content:'third'});
+  const [chat]=f.pending.list();assert.notEqual(chat.token,token);assert.equal(chat.createdAt,1000+minutes(30));assert.equal(f.replies.length,2);assert.equal(f.replies[1][2],'om_third');
+  f.pending.bind({...form,token:chat.token});assert.equal(f.bound[0][2].messageId,'om_third');
+ }finally{f.close();}
+});
+test('without BRIDGE_URL the reply points to the console instead of a link; a failed reply is logged',async()=>{
+ const f=pendingFixture({bridgeUrl:''});try{
+  await f.pending.open(allowed,firstDm);assert.deepEqual(f.replies.map(r=>r[3]),['这个聊天还没有连接到 Herdr，请在 Bridge 管理台「会话绑定」中完成绑定。']);
+  f.pending.reply=async()=>{throw Error('飞书未连接');};await f.pending.open(allowed,{...firstDm,chatId:'oc_2'});
+  assert.equal(f.pending.list().length,2);assert.equal(f.store.data.logs.at(-1).level,'error');assert.match(f.store.data.logs.at(-1).message,/飞书未连接/);
+ }finally{f.close();}
+});
+test('BRIDGE_URL must be an http(s) origin; a trailing slash is dropped',()=>{
+ for(const [v,origin] of [['http://bridge.example:8080/','http://bridge.example:8080'],['https://bridge.example','https://bridge.example'],['',''],[undefined,'']])assert.equal(consoleUrl(v),origin);
+ for(const v of ['http://bridge.example/admin','http://bridge.example/?x=1','http://bridge.example/#a','ftp://bridge.example','bridge.example:8080','http://user:pw@bridge.example','not a url'])assert.throws(()=>consoleUrl(v),/BRIDGE_URL/,v);
+});
+test('binding a pending chat takes app and chat from the record, spends the token and hands the first message over without waiting',async()=>{
+ const f=pendingFixture({onBound:(...args)=>{f.bound.push(args);return new Promise(()=>{});}});try{
+  await f.pending.open(allowed,firstDm);await f.pending.open(allowed,{...firstDm,chatId:'oc_2',messageId:'om_other'});const [{token},other]=f.pending.list();
+  const binding=f.pending.bind({...form,token,appId:'forged',chatId:'oc_forged'});
+  const {id,...rest}=binding;assert.deepEqual(rest,{name:'飞书私聊',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false,enabled:true});
+  assert.deepEqual(new Store(f.dir).data.bindings,[binding]);assert.deepEqual(f.bound,[[f.store.data.apps[0],binding,firstDm]]);
+  assert.deepEqual(f.pending.list().map(c=>c.token),[other.token]);
+  assert.throws(()=>f.pending.bind({...form,token}),/^Error: 绑定链接已失效，请在飞书里重新发消息$/);
+  for(const bad of [{token:'unknown'},{token:undefined},{}])assert.throws(()=>f.pending.bind({...form,...bad}),/绑定链接已失效/);
+  // An invalid form or an unknown machine keeps the token for another try.
+  assert.throws(()=>f.pending.bind({...form,token:other.token,cwd:'relative'}),/工作目录/);assert.throws(()=>f.pending.bind({...form,token:other.token,machineId:'gone'}),/机器连接不存在/);
+  assert.deepEqual(f.pending.list().map(c=>c.token),[other.token]);assert.equal(f.store.data.bindings.length,1);
+ }finally{f.close();}
+});
+test('a group binding keeps the mention choice; a chat whose app was removed cannot be bound',async()=>{
+ const f=pendingFixture();try{
+  await f.pending.open(allowed,{...firstDm,chatType:'group',chatId:'oc_group'});
+  assert.equal(f.pending.bind({...form,token:f.pending.list()[0].token}).requireMention,true);
+  await f.pending.open(allowed,{...firstDm,chatType:'group',chatId:'oc_group2',messageId:'om_g2'});f.store.data.apps=[];
+  assert.throws(()=>f.pending.bind({...form,token:f.pending.list()[0].token}),/应用不存在/);
+ }finally{f.close();}
+});
+
+const png=Buffer.from('89504e470d0a1a0a0000','hex');
+// A connected channel whose bot info comes from info(); every avatar download is answered by avatar(url).
+function botFixture({info,avatar}={}){
+ const requests=[],downloads=[];
+ const channel={on(){},connect:async()=>{},disconnect:async()=>{},getConnectionStatus:()=>({state:'connected'}),rawClient:{request:async o=>{requests.push(o);return info();}}};
+ const f=platformFixture({channelFactory:()=>channel,fetch:async(url,options)=>{downloads.push(String(url));assert.ok(options.signal);return avatar(String(url));}});
+ const a={id:'app-1',name:'注册时的名称',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:['ou_user'],enabled:true};f.store.data.apps=[a];f.store.save();
+ return {...f,a,requests,downloads,file:path.join(f.dir,'avatars','app-1')};
+}
+const botInfo=(bot={})=>()=>({code:0,bot:{app_name:'飞书机器人',open_id:'ou_bot',avatar_url:'https://cdn.example/avatar.png',...bot}});
+test('connecting and verifying take the name and open_id from Feishu and store the https avatar',async()=>{
+ const f=botFixture({info:botInfo(),avatar:()=>new Response(png,{headers:{'content-type':'image/png'}})});try{
+  await f.platforms.start(f.a);
+  assert.deepEqual(f.requests,[{url:'/open-apis/bot/v3/info',method:'GET'}]);assert.deepEqual(f.downloads,['https://cdn.example/avatar.png']);
+  assert.equal(f.a.name,'飞书机器人');assert.equal(f.a.botOpenId,'ou_bot');assert.equal('botName' in f.a,false);assert.ok(f.a.verifiedAt>0);
+  assert.deepEqual(fs.readFileSync(f.file),png);assert.equal(fs.statSync(f.file).mode&0o777,0o600);assert.equal(f.a.avatar.type,'image/png');assert.ok(f.a.avatar.updatedAt>0);
+  assert.deepEqual(new Store(f.dir).data.apps[0].avatar,f.a.avatar);assert.equal(f.platforms.status(f.a).connection,'connected');
+  const avatar=await f.platforms.avatar('app-1');assert.deepEqual([avatar.type,avatar.body],['image/png',png]);
+  f.requests.length=0;const jpeg=Buffer.from('ffd8ffe0','hex');
+  f.platforms.fetch=async()=>new Response(jpeg,{headers:{'content-type':'image/jpeg; charset=binary'}});f.platforms.channel(f.a).rawClient.request=async o=>{f.requests.push(o);return {code:0,data:{bot:{app_name:'改名后的机器人',open_id:'ou_bot',avatar_url:'https://cdn.example/new.jpg'}}};};
+  assert.deepEqual(await f.platforms.verify(f.a),{verified:true,name:'改名后的机器人'});
+  assert.deepEqual(f.requests,[{url:'/open-apis/bot/v3/info',method:'GET'}]);assert.equal(f.a.name,'改名后的机器人');assert.deepEqual(fs.readFileSync(f.file),jpeg);assert.equal(f.a.avatar.type,'image/jpeg');
+ }finally{f.close();}
+});
+test('an avatar that is not https, over 1 MB or not an image is not stored; the old avatar and the connection stay',async()=>{
+ const cases=[['http://cdn.example/a.png',()=>new Response(png,{headers:{'content-type':'image/png'}}),0],
+  ['https://cdn.example/big.png',()=>new Response(Buffer.alloc(1024*1024+1),{headers:{'content-type':'image/png'}}),1],
+  ['https://cdn.example/page',()=>new Response('<html>',{headers:{'content-type':'text/html'}}),1],
+  ['https://cdn.example/missing',()=>new Response('no',{status:404,headers:{'content-type':'image/png'}}),1]];
+ for(const [url,avatar,downloads] of cases){
+  const f=botFixture({info:botInfo({avatar_url:url}),avatar});try{
+   fs.mkdirSync(path.dirname(f.file));fs.writeFileSync(f.file,'old');const old={type:'image/png',updatedAt:1};f.a.avatar=old;
+   await f.platforms.start(f.a);assert.equal(f.platforms.status(f.a).connection,'connected',url);
+   assert.equal(f.downloads.length,downloads,url);assert.equal(fs.readFileSync(f.file,'utf8'),'old',url);assert.deepEqual(f.a.avatar,old,url);assert.equal(f.a.name,'飞书机器人');
+   assert.equal(f.store.data.logs.at(-1).level,'error',url);
+   await f.platforms.verify(f.a);assert.equal(fs.readFileSync(f.file,'utf8'),'old',url);
+  }finally{f.close();}
+ }
+});
+test('an svg avatar is rejected because it can carry script; the old avatar stays',async()=>{
+ const svg='<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>';
+ for(const type of ['image/svg+xml','image/svg+xml; charset=utf-8','IMAGE/SVG+XML']){
+  const f=botFixture({info:botInfo({avatar_url:'https://cdn.example/avatar.svg'}),avatar:()=>new Response(svg,{headers:{'content-type':type}})});try{
+   fs.mkdirSync(path.dirname(f.file));fs.writeFileSync(f.file,'old');const old={type:'image/png',updatedAt:1};f.a.avatar=old;
+   await f.platforms.start(f.a);assert.equal(f.platforms.status(f.a).connection,'connected',type);
+   assert.equal(f.downloads.length,1,type);assert.equal(fs.readFileSync(f.file,'utf8'),'old',type);assert.deepEqual(f.a.avatar,old,type);
+   assert.equal(f.store.data.logs.at(-1).level,'error',type);assert.match(f.store.data.logs.at(-1).message,/头像/,type);
+   const served=await f.platforms.avatar('app-1');assert.deepEqual([served.type,served.body.toString()],['image/png','old'],type);
+  }finally{f.close();}
+ }
+});
+test('a failed bot info request is only logged after connecting but fails a credential check',async()=>{
+ const f=botFixture({info:()=>({code:99991663,msg:'invalid'}),avatar:()=>assert.fail('no download')});try{
+  await f.platforms.start(f.a);assert.equal(f.platforms.status(f.a).connection,'connected');assert.equal(f.a.name,'注册时的名称');assert.equal(f.store.data.logs.at(-1).level,'error');
+  await assert.rejects(f.platforms.verify(f.a),/应用凭证验证失败/);assert.equal(await f.platforms.avatar('app-1'),null);assert.equal(await f.platforms.avatar('../state.json'),null);
+ }finally{f.close();}
+});
+test('removing an app deletes its avatar',async()=>{
+ const f=botFixture({info:botInfo(),avatar:()=>new Response(png,{headers:{'content-type':'image/png'}})});try{
+  await f.platforms.start(f.a);assert.ok(fs.existsSync(f.file));
+  await f.platforms.remove('app-1');assert.equal(fs.existsSync(f.file),false);assert.deepEqual(new Store(f.dir).data.apps,[]);assert.equal(f.platforms.runtime.has('app-1'),false);
+  await assert.rejects(f.platforms.remove('../state.json'),/应用不存在/);assert.ok(fs.existsSync(path.join(f.dir,'state.json')));
+ }finally{f.close();}
+});
+
 test('official onboarding automatically connects after persisting credentials',async()=>{
  let connected=false;
  const f=registrationFixture(async o=>{ready(o);return {client_id:'cli_auto',client_secret:'private',user_info:{open_id:'ou_owner'}};},{connect:async a=>{assert.equal(new Store(f.store.dir).data.apps[0].appId,'cli_auto');assert.equal(f.registrations.status().status,'connecting');a.enabled=true;f.store.save();connected=true;}});
@@ -276,33 +415,47 @@ test('connection failure retains the added app for retry without showing false s
 
 test('channel startup and shutdown do not revive a cancelled connection',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-lifecycle-'));let resolve,options;const handlers={};let closes=0;
- const channel={on:(name,fn)=>handlers[name]=fn,connect:()=>new Promise(r=>resolve=r),disconnect:async()=>{},rawWsClient:{close:()=>closes++},getConnectionStatus:()=>({state:'connected'}),getBotIdentity:()=>({openId:'ou_bot',name:'bot'})};
+ const channel={on:(name,fn)=>handlers[name]=fn,connect:()=>new Promise(r=>resolve=r),disconnect:async()=>{},rawWsClient:{close:()=>closes++},getConnectionStatus:()=>({state:'connected'})};
  const store=new Store(dir),messages=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}}),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true};
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety.batch.text.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server saves chat routes, reports machines with Herdr results only and topics without message ids',async()=>{
+test('the server lists pending chats, saves bindings only through a link token, serves app avatars and reports topics without message ids',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
- fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
+ fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'initialized'),'1');fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
  const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],createdAt:1};
- fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'}],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready'}]}));
+ const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
+ fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({apps:[{...app,id:'app-avatar',avatar:{type:'image/png',updatedAt:5}},{...app,id:'app-plain',appId:'cli_plain'},{...app,id:'app-gone',appId:'cli_gone',avatar:{type:'image/png',updatedAt:5}}],
+  bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'}],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready'}]}));
  fs.writeFileSync(herdr,`#!/bin/sh\nif [ "$3" = agent ]; then echo '${JSON.stringify({result:{agents}})}'; else echo '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'; fi\n`,{mode:0o700});
  const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
- const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1'},stdio:['ignore','pipe','inherit']});
+ const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:'http://127.0.0.1:'+port+'/'},stdio:['ignore','pipe','inherit']});
  try{
   await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim();
   const api=async(p,body)=>{const r=await fetch(`http://127.0.0.1:${port}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
-  const machineId=(await api('machines/save',{name:'fake',type:'local',binary:herdr,enabled:true})).body.id,appId=(await api('apps/save',{name:'bot',appId:'cli_test',appSecret:'secret',allowedUsers:[]})).body.id;
-  const input={name:'route',appId,machineId,chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:true};
-  assert.equal((await api('bindings/save',input)).status,200);assert.deepEqual(await api('bindings/save',{...input,cwd:'/other'}),{status:400,body:{error:'该聊天已有绑定，请先移除旧绑定'}});
-  const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','registration','topics','version']);
+  const machineId=(await api('machines/save',{name:'fake',type:'local',binary:herdr,enabled:true})).body.id;
+  const input={token:'forged',name:'route',appId:'app-plain',machineId,chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:true};
+  assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
+  const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
+  assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
   const {messageIds,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);assert.equal('messageIds' in s.topics[1],false);
   assert.equal((await api('bindings/remove',{id:'b-old'})).status,200);assert.deepEqual((await api('state')).body.topics.map(t=>t.id),['t2']);
-  const {id,...binding}=s.bindings[1];assert.deepEqual(binding,{name:'route',appId,machineId,chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:true,enabled:true});
-  const [m]=s.machines;assert.equal(m.state,'connected');assert.deepEqual(m.agents,agents);assert.deepEqual(m.panes,[{pane_id:'w1:p1'}]);
+  const avatar=async(id,headers={authorization:'Bearer '+key})=>fetch(`http://127.0.0.1:${port}/api/apps/avatar?id=${encodeURIComponent(id)}`,{headers});
+  const image=await avatar('app-avatar');assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');assert.equal(image.headers.get('cache-control'),'private, max-age=300');assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);
+  assert.equal((await avatar('app-avatar',{})).status,401);for(const id of ['app-plain','unknown','../state.json'])assert.equal((await avatar(id)).status,404,id);
+  assert.equal((await api('apps/remove',{id:'app-gone'})).status,200);assert.equal(fs.existsSync(path.join(state,'avatars','app-gone')),false);assert.ok(fs.existsSync(path.join(state,'avatars','app-avatar')));
+  assert.equal((await api('apps/remove',{id:'../avatars/app-avatar'})).status,400);assert.ok(fs.existsSync(path.join(state,'avatars','app-avatar')));
+  const [m]=(await api('state')).body.machines;assert.equal(m.state,'connected');assert.deepEqual(m.agents,agents);assert.deepEqual(m.panes,[{pane_id:'w1:p1'}]);
   assert.deepEqual(Object.keys(m).sort(),['agents','binary','checkedAt','enabled','host','id','name','panes','port','session','state','type']);
   assert.equal((await api('machines/install',{id:machineId})).status,404);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
+});
+test('the server refuses to start with a BRIDGE_URL that is not an http(s) origin',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-'));try{
+  const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:dir,PORT:'0',BIND:'127.0.0.1',BRIDGE_URL:'http://bridge.example/admin'},stdio:['ignore','pipe','pipe']});
+  let err='';server.stderr.on('data',d=>{err+=d;});const timer=setTimeout(()=>server.kill(),5000);const code=await new Promise(r=>server.once('exit',r));clearTimeout(timer);
+  assert.notEqual(code,0);assert.match(err,/BRIDGE_URL/);assert.equal(fs.existsSync(path.join(dir,'access-key')),false);
+ }finally{fs.rmSync(dir,{recursive:true});}
 });
 
 test('SDK cache isolates apps and honors namespaces and absolute expiry',async()=>{const a=channelCache(),b=channelCache();await a.set('same','seen',Date.now()+60000,{namespace:'dedup'});assert.equal(await a.get('same',{namespace:'dedup'}),'seen');assert.equal(await b.get('same',{namespace:'dedup'}),undefined);assert.equal(await a.get('same',{namespace:'token'}),undefined);await a.set('expired','old',Date.now()-1);assert.equal(await a.get('expired'),undefined);});

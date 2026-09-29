@@ -1,17 +1,22 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { expect, test, vi } from 'vitest';
+import { afterEach, expect, test, vi } from 'vitest';
 import { App } from './App.jsx';
 import { assign } from './location.js';
 import { bodyOf, callsTo, deferred, reply, sampleState, stubFetch } from './test/fixtures.js';
 
-vi.mock('./location.js', () => ({ assign: vi.fn(), replace: vi.fn(), reload: vi.fn() }));
+// Navigation is replaced; reading and clearing the query string run against jsdom's real history.
+vi.mock('./location.js', async (importOriginal) => ({ ...(await importOriginal()), assign: vi.fn(), replace: vi.fn(), reload: vi.fn() }));
+
+afterEach(() => window.history.replaceState(null, '', '/'));
 
 // Advances fake timers and lets pending fetch promises and React updates settle.
 const flush = (ms = 0) => act(() => vi.advanceTimersByTimeAsync(ms));
 const pageTitle = () => screen.getByRole('heading', { level: 1 }).textContent;
 const card = (name) => screen.getByText(name).closest('article');
 const nav = (name) => screen.getByRole('button', { name: new RegExp(`^${name}`) });
+const dialog = () => document.querySelector('dialog');
+const avatar = '/api/apps/avatar?id=app-1&v=1700000000000';
 
 test('polls every 4s, skips ticks while a refresh is pending and recovers after a failure', async () => {
   vi.useFakeTimers();
@@ -153,6 +158,8 @@ test('binding rows show the chat, the machine with the agent kind and working di
 
   const row = screen.getByText('个人助手').closest('tr');
   expect(within(row).getByText('oc_1')).toBeTruthy();
+  expect(within(row).getByText('工作助手')).toBeTruthy();
+  expect(row.querySelector('img').getAttribute('src')).toBe(avatar);
   expect(within(row).getByText('cpu2')).toBeTruthy();
   expect(within(row).getByText('claude · ~/work')).toBeTruthy();
   expect(within(row).getByText('@机器人')).toBeTruthy();
@@ -286,4 +293,96 @@ test('the registration dialog polls every 1.2s while open and finishes on the pl
   const closed = callsTo(fetch, '/api/state');
   await flush(1200);
   expect(callsTo(fetch, '/api/state')).toBe(closed);
+});
+
+test('app cards show the bot avatar synced from Feishu, fall back to the Feishu icon and no longer repeat a bot name', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  render(<App />);
+  await screen.findByText('工作助手');
+  expect(card('工作助手').querySelector('.card-icon img').getAttribute('src')).toBe(avatar);
+  expect(card('备用应用').querySelector('.card-icon img')).toBeNull();
+  expect(card('备用应用').querySelector('.card-icon use').getAttribute('href')).toBe('#i-feishu');
+  expect(card('工作助手').querySelector('.card-detail > span').textContent).toBe('凭证已验证');
+});
+
+test('a ?bind= link opens the binding form for its chat on the bindings page and drops the query', async () => {
+  window.history.replaceState(null, '', '/?bind=tok-group');
+  stubFetch({ '/api/state': sampleState() });
+  render(<App />);
+  expect(await screen.findByRole('heading', { name: '连接聊天与会话' })).toBeTruthy();
+  expect(within(dialog()).getByText('oc_group')).toBeTruthy();
+  expect(within(dialog()).getByText('群聊')).toBeTruthy();
+  expect(screen.getByLabelText('绑定名称').value).toBe('飞书群聊');
+  expect(pageTitle()).toBe('会话绑定');
+  expect(window.location.search).toBe('');
+  expect(window.location.pathname).toBe('/');
+});
+
+test('an expired ?bind= link shows a toast, opens nothing and drops the query', async () => {
+  window.history.replaceState(null, '', '/?bind=gone');
+  stubFetch({ '/api/state': sampleState() });
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole('status').textContent).toBe('绑定链接已失效，请在飞书里重新发消息'));
+  expect(dialog()).toBeNull();
+  expect(window.location.search).toBe('');
+});
+
+test('a ?bind= link opened before login keeps its query through the login page and opens the form after login', async () => {
+  window.history.replaceState(null, '', '/?bind=tok-p2p');
+  let authed = false;
+  stubFetch({
+    '/api/state': () => (authed ? sampleState() : reply({ error: '请先登录' }, 401)),
+    '/api/login': () => {
+      authed = true;
+      return { ok: true };
+    },
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  expect(await screen.findByRole('heading', { name: '登录管理台' })).toBeTruthy();
+  expect(window.location.search).toBe('?bind=tok-p2p');
+
+  await user.type(screen.getByLabelText('访问密钥'), 'key');
+  await user.click(screen.getByRole('button', { name: '进入管理台' }));
+  expect(await screen.findByRole('heading', { name: '连接聊天与会话' })).toBeTruthy();
+  expect(screen.getByLabelText('绑定名称').value).toBe('飞书私聊');
+  expect(window.location.search).toBe('');
+});
+
+test('新建绑定 lists the chats waiting for a binding and opens the form for the one picked', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
+  await user.click(screen.getByRole('button', { name: '+ 新建绑定' }));
+
+  const [group, p2p] = dialog().querySelectorAll('.pending-chat');
+  expect(within(group).getByText('工作助手')).toBeTruthy();
+  expect(group.querySelector('img').getAttribute('src')).toBe(avatar);
+  expect(within(group).getByText('群聊')).toBeTruthy();
+  expect(within(group).getByText('oc_group')).toBeTruthy();
+  expect(within(group).getByText('剩余 25 分钟')).toBeTruthy();
+  expect(within(p2p).getByText('私聊')).toBeTruthy();
+  expect(within(p2p).getByText('oc_p2p')).toBeTruthy();
+  expect(within(p2p).getByText('剩余 10 分钟')).toBeTruthy();
+
+  await user.click(p2p);
+  expect(screen.getByRole('heading', { name: '连接聊天与会话' })).toBeTruthy();
+  expect(document.querySelectorAll('dialog')).toHaveLength(1);
+  expect(within(dialog()).getByText('oc_p2p')).toBeTruthy();
+  expect(screen.getByLabelText('绑定名称').value).toBe('飞书私聊');
+});
+
+test('新建绑定 without waiting chats explains how to get a binding link', async () => {
+  const state = sampleState();
+  state.pendingChats = [];
+  stubFetch({ '/api/state': state });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
+  await user.click(screen.getByRole('button', { name: '+ 新建绑定' }));
+  expect(within(dialog()).getByText('在飞书里给机器人发一条消息（群聊需 @机器人），机器人会回复绑定链接。')).toBeTruthy();
+  expect(dialog().querySelector('.pending-chat')).toBeNull();
+  await user.click(within(dialog()).getByRole('button', { name: '关闭' }));
+  expect(dialog()).toBeNull();
 });

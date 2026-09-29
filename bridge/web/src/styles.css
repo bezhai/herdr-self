@@ -136,6 +136,8 @@ nav { display: grid; gap: 2px; }
 .card-head { display: flex; align-items: center; gap: 14px; padding: 16px 18px; }
 .card-icon { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); color: var(--ink-2); }
 .card-icon .i { width: 19px; height: 19px; }
+.avatar { display: block; flex: none; object-fit: cover; }
+.card-icon .avatar { width: 100%; height: 100%; border-radius: calc(var(--radius) - 1px); }
 .card-title { flex: 1; min-width: 0; }
 .card-title strong { display: block; font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
 .card-title p { display: flex; flex-wrap: wrap; gap: 2px 8px; margin: 3px 0 0; font: 12.5px var(--mono); color: var(--muted); }
@@ -191,6 +193,8 @@ tbody tr:hover td { background: rgba(255, 255, 255, .015); }
 td strong { display: block; font-weight: 600; color: var(--ink); }
 td small { display: block; margin-top: 3px; font-size: 12.5px; color: var(--muted); }
 td code { display: block; margin-top: 2px; font: 12px/1.6 var(--mono); color: var(--faint); overflow-wrap: anywhere; }
+td small.app-name { display: flex; align-items: center; gap: 6px; }
+.app-name .avatar, .app-name .i { width: 16px; height: 16px; border-radius: 4px; }
 td.row-action { text-align: right; vertical-align: middle; }
 td.table-empty { padding: 44px 16px; text-align: center; color: var(--muted); }
 .topics-row td { padding: 0 16px 14px 32px; border-top: 0; }
@@ -240,11 +244,30 @@ dialog { width: min(500px, calc(100vw - 24px)); max-height: calc(100dvh - 32px);
 dialog[open] { animation: pop .18s var(--ease); }
 @keyframes pop { from { opacity: 0; transform: translateY(8px) scale(.985); } }
 dialog::backdrop { background: rgba(6, 7, 9, .68); backdrop-filter: blur(3px); }
-dialog > form, .dialog-body { padding: 18px 24px 22px; }
+dialog > form { padding: 18px 24px 0; }
+.dialog-body { padding: 18px 24px 22px; }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; margin: 0 -10px 2px 0; }
 .dialog-head .eyebrow { margin: 0; }
 dialog h2 { margin: 0; font-size: 19px; font-weight: 600; line-height: 1.35; }
-.dialog-actions { position: sticky; bottom: -22px; z-index: 1; display: flex; justify-content: flex-end; gap: 8px; margin: 22px -24px -22px; padding: 14px 24px; border-top: 1px solid var(--line); background: var(--panel); }
+.dialog-note { margin: 14px 0 0; font-size: 13.5px; line-height: 1.7; color: var(--muted); }
+
+/* a Feishu chat: bot avatar, app name, chat id */
+.chat-source, .pending-chat { display: flex; align-items: center; gap: 12px; }
+.chat-source { margin-top: 12px; }
+.chat-avatar { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); color: var(--ink-2); overflow: hidden; }
+.chat-avatar .avatar { width: 100%; height: 100%; }
+.chat-main { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.chat-main strong { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.chat-meta small { font-size: 12.5px; color: var(--muted); }
+.chat-main code { font: 12px/1.6 var(--mono); color: var(--faint); overflow-wrap: anywhere; }
+.chat-meta { display: flex; flex: none; flex-direction: column; align-items: flex-end; gap: 1px; white-space: nowrap; }
+.pending-chats { display: grid; gap: 8px; margin: 16px 0 0; padding: 0; list-style: none; }
+.pending-chat { width: 100%; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--panel-2); text-align: left; transition: background-color .12s, border-color .12s; }
+.pending-chat:hover { background: var(--panel-3); border-color: var(--line-3); }
+
+/* The form footer is the last thing in the dialog's scroll area: it sticks to the bottom edge while fields remain below,
+   and at the end of the scroll it sits after the last field instead of over it. */
+.dialog-actions { position: sticky; bottom: 0; z-index: 1; display: flex; justify-content: flex-end; gap: 8px; margin: 22px -24px 0; padding: 14px 24px; border-top: 1px solid var(--line); background: var(--panel); }
 
 .connect-dialog { width: min(400px, calc(100vw - 24px)); }
 .connect-dialog .dialog-body { padding: 34px 30px 20px; text-align: center; }
@@ -365,13 +388,18 @@ dialog h2 { margin: 0; font-size: 19px; font-weight: 600; line-height: 1.35; }
   td.table-empty { display: block; }
   .topics-row { padding-top: 0; border-top: 0; }
   .topics-row td { display: block; padding: 0 0 4px; }
+  .topic { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 4px 10px; }
+  .topic strong { grid-column: 2 / -1; }
+  .topic code { grid-column: 1 / 3; }
+  .topic time { grid-column: 3; margin-left: 0; }
+  .topic-error { grid-column: 1 / -1; }
   .log { grid-template-columns: auto minmax(0, 1fr); gap: 2px 12px; padding: 10px 14px; }
   .log span { grid-column: 1 / -1; }
-  .form-grid { grid-template-columns: minmax(0, 1fr); }
-  .form-grid.wide-first { grid-template-columns: minmax(0, 1fr) 92px; }
+  .form-grid, .form-grid.wide-first { grid-template-columns: minmax(0, 1fr); }
   dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
-  dialog > form, .dialog-body { padding: 16px 18px 22px; }
-  .dialog-actions { margin: 22px -18px -22px; padding: 12px 18px calc(12px + env(safe-area-inset-bottom, 0px)); }
+  dialog > form { padding: 16px 18px 0; }
+  .dialog-body { padding: 16px 18px 22px; }
+  .dialog-actions { margin: 22px -18px 0; padding: 12px 18px calc(12px + env(safe-area-inset-bottom, 0px)); }
   .dialog-actions > * { flex: 1; }
   .toast { right: 16px; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); left: 16px; max-width: none; }
 }

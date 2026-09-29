@@ -50,6 +50,15 @@ export function topicStatus(state) {
   return { tone, label };
 }
 
+// Label of a Feishu chat type: p2p is a direct chat, anything else a group.
+export const chatTypeLabel = (type) => (type === 'p2p' ? '私聊' : '群聊');
+
+// Whole minutes until a pending chat's binding link expires, rounded up.
+export const minutesLeft = (expiresAt, now = Date.now()) => Math.max(0, Math.ceil((expiresAt - now) / 60000));
+
+// Address of an app's bot avatar, or null without one. The update time busts the browser cache after a new download.
+export const avatarUrl = (app) => (app?.avatar ? `/api/apps/avatar?id=${encodeURIComponent(app.id)}&v=${app.avatar.updatedAt}` : null);
+
 export const formatDateTime = (time) => new Date(time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
 export const formatTime = (time) => new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -79,7 +88,7 @@ export function registrationView(registration, apps, { opening, previousId, scan
   return {
     opening: stillOpening,
     title: completed ? '飞书已连接' : '在飞书中添加应用',
-    subtitle: completed ? app?.botName || app?.name || '' : '新建或选择已有应用',
+    subtitle: completed ? app?.name || '' : '新建或选择已有应用',
     spinner: !(completed || problem || setup || (scanning && Boolean(r?.qr))),
     result: completed ? 'success' : problem || setup ? 'problem' : null,
     qr: scanning && pending && r?.qr ? r.qr : null,

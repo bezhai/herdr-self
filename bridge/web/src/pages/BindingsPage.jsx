@@ -1,6 +1,7 @@
 import { Fragment } from 'react';
 import { request } from '../api.js';
 import { ActionButton } from '../components/ActionButton.jsx';
+import { AppAvatar } from '../components/AppAvatar.jsx';
 import { Badge } from '../components/Badge.jsx';
 import { bindingStatus, formatDateTime, topicStatus } from '../model.js';
 
@@ -42,7 +43,7 @@ function BindingRow({ binding: b, state, refresh, toast }) {
       <td data-label="来源">
         <div>
           <strong>{b.name}</strong>
-          <small>{app?.name}</small>
+          <small className="app-name"><AppAvatar app={app} />{app?.name}</small>
           <code>{b.chatId}</code>
         </div>
       </td>
@@ -74,7 +75,7 @@ export function BindingsPage({ state, refresh, toast }) {
                   </Fragment>
                 );
               })
-              : <tr><td colSpan={5} className="table-empty">暂无会话绑定。接入机器与飞书应用后，使用上方的「新建绑定」。</td></tr>}
+              : <tr><td colSpan={5} className="table-empty">暂无会话绑定。在飞书里给机器人发一条消息，按机器人回复的链接完成绑定。</td></tr>}
           </tbody>
         </table>
       </div>

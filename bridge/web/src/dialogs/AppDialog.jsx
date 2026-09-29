@@ -23,6 +23,7 @@ export function AppDialog({ app, onClose, onSaved }) {
   return (
     <FormDialog eyebrow="FEISHU APP" title="应用配置" submitLabel="保存应用" onSubmit={save} onClose={onClose}>
       <label>应用名称<input required placeholder="Claude 工作助手" {...field('name')} /></label>
+      <p className="fine">连接后以飞书机器人名称为准。</p>
       <div className="form-grid">
         <label>App ID<input className="mono" required placeholder="cli_…" {...field('appId')} /></label>
         <label>API 环境

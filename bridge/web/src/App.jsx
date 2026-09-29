@@ -8,8 +8,9 @@ import { Topbar } from './components/Topbar.jsx';
 import { AppDialog } from './dialogs/AppDialog.jsx';
 import { BindingDialog } from './dialogs/BindingDialog.jsx';
 import { MachineDialog } from './dialogs/MachineDialog.jsx';
+import { PendingChatsDialog } from './dialogs/PendingChatsDialog.jsx';
 import { RegistrationDialog } from './dialogs/RegistrationDialog.jsx';
-import { assign, reload } from './location.js';
+import { assign, clearQuery, query, reload } from './location.js';
 import { BindingsPage } from './pages/BindingsPage.jsx';
 import { LoginPage } from './pages/LoginPage.jsx';
 import { LogsPage } from './pages/LogsPage.jsx';
@@ -28,16 +29,29 @@ export function App() {
   const sequence = useRef(0);
   const { state, online, authed, refresh } = useBridge({ fastPoll: dialog?.kind === 'registration' });
 
-  useEffect(() => onUnauthorized(() => setDialog(null)), []);
-
   const showToast = useCallback((text) => setToast({ text, id: (sequence.current += 1) }), []);
   const hideToast = useCallback(() => setToast(null), []);
-  const openDialog = (kind, props = {}) => setDialog({ kind, key: (sequence.current += 1), ...props });
+  const openDialog = useCallback((kind, props = {}) => setDialog({ kind, key: (sequence.current += 1), ...props }), []);
   const closeDialog = useCallback(() => setDialog(null), []);
   const saved = () => {
     setDialog(null);
     refresh();
   };
+
+  useEffect(() => onUnauthorized(() => setDialog(null)), []);
+
+  // A binding link from Feishu (/?bind=<token>) is handled once the state is loaded, after the login page if there is one,
+  // so the query stays in the address until then.
+  useEffect(() => {
+    const token = authed && new URLSearchParams(query()).get('bind');
+    if (!token) return;
+    clearQuery();
+    const chat = state.pendingChats.find((c) => c.token === token);
+    if (chat) {
+      setPage('bindings');
+      openDialog('binding', { chat });
+    } else showToast('绑定链接已失效，请在飞书里重新发消息');
+  }, [authed, state, openDialog, showToast]);
 
   function navigate(next) {
     setPage(next);
@@ -67,7 +81,7 @@ export function App() {
   if (!authed) return <LoginPage onLogin={refresh} />;
 
   const info = pageInfo[page];
-  const pageActions = { platforms: openRegistration, machines: () => openDialog('machine'), bindings: () => openDialog('binding') };
+  const pageActions = { platforms: openRegistration, machines: () => openDialog('machine'), bindings: () => openDialog('pending') };
   const pageProps = { state, refresh, toast: showToast };
   return (
     <>
@@ -89,7 +103,10 @@ export function App() {
       </div>
       {dialog?.kind === 'machine' && <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'app' && <AppDialog key={dialog.key} app={dialog.app} onClose={closeDialog} onSaved={saved} />}
-      {dialog?.kind === 'binding' && <BindingDialog key={dialog.key} state={state} onClose={closeDialog} onSaved={saved} />}
+      {dialog?.kind === 'pending' && (
+        <PendingChatsDialog key={dialog.key} state={state} onPick={(chat) => openDialog('binding', { chat })} onClose={closeDialog} />
+      )}
+      {dialog?.kind === 'binding' && <BindingDialog key={dialog.key} state={state} chat={dialog.chat} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'registration' && (
         <RegistrationDialog
           key={dialog.key}

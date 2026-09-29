@@ -32,12 +32,16 @@ export function bodyOf(fetch, url) {
 export const callsTo = (fetch, url) => fetch.mock.calls.filter(([called]) => called === url).length;
 
 export function sampleState() {
+  const now = Date.now();
   return {
     host: 'bridge-host',
     version: '0.1.0',
     registration: null,
     apps: [
-      { id: 'app-1', name: '工作助手', appId: 'cli_work', domain: 'feishu', enabled: true, connection: 'connected', verifiedAt: 1, botName: 'WorkBot', allowedUsers: ['ou_1'], error: '' },
+      {
+        id: 'app-1', name: '工作助手', appId: 'cli_work', domain: 'feishu', enabled: true, connection: 'connected', verifiedAt: 1,
+        avatar: { type: 'image/png', updatedAt: 1700000000000 }, allowedUsers: ['ou_1'], error: '',
+      },
       { id: 'app-2', name: '备用应用', appId: 'cli_spare', domain: 'lark', enabled: false, connection: 'disabled', allowedUsers: [], error: '' },
     ],
     machines: [
@@ -56,6 +60,10 @@ export function sampleState() {
     ],
     bindings: [
       { id: 'b-1', name: '个人助手', appId: 'app-1', machineId: 'm-1', chatId: 'oc_1', cwd: '~/work', kind: 'claude', requireMention: true, enabled: true },
+    ],
+    pendingChats: [
+      { token: 'tok-group', appId: 'app-1', chatId: 'oc_group', chatType: 'group', createdAt: now - 5 * 60000, expiresAt: now + 25 * 60000 },
+      { token: 'tok-p2p', appId: 'app-1', chatId: 'oc_p2p', chatType: 'p2p', createdAt: now - 20 * 60000, expiresAt: now + 10 * 60000 },
     ],
     topics: [
       {

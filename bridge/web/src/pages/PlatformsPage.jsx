@@ -1,8 +1,8 @@
 import { request } from '../api.js';
 import { ActionButton } from '../components/ActionButton.jsx';
+import { AppAvatar } from '../components/AppAvatar.jsx';
 import { StatusBadge } from '../components/Badge.jsx';
 import { EmptyState } from '../components/EmptyState.jsx';
-import { Icon } from '../components/Icon.jsx';
 
 const domainNames = { bytedance: '字节内部', lark: 'Lark 国际版' };
 
@@ -15,7 +15,7 @@ function AppCard({ app, bindings, refresh, toast, openApp }) {
   return (
     <article className="card">
       <div className="card-head">
-        <span className="card-icon"><Icon name="feishu" /></span>
+        <span className="card-icon"><AppAvatar app={app} /></span>
         <div className="card-title">
           <strong>{app.name}</strong>
           <p><span>{app.appId}</span><span>{domainNames[app.domain] || '飞书开放平台'}</span></p>
@@ -31,7 +31,7 @@ function AppCard({ app, bindings, refresh, toast, openApp }) {
         </div>
       </div>
       <div className="card-detail">
-        <span>{app.verifiedAt ? `凭证已验证${app.botName ? ` · ${app.botName}` : ''}` : '尚未验证凭证'}</span>
+        <span>{app.verifiedAt ? '凭证已验证' : '尚未验证凭证'}</span>
         <span className="facts">
           <span><b>{app.allowedUsers.length}</b>位授权用户</span>
           <span><b>{bindings.filter((b) => b.appId === app.id).length}</b>个绑定</span>
