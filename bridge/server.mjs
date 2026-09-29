@@ -2,6 +2,7 @@ import http from 'node:http';import fs from 'node:fs';import path from 'node:pat
 import {Store,normalizeMachine,herdr,helper,installHelper,targetAgent,text,uuid,publicText} from './core.mjs';
 import {Platforms,normalizeApp} from './platform.mjs';
 import {Registrations} from './registration.mjs';
+import {staticFile,sendStatic} from './web-assets.mjs';
 const root=path.dirname(fileURLToPath(import.meta.url)),dir=process.env.BRIDGE_STATE||path.join(root,'state'),store=new Store(dir),live=new Map(),refreshes=new Map(),locks=new Set();
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map(),attempts=new Map();
 if(!store.data.machines.length&&!fs.existsSync(path.join(dir,'initialized'))){store.data.machines.push(normalizeMachine({name:'本机',type:'local',session:'default',enabled:true}));store.save();fs.writeFileSync(path.join(dir,'initialized'),'1');}
@@ -26,11 +27,10 @@ function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.len
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
 async function body(req){let s='';for await(const b of req){s+=b;if(s.length>100000)throw Error('请求内容过大');}return JSON.parse(s||'{}');}
-const assets={'/':['index.html','text/html'],'/app.js':['app.js','text/javascript'],'/style.css':['style.css','text/css'],'/connect':['connect.html','text/html'],'/connect.js':['connect.js','text/javascript']};
 const server=http.createServer(async(req,res)=>{try{
  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
  const p=new URL(req.url,'http://localhost').pathname,host=req.headers.host?.split(':')[0];if(!['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(host))return json(res,403,{error:'不允许的 Host'});
- if(req.method==='GET'&&assets[p]){const [file,type]=assets[p];res.writeHead(200,{'Content-Type':type+'; charset=utf-8','Cache-Control':'no-cache'});return fs.createReadStream(path.join(root,'public',file)).pipe(res);}
+ const asset=req.method==='GET'&&staticFile(p);if(asset)return sendStatic(res,asset);
  if(p==='/health')return json(res,200,{ok:true,service:'herdr-bridge'});
  if(req.method==='POST'&&!req.headers.authorization&&req.headers.origin!=='http://'+req.headers.host&&req.headers.origin!=='https://'+req.headers.host)return json(res,403,{error:'跨站请求已拒绝'});
  if(p==='/api/login'&&req.method==='POST'){const ip=req.socket.remoteAddress,now=Date.now();let a=attempts.get(ip);if(!a||now-a.at>60000)a={at:now,n:0};attempts.set(ip,a);if(++a.n>20)return json(res,429,{error:'请稍后重试'});const b=await body(req);if(!equal(b.key,key))return json(res,401,{error:'访问密钥不正确'});const id=crypto.randomBytes(32).toString('hex');auth.set(id,now+12*3600000);res.setHeader('Set-Cookie',`bridge_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);return json(res,200,{ok:true});}

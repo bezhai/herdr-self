@@ -12,6 +12,8 @@ npm ci
 npm start
 ```
 
+`npm start` 先用 Vite 构建管理台（输出到 `web/dist/`），构建失败则不会启动。只支持安装完整依赖的源码部署：使用 `npm ci`，不要加 `--omit=dev`，构建工具在开发依赖中。Bridge 目录需要可写。前端未构建时 `/` 与 `/connect` 返回 503。
+
 打开 `http://localhost:8080`。首次启动生成 `state/access-key`，使用该文件中的访问密钥登录。状态目录包含应用凭证和会话配置，不应提交到 Git。
 
 | 环境变量 | 默认值 | 用途 |
@@ -34,7 +36,7 @@ npm start
 
 ## 实现
 
-- Node.js ES Modules 后端，HTML/CSS/JavaScript 管理页面。
+- Node.js ES Modules 后端；管理台为 React + Vite（`web/`），构建产物为同源 JS/CSS，满足服务端 CSP（不允许内联脚本、内联样式与外部资源）。
 - `@larksuite/channel` 负责应用注册、连接、消息规范化、卡片回调和消息发送；各应用使用独立 Channel 和缓存。
 - Python 适配器通过 Claude MCP Channel、hooks 和 permission relay 收发消息、处理审批。
 - Bridge 校验允许名单、聊天路由和原生会话身份，持久化消息去重与投递状态。投递结果未知时不自动重发。
@@ -48,7 +50,12 @@ npm start
 npm test
 ```
 
-覆盖 SSH 参数、原生会话身份、授权与消息路由、应用注册生命周期、凭证隔离、持久化去重、SDK 分段发送和卡片回调，以及 Python MCP 启动。SDK 请求在测试中模拟，不会创建飞书应用或向真实聊天发送消息。
+先构建前端，再运行 `node --test test.mjs` 与 `vitest run`。
+
+- 后端（`test.mjs`）：SSH 参数、原生会话身份、授权与消息路由、应用注册生命周期、凭证隔离、持久化去重、SDK 分段发送和卡片回调、Python MCP 启动，以及静态资源映射（路径白名单、未构建时 503）和构建产物的 CSP 检查。
+- 前端（`web/src/**/*.test.*`，jsdom）：状态派生、轮询与失败恢复、401 回到登录页、弹窗表单与提交、Inspect 消息与审批、注册弹窗与 `/connect` 跳转白名单、toast。
+
+SDK 请求在测试中模拟，不会创建飞书应用或向真实聊天发送消息。原生 dialog 的键盘与焦点行为需要在浏览器中验证。
 
 ## 参考
 
