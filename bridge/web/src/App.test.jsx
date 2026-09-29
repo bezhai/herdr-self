@@ -122,25 +122,63 @@ test('navigation switches the title, breadcrumb and page action, and closes the 
   expect(screen.getByText('cpu2 已连接')).toBeTruthy();
 });
 
-test('machine cards list agents, mark attached ones and open the inspect dialog for them', async () => {
-  const fetch = stubFetch({
-    '/api/state': sampleState(),
-    '/api/adapters/inspect': { status: 'ready', paneId: 'w1:p2', nativeId: 'native-1234567890', events: [], permissions: [] },
-  });
+test('machine cards list Herdr agents with their status, mark agents without a session identity and offer no session actions', async () => {
+  stubFetch({ '/api/state': sampleState() });
   const user = userEvent.setup();
   render(<App />);
   await user.click(await screen.findByRole('button', { name: /^机器连接/ }));
 
-  const [attached, detached] = card('cpu2').querySelectorAll('.agent-row');
-  expect(attached.classList.contains('ready')).toBe(true);
-  expect(within(attached).getByText('已接入')).toBeTruthy();
-  expect(within(detached).getByText('需启动适配器')).toBeTruthy();
-  expect(within(detached).queryByRole('button')).toBeNull();
+  const cpu2 = card('cpu2');
+  const [reviewer, codex, blocked] = cpu2.querySelectorAll('.agent-row');
+  expect(within(reviewer).getByText('reviewer')).toBeTruthy();
+  expect(within(reviewer).getByText('w1:p2 · /work')).toBeTruthy();
+  expect(within(reviewer).getByText('运行中').classList.contains('warn')).toBe(true);
+  expect(within(reviewer).queryByText('未识别会话')).toBeNull();
+  expect(within(codex).getByText('codex')).toBeTruthy();
+  expect(within(codex).getByText('空闲').classList.contains('neutral')).toBe(true);
+  expect(within(codex).getByText('未识别会话')).toBeTruthy();
+  expect(within(blocked).getByText('等待确认')).toBeTruthy();
+  expect(cpu2.querySelector('.facts').textContent).toBe('3个终端3个 Agent');
+  expect(within(cpu2).queryByRole('button', { name: '查看连接' })).toBeNull();
+  expect(within(cpu2).queryByRole('button', { name: /适配器/ })).toBeNull();
   expect(within(card('cpu3')).getByText('ssh: connection refused')).toBeTruthy();
+  expect(screen.getByText('Agent', { selector: '.metric span' }).nextElementSibling.textContent).toBe('3');
+});
 
-  await user.click(within(attached).getByRole('button', { name: '查看连接' }));
-  expect(await screen.findByRole('heading', { name: 'Claude · w1:p2' })).toBeTruthy();
-  expect(bodyOf(fetch, '/api/adapters/inspect')).toEqual({ machineId: 'm-1', adapterId: 'ad-1' });
+test('binding rows show the chat, the machine with the agent kind and working directory, and the status; the page holds only the routes table', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
+
+  const row = screen.getByText('个人助手').closest('tr');
+  expect(within(row).getByText('oc_1')).toBeTruthy();
+  expect(within(row).getByText('cpu2')).toBeTruthy();
+  expect(within(row).getByText('claude · ~/work')).toBeTruthy();
+  expect(within(row).getByText('@机器人')).toBeTruthy();
+  expect(within(row).getByText('可用')).toBeTruthy();
+  expect([...document.querySelectorAll('th')].map((th) => th.textContent)).toEqual(['来源', '目标', '触发方式', '状态', '操作']);
+  expect(screen.queryByText('最近投递')).toBeNull();
+});
+
+test('each binding lists its topics newest first with state, pane and creation time, and shows why a topic failed', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
+
+  const topicsRow = document.querySelector('.topics-row');
+  expect(topicsRow.previousElementSibling).toBe(screen.getByText('个人助手').closest('tr'));
+  const [failed, ready] = topicsRow.querySelectorAll('.topic');
+  expect(within(failed).getByText('升级依赖')).toBeTruthy();
+  expect(within(failed).getByText('失败').classList.contains('error')).toBe(true);
+  expect(within(failed).getByText('cpu2')).toBeTruthy();
+  expect(within(failed).getByText('agent target pane w1:p6 is not an available shell')).toBeTruthy();
+  expect(within(ready).getByText('修复登录页')).toBeTruthy();
+  expect(within(ready).getByText('运行中').className).toBe('badge');
+  expect(within(ready).getByText('cpu2 · w1:p5')).toBeTruthy();
+  expect(ready.querySelector('time').getAttribute('datetime')).toBe('2026-09-28T01:02:00.000Z');
+  expect(ready.querySelector('.topic-error')).toBeNull();
 });
 
 test('only disabled apps and machines offer configure/edit and remove', async () => {

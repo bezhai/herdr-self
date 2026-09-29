@@ -1,36 +1,47 @@
 import { expect, test } from 'vitest';
-import { bindingStatus, deliveryLabel, deliveryTone, metrics, registrationView, statusLabel, statusTone } from './model.js';
+import { agentStatusLabel, bindingStatus, metrics, registrationView, statusLabel, statusTone, topicStatus } from './model.js';
 import { sampleState } from './test/fixtures.js';
 
-test('status tones group connection and agent states', () => {
+test('status tones group connection and Herdr agent states', () => {
   expect(['error', 'failed'].map(statusTone)).toEqual(['error', 'error']);
-  expect(['connected', 'ready'].map(statusTone)).toEqual(['ok', 'ok']);
+  expect(statusTone('connected')).toBe('ok');
   expect(['connecting', 'reconnecting', 'working', 'blocked'].map(statusTone)).toEqual(['warn', 'warn', 'warn', 'warn']);
-  expect(['disabled', 'idle', 'offline', 'unknown-state'].map(statusTone)).toEqual(['neutral', 'neutral', 'neutral', 'neutral']);
+  expect(['disabled', 'idle', 'done', 'unknown', 'unknown-state'].map(statusTone)).toEqual(['neutral', 'neutral', 'neutral', 'neutral', 'neutral']);
   expect(statusLabel('reconnecting')).toBe('重连中');
-  expect(statusLabel('blocked')).toBe('等待审批');
+  expect(statusLabel('idle')).toBe('未连接');
   expect(statusLabel('unknown-state')).toBe('unknown-state');
 });
 
-test('metrics count online machines, connected platforms, bindings and attached agents', () => {
-  expect(metrics(sampleState())).toEqual({ machinesOnline: 2, machines: 4, platformsConnected: 1, platforms: 2, bindings: 1, agents: 1 });
+test('Herdr agent statuses have their own labels', () => {
+  expect(['idle', 'working', 'blocked', 'done', 'unknown'].map(agentStatusLabel)).toEqual(['空闲', '运行中', '等待确认', '已完成', '未知']);
+  expect(agentStatusLabel('new-status')).toBe('new-status');
 });
 
-test('a binding is usable only with its native session attached and its platform connected', () => {
+test('topic states have a label and a tone', () => {
+  expect(['starting', 'ready', 'failed', 'closed', 'other'].map(topicStatus)).toEqual([
+    { tone: 'warn', label: '启动中' }, { tone: 'ok', label: '运行中' }, { tone: 'error', label: '失败' }, { tone: 'neutral', label: '已结束' },
+    { tone: 'neutral', label: 'other' },
+  ]);
+});
+
+test('metrics count online machines, connected platforms, bindings and the agents Herdr reports on connected machines', () => {
+  const state = sampleState();
+  expect(metrics(state)).toEqual({ machinesOnline: 2, machines: 4, platformsConnected: 1, platforms: 2, bindings: 1, agents: 3 });
+  state.machines[2].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
+  state.machines[3].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
+  expect(metrics(state).agents).toBe(3);
+});
+
+test('a binding is usable while its platform app and its machine are connected', () => {
   const state = sampleState();
   const binding = state.bindings[0];
+  const machineDown = { tone: 'neutral', label: '机器未连接' };
   expect(bindingStatus(binding, state)).toEqual({ tone: 'ok', label: '可用' });
+  expect(bindingStatus({ ...binding, machineId: 'm-3' }, state)).toEqual(machineDown);
+  expect(bindingStatus({ ...binding, machineId: 'm-4' }, state)).toEqual(machineDown);
+  expect(bindingStatus({ ...binding, machineId: 'removed' }, state)).toEqual(machineDown);
   state.apps[0].connection = 'reconnecting';
   expect(bindingStatus(binding, state)).toEqual({ tone: 'neutral', label: '等待平台连接' });
-  expect(bindingStatus({ ...binding, nativeId: 'replaced-session' }, state)).toEqual({ tone: 'neutral', label: '等待原生会话' });
-  expect(bindingStatus({ ...binding, machineId: 'removed' }, state)).toEqual({ tone: 'neutral', label: '等待原生会话' });
-});
-
-test('delivery labels keep the status table and warn on unknown delivery or missing reply', () => {
-  expect(['queued', 'running', 'completed', 'delivery_unknown', 'no_reply', 'dispatching'].map(deliveryLabel))
-    .toEqual(['排队中', '执行中', '已回复', '投递待核查', '需要关注', '投递中']);
-  expect(deliveryLabel('new_status')).toBe('new_status');
-  expect(['delivery_unknown', 'no_reply', 'completed', 'queued'].map(deliveryTone)).toEqual(['warn', 'warn', 'neutral', 'neutral']);
 });
 
 const apps = [

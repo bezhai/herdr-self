@@ -5,10 +5,10 @@ export function Stream({ empty, children }) {
   return <div className="stream">{children.length ? children : <p className="stream-empty">{empty}</p>}</div>;
 }
 
-// tone: a log level (info | error) or a delivery tone (warn | neutral).
-export function StreamRow({ tone, at, title, children }) {
+// level: a log level (info | error); errors are highlighted.
+export function StreamRow({ level, at, title, children }) {
   return (
-    <div className={tone && tone !== 'neutral' ? `log ${tone}` : 'log'}>
+    <div className={level === 'error' ? 'log error' : 'log'}>
       <time>{formatTime(at)}</time>
       <b>{title}</b>
       <span>{children}</span>

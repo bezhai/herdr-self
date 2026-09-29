@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { onUnauthorized, request } from './api.js';
 
-const emptyState = { host: '', registration: null, machines: [], apps: [], bindings: [], logs: [], deliveries: [] };
+const emptyState = { host: '', registration: null, machines: [], apps: [], bindings: [], topics: [], logs: [] };
 
 // Polls /api/state every 4s, and every 1.2s while fastPoll is set. A refresh that starts while
 // another is in flight is skipped. online: null until the first result, then whether the last refresh succeeded.

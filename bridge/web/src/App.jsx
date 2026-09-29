@@ -7,7 +7,6 @@ import { Toast } from './components/Toast.jsx';
 import { Topbar } from './components/Topbar.jsx';
 import { AppDialog } from './dialogs/AppDialog.jsx';
 import { BindingDialog } from './dialogs/BindingDialog.jsx';
-import { InspectDialog } from './dialogs/InspectDialog.jsx';
 import { MachineDialog } from './dialogs/MachineDialog.jsx';
 import { RegistrationDialog } from './dialogs/RegistrationDialog.jsx';
 import { assign, reload } from './location.js';
@@ -81,9 +80,7 @@ export function App() {
               <PageHeading info={info} onAction={pageActions[page]} />
               <Metrics state={state} />
               {page === 'platforms' && <PlatformsPage {...pageProps} openApp={(app) => openDialog('app', { app })} />}
-              {page === 'machines' && (
-                <MachinesPage {...pageProps} openMachine={(machine) => openDialog('machine', { machine })} openInspect={(target) => openDialog('inspect', { target })} />
-              )}
+              {page === 'machines' && <MachinesPage {...pageProps} openMachine={(machine) => openDialog('machine', { machine })} />}
               {page === 'bindings' && <BindingsPage {...pageProps} />}
               {page === 'logs' && <LogsPage state={state} />}
             </div>
@@ -93,7 +90,6 @@ export function App() {
       {dialog?.kind === 'machine' && <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'app' && <AppDialog key={dialog.key} app={dialog.app} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'binding' && <BindingDialog key={dialog.key} state={state} onClose={closeDialog} onSaved={saved} />}
-      {dialog?.kind === 'inspect' && <InspectDialog key={dialog.key} target={dialog.target} state={state} toast={showToast} onClose={closeDialog} />}
       {dialog?.kind === 'registration' && (
         <RegistrationDialog
           key={dialog.key}

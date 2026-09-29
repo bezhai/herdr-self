@@ -1,21 +1,26 @@
 // Pure display derivations from the /api/state payload. No DOM, no requests.
 
 const statusLabels = {
-  connected: '已连接', disabled: '已停用', idle: '未连接', error: '连接失败', failed: '连接失败', connecting: '连接中',
-  reconnecting: '重连中', ready: '就绪', working: '执行中', blocked: '等待审批', offline: '未接入',
+  connected: '已连接', disabled: '已停用', idle: '未连接', error: '连接失败', failed: '连接失败', connecting: '连接中', reconnecting: '重连中',
 };
 
+// Label of a machine or platform connection status.
 export const statusLabel = (status) => statusLabels[status] || status;
 
-// Tone of a connection, platform or agent status: ok | warn | error | neutral.
+const agentStatusLabels = { idle: '空闲', working: '运行中', blocked: '等待确认', done: '已完成', unknown: '未知' };
+
+// Label of a Herdr agent_status. Its tone comes from statusTone like every other status.
+export const agentStatusLabel = (status) => agentStatusLabels[status] || status;
+
+// Tone of a connection, platform or Herdr agent status: ok | warn | error | neutral.
 export function statusTone(status) {
   if (['error', 'failed'].includes(status)) return 'error';
-  if (['connected', 'ready'].includes(status)) return 'ok';
+  if (status === 'connected') return 'ok';
   if (['connecting', 'reconnecting', 'working', 'blocked'].includes(status)) return 'warn';
   return 'neutral';
 }
 
-// Machines that can take a new binding.
+// Enabled machines whose last Herdr refresh succeeded; only these can take a new binding.
 export const connectedMachines = (state) => state.machines.filter((m) => m.enabled && m.state === 'connected');
 
 export function metrics(state) {
@@ -25,26 +30,27 @@ export function metrics(state) {
     platformsConnected: state.apps.filter((a) => a.connection === 'connected').length,
     platforms: state.apps.length,
     bindings: state.bindings.length,
-    agents: state.machines.reduce((n, m) => n + (m.adapters?.length || 0), 0),
+    agents: connectedMachines(state).reduce((n, m) => n + m.agents.length, 0),
   };
 }
 
-// A binding works only while its pinned native session is attached and its platform app is connected.
+// A binding is usable while its platform app and its machine are connected.
 export function bindingStatus(binding, state) {
-  const machine = state.machines.find((m) => m.id === binding.machineId);
   const app = state.apps.find((a) => a.id === binding.appId);
-  const adapter = machine?.adapters?.find((x) => x.id === binding.adapterId && x.nativeId === binding.nativeId);
-  if (!adapter) return { tone: 'neutral', label: '等待原生会话' };
   if (app?.connection !== 'connected') return { tone: 'neutral', label: '等待平台连接' };
+  if (!connectedMachines(state).some((m) => m.id === binding.machineId)) return { tone: 'neutral', label: '机器未连接' };
   return { tone: 'ok', label: '可用' };
 }
 
-const deliveryLabels = {
-  queued: '排队中', running: '执行中', completed: '已回复', delivery_unknown: '投递待核查', no_reply: '需要关注', dispatching: '投递中',
-};
+const topicStates = { starting: ['warn', '启动中'], ready: ['ok', '运行中'], failed: ['error', '失败'], closed: ['neutral', '已结束'] };
 
-export const deliveryLabel = (status) => deliveryLabels[status] || status;
-export const deliveryTone = (status) => (['delivery_unknown', 'no_reply'].includes(status) ? 'warn' : 'neutral');
+// Badge of a topic session state.
+export function topicStatus(state) {
+  const [tone, label] = topicStates[state] || ['neutral', state];
+  return { tone, label };
+}
+
+export const formatDateTime = (time) => new Date(time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
 export const formatTime = (time) => new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 

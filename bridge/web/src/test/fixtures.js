@@ -43,18 +43,31 @@ export function sampleState() {
     machines: [
       {
         id: 'm-1', name: 'cpu2', type: 'ssh', host: 'cpu2', port: 22, session: 'default', binary: '~/.local/bin/herdr',
-        enabled: true, state: 'connected', adapterInstalled: true, panes: [{}, {}],
-        agents: [{ name: 'claude', pane_id: 'w1:p2', cwd: '/work' }, { agent: 'codex', pane_id: 'w1:p3', cwd: '/other' }],
-        adapters: [{ id: 'ad-1', paneId: 'w1:p2', nativeId: 'native-1234567890' }],
+        enabled: true, state: 'connected', checkedAt: 1, panes: [{}, {}, {}],
+        agents: [
+          { name: 'reviewer', agent: 'claude', pane_id: 'w1:p2', cwd: '/work', agent_status: 'working', agent_session: { value: 'session-claude' } },
+          { agent: 'codex', pane_id: 'w1:p3', cwd: '/other', agent_status: 'idle' },
+          { agent: 'codex', pane_id: 'w1:p4', cwd: '/srv', agent_status: 'blocked', agent_session: { value: 'session-codex' } },
+        ],
       },
-      { id: 'm-2', name: 'gpu1', type: 'ssh', host: 'gpu1', port: 2222, session: 'work', binary: '~/.local/bin/herdr', enabled: true, state: 'connected', panes: [], agents: [], adapters: [] },
-      { id: 'm-3', name: 'laptop', type: 'local', host: '', port: 22, session: 'default', binary: '~/.local/bin/herdr', enabled: false, state: 'disabled', panes: [], agents: [], adapters: [] },
-      { id: 'm-4', name: 'cpu3', type: 'ssh', host: 'cpu3', port: 22, session: 'default', binary: '~/.local/bin/herdr', enabled: true, state: 'error', error: 'ssh: connection refused', panes: [], agents: [], adapters: [] },
+      { id: 'm-2', name: 'gpu1', type: 'ssh', host: 'gpu1', port: 2222, session: 'work', binary: '~/.local/bin/herdr', enabled: true, state: 'connected', checkedAt: 1, panes: [], agents: [] },
+      { id: 'm-3', name: 'laptop', type: 'local', host: '', port: 22, session: 'default', binary: '~/.local/bin/herdr', enabled: false, state: 'disabled', panes: [], agents: [] },
+      { id: 'm-4', name: 'cpu3', type: 'ssh', host: 'cpu3', port: 22, session: 'default', binary: '~/.local/bin/herdr', enabled: true, state: 'error', checkedAt: 1, error: 'ssh: connection refused', panes: [], agents: [] },
     ],
     bindings: [
-      { id: 'b-1', name: '个人助手', appId: 'app-1', machineId: 'm-1', adapterId: 'ad-1', nativeId: 'native-1234567890', paneId: 'w1:p2', chatId: 'oc_1', rootId: '', requireMention: true, replyInThread: true },
+      { id: 'b-1', name: '个人助手', appId: 'app-1', machineId: 'm-1', chatId: 'oc_1', cwd: '~/work', kind: 'claude', requireMention: true, enabled: true },
+    ],
+    topics: [
+      {
+        id: 't-1', bindingId: 'b-1', appId: 'app-1', chatId: 'oc_1', rootId: 'om_1', machineId: 'm-1', workspaceId: 'w1', tabId: 'w1:t2',
+        paneId: 'w1:p5', agentName: 'feishu-t1', title: '修复登录页', state: 'ready', error: '', createdAt: Date.UTC(2026, 8, 28, 1, 2),
+      },
+      {
+        id: 't-2', bindingId: 'b-1', appId: 'app-1', chatId: 'oc_1', rootId: 'om_2', machineId: 'm-1', workspaceId: 'w1', tabId: '',
+        paneId: '', agentName: 'feishu-t2', title: '升级依赖', state: 'failed', error: 'agent target pane w1:p6 is not an available shell',
+        createdAt: Date.UTC(2026, 8, 29, 3, 4),
+      },
     ],
     logs: [{ at: 1, kind: '机器连接', message: 'cpu2 已连接', level: 'info' }],
-    deliveries: [{ createdAt: 1, status: 'completed', messageId: 'om_1' }],
   };
 }

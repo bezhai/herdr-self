@@ -3,7 +3,6 @@ import userEvent from '@testing-library/user-event';
 import { expect, test, vi } from 'vitest';
 import { AppDialog } from './AppDialog.jsx';
 import { BindingDialog } from './BindingDialog.jsx';
-import { InspectDialog } from './InspectDialog.jsx';
 import { MachineDialog } from './MachineDialog.jsx';
 import { RegistrationDialog } from './RegistrationDialog.jsx';
 import { bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.js';
@@ -67,88 +66,31 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
   expect(screen.getByLabelText('App Secret').value).toBe('');
 });
 
-test('binding form lists every app, only connected machines, and follows the selected machine for sessions', async () => {
+test('binding form lists every app and only connected machines, and saves a chat route with a working directory and agent kind', async () => {
   const fetch = stubFetch({ '/api/bindings/save': { ok: true } });
   const onSaved = vi.fn();
   const user = userEvent.setup();
   render(<BindingDialog state={sampleState()} onClose={vi.fn()} onSaved={onSaved} />);
   expect(optionLabels('飞书应用')).toEqual(['工作助手', '备用应用']);
   expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work']);
-  expect(optionLabels('已接入的 Claude 会话')).toEqual(['w1:p2 · native-1']);
-  expect(screen.getByText('绑定固定的原生会话身份；会话变化后需要重新绑定。')).toBeTruthy();
+  expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex']);
+  expect(screen.getByLabelText('Agent 类型').value).toBe('claude');
   expect(screen.getByLabelText(/仅 @机器人时触发/).checked).toBe(true);
-  expect(screen.getByLabelText('在话题中回复').checked).toBe(true);
-
-  await user.selectOptions(screen.getByLabelText('机器 / Herdr 实例'), 'm-2');
-  expect(optionLabels('已接入的 Claude 会话')).toEqual([]);
-  expect(screen.getByText(/^暂无已接入会话/)).toBeTruthy();
-  await user.selectOptions(screen.getByLabelText('机器 / Herdr 实例'), 'm-1');
-  await user.selectOptions(screen.getByLabelText('飞书应用'), 'app-2');
+  expect(document.querySelectorAll('select')).toHaveLength(3);
+  expect(screen.getByText(/^每个飞书话题会在 Herdr 中新开一个 tab/)).toBeTruthy();
+  expect(screen.queryByLabelText('话题根消息 ID')).toBeNull();
+  expect(screen.queryByLabelText('在话题中回复')).toBeNull();
 
   await user.type(screen.getByLabelText('绑定名称'), '个人助手');
+  await user.selectOptions(screen.getByLabelText('飞书应用'), 'app-2');
   await user.type(screen.getByLabelText('Chat ID'), 'oc_42');
-  await user.click(screen.getByLabelText('在话题中回复'));
+  await user.selectOptions(screen.getByLabelText('机器 / Herdr 实例'), 'm-2');
+  await user.type(screen.getByLabelText('工作目录'), '~/code/bridge');
+  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
+  await user.click(screen.getByLabelText(/仅 @机器人时触发/));
   await user.click(screen.getByRole('button', { name: '保存绑定' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ name: '个人助手', appId: 'app-2', machineId: 'm-1', adapterId: 'ad-1', chatId: 'oc_42', rootId: '', requireMention: true, replyInThread: false });
-});
-
-const target = { machineId: 'm-1', adapterId: 'ad-1' };
-const snapshot = (overrides) => ({ status: 'ready', paneId: 'w1:p2', nativeId: 'native-1', events: [], permissions: [], ...overrides });
-
-test('inspect shows the last 15 messages and sends a message to the pinned native session', async () => {
-  const events = Array.from({ length: 17 }, (_, i) => ({ kind: i % 2 ? 'reply' : 'user', at: i * 1000, data: { text: `message ${i}` } }));
-  events.push({ kind: 'permission', at: 0, data: { text: 'not a message' } });
-  const fetch = stubFetch({ '/api/adapters/inspect': snapshot({ events }), '/api/adapters/message': { queued: true } });
-  const user = userEvent.setup();
-  render(<InspectDialog target={target} state={sampleState()} toast={vi.fn()} onClose={vi.fn()} />);
-  expect(await screen.findByText('message 16')).toBeTruthy();
-  expect(screen.getByText('message 2')).toBeTruthy();
-  expect(screen.queryByText('message 1')).toBeNull();
-  expect(screen.queryByText('not a message')).toBeNull();
-  expect(screen.getByText('就绪 · native-1')).toBeTruthy();
-
-  await user.type(screen.getByLabelText('连通性对话'), 'ping');
-  await user.click(screen.getByRole('button', { name: '发送' }));
-  await waitFor(() => expect(bodyOf(fetch, '/api/adapters/message')).toBeTruthy());
-  const body = bodyOf(fetch, '/api/adapters/message');
-  expect(body.target).toEqual({ machineId: 'm-1', adapterId: 'ad-1', nativeId: 'native-1', paneId: 'w1:p2' });
-  expect(body.id).toMatch(/^web-[0-9a-z]+-[0-9a-z]+$/);
-  expect(body.text).toBe('ping');
-  await waitFor(() => expect(screen.getByLabelText('连通性对话').value).toBe(''));
-});
-
-test('inspect reloads with each state refresh and disables every approval button while a verdict is sent', async () => {
-  const verdict = deferred();
-  const fetch = stubFetch({
-    '/api/adapters/inspect': snapshot({
-      status: 'blocked',
-      permissions: [
-        { request_id: 'req-1', tool_name: 'Bash', input_preview: 'rm -rf build', status: 'pending' },
-        { request_id: 'req-0', tool_name: 'Read', input_preview: 'README.md', status: 'submitted' },
-      ],
-    }),
-    '/api/adapters/permission': () => verdict.promise,
-  });
-  const user = userEvent.setup();
-  const view = render(<InspectDialog target={target} state={sampleState()} toast={vi.fn()} onClose={vi.fn()} />);
-  const allow = await screen.findByRole('button', { name: '允许这一次' });
-  const deny = screen.getByRole('button', { name: '拒绝' });
-  expect(screen.getByText('已提交，等待 Claude 处理')).toBeTruthy();
-  expect(screen.getByRole('button', { name: '发送' }).disabled).toBe(true);
-
-  const loads = fetch.mock.calls.length;
-  view.rerender(<InspectDialog target={target} state={sampleState()} toast={vi.fn()} onClose={vi.fn()} />);
-  await waitFor(() => expect(fetch.mock.calls.length).toBe(loads + 1));
-
-  await user.click(allow);
-  expect(allow.disabled).toBe(true);
-  expect(deny.disabled).toBe(true);
-  expect(bodyOf(fetch, '/api/adapters/permission')).toEqual({
-    target: { machineId: 'm-1', adapterId: 'ad-1', nativeId: 'native-1', paneId: 'w1:p2' }, requestId: 'req-1', behavior: 'allow',
-  });
-  verdict.resolve(reply({ ok: true }));
-  await waitFor(() => expect(allow.disabled).toBe(false));
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ name: '个人助手', appId: 'app-2', machineId: 'm-2', chatId: 'oc_42', cwd: '~/code/bridge', kind: 'codex', requireMention: false });
 });
 
 const registrationProps = () => ({ apps: sampleState().apps, previousId: 'r0', onRetry: vi.fn(), onDone: vi.fn(), onConfigure: vi.fn(), onManual: vi.fn(), onClose: vi.fn() });
