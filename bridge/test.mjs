@@ -247,8 +247,8 @@ test('another topic opens a tab in the same workspace, also with HERDR_REMOTE_AN
   assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>t.reactions.map(r=>r.messageId)),[['om_1','om_3'],['om_2']]);
  }finally{f.close();}
 });
-test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding passes no agent arguments',async()=>{
- for(const [binding,args] of [[{},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],[{kind:'codex'},[]]]){
+test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding starts its agent with -- --no-daemon',async()=>{
+ for(const [binding,args] of [[{},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],[{kind:'codex'},['--','--no-daemon']]]){
   const f=topicFixture({binding});try{
    await f.send({messageId:'om_1',content:'one'});
    assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',f.b.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(binding));

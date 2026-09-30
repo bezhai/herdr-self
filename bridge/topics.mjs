@@ -3,8 +3,9 @@ import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed}
 import {permissionMode} from './platform.mjs';
 // One Feishu topic = one Herdr agent session in its own tab of the binding's workspace. Everything goes through the Herdr CLI.
 const workspaceLabel=b=>'飞书 · '+b.name;
-// Arguments that Herdr passes on to the agent it starts, after --: a Claude binding's permission mode.
-const agentArgs=b=>b.kind==='claude'?['--','--permission-mode',permissionMode(b)]:[];
+// Arguments that Herdr passes on to the agent it starts, after --: a Claude binding's permission mode. Codex runs in the topic pane
+// instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started that server.
+const agentArgs=b=>b.kind==='claude'?['--','--permission-mode',permissionMode(b)]:['--','--no-daemon'];
 const brief=e=>publicText(e.message).split('\n')[0].slice(0,200);
 // Set in every topic pane: the agent's permission and question hooks then wait for an answer from Feishu (see cards).
 const remoteAnswers=['--env','HERDR_REMOTE_ANSWERS=1'];
