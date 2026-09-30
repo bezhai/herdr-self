@@ -27,9 +27,9 @@ export function normalizeBinding(b,chat,bindings){
 // Bridge takes text, and rich text without resources, from a person. Mentions are left to routing and topic handling.
 export function routable(msg){return msg.senderType==='user'&&['text','post'].includes(msg.rawContentType)&&Boolean(msg.senderId)&&!msg.resources?.length;}
 export class Platforms{
- // onMessage(app,binding,msg) receives every allowed message of a bound chat; onUnbound(app,msg) the ones that ask for a binding.
- // fetch downloads bot avatars.
- constructor(store,{onMessage,onUnbound,channelFactory=createLarkChannel,fetch=globalThis.fetch}){this.store=store;this.onMessage=onMessage;this.onUnbound=onUnbound;this.channelFactory=channelFactory;this.fetch=fetch;this.runtime=new Map();}
+ // onMessage(app,binding,msg) receives every allowed message of a bound chat; onUnbound(app,msg) the ones that ask for a binding;
+ // onCardAction(app,evt) every card click of a person on the allowlist and returns the callback response. fetch downloads bot avatars.
+ constructor(store,{onMessage,onUnbound,onCardAction,channelFactory=createLarkChannel,fetch=globalThis.fetch}){this.store=store;this.onMessage=onMessage;this.onUnbound=onUnbound;this.onCardAction=onCardAction;this.channelFactory=channelFactory;this.fetch=fetch;this.runtime=new Map();}
  app(id){const a=this.store.data.apps.find(x=>x.id===id);if(!a)throw Error('应用不存在');return a;}
  status(a){const r=this.runtime.get(a.id);return {...a,appSecret:undefined,hasSecret:!!a.appSecret,connection:a.enabled?(r?.state==='error'?'error':r?.channel.getConnectionStatus()?.state||r?.state||'connecting'):'disabled',error:r?.error||''};}
  channel(a){
@@ -39,8 +39,9 @@ export class Platforms{
    httpTimeoutMs:10000,connectTimeoutMs:15000,resolveSenderNames:false,resolveChatMode:false,
    // Mention requirements differ per binding. Bridge checks group senders as well as DM senders.
    policy:{requireMention:false,respondToMentionAll:false,dmMode:'allowlist',dmAllowlist:a.allowedUsers},
-   // Handle each platform message on its own: no merging while busy and no batching delay.
-   safety:{chatQueue:{enabled:true,mergeWhileBusy:false},batch:{text:{delayMs:0},media:{delayMs:0}}},
+   // Handle each platform message on its own: no merging while busy and no batching delay. Card clicks take a queue of their own, so
+   // that a click never waits behind the chat's messages.
+   safety:{chatQueue:{enabled:true,mergeWhileBusy:false,cardActions:'separate'},batch:{text:{delayMs:0},media:{delayMs:0}}},
    // A send whose result is unknown is never repeated.
    outbound:{retry:{maxAttempts:1}},
    logger:{debug(){},info(){},warn(){},error(){}},
@@ -48,6 +49,7 @@ export class Platforms{
   rt.channel=channel;this.runtime.set(a.id,rt);
   const current=()=>this.runtime.get(a.id)===rt&&!rt.stopped;
   channel.on('message',msg=>{if(current())this.receive(a,msg);});
+  channel.on('cardAction',evt=>current()?this.cardAction(a,evt):undefined);
   channel.on('error',()=>{if(current()){rt.error='飞书连接异常';this.store.log('平台连接',a.name+' 连接异常','error');}});
   channel.on('reconnecting',()=>{if(current()){rt.state='reconnecting';this.store.log('平台连接',a.name+' 正在重连');}});
   channel.on('reconnected',()=>{if(current()){rt.state='connected';rt.error='';this.store.log('平台连接',a.name+' 已连接');}});
@@ -107,8 +109,13 @@ export class Platforms{
   // A chat without a binding asks for one: a direct chat with any message, a group only by mentioning the bot.
   else if(msg.chatType==='p2p'||msg.mentionedBot)this.onUnbound(a,msg);
  }
- // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic. content is {text} or {markdown}.
- async reply(a,chatId,rootId,content){await this.connected(a).send(chatId,content,{replyTo:rootId,replyInThread:true});}
+ // Like messages, a card click counts only from someone on the allowlist; anyone else in the chat can click too.
+ cardAction(a,evt){if(!a.enabled||!a.allowedUsers.includes(evt.operator?.openId))return {toast:{type:'error',content:'你不在这个应用的允许名单中，不能处理这个请求'}};return this.onCardAction(a,evt);}
+ // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic. content is {text}, {markdown}
+ // or {card} with a card JSON; resolves to the id of the message sent.
+ async reply(a,chatId,rootId,content){return (await this.connected(a).send(chatId,content,{replyTo:rootId,replyInThread:true})).messageId;}
+ // Replaces the whole content of a card the bot sent.
+ async updateCard(a,messageId,card){await this.connected(a).updateCard(messageId,card);}
  // The bot's emoji reaction on a message. Resolves to the reaction id, which is the only way to remove it again.
  async react(a,messageId,emojiType){return this.connected(a).addReaction(messageId,emojiType);}
  async unreact(a,messageId,reactionId){await this.connected(a).removeReaction(messageId,reactionId);}
