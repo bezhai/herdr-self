@@ -16,24 +16,30 @@ export function normalizeMachine(b){
  const binary=hostPath(b.binary||'~/.local/bin/herdr','Herdr 路径');
  return {id:b.id||uuid(),name:text(b.name,60),type,host,session,port,binary,enabled:Boolean(b.enabled)};
 }
-// Arguments are strings passed verbatim, or {path} for a path on the Herdr host whose leading ~/ expands to that host's home.
-// Herdr itself does not expand ~ in --cwd.
-export function remoteInvocation(m,args){
+// argv[0] is the program, argv[1..] its arguments. Each is a string passed verbatim, or {path} for a path on machine m whose
+// leading ~/ expands to that machine's home. Herdr itself does not expand ~ in --cwd.
+export function remoteInvocation(m,argv){
  const shellPath=p=>p.startsWith('~/')?'"$HOME"/'+quote(p.slice(2)):quote(p),localPath=p=>p.replace(/^~\//,os.homedir()+'/');
- const command=[shellPath(m.binary),...args.map(a=>typeof a==='string'?quote(a):shellPath(a.path))].join(' ');
+ const command=argv.map(a=>typeof a==='string'?quote(a):shellPath(a.path)).join(' ');
  if(m.type==='ssh')return ['ssh',['-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=7','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=1','-p',String(m.port),'--',m.host,'env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c '+quote(command)]];
- return [localPath(m.binary),args.map(a=>typeof a==='string'?a:localPath(a.path))];
+ const [program,...args]=argv.map(a=>typeof a==='string'?a:localPath(a.path));return [program,args];
 }
 // Herdr reports a failed request as one {"id","error":{"code","message"}} line on stderr and exits non-zero; keep its code.
 function failure(text){
  try{const {error}=JSON.parse(text.trim().split('\n').at(-1));if(error?.code)return Object.assign(Error(error.message),{code:error.code});}catch{}
  return Error((text||'远程命令失败').slice(-1000));
 }
-export function execute(m,args,{timeoutMs=12000}={}){
- const [bin,argv]=remoteInvocation(m,args),env={...process.env};for(const k of Object.keys(env))if(k.startsWith('HERDR_'))delete env[k];
- return new Promise((resolve,reject)=>{const p=spawn(bin,argv,{env,stdio:['pipe','pipe','pipe']});let out='',err='';const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Error('连接超时，请检查 SSH 与 Herdr 状态'));},timeoutMs);p.stdout.on('data',d=>{out+=d;if(out.length>4e6){p.kill('SIGKILL');reject(Error('响应过大'));}});p.stderr.on('data',d=>{err=(err+d).slice(-2000);});p.on('error',e=>{clearTimeout(timer);reject(e);});p.on('close',code=>{clearTimeout(timer);if(code!==0)return reject(failure(err||out));try{resolve(JSON.parse(out));}catch{reject(Error('远程服务未返回有效 JSON'));}});p.stdin.on('error',()=>{});p.stdin.end();});
+// Runs argv (see remoteInvocation) on machine m and resolves to its stdout.
+function run(m,argv,{timeoutMs=12000}={}){
+ const [bin,args]=remoteInvocation(m,argv),env={...process.env};for(const k of Object.keys(env))if(k.startsWith('HERDR_'))delete env[k];
+ return new Promise((resolve,reject)=>{const p=spawn(bin,args,{env,stdio:['pipe','pipe','pipe']});let out='',err='';const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Error('连接超时，请检查 SSH 与 Herdr 状态'));},timeoutMs);p.stdout.on('data',d=>{out+=d;if(out.length>4e6){p.kill('SIGKILL');reject(Error('响应过大'));}});p.stderr.on('data',d=>{err=(err+d).slice(-2000);});p.on('error',e=>{clearTimeout(timer);reject(e);});p.on('close',code=>{clearTimeout(timer);if(code!==0)return reject(failure(err||out));resolve(out);});p.stdin.on('error',()=>{});p.stdin.end();});
 }
-export async function herdr(m,args,options){return (await execute(m,['--session',m.session,...args],options)).result;}
+export async function herdr(m,args,options){
+ const out=await run(m,[{path:m.binary},'--session',m.session,...args],options);
+ try{return JSON.parse(out).result;}catch{throw Error('远程服务未返回有效 JSON');}
+}
+// Creates dir and its missing parents on machine m; a leading ~/ is that machine's home. An existing directory is fine.
+export async function makeDirectory(m,dir){await run(m,['mkdir','-p','--',{path:dir}]);}
 export function publicText(s){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}
 // Persisted collections. Keys of older state files outside this list are dropped on load.
 const collections=['machines','apps','bindings','topics','logs'];

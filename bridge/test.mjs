@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {spawn} from 'node:child_process';import net from 'node:net';
-import {normalizeMachine,remoteInvocation,herdr,quote,Store} from './core.mjs';import {normalizeApp,normalizeBinding,routable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
+import {normalizeMachine,remoteInvocation,herdr,makeDirectory,quote,Store} from './core.mjs';import {normalizeApp,normalizeBinding,routable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';import {staticFile,sendStatic} from './web-assets.mjs';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
@@ -41,9 +41,15 @@ test('begin timeout ignores late callback and does not publish an expired author
 });
 test('SSH machine rejects option and shell injection; command arguments remain quoted',()=>{
  for(const host of ['-oProxyCommand=x','a;touch /tmp/bad','a$(id)','x\ny'])assert.throws(()=>normalizeMachine({name:'test',host}));
- const m=normalizeMachine({name:'test',host:'user@host',binary:'~/.local/bin/herdr'});const [bin,args]=remoteInvocation(m,['--session','default','agent','prompt','w1:p1',"x'; echo hacked"]);assert.equal(bin,'ssh');assert.ok(args.includes('StrictHostKeyChecking=yes'));assert.ok(args.includes('--'));assert.match(args.at(-1),/sh -c/);
- const remote=remoteInvocation(m,['tab','create','--cwd',{path:'~/w x'},'--label','~/not-a-path'])[1].at(-1);assert.ok(remote.includes(quote(`"$HOME"/'w x'`).slice(1,-1)));assert.ok(remote.includes(quote(quote('~/not-a-path')).slice(1,-1)));
- const local=normalizeMachine({name:'local',type:'local',binary:'~/bin/herdr'});assert.deepEqual(remoteInvocation(local,['--cwd',{path:'~/w x'},{path:'/srv'},'~/text']),[os.homedir()+'/bin/herdr',['--cwd',os.homedir()+'/w x','/srv','~/text']]);
+ const m=normalizeMachine({name:'test',host:'user@host',binary:'~/.local/bin/herdr'});const [bin,args]=remoteInvocation(m,[{path:m.binary},'--session','default','agent','prompt','w1:p1',"x'; echo hacked"]);assert.equal(bin,'ssh');assert.ok(args.includes('StrictHostKeyChecking=yes'));assert.ok(args.includes('--'));assert.match(args.at(-1),/sh -c/);
+ const shell=command=>'env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c '+quote(command);
+ assert.equal(args.at(-1),shell(`"$HOME"/'.local/bin/herdr' '--session' 'default' 'agent' 'prompt' 'w1:p1' 'x'\\''; echo hacked'`));
+ const remote=remoteInvocation(m,[{path:m.binary},'tab','create','--cwd',{path:'~/w x'},'--label','~/not-a-path'])[1].at(-1);assert.ok(remote.includes(quote(`"$HOME"/'w x'`).slice(1,-1)));assert.ok(remote.includes(quote(quote('~/not-a-path')).slice(1,-1)));
+ // The program is a command name or a {path}; only {path} expands ~/, on the target machine.
+ assert.equal(remoteInvocation(m,['mkdir','-p','--',{path:'~/w x'}])[1].at(-1),shell(`'mkdir' '-p' '--' "$HOME"/'w x'`));
+ assert.equal(remoteInvocation(m,['mkdir;id','--',{path:"/srv/a'b"}])[1].at(-1),shell(`'mkdir;id' '--' '/srv/a'\\''b'`));
+ const local=normalizeMachine({name:'local',type:'local',binary:'~/bin/herdr'});assert.deepEqual(remoteInvocation(local,[{path:local.binary},'--cwd',{path:'~/w x'},{path:'/srv'},'~/text']),[os.homedir()+'/bin/herdr',['--cwd',os.homedir()+'/w x','/srv','~/text']]);
+ assert.deepEqual(remoteInvocation(local,['mkdir','-p','--',{path:'~/w x'}]),['mkdir',['-p','--',os.homedir()+'/w x']]);assert.deepEqual(remoteInvocation(local,[{path:'/opt/herdr'}]),['/opt/herdr',[]]);
  assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',session:'../default'}));assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',port:-1}));assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',binary:'herdr'}),/Herdr 路径/);
 });
 test('a binding routes the pending chat of an app to a working directory and agent kind on a machine; app and chat never come from the client',()=>{
@@ -127,6 +133,7 @@ test('Herdr commands keep Herdr error codes, honor per-call timeouts and expand 
   ` usage) echo 'agent prompt requires text' >&2; exit 2;;`,
   ` slow) sleep 0.3; echo '{"id":"x","result":{"type":"ok"}}';;`,
   ` cwd) printf '{"result":{"cwd":"%s","text":"%s"}}' "$5" "$6";;`,
+  ` text) echo 'not json';;`,
   ` *) echo '{"id":"cli:agent:list","result":{"type":"agent_list","agents":[]}}';;`,'esac',''].join('\n'),{mode:0o700});
  const m=normalizeMachine({name:'local',type:'local',binary:bin});
  try{
@@ -135,15 +142,24 @@ test('Herdr commands keep Herdr error codes, honor per-call timeouts and expand 
   await assert.rejects(herdr(m,['usage']),e=>e.code===undefined&&/requires text/.test(e.message));
   await assert.rejects(herdr(m,['slow'],{timeoutMs:100}),/连接超时/);assert.deepEqual(await herdr(m,['slow'],{timeoutMs:5000}),{type:'ok'});
   assert.deepEqual(await herdr(m,['cwd','--cwd',{path:'~/work'},'~/work']),{cwd:os.homedir()+'/work',text:'~/work'});
+  await assert.rejects(herdr(m,['text']),/^Error: 远程服务未返回有效 JSON$/);
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('makeDirectory creates nested directories on a local machine, succeeds again when they exist and reports what mkdir says on failure',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-mkdir-')),target=path.join(dir,'a','b','c'),m=normalizeMachine({name:'local',type:'local'});
+ try{
+  await makeDirectory(m,target);assert.ok(fs.statSync(target).isDirectory());
+  await makeDirectory(m,target);assert.ok(fs.statSync(target).isDirectory());
+  fs.writeFileSync(path.join(dir,'file'),'');await assert.rejects(makeDirectory(m,path.join(dir,'file','x')),/mkdir/);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 
 const coded=(code,message)=>Object.assign(Error(message),{code});
 // In-memory Herdr: records every CLI call; h.on['<group> <verb>'] replaces the next such call and may call run(args) for the default result.
 // Agents start idle with state_change_seq 1; a prompt returns the agent as it is.
-// h.retained[paneId] holds the replies Herdr keeps for the agent of that pane.
+// h.retained[paneId] holds the replies Herdr keeps for the agent of that pane. h.made records every makeDirectory as [machine id, path].
 function fakeHerdr(){
- const h={calls:[],timeouts:[],machines:[],workspaces:[],agents:[],retained:{},created:0,panes:0,on:{}};
+ const h={calls:[],timeouts:[],machines:[],workspaces:[],agents:[],retained:{},made:[],created:0,panes:0,on:{}};
  const run=args=>{
   const [group,verb]=args;
   if(group==='workspace'&&verb==='list')return {type:'workspace_list',workspaces:h.workspaces};
@@ -157,12 +173,13 @@ function fakeHerdr(){
   throw Error('unexpected herdr '+args.join(' '));
  };
  h.herdr=async(m,args,options={})=>{h.calls.push(args);h.timeouts.push(options.timeoutMs);h.machines.push(m.id);await null;const key=args[0]+' '+args[1],hook=h.on[key];if(hook){delete h.on[key];return hook(args,run);}return run(args);};
+ h.makeDirectory=async(m,dir)=>{h.made.push([m.id,dir]);await null;};
  return h;
 }
 function topicFixture({binding,machine}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],reacted=[],unreacted=[],m={id:'m',name:'cpu2',enabled:true,...machine};
  store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];
- const topics=new Topics(store,{herdr:h.herdr,machine:id=>{if(id!==m.id)throw Error('机器连接不存在');return m;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
+ const topics=new Topics(store,{herdr:h.herdr,makeDirectory:h.makeDirectory,machine:id=>{if(id!==m.id)throw Error('机器连接不存在');return m;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
   reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);},
   react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);}});
  const send=msg=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg});
@@ -231,6 +248,25 @@ test('a workspace id that Herdr reassigned to another workspace is not reused; a
   await f.send({messageId:'om_2',content:'two'});
   assert.deepEqual(f.h.calls.slice(0,3),[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w2:t2','two']]);
   assert.equal(f.h.calls.some(c=>c[0]==='tab'&&c[1]==='create'),false);assert.deepEqual([f.b.workspaceId,f.store.data.topics[1].paneId],['w2','w2:p2']);
+ }finally{f.close();}
+});
+test('each new topic creates its working directory on the machine before any workspace call, whether it creates the workspace or a tab in it',async()=>{
+ const f=topicFixture();try{
+  const seen=[],before=(args,run)=>{seen.push([...f.h.made]);return run(args);};
+  f.h.on['workspace list']=before;await f.send({messageId:'om_1',content:'one'});
+  f.h.on['workspace list']=before;await f.send({messageId:'om_2',content:'two'});
+  assert.deepEqual(seen,[[['m','~/work']],[['m','~/work'],['m','~/work']]]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='create').map(c=>c[0]),['workspace','tab']);
+  // A message in a ready topic opens no tab and creates nothing.
+  await f.send({messageId:'om_3',rootId:'om_1',content:'three'});assert.equal(f.h.made.length,2);
+ }finally{f.close();}
+});
+test('a working directory that cannot be created fails the start like any start failure, before any workspace or tab is created',async()=>{
+ const f=topicFixture(),raw="mkdir: cannot create directory '/srv/app': Permission denied";try{
+  f.topics.makeDirectory=async()=>{throw Error(raw);};
+  await f.send({messageId:'om_1',content:'one'});
+  const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed',raw]);assert.equal(new Store(f.dir).data.topics[0].state,'failed');
+  assert.deepEqual(f.h.calls,[]);assert.deepEqual(f.replies.map(r=>r[3]),[{text:'启动失败，请在 Bridge 管理台查看原因'}]);
+  assert.deepEqual(f.unreacted,[['a','om_1','r_om_1']]);assert.match(f.store.data.logs.at(-1).message,/启动失败.*Permission denied/);
  }finally{f.close();}
 });
 test('a topic whose named agent is gone is closed with one notice and gets no further prompts',async()=>{

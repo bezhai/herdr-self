@@ -12,10 +12,11 @@ function enqueue(queues,key,task){
  queues.set(key,tail);tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});return run;
 }
 export class Topics{
- // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; machine(id) and app(id) return a machine or an app, or throw;
- // reply(app,chatId,rootId,{text}|{markdown}) answers in the topic thread; react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId).
- constructor(store,{herdr,machine,app,reply,react,unreact}){
-  this.store=store;this.herdr=herdr;this.machine=machine;this.app=app;this.reply=reply;this.react=react;this.unreact=unreact;this.topicQueues=new Map();this.workspaceQueues=new Map();
+ // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path) creates a directory and its parents on machine m;
+ // machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{text}|{markdown}) answers in the topic thread;
+ // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId).
+ constructor(store,{herdr,makeDirectory,machine,app,reply,react,unreact}){
+  this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.react=react;this.unreact=unreact;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // A start interrupted by a restart cannot be resumed; the next message in the topic retries it.
   const interrupted=store.data.topics.filter(t=>t.state==='starting');
   for(const t of interrupted)Object.assign(t,{state:'failed',error:'Bridge 重启时 Agent 启动未完成'});
@@ -81,6 +82,8 @@ export class Topics{
  // Herdr reuses workspace ids after a server restart, so the stored id counts only while the workspace still carries the binding's label.
  // Runs in the binding's queue so that topics opened together create the workspace once.
  async openTab(m,b,t){
+  // Herdr falls back to the home directory for a --cwd that does not exist. Created for every tab: it may have been removed since the workspace was.
+  await this.makeDirectory(m,b.cwd);
   const {workspaces}=await this.herdr(m,['workspace','list']);
   if(workspaces.some(w=>w.workspace_id===b.workspaceId&&w.label===workspaceLabel(b))){
    const r=await this.herdr(m,['tab','create','--workspace',b.workspaceId,'--cwd',{path:b.cwd},'--label',t.title,'--no-focus']);

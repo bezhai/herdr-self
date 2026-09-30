@@ -1,5 +1,5 @@
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';import {fileURLToPath} from 'node:url';
-import {Store,normalizeMachine,herdr,publicText} from './core.mjs';
+import {Store,normalizeMachine,herdr,makeDirectory,publicText} from './core.mjs';
 import {Platforms,normalizeApp} from './platform.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';
@@ -15,7 +15,7 @@ async function refresh(m){if(refreshes.has(m.id))return refreshes.get(m.id);cons
  // Topic agents' new replies go back to Feishu; this does not wait for them and never throws.
  topics.sync(m,agents);
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
-const topics=new Topics(store,{herdr,machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
+const topics=new Topics(store,{herdr,makeDirectory,machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
 const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>pending.open(...args)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
  if(!a.enabled||platforms.status(a).connection!=='connected'){await platforms.start(a);a.enabled=true;store.save();}
