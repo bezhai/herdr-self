@@ -56,6 +56,17 @@ fn run_shell_hook_with_env(
     hook_input: &str,
     envs: &[(&str, &str)],
 ) -> Option<serde_json::Value> {
+    run_shell_hook_raw_with_env(asset_path, args, hook_input, envs)
+        .map(|line| serde_json::from_str(&line).unwrap())
+}
+
+/// Runs a hook against a fake socket and returns the raw request line it sent.
+fn run_shell_hook_raw_with_env(
+    asset_path: &str,
+    args: &[&str],
+    hook_input: &str,
+    envs: &[(&str, &str)],
+) -> Option<String> {
     let base = unique_test_dir();
     fs::create_dir_all(&base).unwrap();
     let socket_path = base.join("herdr.sock");
@@ -116,7 +127,7 @@ fn run_shell_hook_with_env(
 
     let request = server.join().unwrap();
     cleanup_test_base(&base);
-    request.map(|line| serde_json::from_str(&line).unwrap())
+    request
 }
 
 #[test]
@@ -182,6 +193,234 @@ fn claude_hook_ignores_cursor_compatibility_payloads() {
             &[("CURSOR_VERSION", cursor_version)],
         )
         .is_none());
+    }
+}
+
+const CLAUDE_HOOK_ASSET: &str = "src/integration/assets/claude/herdr-agent-state.sh";
+const CODEX_HOOK_ASSET: &str = "src/integration/assets/codex/herdr-agent-state.sh";
+const MAX_REPLY_BYTES: usize = 64 * 1024;
+
+fn stop_input(fields: serde_json::Value) -> String {
+    let mut input = serde_json::json!({ "hook_event_name": "Stop" });
+    input
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    input.to_string()
+}
+
+#[test]
+fn claude_reply_hook_reports_last_assistant_message_on_stop() {
+    let request = run_claude_hook(
+        "reply",
+        &stop_input(serde_json::json!({
+            "session_id": "claude-session",
+            "last_assistant_message": "Done. See **README.md**.",
+        })),
+    )
+    .expect("stop should report the final reply");
+
+    assert_eq!(request["method"], "pane.report_agent_reply");
+    let params = &request["params"];
+    assert_eq!(params["pane_id"], "p_test");
+    assert_eq!(params["source"], "herdr:claude");
+    assert_eq!(params["agent"], "claude");
+    assert_eq!(params["agent_session_id"], "claude-session");
+    assert_eq!(params["text"], "Done. See **README.md**.");
+    assert!(params["seq"].as_u64().is_some_and(|seq| seq > 0));
+    assert!(params.get("truncated").is_none());
+
+    let without_session = run_claude_hook(
+        "reply",
+        &stop_input(serde_json::json!({ "last_assistant_message": "ok" })),
+    )
+    .expect("a reply without session id should still report");
+    assert!(without_session["params"].get("agent_session_id").is_none());
+    assert_eq!(without_session["params"]["text"], "ok");
+}
+
+#[test]
+fn claude_reply_hook_sends_non_ascii_text_as_utf8() {
+    let raw = run_shell_hook_raw_with_env(
+        CLAUDE_HOOK_ASSET,
+        &["reply"],
+        &stop_input(serde_json::json!({
+            "session_id": "claude-session",
+            "last_assistant_message": "已完成：**修复**登录",
+        })),
+        &[],
+    )
+    .expect("stop should report the final reply");
+
+    assert!(raw.contains("已完成：**修复**登录"), "raw request: {raw}");
+    assert!(!raw.contains("\\u"), "raw request: {raw}");
+}
+
+#[test]
+fn claude_reply_hook_truncates_long_messages_at_a_character_boundary() {
+    let message = "界".repeat(30_000);
+    let request = run_claude_hook(
+        "reply",
+        &stop_input(serde_json::json!({ "last_assistant_message": message })),
+    )
+    .expect("long replies should still report");
+
+    let text = request["params"]["text"].as_str().unwrap();
+    assert_eq!(text.len(), MAX_REPLY_BYTES / 3 * 3);
+    assert!(message.starts_with(text));
+    assert_eq!(request["params"]["truncated"], true);
+}
+
+#[test]
+fn claude_reply_hook_ignores_subagent_cursor_and_grok_stops() {
+    let message = serde_json::json!({ "last_assistant_message": "done" });
+    let with = |fields: serde_json::Value| {
+        let mut merged = message.clone();
+        merged
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        stop_input(merged)
+    };
+
+    assert!(
+        run_claude_hook("reply", &with(serde_json::json!({ "agent_id": "agent-1" }))).is_none()
+    );
+    assert!(run_claude_hook(
+        "reply",
+        &with(serde_json::json!({ "cursor_version": "2026.08.11-e8db854" }))
+    )
+    .is_none());
+    assert!(run_shell_hook_with_env(
+        CLAUDE_HOOK_ASSET,
+        &["reply"],
+        &with(serde_json::json!({})),
+        &[("CURSOR_VERSION", "2026.08.11-e8db854")],
+    )
+    .is_none());
+    assert!(run_shell_hook_with_env(
+        CLAUDE_HOOK_ASSET,
+        &["reply"],
+        &with(serde_json::json!({})),
+        &[("GROK_SESSION_ID", "grok-session")],
+    )
+    .is_none());
+}
+
+#[test]
+fn claude_reply_hook_requires_a_stop_event_with_a_message() {
+    for input in [
+        stop_input(serde_json::json!({})),
+        stop_input(serde_json::json!({ "last_assistant_message": "" })),
+        stop_input(serde_json::json!({ "last_assistant_message": null })),
+        stop_input(serde_json::json!({ "last_assistant_message": ["done"] })),
+        serde_json::json!({
+            "hook_event_name": "SubagentStop",
+            "last_assistant_message": "done",
+        })
+        .to_string(),
+        serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "claude-session",
+            "last_assistant_message": "done",
+        })
+        .to_string(),
+    ] {
+        assert!(
+            run_claude_hook("reply", &input).is_none(),
+            "reply action should ignore {input}"
+        );
+    }
+
+    assert!(run_claude_hook(
+        "session",
+        &stop_input(serde_json::json!({
+            "session_id": "claude-session",
+            "last_assistant_message": "done",
+        })),
+    )
+    .is_none());
+}
+
+#[test]
+fn codex_reply_hook_reports_last_assistant_message_on_stop() {
+    let input = stop_input(serde_json::json!({
+        "session_id": "codex-session",
+        "turn_id": "turn-1",
+        "last_assistant_message": "修好了 `cargo test`",
+    }));
+    let raw = run_shell_hook_raw_with_env(CODEX_HOOK_ASSET, &["reply"], &input, &[])
+        .expect("codex stop should report the final reply");
+    assert!(!raw.contains("\\u"), "raw request: {raw}");
+    let request: serde_json::Value = serde_json::from_str(&raw).unwrap();
+
+    assert_eq!(request["method"], "pane.report_agent_reply");
+    let params = &request["params"];
+    assert_eq!(params["pane_id"], "p_test");
+    assert_eq!(params["source"], "herdr:codex");
+    assert_eq!(params["agent"], "codex");
+    assert_eq!(params["agent_session_id"], "codex-session");
+    assert_eq!(params["text"], "修好了 `cargo test`");
+    assert!(params["seq"].as_u64().is_some_and(|seq| seq > 0));
+    assert!(params.get("truncated").is_none());
+
+    let matching = run_shell_hook_with_env(
+        CODEX_HOOK_ASSET,
+        &["reply"],
+        &input,
+        &[("CODEX_THREAD_ID", "codex-session")],
+    )
+    .expect("the root thread should still report");
+    assert_eq!(matching["params"]["agent_session_id"], "codex-session");
+
+    let message = "界".repeat(30_000);
+    let truncated = run_codex_hook(
+        "reply",
+        &stop_input(serde_json::json!({
+            "session_id": "codex-session",
+            "last_assistant_message": message,
+        })),
+    )
+    .expect("long replies should still report");
+    let text = truncated["params"]["text"].as_str().unwrap();
+    assert_eq!(text.len(), MAX_REPLY_BYTES / 3 * 3);
+    assert_eq!(truncated["params"]["truncated"], true);
+}
+
+#[test]
+fn codex_reply_hook_ignores_nested_sessions_and_missing_messages() {
+    assert!(run_shell_hook_with_env(
+        CODEX_HOOK_ASSET,
+        &["reply"],
+        &stop_input(serde_json::json!({
+            "session_id": "nested-session",
+            "last_assistant_message": "done",
+        })),
+        &[("CODEX_THREAD_ID", "parent-session")],
+    )
+    .is_none());
+
+    for input in [
+        stop_input(serde_json::json!({
+            "session_id": "codex-session",
+            "last_assistant_message": null,
+        })),
+        stop_input(serde_json::json!({
+            "session_id": "codex-session",
+            "last_assistant_message": "",
+        })),
+        serde_json::json!({
+            "hook_event_name": "SessionStart",
+            "session_id": "codex-session",
+            "transcript_path": "/tmp/codex-session.jsonl",
+            "last_assistant_message": "done",
+        })
+        .to_string(),
+    ] {
+        assert!(
+            run_codex_hook("reply", &input).is_none(),
+            "reply action should ignore {input}"
+        );
     }
 }
 

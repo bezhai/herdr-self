@@ -967,13 +967,22 @@ fn install_claude_writes_hook_and_updates_settings() {
         .as_str()
         .unwrap()
         .contains(" session"));
+    assert_eq!(
+        settings["hooks"]["Stop"],
+        serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": hook_command(&installed.hook_path, Some("reply")),
+                "timeout": 10,
+            }],
+        }])
+    );
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
-    assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
     std::env::remove_var("HOME");
@@ -1010,22 +1019,23 @@ fn install_claude_is_idempotent_for_hook_entries() {
     std::env::set_var("HOME", &home);
 
     install_claude().unwrap();
+    let first = fs::read_to_string(claude_dir.join("settings.json")).unwrap();
     install_claude().unwrap();
+    let second = fs::read_to_string(claude_dir.join("settings.json")).unwrap();
+    assert_eq!(second, first);
 
-    let settings: Value =
-        serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
-            .unwrap();
+    let settings: Value = serde_json::from_str(&second).unwrap();
     assert_eq!(
         settings["hooks"]["SessionStart"].as_array().unwrap().len(),
         1
     );
+    assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
-    assert!(settings["hooks"].get("Stop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
     std::env::remove_var("HOME");
@@ -1070,6 +1080,13 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
                     {"type": "command", "command": format!("bash '{}' release", hook_path.display()), "timeout": 10},
                     {"type": "command", "command": "echo keep-session-end", "timeout": 10}
                 ]
+            }],
+            "Stop": [{
+                "matcher": "*",
+                "hooks": [
+                    {"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-stop", "timeout": 10}
+                ]
             }]
         }
     });
@@ -1101,16 +1118,23 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
         settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"],
         "echo keep-session-end"
     );
+    let stop = settings["hooks"]["Stop"].as_array().unwrap();
+    assert_eq!(stop.len(), 2);
+    assert_eq!(stop[0]["hooks"].as_array().unwrap().len(), 1);
+    assert_eq!(stop[0]["hooks"][0]["command"], "echo keep-stop");
+    assert_eq!(
+        stop[1]["hooks"][0]["command"],
+        hook_command(&hook_path, Some("reply"))
+    );
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("Stop").is_none());
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
 }
 
 #[test]
-fn claude_v9_integration_status_is_outdated_until_reinstalled() {
+fn claude_v10_integration_status_is_outdated_until_reinstalled() {
     let _lock = integration_env_lock();
     let base = unique_base();
     let home = base.join("home");
@@ -1119,7 +1143,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
     let hook_path = claude_hooks_dir.join(CLAUDE_HOOK_INSTALL_NAME);
     fs::write(
         &hook_path,
-        "#!/bin/sh\n# HERDR_INTEGRATION_ID=claude\n# HERDR_INTEGRATION_VERSION=9\n",
+        "#!/bin/sh\n# HERDR_INTEGRATION_ID=claude\n# HERDR_INTEGRATION_VERSION=10\n",
     )
     .unwrap();
     std::env::set_var("HOME", &home);
@@ -1131,8 +1155,8 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
         .unwrap();
 
     assert_eq!(claude.path, hook_path);
-    assert_eq!(claude.installed_version, Some(9));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.installed_version, Some(10));
+    assert_eq!(claude.expected_version, 11);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     install_claude().unwrap();
@@ -1141,7 +1165,7 @@ fn claude_v9_integration_status_is_outdated_until_reinstalled() {
         hook_path,
         CLAUDE_INTEGRATION_VERSION,
     );
-    assert_eq!(status.installed_version, Some(10));
+    assert_eq!(status.installed_version, Some(11));
     assert_eq!(status.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
@@ -1171,7 +1195,7 @@ fn claude_v2_integration_status_is_outdated() {
 
     assert_eq!(claude.path, hook_path);
     assert_eq!(claude.installed_version, Some(2));
-    assert_eq!(claude.expected_version, 10);
+    assert_eq!(claude.expected_version, 11);
     assert_eq!(claude.state, IntegrationStatusKind::Outdated);
 
     std::env::remove_var("HOME");
@@ -1220,6 +1244,11 @@ fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
             "Stop": [{
                 "matcher": "*",
                 "hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]
+            }, {
+                "hooks": [
+                    {"type": "command", "command": format!("bash '{}' reply", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-stop", "timeout": 10}
+                ]
             }],
             "SessionEnd": [{
                 "matcher": "*",
@@ -1258,7 +1287,12 @@ fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
-    assert!(settings["hooks"].get("Stop").is_none());
+    assert_eq!(
+        settings["hooks"]["Stop"],
+        serde_json::json!([{
+            "hooks": [{"type": "command", "command": "echo keep-stop", "timeout": 10}]
+        }])
+    );
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
     std::env::remove_var("HOME");
@@ -1304,8 +1338,47 @@ fn codex_v2_integration_status_is_outdated() {
 
     assert_eq!(codex.path, hook_path);
     assert_eq!(codex.installed_version, Some(2));
-    assert_eq!(codex.expected_version, 8);
+    assert_eq!(codex.expected_version, 9);
     assert_eq!(codex.state, IntegrationStatusKind::Outdated);
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn codex_v8_integration_status_is_outdated_until_reinstalled() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    fs::write(
+        &hook_path,
+        "#!/bin/sh\n# HERDR_INTEGRATION_ID=codex\n# HERDR_INTEGRATION_VERSION=8\n",
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    let statuses = installed_integration_statuses();
+    let codex = statuses
+        .iter()
+        .find(|status| status.target == crate::api::schema::IntegrationTarget::Codex)
+        .unwrap();
+
+    assert_eq!(codex.path, hook_path);
+    assert_eq!(codex.installed_version, Some(8));
+    assert_eq!(codex.expected_version, 9);
+    assert_eq!(codex.state, IntegrationStatusKind::Outdated);
+
+    install_codex().unwrap();
+    let status = integration_status_at(
+        crate::api::schema::IntegrationTarget::Codex,
+        hook_path,
+        CODEX_INTEGRATION_VERSION,
+    );
+    assert_eq!(status.installed_version, Some(9));
+    assert_eq!(status.state, IntegrationStatusKind::Current);
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -1335,10 +1408,19 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
         .as_str()
         .unwrap()
         .contains(" session"));
+    assert_eq!(
+        hooks["hooks"]["Stop"],
+        serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": hook_command(&installed.hook_path, Some("reply")),
+                "timeout": 10,
+            }],
+        }])
+    );
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
-    assert!(hooks["hooks"].get("Stop").is_none());
     assert!(config.contains("model = \"gpt-5.4\""));
     assert!(config.contains("[features]"));
     assert!(config.contains("hooks = true"));
@@ -1389,10 +1471,10 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     let config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
 
     assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
+    assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
-    assert!(hooks["hooks"].get("Stop").is_none());
     assert_eq!(config.matches("hooks = true").count(), 1);
     assert!(!config.contains("codex_hooks"));
     assert!(config.contains("other = true"));
@@ -1444,7 +1526,13 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
             ]}],
             "PreToolUse": [{"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}],
             "PermissionRequest": [{"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]}],
-            "Stop": [{"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]}]
+            "Stop": [
+                {"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]},
+                {"hooks": [
+                    {"type": "command", "command": format!("bash '{}' reply", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-stop", "timeout": 10}
+                ]}
+            ]
         }
     });
     fs::write(
@@ -1470,7 +1558,12 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     assert!(hooks["hooks"].get("SessionStart").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
-    assert!(hooks["hooks"].get("Stop").is_none());
+    assert_eq!(
+        hooks["hooks"]["Stop"],
+        serde_json::json!([{
+            "hooks": [{"type": "command", "command": "echo keep-stop", "timeout": 10}]
+        }])
+    );
     assert_eq!(
         hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
             .as_array()
@@ -1484,6 +1577,52 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     );
     assert!(config.contains("hooks = true"));
     assert!(config.contains("other = true"));
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codex_preserves_user_stop_hooks_and_replaces_legacy_idle() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let hooks = serde_json::json!({
+        "hooks": {
+            "Stop": [
+                {"hooks": [
+                    {"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-stop", "timeout": 10}
+                ]},
+                {"hooks": [{"type": "command", "command": format!("bash '{}' reply", hook_path.display()), "timeout": 30}]}
+            ]
+        }
+    });
+    fs::write(
+        codex_dir.join("hooks.json"),
+        serde_json::to_string(&hooks).unwrap(),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    install_codex().unwrap();
+
+    let hooks: Value =
+        serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        hooks["hooks"]["Stop"],
+        serde_json::json!([
+            {"hooks": [{"type": "command", "command": "echo keep-stop", "timeout": 10}]},
+            {"hooks": [{
+                "type": "command",
+                "command": hook_command(&hook_path, Some("reply")),
+                "timeout": 10,
+            }]}
+        ])
+    );
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -3185,6 +3324,39 @@ fn bundled_integration_asset_versions_match_expected_versions() {
             MASTRACODE_INTEGRATION_VERSION,
         ),
         ("grok", GROK_HOOK_ASSET, GROK_INTEGRATION_VERSION),
+    ] {
+        assert_eq!(
+            parse_integration_version(asset),
+            Some(expected_version),
+            "{name} asset version must match its integration version constant"
+        );
+    }
+
+    // Reply reporting on Stop shipped with Claude 11 and Codex 9. Both platform
+    // assets carry the marker even though Windows does not report replies yet.
+    assert_eq!(CLAUDE_INTEGRATION_VERSION, 11);
+    assert_eq!(CODEX_INTEGRATION_VERSION, 9);
+    for (name, asset, expected_version) in [
+        (
+            "claude sh",
+            include_str!("assets/claude/herdr-agent-state.sh"),
+            CLAUDE_INTEGRATION_VERSION,
+        ),
+        (
+            "claude ps1",
+            include_str!("assets/claude/herdr-agent-state.ps1"),
+            CLAUDE_INTEGRATION_VERSION,
+        ),
+        (
+            "codex sh",
+            include_str!("assets/codex/herdr-agent-state.sh"),
+            CODEX_INTEGRATION_VERSION,
+        ),
+        (
+            "codex ps1",
+            include_str!("assets/codex/herdr-agent-state.ps1"),
+            CODEX_INTEGRATION_VERSION,
+        ),
     ] {
         assert_eq!(
             parse_integration_version(asset),

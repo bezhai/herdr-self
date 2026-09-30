@@ -475,6 +475,22 @@ pub struct PaneReportAgentSessionParams {
     pub session_start_source: Option<String>,
 }
 
+/// Final assistant reply reported by an agent integration hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportAgentReplyParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    pub text: String,
+    /// The reporter already cut `text` to fit the reply size limit.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReportMetadataParams {
     pub pane_id: String,

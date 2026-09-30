@@ -274,6 +274,123 @@ fn request_round_trips_for_agent_explain() {
 }
 
 #[test]
+fn agent_reply_requests_and_response_round_trip() {
+    let report = Request {
+        id: "req_reply".into(),
+        method: Method::PaneReportAgentReply(PaneReportAgentReplyParams {
+            pane_id: "w1:p1".into(),
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            seq: Some(42),
+            agent_session_id: Some("claude-session".into()),
+            text: "已完成 **done**".into(),
+            truncated: false,
+        }),
+    };
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["method"], "pane.report_agent_reply");
+    assert_eq!(json["params"]["text"], "已完成 **done**");
+    assert!(json["params"].get("truncated").is_none());
+    let restored: Request = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, report);
+
+    let minimal: Request = serde_json::from_value(serde_json::json!({
+        "id": "req_min",
+        "method": "pane.report_agent_reply",
+        "params": {
+            "pane_id": "w1:p1",
+            "source": "herdr:codex",
+            "agent": "codex",
+            "text": "done",
+            "truncated": true,
+        },
+    }))
+    .unwrap();
+    let Method::PaneReportAgentReply(params) = minimal.method else {
+        panic!("expected a reply report");
+    };
+    assert_eq!(params.seq, None);
+    assert_eq!(params.agent_session_id, None);
+    assert!(params.truncated);
+
+    for after_seq in [None, Some(7)] {
+        let replies = Request {
+            id: "req_replies".into(),
+            method: Method::AgentReplies(AgentRepliesParams {
+                target: "reviewer".into(),
+                after_seq,
+            }),
+        };
+        let json = serde_json::to_value(&replies).unwrap();
+        assert_eq!(json["method"], "agent.replies");
+        assert_eq!(
+            json["params"].get("after_seq").is_some(),
+            after_seq.is_some()
+        );
+        let restored: Request = serde_json::from_value(json).unwrap();
+        assert_eq!(restored, replies);
+    }
+
+    let response = SuccessResponse {
+        id: "req_replies".into(),
+        result: ResponseResult::AgentReplies {
+            agent: AgentInfo {
+                terminal_id: "term_1".into(),
+                name: Some("reviewer".into()),
+                agent: Some("claude".into()),
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Idle,
+                screen_detection_skipped: false,
+                state_labels: HashMap::new(),
+                tokens: HashMap::new(),
+                agent_session: None,
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                pane_id: "w1:p1".into(),
+                focused: false,
+                launch_pending: false,
+                interactive_ready: false,
+                state_change_seq: 3,
+                completion_seq: None,
+                reply_seq: Some(2),
+                cwd: None,
+                foreground_cwd: None,
+                revision: 5,
+            },
+            replies: vec![
+                AgentReplyInfo {
+                    seq: 1,
+                    text: "first".into(),
+                    truncated: false,
+                },
+                AgentReplyInfo {
+                    seq: 2,
+                    text: "second".into(),
+                    truncated: true,
+                },
+            ],
+        },
+    };
+    let json = serde_json::to_value(&response).unwrap();
+    assert_eq!(json["result"]["type"], "agent_replies");
+    assert_eq!(json["result"]["agent"]["reply_seq"], 2);
+    assert_eq!(json["result"]["replies"][0]["truncated"], false);
+    assert_eq!(json["result"]["replies"][1]["text"], "second");
+    let restored: SuccessResponse = serde_json::from_value(json).unwrap();
+    assert_eq!(restored, response);
+
+    let ResponseResult::AgentReplies { mut agent, .. } = restored.result else {
+        panic!("expected agent replies");
+    };
+    agent.reply_seq = None;
+    let json = serde_json::to_value(&agent).unwrap();
+    assert!(json.get("reply_seq").is_none());
+}
+
+#[test]
 fn integration_list_request_and_response_round_trip() {
     let request = Request {
         id: "req_integrations".into(),

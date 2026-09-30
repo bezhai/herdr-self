@@ -3,8 +3,8 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    AgentPromptParams, AgentRenameParams, AgentRepliesParams, AgentReplyInfo, AgentSendKeysParams,
+    AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -50,6 +50,46 @@ impl App {
         };
 
         encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    pub(super) fn handle_agent_replies(
+        &mut self,
+        id: String,
+        params: AgentRepliesParams,
+    ) -> String {
+        self.reconcile_managed_agent_target(&params.target);
+        let resolved = match self.resolve_agent_target(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
+        };
+        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
+            return encode_error_body(
+                id,
+                self.agent_target_error_body(
+                    crate::app::terminal_targets::TerminalTargetError::NotFound {
+                        target: params.target,
+                    },
+                ),
+            );
+        };
+        let replies = self
+            .state
+            .terminal_id_for_pane(resolved.ws_idx, resolved.pane_id)
+            .and_then(|terminal_id| self.state.terminals.get(&terminal_id))
+            .map(|terminal| {
+                terminal
+                    .agent_replies()
+                    .after(params.after_seq)
+                    .map(|reply| AgentReplyInfo {
+                        seq: reply.seq,
+                        text: reply.text.clone(),
+                        truncated: reply.truncated,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        encode_success(id, ResponseResult::AgentReplies { agent, replies })
     }
 
     pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
@@ -755,6 +795,177 @@ mod tests {
         let error: crate::api::schema::ErrorResponse = serde_json::from_str(&response).unwrap();
         assert_eq!(error.error.code, "agent_not_ready");
         assert!(rx.try_recv().is_err());
+    }
+
+    fn api_request(app: &mut App, method: crate::api::schema::Method) -> serde_json::Value {
+        let response = app.handle_api_request(crate::api::schema::Request {
+            id: "req".into(),
+            method,
+        });
+        serde_json::from_str(&response).unwrap()
+    }
+
+    fn report_reply(
+        app: &mut App,
+        pane_id: &str,
+        source: &str,
+        agent: &str,
+        seq: u64,
+        text: &str,
+    ) -> serde_json::Value {
+        api_request(
+            app,
+            crate::api::schema::Method::PaneReportAgentReply(
+                crate::api::schema::PaneReportAgentReplyParams {
+                    pane_id: pane_id.into(),
+                    source: source.into(),
+                    agent: agent.into(),
+                    seq: Some(seq),
+                    agent_session_id: None,
+                    text: text.into(),
+                    truncated: false,
+                },
+            ),
+        )
+    }
+
+    fn agent_replies(app: &mut App, target: &str, after_seq: Option<u64>) -> serde_json::Value {
+        api_request(
+            app,
+            crate::api::schema::Method::AgentReplies(crate::api::schema::AgentRepliesParams {
+                target: target.into(),
+                after_seq,
+            }),
+        )
+    }
+
+    fn claude_app() -> (App, String) {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let public_pane_id = app.public_pane_id(0, pane_id).unwrap();
+        (app, public_pane_id)
+    }
+
+    #[test]
+    fn agent_replies_returns_reported_replies_after_a_seq() {
+        let (mut app, pane_id) = claude_app();
+        for (seq, text) in [(10, "first"), (11, "第二条 **reply**"), (12, "third")] {
+            let response = report_reply(&mut app, &pane_id, "herdr:claude", "claude", seq, text);
+            assert_eq!(response["result"]["type"], "ok", "{response}");
+        }
+
+        let all = agent_replies(&mut app, &pane_id, None);
+        assert_eq!(all["result"]["type"], "agent_replies", "{all}");
+        assert_eq!(all["result"]["agent"]["pane_id"], pane_id.as_str());
+        assert_eq!(all["result"]["agent"]["reply_seq"], 3);
+        assert_eq!(
+            all["result"]["replies"],
+            serde_json::json!([
+                {"seq": 1, "text": "first", "truncated": false},
+                {"seq": 2, "text": "第二条 **reply**", "truncated": false},
+                {"seq": 3, "text": "third", "truncated": false},
+            ])
+        );
+
+        let after = agent_replies(&mut app, &pane_id, Some(1));
+        let seqs: Vec<u64> = after["result"]["replies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|reply| reply["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, [2, 3]);
+        assert_eq!(
+            agent_replies(&mut app, &pane_id, Some(3))["result"]["replies"],
+            serde_json::json!([])
+        );
+
+        let agent = api_request(
+            &mut app,
+            crate::api::schema::Method::AgentGet(AgentTarget {
+                target: pane_id.clone(),
+            }),
+        );
+        assert_eq!(agent["result"]["agent"]["reply_seq"], 3);
+    }
+
+    #[test]
+    fn agent_replies_is_empty_without_replies_and_rejects_unknown_targets() {
+        let (mut app, pane_id) = claude_app();
+
+        let empty = agent_replies(&mut app, &pane_id, None);
+        assert_eq!(empty["result"]["replies"], serde_json::json!([]), "{empty}");
+        assert!(empty["result"]["agent"].get("reply_seq").is_none());
+
+        let missing = agent_replies(&mut app, "no-such-agent", None);
+        assert_eq!(missing["error"]["code"], "agent_not_found", "{missing}");
+    }
+
+    #[test]
+    fn pane_report_agent_reply_acknowledges_ignored_reports() {
+        let (mut app, pane_id) = claude_app();
+
+        for (source, agent, seq, text) in [
+            ("custom:claude", "claude", 1, "unofficial"),
+            ("herdr:codex", "codex", 2, "other agent"),
+            ("herdr:claude", "claude", 3, ""),
+        ] {
+            let response = report_reply(&mut app, &pane_id, source, agent, seq, text);
+            assert_eq!(response["result"]["type"], "ok", "{response}");
+        }
+        assert_eq!(
+            report_reply(&mut app, &pane_id, "herdr:claude", "claude", 5, "kept")["result"]["type"],
+            "ok"
+        );
+        let stale = report_reply(&mut app, &pane_id, "herdr:claude", "claude", 4, "stale");
+        assert_eq!(stale["result"]["type"], "ok", "{stale}");
+
+        let replies = agent_replies(&mut app, &pane_id, None);
+        assert_eq!(
+            replies["result"]["replies"],
+            serde_json::json!([{"seq": 1, "text": "kept", "truncated": false}])
+        );
+
+        let invalid = report_reply(&mut app, &pane_id, "herdr:claude", " ", 6, "text");
+        assert_eq!(invalid["error"]["code"], "invalid_agent", "{invalid}");
+        let missing = report_reply(&mut app, "w9:p9", "herdr:claude", "claude", 7, "text");
+        assert_eq!(missing["error"]["code"], "pane_not_found", "{missing}");
+    }
+
+    #[test]
+    fn agent_reply_methods_do_not_change_the_ui() {
+        for method in [
+            crate::api::schema::Method::PaneReportAgentReply(
+                crate::api::schema::PaneReportAgentReplyParams {
+                    pane_id: "w1:p1".into(),
+                    source: "herdr:claude".into(),
+                    agent: "claude".into(),
+                    seq: None,
+                    agent_session_id: None,
+                    text: "done".into(),
+                    truncated: false,
+                },
+            ),
+            crate::api::schema::Method::AgentReplies(crate::api::schema::AgentRepliesParams {
+                target: "w1:p1".into(),
+                after_seq: None,
+            }),
+        ] {
+            assert!(!crate::api::request_changes_ui(
+                &crate::api::schema::Request {
+                    id: "req".into(),
+                    method,
+                }
+            ));
+        }
     }
 
     #[test]

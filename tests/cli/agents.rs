@@ -29,6 +29,132 @@ fn agent_explain_missing_file_reports_json_error() {
         .contains(missing.to_str().unwrap()));
 }
 
+#[test]
+fn agent_replies_rejects_invalid_arguments_before_contacting_the_server() {
+    let socket_path = Path::new("/tmp/herdr-cli-agent-replies-no-server.sock");
+
+    for (args, expected) in [
+        (vec!["agent", "replies"], "usage: herdr agent replies"),
+        (
+            vec!["agent", "replies", "w1:p1", "--after", "nope"],
+            "invalid value for --after: nope",
+        ),
+        (
+            vec!["agent", "replies", "w1:p1", "--after"],
+            "missing value for --after",
+        ),
+        (
+            vec!["agent", "replies", "w1:p1", "--bogus"],
+            "unknown option: --bogus",
+        ),
+        (
+            vec!["agent", "replies", "w1:p1", "extra"],
+            "usage: herdr agent replies",
+        ),
+    ] {
+        let output = run_cli(socket_path, &args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn agent_replies_returns_final_replies_reported_by_the_claude_stop_hook() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let hook = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/claude/herdr-agent-state.sh");
+    // Every input line ends one turn and runs the real Stop hook with that line as the reply.
+    let fake_claude = bin_dir.join("claude");
+    fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '{{\"hook_event_name\":\"Stop\",\"session_id\":\"e2e-session\",\"last_assistant_message\":\"%s\"}}' \"$line\" | bash '{}' reply\ndone\n",
+            hook.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let herdr = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert!(run_cli(&socket_path, &["pane", "run", &pane_id, "claude"])
+        .status
+        .success());
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+            run_cli(&socket_path, &["agent", "get", &pane_id])
+                .status
+                .success()
+        }),
+        "fake claude was not detected"
+    );
+    let empty = run_cli_json(&socket_path, &["agent", "replies", &pane_id]);
+    assert_eq!(empty["result"]["type"], "agent_replies");
+    assert_eq!(empty["result"]["replies"], serde_json::json!([]));
+
+    let reply_seq = |socket_path: &Path| {
+        run_cli_json(socket_path, &["agent", "get", &pane_id])["result"]["agent"]["reply_seq"]
+            .as_u64()
+    };
+    for (turn, text) in ["第一轮 **完成**", "second turn"].into_iter().enumerate() {
+        assert!(run_cli(&socket_path, &["pane", "run", &pane_id, text])
+            .status
+            .success());
+        assert!(
+            wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+                reply_seq(&socket_path) == Some(turn as u64 + 1)
+            }),
+            "reply {text:?} was not recorded"
+        );
+    }
+
+    let all = run_cli_json(&socket_path, &["agent", "replies", &pane_id]);
+    assert_eq!(all["result"]["agent"]["reply_seq"], 2);
+    assert_eq!(
+        all["result"]["replies"],
+        serde_json::json!([
+            {"seq": 1, "text": "第一轮 **完成**", "truncated": false},
+            {"seq": 2, "text": "second turn", "truncated": false},
+        ])
+    );
+    let after = run_cli_json(
+        &socket_path,
+        &["agent", "replies", &pane_id, "--after", "1"],
+    );
+    assert_eq!(
+        after["result"]["replies"],
+        serde_json::json!([{"seq": 2, "text": "second turn", "truncated": false}])
+    );
+    let none = run_cli_json(&socket_path, &["agent", "replies", &pane_id, "--after=2"]);
+    assert_eq!(none["result"]["replies"], serde_json::json!([]));
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
 fn write_delayed_shell_and_fake_pi(
     base: &Path,
     shell_delay_seconds: &str,

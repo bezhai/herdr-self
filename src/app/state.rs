@@ -830,6 +830,8 @@ pub struct AppState {
     pub sidebar_agents: crate::config::AgentsSidebarConfig,
     pub sidebar_spaces: crate::config::SpacesSidebarConfig,
     pub next_agent_state_change_seq: u64,
+    /// Last reply seq handed out to an agent reply; shared by every terminal.
+    pub next_agent_reply_seq: u64,
     pub confirm_close: bool,
     pub pane_borders: crate::config::PaneBordersConfig,
     pub pane_outer_borders: bool,
@@ -1057,6 +1059,7 @@ impl AppState {
             sidebar_agents: crate::config::AgentsSidebarConfig::default(),
             sidebar_spaces: crate::config::SpacesSidebarConfig::default(),
             next_agent_state_change_seq: 0,
+            next_agent_reply_seq: 0,
             confirm_close: true,
             pane_borders: crate::config::PaneBordersConfig::Auto,
             pane_outer_borders: true,

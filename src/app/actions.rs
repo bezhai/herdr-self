@@ -1609,6 +1609,23 @@ impl AppState {
         }
     }
 
+    /// Records an agent's final reply for the terminal attached to `pane_id`.
+    pub(crate) fn record_agent_reply(
+        &mut self,
+        pane_id: PaneId,
+        report: crate::terminal::agent_replies::AgentReplyReport,
+    ) -> Option<u64> {
+        let terminal_id = self
+            .workspaces
+            .iter()
+            .find_map(|ws| ws.pane_state(pane_id))?
+            .attached_terminal_id
+            .clone();
+        self.terminals
+            .get_mut(&terminal_id)?
+            .record_agent_reply(report, &mut self.next_agent_reply_seq)
+    }
+
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
     where
         F: FnOnce(&mut crate::terminal::TerminalState) -> Option<TerminalStateMutation>,
@@ -1654,6 +1671,7 @@ impl AppState {
                     .is_some_and(|change| change.previous_agent_label != change.agent_label);
             if completion_reset {
                 terminal.last_agent_completion_seq = None;
+                terminal.clear_agent_replies();
             }
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
@@ -3203,6 +3221,129 @@ mod tests {
         assert!(terminal.last_agent_completion_seq.is_none());
         assert!(app.workspaces[1].panes[&pane_id].seen);
         assert!(!app.pending_agent_notifications.contains_key(&pane_id));
+    }
+
+    fn state_changed(pane_id: PaneId, agent: Option<Agent>, state: AgentState) -> AppEvent {
+        AppEvent::StateChanged {
+            pane_id,
+            agent,
+            state,
+            visible_blocker: false,
+            visible_working: state == AgentState::Working,
+            process_exited: false,
+            observed_at: Instant::now(),
+        }
+    }
+
+    fn record_claude_reply(
+        app: &mut AppState,
+        pane_id: PaneId,
+        seq: u64,
+        text: &str,
+    ) -> Option<u64> {
+        app.record_agent_reply(
+            pane_id,
+            crate::terminal::agent_replies::AgentReplyReport {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                agent_session_id: None,
+                text: text.into(),
+                truncated: false,
+            },
+        )
+    }
+
+    fn latest_reply_seq(app: &AppState, ws_idx: usize, pane_id: PaneId) -> Option<u64> {
+        app.terminals[&app.workspaces[ws_idx].panes[&pane_id].attached_terminal_id]
+            .agent_replies()
+            .latest_seq()
+    }
+
+    #[test]
+    fn agent_reply_seq_is_shared_across_panes_and_survives_turns() {
+        let mut app = app_with_workspaces(&["one", "two"]);
+        let first = app.workspaces[0].tabs[0].root_pane;
+        let second = app.workspaces[1].tabs[0].root_pane;
+        for pane_id in [first, second] {
+            app.handle_app_event(state_changed(
+                pane_id,
+                Some(Agent::Claude),
+                AgentState::Working,
+            ));
+        }
+
+        assert_eq!(record_claude_reply(&mut app, first, 10, "one"), Some(1));
+        assert_eq!(record_claude_reply(&mut app, second, 10, "two"), Some(2));
+        for state in [AgentState::Idle, AgentState::Working, AgentState::Idle] {
+            app.handle_app_event(state_changed(first, Some(Agent::Claude), state));
+        }
+        assert_eq!(record_claude_reply(&mut app, first, 11, "three"), Some(3));
+
+        assert_eq!(app.next_agent_reply_seq, 3);
+        assert_eq!(latest_reply_seq(&app, 0, first), Some(3));
+        assert_eq!(latest_reply_seq(&app, 1, second), Some(2));
+        let texts: Vec<String> = app.terminals
+            [&app.workspaces[0].panes[&first].attached_terminal_id]
+            .agent_replies()
+            .after(None)
+            .map(|reply| reply.text.clone())
+            .collect();
+        assert_eq!(texts, ["one", "three"]);
+        app.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_replies_clear_when_the_session_changes() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Idle,
+        ));
+        let report_session = |app: &mut AppState, seq: u64, session: &str, source: &str| {
+            app.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session),
+                session_start_source: Some(source.into()),
+            });
+        };
+        report_session(&mut app, 1, "old-session", "startup");
+        assert_eq!(record_claude_reply(&mut app, pane_id, 2, "old"), Some(1));
+
+        report_session(&mut app, 3, "old-session", "resume");
+        assert_eq!(latest_reply_seq(&app, 0, pane_id), Some(1));
+
+        report_session(&mut app, 4, "new-session", "clear");
+        assert_eq!(latest_reply_seq(&app, 0, pane_id), None);
+    }
+
+    #[test]
+    fn agent_replies_clear_when_the_agent_changes_or_exits() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Idle,
+        ));
+        assert_eq!(record_claude_reply(&mut app, pane_id, 1, "claude"), Some(1));
+
+        app.handle_app_event(state_changed(pane_id, Some(Agent::Codex), AgentState::Idle));
+        assert_eq!(latest_reply_seq(&app, 0, pane_id), None);
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Idle,
+        ));
+        assert_eq!(record_claude_reply(&mut app, pane_id, 2, "again"), Some(2));
+        app.publish_pane_process_exit_if_agent(pane_id, false);
+        assert_eq!(latest_reply_seq(&app, 0, pane_id), None);
     }
 
     #[test]

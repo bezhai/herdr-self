@@ -1320,6 +1320,26 @@
           ],
           "type": "object"
         },
+        "AgentRepliesParams": {
+          "properties": {
+            "after_seq": {
+              "description": "Return only replies with a greater seq.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentSendKeysParams": {
           "properties": {
             "keys": {
@@ -3106,6 +3126,48 @@
             "source",
             "agent",
             "state"
+          ],
+          "type": "object"
+        },
+        "PaneReportAgentReplyParams": {
+          "description": "Final assistant reply reported by an agent integration hook.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "source": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "truncated": {
+              "description": "The reporter already cut `text` to fit the reply size limit.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "agent",
+            "text"
           ],
           "type": "object"
         },
@@ -5481,6 +5543,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.replies",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentRepliesParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.send_keys",
               "type": "string"
             },
@@ -6185,6 +6263,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_agent_reply",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentReplyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.report_metadata",
               "type": "string"
             },
@@ -6827,6 +6921,15 @@
             "pane_id": {
               "type": "string"
             },
+            "reply_seq": {
+              "description": "Seq of the latest retained reply; read the text with `agent.replies`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "revision": {
               "format": "uint64",
               "minimum": 0,
@@ -6954,6 +7057,28 @@
             "source",
             "source_kind",
             "local_override_shadowing_remote"
+          ],
+          "type": "object"
+        },
+        "AgentReplyInfo": {
+          "description": "A final assistant reply retained for an agent, in memory only.",
+          "properties": {
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "type": "string"
+            },
+            "truncated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "seq",
+            "text",
+            "truncated"
           ],
           "type": "object"
         },
@@ -9729,6 +9854,29 @@
               "required": [
                 "type",
                 "agents"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "replies": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentReplyInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_replies",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent",
+                "replies"
               ],
               "type": "object"
             },

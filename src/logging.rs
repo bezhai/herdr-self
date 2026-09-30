@@ -112,6 +112,7 @@ fn is_routine_api_method(method: &str) -> bool {
             | "tab.list"
             | "pane.report_agent"
             | "pane.report_agent_session"
+            | "pane.report_agent_reply"
             | "pane.report_metadata"
     )
 }
@@ -559,6 +560,17 @@ fn rotated_log_path(path: &Path, index: usize) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_reports_are_routine_api_methods() {
+        for method in [
+            "pane.report_agent",
+            "pane.report_agent_session",
+            "pane.report_agent_reply",
+        ] {
+            assert!(is_routine_api_method(method), "{method}");
+        }
+    }
 
     fn temp_log_path(name: &str) -> PathBuf {
         let unique = format!(

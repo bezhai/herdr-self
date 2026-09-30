@@ -320,6 +320,16 @@ fn agent_command() -> Command {
         .subcommand(Command::new("list").about("List agents"))
         .subcommand(id_command("get", "target", "Show an agent"))
         .subcommand(
+            Command::new("replies")
+                .about("Show an agent's recent final replies")
+                .override_usage("herdr agent replies <TARGET> [OPTIONS]")
+                .arg(required("target", "TARGET"))
+                .arg(option("after", "SEQ").help("Only show replies with a greater seq"))
+                .after_help(
+                    "Replies come from the Claude Code and Codex Stop hooks. Herdr keeps the last 8 replies per agent in memory; each is capped at 64 KiB.",
+                ),
+        )
+        .subcommand(
             Command::new("read")
                 .about("Read agent terminal output")
                 .override_usage("herdr agent read <TARGET> [OPTIONS]")
@@ -1234,6 +1244,24 @@ mod tests {
             .get_arguments()
             .any(|arg| arg.get_long() == Some("entrypoint")));
         assert!(option_values(open, "placement").contains(&"zoomed".to_string()));
+    }
+
+    #[test]
+    fn spec_describes_agent_replies() {
+        let cmd = super::command();
+        let replies = command_path(&cmd, &["agent", "replies"]);
+        assert!(replies.get_about().is_some());
+        assert!(has_option(replies, "after"));
+        assert!(replies
+            .get_arguments()
+            .any(|arg| arg.get_id() == "target" && arg.is_required_set()));
+
+        let args = ["herdr", "agent", "replies", "--help"].map(String::from);
+        let mut output = Vec::new();
+        assert!(super::write_requested_help(&args, &mut output, || {}).unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Usage: herdr agent replies"), "{output}");
+        assert!(output.contains("--after"), "{output}");
     }
 
     #[test]

@@ -9,12 +9,12 @@ use crate::api::schema::{
     PaneListParams, PaneMoveDestination, PaneMoveParams, PaneMoveReason, PaneMoveResult,
     PaneNeighborParams, PaneNeighborResult, PaneProcessInfo, PaneProcessInfoParams,
     PaneProcessInfoProcess, PaneReadParams, PaneReadResult, PaneReleaseAgentParams,
-    PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
-    PaneReportMetadataParams, PaneResizeParams, PaneResizeReason, PaneResizeResult,
-    PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams, PaneSendKeysParams,
-    PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason, PaneSwapResult,
-    PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams, PaneZoomReason,
-    PaneZoomResult, ResponseResult,
+    PaneRenameParams, PaneReportAgentParams, PaneReportAgentReplyParams,
+    PaneReportAgentSessionParams, PaneReportMetadataParams, PaneResizeParams, PaneResizeReason,
+    PaneResizeResult, PaneScrollParams, PaneSelectionReadParams, PaneSendInputParams,
+    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneSwapReason,
+    PaneSwapResult, PaneTarget, PaneTextPoint, PaneTextRange, PaneZoomMode, PaneZoomParams,
+    PaneZoomReason, PaneZoomResult, ResponseResult,
 };
 use crate::app::actions::{PaneZoomCommand, PaneZoomNoopReason};
 use crate::app::App;
@@ -1599,6 +1599,33 @@ impl App {
                 params.session_start_source,
             ),
         });
+
+        encode_success(id, ResponseResult::Ok {})
+    }
+
+    pub(super) fn handle_pane_report_agent_reply(
+        &mut self,
+        id: String,
+        params: PaneReportAgentReplyParams,
+    ) -> String {
+        let Some((_ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(agent_label) = normalize_reported_agent_label(&params.agent) else {
+            return invalid_agent(id);
+        };
+        // Ignored reports are acknowledged too; hooks never retry them.
+        self.state.record_agent_reply(
+            pane_id,
+            crate::terminal::agent_replies::AgentReplyReport {
+                source: params.source,
+                agent_label,
+                seq: params.seq,
+                agent_session_id: params.agent_session_id,
+                text: params.text,
+                truncated: params.truncated,
+            },
+        );
 
         encode_success(id, ResponseResult::Ok {})
     }

@@ -17,6 +17,22 @@ pub struct AgentReadParams {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentRepliesParams {
+    pub target: String,
+    /// Return only replies with a greater seq.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_seq: Option<u64>,
+}
+
+/// A final assistant reply retained for an agent, in memory only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentReplyInfo {
+    pub seq: u64,
+    pub text: String,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentSendKeysParams {
     pub target: String,
     pub keys: Vec<String>,
@@ -221,6 +237,9 @@ pub struct AgentInfo {
     /// The current idle transition completed work, independently of who has viewed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_seq: Option<u64>,
+    /// Seq of the latest retained reply; read the text with `agent.replies`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_seq: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -3,7 +3,7 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=claude
-# HERDR_INTEGRATION_VERSION=10
+# HERDR_INTEGRATION_VERSION=11
 
 set -eu
 
@@ -13,7 +13,7 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 case "$action" in
-  session) ;;
+  session|reply) ;;
   *) exit 0 ;;
 esac
 
@@ -30,6 +30,7 @@ import socket
 import time
 
 source = "herdr:claude"
+max_reply_bytes = 64 * 1024
 action = os.environ.get("HERDR_ACTION", "")
 pane_id = os.environ.get("HERDR_PANE_ID")
 socket_path = os.environ.get("HERDR_SOCKET_PATH")
@@ -51,21 +52,50 @@ if hook_input_file:
 if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)
 hook_event_name = str(hook_input.get("hook_event_name") or "")
-if hook_event_name != "SessionStart":
+expected_event_name = "Stop" if action == "reply" else "SessionStart"
+if hook_event_name != expected_event_name:
     raise SystemExit(0)
 is_subagent = bool(hook_input.get("agent_id"))
 if is_subagent:
+    raise SystemExit(0)
+# Grok imports Claude hooks and sets GROK_SESSION_ID in every hook process.
+if action == "reply" and "GROK_SESSION_ID" in os.environ:
     raise SystemExit(0)
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
 session_id = hook_input.get("session_id")
 agent_session_id = session_id if isinstance(session_id, str) and session_id else None
-transcript_path = hook_input.get("transcript_path")
-agent_session_path = transcript_path if isinstance(transcript_path, str) and transcript_path else None
-session_start_source = hook_input.get("source") if hook_event_name == "SessionStart" else None
-if not isinstance(session_start_source, str) or not session_start_source:
-    session_start_source = None
-if agent_session_id:
+socket_timeout = 0.5
+if action == "reply":
+    message = hook_input.get("last_assistant_message")
+    if not isinstance(message, str) or not message:
+        raise SystemExit(0)
+    encoded = message.encode("utf-8", errors="replace")
+    truncated = len(encoded) > max_reply_bytes
+    text = encoded[:max_reply_bytes].decode("utf-8", errors="ignore")
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "claude",
+        "seq": report_seq,
+    }
+    if agent_session_id:
+        params["agent_session_id"] = agent_session_id
+    params["text"] = text
+    if truncated:
+        params["truncated"] = True
+    request = {
+        "id": request_id,
+        "method": "pane.report_agent_reply",
+        "params": params,
+    }
+    socket_timeout = 2.0
+elif agent_session_id:
+    transcript_path = hook_input.get("transcript_path")
+    agent_session_path = transcript_path if isinstance(transcript_path, str) and transcript_path else None
+    session_start_source = hook_input.get("source")
+    if not isinstance(session_start_source, str) or not session_start_source:
+        session_start_source = None
     params = {
         "pane_id": pane_id,
         "source": source,
@@ -87,9 +117,9 @@ else:
 
 try:
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    client.settimeout(0.5)
+    client.settimeout(socket_timeout)
     client.connect(socket_path)
-    client.sendall((json.dumps(request) + "\n").encode())
+    client.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
     try:
         client.recv(4096)
     except Exception:

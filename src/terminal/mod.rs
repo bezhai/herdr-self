@@ -1,3 +1,4 @@
+pub mod agent_replies;
 mod history_read;
 mod id;
 mod runtime;

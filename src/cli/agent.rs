@@ -2,8 +2,9 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{
     AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentRepliesParams, AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams,
+    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat,
+    ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -18,6 +19,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
     match subcommand {
         "list" => agent_list(&args[1..]),
         "get" => agent_get(&args[1..]),
+        "replies" => agent_replies(&args[1..]),
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
@@ -462,6 +464,54 @@ fn agent_get(args: &[String]) -> std::io::Result<i32> {
         method: Method::AgentGet(AgentTarget {
             target: target.clone(),
         }),
+    })?)
+}
+
+const AGENT_REPLIES_USAGE: &str = "usage: herdr agent replies <target> [--after SEQ]";
+
+fn agent_replies(args: &[String]) -> std::io::Result<i32> {
+    let args = super::expand_equals_args(args, &["--after"]);
+    let mut target = None;
+    let mut after_seq = None;
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--after" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --after");
+                    return Ok(2);
+                };
+                after_seq = match super::parse_u64_flag("--after", value) {
+                    Ok(seq) => Some(seq),
+                    Err(err) => {
+                        eprintln!("{err}");
+                        return Ok(2);
+                    }
+                };
+                index += 2;
+            }
+            other if other.starts_with('-') => {
+                eprintln!("unknown option: {other}");
+                return Ok(2);
+            }
+            value if target.is_none() => {
+                target = Some(value.to_string());
+                index += 1;
+            }
+            _ => {
+                eprintln!("{AGENT_REPLIES_USAGE}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(target) = target else {
+        eprintln!("{AGENT_REPLIES_USAGE}");
+        return Ok(2);
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:replies".into(),
+        method: Method::AgentReplies(AgentRepliesParams { target, after_seq }),
     })?)
 }
 
@@ -927,6 +977,7 @@ fn print_agent_help() {
     eprintln!("herdr agent commands:");
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
+    eprintln!("  herdr agent replies <target> [--after SEQ]");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");

@@ -1092,6 +1092,7 @@ impl App {
             }
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
+            Method::AgentReplies(params) => return self.handle_agent_replies(request.id, params),
             Method::AgentSendKeys(params) => {
                 return self.handle_agent_send_keys(request.id, params);
             }
@@ -1174,6 +1175,9 @@ impl App {
             }
             Method::PaneReportAgentSession(params) => {
                 return self.handle_pane_report_agent_session(request.id, params);
+            }
+            Method::PaneReportAgentReply(params) => {
+                return self.handle_pane_report_agent_reply(request.id, params);
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);

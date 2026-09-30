@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 // Process-exit updates clear matching hook authority before recomputing state.
 
 use crate::detect::{Agent, AgentState};
+use crate::terminal::agent_replies::{AgentReplies, AgentReplyReport};
 use crate::terminal::TerminalId;
 
 #[path = "metadata.rs"]
@@ -143,6 +144,7 @@ pub struct TerminalState {
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
     pub last_agent_completion_seq: Option<u64>,
+    agent_replies: AgentReplies,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -180,6 +182,7 @@ impl TerminalState {
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
+            agent_replies: AgentReplies::default(),
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -2108,12 +2111,53 @@ impl TerminalState {
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
+        self.agent_replies.clear();
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
         self.agent_process_acquisition_pending = false;
         self.pending_agent_resume_plan = None;
         self.clear_agent_name();
+    }
+
+    /// Records a final reply from an official integration and returns its reply seq.
+    ///
+    /// Reports that cannot belong to the pane's current agent are ignored. The
+    /// hook sequence is consumed only when the reply is recorded.
+    pub fn record_agent_reply(
+        &mut self,
+        report: AgentReplyReport,
+        next_reply_seq: &mut u64,
+    ) -> Option<u64> {
+        if report.text.is_empty()
+            || !crate::agent_resume::is_official_agent_source(&report.source, &report.agent_label)
+            || !self.is_agent_terminal()
+            || self.known_agent_label_conflicts_with_detected_agent(&report.agent_label)
+            || self.agent_reply_session_conflicts(report.agent_session_id.as_deref())
+            || !self.accept_hook_report(&report.source, report.seq)
+        {
+            return None;
+        }
+        *next_reply_seq += 1;
+        self.agent_replies
+            .push(*next_reply_seq, report.text, report.truncated);
+        Some(*next_reply_seq)
+    }
+
+    fn agent_reply_session_conflicts(&self, agent_session_id: Option<&str>) -> bool {
+        let Some(agent_session_id) = agent_session_id else {
+            return false;
+        };
+        self.current_session_identity_for_persistence()
+            .is_some_and(|(_, _, _, current_value)| current_value != agent_session_id)
+    }
+
+    pub fn agent_replies(&self) -> &AgentReplies {
+        &self.agent_replies
+    }
+
+    pub fn clear_agent_replies(&mut self) {
+        self.agent_replies.clear();
     }
 
     pub fn is_agent_terminal(&self) -> bool {
@@ -2249,6 +2293,183 @@ mod tests {
             agent: agent_label.into(),
             session_ref,
         });
+    }
+
+    fn agent_reply(source: &str, agent: &str, seq: u64, text: &str) -> AgentReplyReport {
+        AgentReplyReport {
+            source: source.into(),
+            agent_label: agent.into(),
+            seq: Some(seq),
+            agent_session_id: None,
+            text: text.into(),
+            truncated: false,
+        }
+    }
+
+    fn claude_reply(seq: u64, text: &str) -> AgentReplyReport {
+        agent_reply("herdr:claude", "claude", seq, text)
+    }
+
+    fn reply_texts(terminal: &TerminalState) -> Vec<(u64, String)> {
+        terminal
+            .agent_replies()
+            .after(None)
+            .map(|reply| (reply.seq, reply.text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn agent_reply_is_recorded_with_increasing_reply_seqs() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_reply_seq = 0;
+
+        assert_eq!(
+            terminal.record_agent_reply(claude_reply(100, "first"), &mut next_reply_seq),
+            Some(1)
+        );
+        assert_eq!(
+            terminal.record_agent_reply(claude_reply(101, "second"), &mut next_reply_seq),
+            Some(2)
+        );
+
+        assert_eq!(next_reply_seq, 2);
+        assert_eq!(terminal.agent_replies().latest_seq(), Some(2));
+        assert_eq!(
+            reply_texts(&terminal),
+            [(1, "first".to_string()), (2, "second".to_string())]
+        );
+    }
+
+    #[test]
+    fn agent_reply_keeps_the_reported_truncation_and_caps_text() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        let mut next_reply_seq = 0;
+        let mut report = agent_reply(
+            "herdr:codex",
+            "codex",
+            1,
+            &"x".repeat(crate::terminal::agent_replies::MAX_AGENT_REPLY_BYTES + 1),
+        );
+        report.truncated = false;
+
+        assert_eq!(
+            terminal.record_agent_reply(report, &mut next_reply_seq),
+            Some(1)
+        );
+
+        let reply = terminal.agent_replies().after(None).next().unwrap();
+        assert_eq!(
+            reply.text.len(),
+            crate::terminal::agent_replies::MAX_AGENT_REPLY_BYTES
+        );
+        assert!(reply.truncated);
+    }
+
+    #[test]
+    fn agent_reply_is_ignored_without_a_matching_official_agent() {
+        let mut next_reply_seq = 0;
+
+        let mut shell = test_terminal();
+        assert_eq!(
+            shell.record_agent_reply(claude_reply(1, "no agent"), &mut next_reply_seq),
+            None
+        );
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        for report in [
+            agent_reply("custom:claude", "claude", 1, "unofficial source"),
+            agent_reply("herdr:codex", "claude", 2, "source and agent disagree"),
+            agent_reply("herdr:codex", "codex", 3, "other detected agent"),
+            claude_reply(4, ""),
+        ] {
+            assert_eq!(
+                terminal.record_agent_reply(report.clone(), &mut next_reply_seq),
+                None,
+                "{report:?}"
+            );
+        }
+
+        assert_eq!(next_reply_seq, 0);
+        assert_eq!(terminal.agent_replies().latest_seq(), None);
+    }
+
+    #[test]
+    fn agent_reply_shares_stale_seq_rejection_with_session_reports() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
+            Some(50),
+            Some("startup".into()),
+        );
+        let mut next_reply_seq = 0;
+
+        assert_eq!(
+            terminal
+                .record_agent_reply(claude_reply(40, "older than session"), &mut next_reply_seq),
+            None
+        );
+        assert_eq!(
+            terminal.record_agent_reply(claude_reply(60, "fresh"), &mut next_reply_seq),
+            Some(1)
+        );
+        assert_eq!(
+            terminal.record_agent_reply(claude_reply(60, "duplicate"), &mut next_reply_seq),
+            None
+        );
+        assert_eq!(reply_texts(&terminal), [(1, "fresh".to_string())]);
+    }
+
+    #[test]
+    fn agent_reply_session_id_must_match_the_current_session() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let mut next_reply_seq = 0;
+        let with_session = |seq: u64, session: &str| AgentReplyReport {
+            agent_session_id: Some(session.into()),
+            ..claude_reply(seq, session)
+        };
+
+        assert_eq!(
+            terminal.record_agent_reply(with_session(1, "before-session"), &mut next_reply_seq),
+            Some(1),
+            "no session ref is known yet"
+        );
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("current").unwrap(),
+        });
+        assert_eq!(
+            terminal.record_agent_reply(with_session(2, "previous"), &mut next_reply_seq),
+            None
+        );
+        assert_eq!(
+            terminal.record_agent_reply(with_session(3, "current"), &mut next_reply_seq),
+            Some(2)
+        );
+        assert_eq!(
+            terminal.record_agent_reply(claude_reply(4, "no session id"), &mut next_reply_seq),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn agent_replies_are_cleared_after_respawn() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        let mut next_reply_seq = 0;
+        terminal.record_agent_reply(claude_reply(1, "before respawn"), &mut next_reply_seq);
+        assert_eq!(terminal.agent_replies().latest_seq(), Some(1));
+
+        terminal.clear_agent_runtime_identity_after_respawn();
+
+        assert_eq!(terminal.agent_replies().latest_seq(), None);
     }
 
     #[test]
