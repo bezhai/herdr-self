@@ -10,7 +10,7 @@ export function consoleUrl(value){
  return u.origin;
 }
 export class PendingChats{
- // reply(app,chatId,rootId,text) answers in the thread of a message; onBound(app,binding,msg) takes the first message of a newly bound chat;
+ // reply(app,chatId,rootId,{text}) answers in the thread of a message; onBound(app,binding,msg) takes the first message of a newly bound chat;
  // app(id) and machine(id) return an app or a machine, or throw.
  // Records stay in memory only: the first message never reaches the disk or the browser, and a restart forgets every link.
  constructor(store,{reply,onBound,app,machine,bridgeUrl='',now=Date.now}){this.store=store;this.reply=reply;this.onBound=onBound;this.app=app;this.machine=machine;this.bridgeUrl=bridgeUrl;this.now=now;this.chats=new Map();}
@@ -20,7 +20,7 @@ export class PendingChats{
   const createdAt=this.now(),chat={token:crypto.randomBytes(16).toString('base64url'),appId:a.id,chatId:msg.chatId,chatType:msg.chatType==='p2p'?'p2p':'group',message:msg,createdAt,expiresAt:createdAt+lifetime};
   this.chats.set(key,chat);this.store.log('会话绑定',`${a.name}：${chatLabel(chat.chatType)} ${chat.chatId} 尚未绑定，回复绑定${this.bridgeUrl?'链接':'提示'}`);
   const text=this.bridgeUrl?`这个聊天还没有连接到 Herdr，打开链接完成绑定：${this.bridgeUrl}/?bind=${chat.token}`:'这个聊天还没有连接到 Herdr，请在 Bridge 管理台「会话绑定」中完成绑定。';
-  try{await this.reply(a,chat.chatId,msg.messageId,text);}catch(e){this.store.log('会话绑定',`${a.name}：绑定提示未发出，${e.message}`,'error');}
+  try{await this.reply(a,chat.chatId,msg.messageId,{text});}catch(e){this.store.log('会话绑定',`${a.name}：绑定提示未发出，${e.message}`,'error');}
  }
  // Live records without their messages.
  list(){this.prune();return [...this.chats.values()].map(({message,...chat})=>chat);}

@@ -107,9 +107,9 @@ export class Platforms{
   // A chat without a binding asks for one: a direct chat with any message, a group only by mentioning the bot.
   else if(msg.chatType==='p2p'||msg.mentionedBot)this.onUnbound(a,msg);
  }
- // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic.
- async reply(a,chatId,rootId,text){
+ // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic. content is {text} or {markdown}.
+ async reply(a,chatId,rootId,content){
   const channel=this.runtime.get(a.id)?.channel;if(!channel||channel.getConnectionStatus()?.state!=='connected')throw Error('飞书未连接');
-  await channel.send(chatId,{text},{replyTo:rootId,replyInThread:true});
+  await channel.send(chatId,content,{replyTo:rootId,replyInThread:true});
  }
 }

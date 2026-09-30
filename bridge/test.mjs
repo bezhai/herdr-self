@@ -93,17 +93,18 @@ test('platform channels listen for messages and connection events only and never
  try{f.platforms.channel({id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu'});
  assert.deepEqual(Object.keys(handlers).sort(),['error','message','reconnected','reconnecting']);assert.deepEqual(options.outbound,{retry:{maxAttempts:1}});assert.deepEqual(options.safety.chatQueue,{enabled:true,mergeWhileBusy:false});}finally{f.close();}
 });
-test('replies go into the topic thread and fail without a connected channel',async()=>{
+test('replies go into the topic thread as text or markdown and fail without a connected channel',async()=>{
  const f=platformFixture(),sent=[];try{
-  await assert.rejects(f.platforms.reply(allowed,'oc_1','om_1','hi'),/飞书未连接/);
+  await assert.rejects(f.platforms.reply(allowed,'oc_1','om_1',{text:'hi'}),/飞书未连接/);
   f.platforms.runtime.set('a',{channel:{getConnectionStatus:()=>({state:'connected'}),send:async(...args)=>{sent.push(args);return {messageId:'om_r'};}}});
-  await f.platforms.reply(allowed,'oc_1','om_1','hi');assert.deepEqual(sent,[['oc_1',{text:'hi'},{replyTo:'om_1',replyInThread:true}]]);
+  await f.platforms.reply(allowed,'oc_1','om_1',{text:'hi'});await f.platforms.reply(allowed,'oc_1','om_1',{markdown:'**done**\n\n- a'});
+  assert.deepEqual(sent,[['oc_1',{text:'hi'},{replyTo:'om_1',replyInThread:true}],['oc_1',{markdown:'**done**\n\n- a'},{replyTo:'om_1',replyInThread:true}]]);
  }finally{f.close();}
 });
 test('a start failure with a local path and an English Herdr error keeps them out of the Feishu notice',async()=>{
  const f=topicFixture(),raw='no herdr server is running at /home/someone/.config/herdr/herdr.sock; run `herdr server`';try{
   f.h.on['workspace list']=()=>{throw Error(raw);};await f.send({messageId:'om_1',content:'one'});
-  assert.deepEqual(f.replies.map(r=>r[3]),['启动失败，请在 Bridge 管理台查看原因']);assert.ok(f.replies.every(r=>!r[3].includes('/home/')&&!r[3].includes('herdr server')));
+  assert.deepEqual(f.replies.map(r=>r[3]),[{text:'启动失败，请在 Bridge 管理台查看原因'}]);assert.ok(f.replies.every(r=>!r[3].text.includes('/home/')&&!r[3].text.includes('herdr server')));
   assert.equal(f.store.data.topics[0].error,raw);
  }finally{f.close();}
 });
@@ -127,8 +128,9 @@ test('Herdr commands keep Herdr error codes, honor per-call timeouts and expand 
 
 const coded=(code,message)=>Object.assign(Error(message),{code});
 // In-memory Herdr: records every CLI call; h.on['<group> <verb>'] replaces the next such call and may call run(args) for the default result.
+// h.retained[paneId] holds the replies Herdr keeps for the agent of that pane.
 function fakeHerdr(){
- const h={calls:[],timeouts:[],machines:[],workspaces:[],agents:[],created:0,panes:0,on:{}};
+ const h={calls:[],timeouts:[],machines:[],workspaces:[],agents:[],retained:{},created:0,panes:0,on:{}};
  const run=args=>{
   const [group,verb]=args;
   if(group==='workspace'&&verb==='list')return {type:'workspace_list',workspaces:h.workspaces};
@@ -138,6 +140,7 @@ function fakeHerdr(){
   if(group==='agent'&&verb==='start'){const agent={name:args[2],agent:args[4],pane_id:args[6],agent_status:'idle'};h.agents.push(agent);return {type:'agent_started',agent,argv:[args[4]]};}
   if(group==='agent'&&verb==='list')return {type:'agent_list',agents:h.agents};
   if(group==='agent'&&verb==='prompt')return {type:'agent_prompted',agent:h.agents.find(a=>a.pane_id===args[2])};
+  if(group==='agent'&&verb==='replies'){const after=args[3]==='--after'?Number(args[4]):0;return {type:'agent_replies',agent:h.agents.find(a=>a.pane_id===args[2]),replies:(h.retained[args[2]]||[]).filter(r=>r.seq>after)};}
   throw Error('unexpected herdr '+args.join(' '));
  };
  h.herdr=async(m,args,options={})=>{h.calls.push(args);h.timeouts.push(options.timeoutMs);h.machines.push(m.id);await null;const key=args[0]+' '+args[1],hook=h.on[key];if(hook){delete h.on[key];return hook(args,run);}return run(args);};
@@ -146,9 +149,10 @@ function fakeHerdr(){
 function topicFixture({binding,machine}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],m={id:'m',name:'cpu2',enabled:true,...machine};
  store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];
- const topics=new Topics(store,{herdr:h.herdr,machine:id=>{if(id!==m.id)throw Error('机器连接不存在');return m;},reply:async(a,chatId,rootId,text)=>{replies.push([a.id,chatId,rootId,text]);}});
+ const topics=new Topics(store,{herdr:h.herdr,machine:id=>{if(id!==m.id)throw Error('机器连接不存在');return m;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
+  reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);}});
  const send=msg=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg});
- return {dir,store,h,replies,b,send,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,replies,b,send,close(){fs.rmSync(dir,{recursive:true});}};
 }
 const later=ms=>new Promise(r=>setTimeout(r,ms));
 test('a new topic creates the binding workspace, names its root tab after the topic, starts the agent there with a longer timeout and prompts it',async()=>{
@@ -158,9 +162,9 @@ test('a new topic creates the binding workspace, names its root tab after the to
   assert.equal(agentName,'feishu-'+id.slice(0,8));assert.match(agentName,/^feishu-[0-9a-f]{8}$/);assert.ok(createdAt>0);
   assert.deepEqual(f.h.calls,[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w1:t1',title],['agent','start',agentName,'--kind','claude','--pane','w1:p1','--timeout','60000'],['agent','prompt','w1:p1',text]]);
   assert.deepEqual(f.h.timeouts,[undefined,undefined,undefined,70000,undefined]);assert.deepEqual([...new Set(f.h.machines)],['m']);
-  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1']});
+  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0});
   assert.equal(new Store(f.dir).data.bindings[0].workspaceId,'w1');assert.equal(new Store(f.dir).data.topics[0].state,'ready');
-  assert.deepEqual(f.replies,[['a','oc_1','om_1',`已在 cpu2 的 Herdr 中启动 claude：飞书 · 个人助手 / ${title}`]]);
+  assert.deepEqual(f.replies,[['a','oc_1','om_1',{text:`已在 cpu2 的 Herdr 中启动 claude：飞书 · 个人助手 / ${title}`}]]);
  }finally{f.close();}
 });
 test('another topic opens a tab in the same workspace; replies in a topic prompt its pane without a new tab',async()=>{
@@ -220,7 +224,7 @@ test('a topic whose named agent is gone is closed with one notice and gets no fu
   f.h.agents.splice(0,1,{name:'someone-else',pane_id:'w1:p1',agent_status:'idle'});f.h.calls.length=0;f.replies.length=0;
   await f.send({messageId:'om_2',rootId:'om_1',content:'two'});await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
   assert.deepEqual(f.h.calls,[['agent','list']]);assert.equal(f.store.data.topics[0].state,'closed');
-  assert.deepEqual(f.replies,[['a','oc_1','om_1','该话题的会话已结束，请发起新话题']]);
+  assert.deepEqual(f.replies,[['a','oc_1','om_1',{text:'该话题的会话已结束，请发起新话题'}]]);
  }finally{f.close();}
 });
 test('a failed start marks the topic failed with a notice that carries no error details; the next message retries in a new tab',async()=>{
@@ -228,7 +232,7 @@ test('a failed start marks the topic failed with a notice that carries no error 
   f.h.on['agent start']=()=>{throw coded('agent_pane_busy','agent target pane w1:p1 is not an available shell');};
   await f.send({messageId:'om_1',content:'one'});
   const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed','agent target pane w1:p1 is not an available shell']);assert.equal(new Store(f.dir).data.topics[0].state,'failed');
-  assert.deepEqual(f.replies.map(r=>r[3]),['启动失败，请在 Bridge 管理台查看原因']);assert.match(f.store.data.logs.at(-1).message,/agent target pane w1:p1 is not an available shell/);assert.equal(f.h.calls.some(c=>c[1]==='prompt'),false);
+  assert.deepEqual(f.replies.map(r=>r[3]),[{text:'启动失败，请在 Bridge 管理台查看原因'}]);assert.match(f.store.data.logs.at(-1).message,/agent target pane w1:p1 is not an available shell/);assert.equal(f.h.calls.some(c=>c[1]==='prompt'),false);
   f.h.calls.length=0;await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
   assert.deepEqual(f.h.calls,[['workspace','list'],['tab','create','--workspace','w1','--cwd',{path:'~/work'},'--label','one','--no-focus'],['agent','start',t.agentName,'--kind','claude','--pane','w1:p2','--timeout','60000'],['agent','prompt','w1:p2','two']]);
   assert.deepEqual([t.state,t.error,t.paneId,f.store.data.topics.length],['ready','','w1:p2',1]);
@@ -237,7 +241,7 @@ test('a failed start marks the topic failed with a notice that carries no error 
 test('a topic on a disconnected machine fails without calling Herdr',async()=>{
  const f=topicFixture({machine:{enabled:false}});try{
   await f.send({messageId:'om_1',content:'one'});
-  assert.deepEqual([f.h.calls,f.store.data.topics[0].state,f.store.data.topics[0].error,f.replies.map(r=>r[3])],[[],'failed','机器连接已停用',['启动失败，请在 Bridge 管理台查看原因']]);
+  assert.deepEqual([f.h.calls,f.store.data.topics[0].state,f.store.data.topics[0].error,f.replies.map(r=>r[3])],[[],'failed','机器连接已停用',[{text:'启动失败，请在 Bridge 管理台查看原因'}]]);
  }finally{f.close();}
 });
 test('agent_not_ready at start still opens the topic; agent_blocked sends a notice; other prompt errors are only logged',async()=>{
@@ -245,7 +249,7 @@ test('agent_not_ready at start still opens the topic; agent_blocked sends a noti
   f.h.on['agent start']=(args,run)=>{run(args);throw coded('agent_not_ready','agent is blocked during startup and is not ready for prompts');};
   f.h.on['agent prompt']=()=>{throw coded('agent_blocked','agent w1:p1 is blocked and requires interactive input');};
   await f.send({messageId:'om_1',content:'one'});
-  assert.equal(f.store.data.topics[0].state,'ready');assert.deepEqual(f.replies.map(r=>r[3]).slice(1),['Agent 正在等待确认，请到 Herdr 中处理后重发这条消息']);
+  assert.equal(f.store.data.topics[0].state,'ready');assert.deepEqual(f.replies.map(r=>r[3]).slice(1),[{text:'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息'}]);
   f.h.on['agent prompt']=()=>{throw coded('agent_prompt_failed','pty closed');};f.replies.length=0;const logs=f.store.data.logs.length;
   await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
   assert.deepEqual(f.replies,[]);assert.equal(f.h.calls.filter(c=>c[1]==='prompt').length,2);assert.equal(f.store.data.topics[0].state,'ready');
@@ -267,12 +271,98 @@ test('topics still starting when Bridge restarts are marked failed',()=>{
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 
+// A ready topic whose agent runs in w1:p1; snapshot(seq) is an agent list in which that agent reports reply_seq seq.
+async function readyTopic(){
+ const f=topicFixture();await f.send({messageId:'om_1',content:'one'});f.h.calls.length=0;f.replies.length=0;
+ return {...f,t:f.store.data.topics[0],snapshot:reply_seq=>f.h.agents.map(a=>({...a,reply_seq}))};
+}
+const forwarded=f=>f.store.data.logs.filter(l=>l.kind==='回复转发').map(l=>[l.level,l.message]);
+test('new replies of a topic agent are fetched after the stored seq and sent in order as markdown into its thread; a topic without a seq counts from 0',async()=>{
+ const f=await readyTopic();try{
+  delete f.t.replySeq;f.h.retained['w1:p1']=[{seq:1,text:'**第一条**'},{seq:2,text:'第二条\n\n- 列表'}];
+  await f.topics.sync(f.m,f.snapshot(2));
+  assert.deepEqual(f.h.calls,[['agent','replies','w1:p1','--after','0']]);
+  assert.deepEqual(f.replies,[['a','oc_1','om_1',{markdown:'**第一条**'}],['a','oc_1','om_1',{markdown:'第二条\n\n- 列表'}]]);assert.equal(new Store(f.dir).data.topics[0].replySeq,2);
+  f.h.retained['w1:p1'].push({seq:5,text:'第三条'});f.h.calls.length=0;f.replies.length=0;
+  await f.topics.sync(f.m,f.snapshot(5));
+  assert.deepEqual(f.h.calls,[['agent','replies','w1:p1','--after','2']]);assert.deepEqual(f.replies.map(r=>r[3]),[{markdown:'第三条'}]);assert.equal(f.t.replySeq,5);
+  assert.deepEqual(forwarded(f),Array(3).fill(['info',`个人助手：已转发 ${f.t.agentName} 的回复`]));assert.ok(!JSON.stringify(f.store.data.logs).includes('第一条'));
+ }finally{f.close();}
+});
+test('an unchanged reply_seq, or an agent without one from an older Herdr, calls nothing and sends nothing',async()=>{
+ const f=await readyTopic();try{
+  f.h.retained['w1:p1']=[{seq:3,text:'x'}];f.t.replySeq=3;
+  await f.topics.sync(f.m,f.snapshot(3));await f.topics.sync(f.m,f.h.agents);delete f.t.replySeq;await f.topics.sync(f.m,f.h.agents);
+  assert.deepEqual([f.h.calls,f.replies],[[],[]]);
+ }finally{f.close();}
+});
+test('syncs with the same snapshot fetch the replies once',async()=>{
+ const f=await readyTopic();try{
+  f.h.retained['w1:p1']=[{seq:1,text:'a'},{seq:2,text:'b'}];const snapshot=f.snapshot(2);
+  await Promise.all([f.topics.sync(f.m,snapshot),f.topics.sync(f.m,snapshot)]);await f.topics.sync(f.m,snapshot);
+  assert.equal(f.h.calls.length,1);assert.deepEqual(f.replies.map(r=>r[3]),[{markdown:'a'},{markdown:'b'}]);
+ }finally{f.close();}
+});
+test('each reply seq is on disk before its send; a failed send is logged once, not retried, and the seq still advances',async()=>{
+ const f=await readyTopic();try{
+  const seen=[];f.topics.reply=async(a,chatId,rootId,{markdown})=>{seen.push([markdown,new Store(f.dir).data.topics[0].replySeq]);if(markdown==='一')throw Error('飞书未连接');};
+  f.h.retained['w1:p1']=[{seq:1,text:'一'},{seq:2,text:'二'}];
+  await f.topics.sync(f.m,f.snapshot(2));await f.topics.sync(f.m,f.snapshot(2));
+  assert.deepEqual(seen,[['一',1],['二',2]]);assert.equal(f.h.calls.length,1);assert.equal(f.t.replySeq,2);
+  assert.deepEqual(forwarded(f),[['error',`个人助手：${f.t.agentName} 的回复未发出，飞书未连接`],['info',`个人助手：已转发 ${f.t.agentName} 的回复`]]);
+ }finally{f.close();}
+});
+test('a reply_seq below the stored one, after Herdr restarted and counts from 1 again, fetches all replies and sends those up to the snapshot',async()=>{
+ const f=await readyTopic();try{
+  f.t.replySeq=7;f.h.retained['w1:p1']=[{seq:1,text:'一'},{seq:2,text:'二'},{seq:3,text:'快照之后'}];
+  await f.topics.sync(f.m,f.snapshot(2));
+  assert.deepEqual(f.h.calls,[['agent','replies','w1:p1']]);assert.deepEqual(f.replies.map(r=>r[3]),[{markdown:'一'},{markdown:'二'}]);assert.equal(f.t.replySeq,2);
+  f.h.calls.length=0;await f.topics.sync(f.m,f.snapshot(3));
+  assert.deepEqual(f.h.calls,[['agent','replies','w1:p1','--after','2']]);assert.deepEqual(f.replies.at(-1)[3],{markdown:'快照之后'});
+ }finally{f.close();}
+});
+test('a truncated reply ends with a line pointing to Herdr',async()=>{
+ const f=await readyTopic();try{
+  f.h.retained['w1:p1']=[{seq:1,text:'很长的回复',truncated:true},{seq:2,text:'完整的回复',truncated:false}];
+  await f.topics.sync(f.m,f.snapshot(2));
+  assert.deepEqual(f.replies.map(r=>r[3]),[{markdown:'很长的回复\n\n（回复过长，已截断，完整内容请在 Herdr 中查看）'},{markdown:'完整的回复'}]);
+ }finally{f.close();}
+});
+test('sync handles only ready topics of its machine whose agent matches both pane and name',async()=>{
+ const f=topicFixture();try{
+  const topic={bindingId:'b',appId:'a',chatId:'oc_1',machineId:'m',paneId:'w1:p1',agentName:'feishu-1',state:'ready',replySeq:0};
+  f.store.data.topics=[{...topic,id:'ready',rootId:'om_ready'},...['closed','failed','starting'].map(state=>({...topic,id:state,rootId:'om_'+state,state})),{...topic,id:'elsewhere',rootId:'om_elsewhere',machineId:'m2'},
+   {...topic,id:'moved',rootId:'om_moved',paneId:'w1:p2'},{...topic,id:'renamed',rootId:'om_renamed',paneId:'w1:p3',agentName:'feishu-3'}];
+  f.h.retained={'w1:p1':[{seq:1,text:'hi'}],'w1:p2':[{seq:1,text:'no'}],'w1:p3':[{seq:1,text:'no'}]};
+  await f.topics.sync(f.m,[{name:'feishu-1',pane_id:'w1:p1',reply_seq:1},{name:'someone-else',pane_id:'w1:p3',reply_seq:1}]);
+  assert.deepEqual(f.h.calls,[['agent','replies','w1:p1','--after','0']]);assert.deepEqual(f.replies,[['a','oc_1','om_ready',{markdown:'hi'}]]);
+ }finally{f.close();}
+});
+test('sync runs in the topic queue after a message being prompted, and skips a topic that such a message closed',async()=>{
+ const f=await readyTopic();try{
+  f.h.retained['w1:p1']=[{seq:1,text:'done'}];f.h.on['agent prompt']=async(args,run)=>{await later(20);return run(args);};
+  await Promise.all([f.send({messageId:'om_2',rootId:'om_1',content:'two'}),f.topics.sync(f.m,f.snapshot(1))]);
+  assert.deepEqual(f.h.calls.map(c=>c.slice(0,2)),[['agent','list'],['agent','prompt'],['agent','replies']]);assert.deepEqual(f.replies.map(r=>r[3]),[{markdown:'done'}]);
+  const snapshot=f.snapshot(2);f.h.agents.length=0;f.h.calls.length=0;
+  await Promise.all([f.send({messageId:'om_3',rootId:'om_1',content:'three'}),f.topics.sync(f.m,snapshot)]);
+  assert.deepEqual(f.h.calls,[['agent','list']]);assert.equal(f.t.state,'closed');assert.equal(f.t.replySeq,1);
+ }finally{f.close();}
+});
+test('a queued reply fetch whose binding was removed meanwhile sends nothing',async()=>{
+ const f=await readyTopic();try{
+  f.h.retained['w1:p1']=[{seq:1,text:'done'}];f.h.on['agent prompt']=async(args,run)=>{await later(20);return run(args);};
+  const done=Promise.all([f.send({messageId:'om_2',rootId:'om_1',content:'two'}),f.topics.sync(f.m,f.snapshot(1))]);
+  f.store.data.bindings=[];f.store.data.topics=[];await done;
+  assert.deepEqual(f.h.calls.map(c=>c[1]),['list','prompt']);assert.deepEqual(f.replies,[]);
+ }finally{f.close();}
+});
+
 const minutes=n=>n*60000;
 function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-pending-')),store=new Store(dir),replies=[],bound=[],clock={now:1000};
  store.data.apps=[{...allowed}];store.data.machines=[{id:'m',name:'cpu2'}];store.save();
  const lookup=(collection,error)=>id=>{const x=store.data[collection].find(y=>y.id===id);if(!x)throw Error(error);return x;};
- const pending=new PendingChats(store,{reply:async(a,chatId,rootId,text)=>{replies.push([a.id,chatId,rootId,text]);},onBound:onBound||((...args)=>{bound.push(args);}),
+ const pending=new PendingChats(store,{reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);},onBound:onBound||((...args)=>{bound.push(args);}),
   app:lookup('apps','应用不存在'),machine:lookup('machines','机器连接不存在'),bridgeUrl,now:()=>clock.now});
  return {dir,store,replies,bound,clock,pending,close(){fs.rmSync(dir,{recursive:true});}};
 }
@@ -283,7 +373,7 @@ test('an unbound chat gets a pending record kept in memory only and one reply in
   await f.pending.open(allowed,firstDm);
   const [chat]=f.pending.list();assert.match(chat.token,/^[A-Za-z0-9_-]{22}$/);
   assert.deepEqual(chat,{token:chat.token,appId:'a',chatId:'oc_1',chatType:'p2p',createdAt:1000,expiresAt:1000+minutes(30)});
-  assert.deepEqual(f.replies,[['a','oc_1','om_first',`这个聊天还没有连接到 Herdr，打开链接完成绑定：http://bridge.example:8080/?bind=${chat.token}`]]);
+  assert.deepEqual(f.replies,[['a','oc_1','om_first',{text:`这个聊天还没有连接到 Herdr，打开链接完成绑定：http://bridge.example:8080/?bind=${chat.token}`}]]);
   assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('first private prompt'));assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes(chat.token));
   await f.pending.open(allowed,{...firstDm,chatId:'oc_group',chatType:'group',messageId:'om_group'});assert.deepEqual(f.pending.list().map(c=>[c.chatId,c.chatType]),[['oc_1','p2p'],['oc_group','group']]);
  }finally{f.close();}
@@ -301,7 +391,7 @@ test('a chat with a live record gets no second reply and keeps its first message
 });
 test('without BRIDGE_URL the reply points to the console instead of a link; a failed reply is logged',async()=>{
  const f=pendingFixture({bridgeUrl:''});try{
-  await f.pending.open(allowed,firstDm);assert.deepEqual(f.replies.map(r=>r[3]),['这个聊天还没有连接到 Herdr，请在 Bridge 管理台「会话绑定」中完成绑定。']);
+  await f.pending.open(allowed,firstDm);assert.deepEqual(f.replies.map(r=>r[3]),[{text:'这个聊天还没有连接到 Herdr，请在 Bridge 管理台「会话绑定」中完成绑定。'}]);
   f.pending.reply=async()=>{throw Error('飞书未连接');};await f.pending.open(allowed,{...firstDm,chatId:'oc_2'});
   assert.equal(f.pending.list().length,2);assert.equal(f.store.data.logs.at(-1).level,'error');assert.match(f.store.data.logs.at(-1).message,/飞书未连接/);
  }finally{f.close();}
@@ -448,6 +538,28 @@ test('the server lists pending chats, saves bindings only through a link token, 
   const [m]=(await api('state')).body.machines;assert.equal(m.state,'connected');assert.deepEqual(m.agents,agents);assert.deepEqual(m.panes,[{pane_id:'w1:p1'}]);
   assert.deepEqual(Object.keys(m).sort(),['agents','binary','checkedAt','enabled','host','id','name','panes','port','session','state','type']);
   assert.equal((await api('machines/install',{id:machineId})).status,404);
+ }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
+});
+test('the server hands every refreshed agent list to the topics, which fetch and forward new replies',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),calls=path.join(dir,'calls');
+ const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',reply_seq:1};
+ fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
+ fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'fake',type:'local',session:'default',binary:herdr,enabled:true}],
+  apps:[{id:'app',name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false}],bindings:[{id:'b',name:'助手',appId:'app',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false,enabled:true}],
+  topics:[{id:'t',bindingId:'b',appId:'app',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',state:'ready',error:'',messageIds:['om_1'],createdAt:1}]}));
+ fs.writeFileSync(herdr,['#!/bin/sh',`echo "$*" >> ${quote(calls)}`,'case "$3 $4" in',
+  ` 'agent list') echo ${quote(JSON.stringify({result:{type:'agent_list',agents:[agent]}}))};;`,
+  ` 'agent replies') echo ${quote(JSON.stringify({result:{type:'agent_replies',agent,replies:[{seq:1,text:'hi'}]}}))};;`,
+  ` *) echo '{"result":{"panes":[]}}';;`,'esac',''].join('\n'),{mode:0o700});
+ const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
+ const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1'},stdio:['ignore','pipe','inherit']});
+ try{
+  await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async p=>(await fetch(`http://127.0.0.1:${port}/api/${p}`,{headers:{authorization:'Bearer '+key}})).json();
+  // The app is not connected, so the forward fails and is logged; no Feishu request is made.
+  let s;for(let i=0;i<100;i++){s=await api('state');if(s.logs.some(l=>l.kind==='回复转发'))break;await later(50);}
+  assert.equal(s.topics[0].replySeq,1);assert.deepEqual(s.logs.filter(l=>l.kind==='回复转发').map(l=>[l.level,l.message]),[['error','助手：feishu-1 的回复未发出，飞书未连接']]);
+  assert.deepEqual(fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('replies')),['--session default agent replies w1:p1 --after 0']);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
 test('the server refuses to start with a BRIDGE_URL that is not an http(s) origin',async()=>{

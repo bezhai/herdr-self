@@ -8,9 +8,10 @@ function enqueue(queues,key,task){
  queues.set(key,tail);tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});return run;
 }
 export class Topics{
- // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; machine(id) returns a machine; reply(app,chatId,rootId,text) answers in the topic thread.
- constructor(store,{herdr,machine,reply}){
-  this.store=store;this.herdr=herdr;this.machine=machine;this.reply=reply;this.topicQueues=new Map();this.workspaceQueues=new Map();
+ // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; machine(id) and app(id) return a machine or an app, or throw;
+ // reply(app,chatId,rootId,{text}|{markdown}) answers in the topic thread.
+ constructor(store,{herdr,machine,app,reply}){
+  this.store=store;this.herdr=herdr;this.machine=machine;this.app=app;this.reply=reply;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // A start interrupted by a restart cannot be resumed; the next message in the topic retries it.
   const interrupted=store.data.topics.filter(t=>t.state==='starting');
   for(const t of interrupted)Object.assign(t,{state:'failed',error:'Bridge 重启时 Agent 启动未完成'});
@@ -26,7 +27,7 @@ export class Topics{
    // Recorded before the first await, so messages arriving meanwhile join this topic instead of opening another tab.
    const id=uuid();
    t={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:b.machineId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
-    title:[...text.replace(/\s+/g,' ')].slice(0,24).join(''),state:'starting',error:'',messageIds:[],createdAt:Date.now()};
+    title:[...text.replace(/\s+/g,' ')].slice(0,24).join(''),state:'starting',error:'',messageIds:[],replySeq:0,createdAt:Date.now()};
    this.store.data.topics.push(t);
   }
   // At most once: the id is on disk before Herdr is called, and a message seen before is dropped.
@@ -74,7 +75,31 @@ export class Topics{
   await this.herdr(m,['tab','rename',r.tab.tab_id,t.title]);
   b.workspaceId=r.workspace.workspace_id;return {workspaceId:b.workspaceId,tabId:r.tab.tab_id,paneId:r.root_pane.pane_id};
  }
+ // Takes an agent list of machine m after each refresh. The agent of a ready topic reports reply_seq, the seq of its latest reply
+ // (missing in Herdr versions without replies); a change is fetched in the topic's queue, so replies and prompts never overlap.
+ // Never rejects; resolves when the fetches it queued are done.
+ sync(m,agents){
+  return Promise.all(this.store.data.topics.filter(t=>t.machineId===m.id&&t.state==='ready').map(t=>{
+   const seq=agents.find(x=>x.pane_id===t.paneId&&x.name===t.agentName)?.reply_seq;
+   if(seq==null||seq===(t.replySeq||0))return;
+   return enqueue(this.topicQueues,t.id,()=>this.pull(m,t,seq)).catch(e=>this.store.log('回复转发',`${t.agentName}：${brief(e)}`,'error'));
+  }));
+ }
+ // Sends the agent's replies after t.replySeq, up to seq from the agent list, into the thread.
+ async pull(m,t,seq){
+  const last=t.replySeq||0,b=this.store.data.bindings.find(x=>x.id===t.bindingId);
+  // Checked again in the queue: an earlier sync of the same list may have sent them, a message may have closed the topic or the binding is gone.
+  if(!b||t.state!=='ready'||seq===last)return;
+  // A seq below the stored one means Herdr restarted or handed off and counts from 1 again: take its replies up to seq.
+  const a=this.app(t.appId),reset=seq<last,{replies}=await this.herdr(m,['agent','replies',t.paneId,...reset?[]:['--after',String(last)]]);
+  for(const r of replies)if(!reset||r.seq<=seq){
+   // At most once, like messages: the seq is on disk before the send, and a failed send is not repeated.
+   this.update(t,{replySeq:r.seq});
+   try{await this.reply(a,t.chatId,t.rootId,{markdown:r.truncated?r.text+'\n\n（回复过长，已截断，完整内容请在 Herdr 中查看）':r.text});this.store.log('回复转发',`${b.name}：已转发 ${t.agentName} 的回复`);}
+   catch(e){this.store.log('回复转发',`${b.name}：${t.agentName} 的回复未发出，${brief(e)}`,'error');}
+  }
+ }
  target(t){const m=this.machine(t.machineId);if(!m.enabled)throw Error('机器连接已停用');return m;}
  update(t,fields){Object.assign(t,fields);this.store.save();}
- async notify(a,t,text){try{await this.reply(a,t.chatId,t.rootId,text);}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}}
+ async notify(a,t,text){try{await this.reply(a,t.chatId,t.rootId,{text});}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}}
 }
