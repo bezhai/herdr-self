@@ -1,7 +1,10 @@
 import {uuid,publicText} from './core.mjs';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.mjs';
+import {permissionMode} from './platform.mjs';
 // One Feishu topic = one Herdr agent session in its own tab of the binding's workspace. Everything goes through the Herdr CLI.
 const workspaceLabel=b=>'飞书 · '+b.name;
+// Arguments that Herdr passes on to the agent it starts, after --: a Claude binding's permission mode.
+const agentArgs=b=>b.kind==='claude'?['--','--permission-mode',permissionMode(b)]:[];
 const brief=e=>publicText(e.message).split('\n')[0].slice(0,200);
 // Set in every topic pane: the agent's permission and question hooks then wait for an answer from Feishu (see cards).
 const remoteAnswers=['--env','HERDR_REMOTE_ANSWERS=1'];
@@ -85,7 +88,7 @@ export class Topics{
   try{
    m=this.target(t);
    Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();
-   try{await this.herdr(m,['agent','start',t.agentName,'--kind',b.kind,'--pane',t.paneId,'--timeout','60000'],{timeoutMs:70000});}
+   try{await this.herdr(m,['agent','start',t.agentName,'--kind',b.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs(b)],{timeoutMs:70000});}
    // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
    catch(e){if(e.code!=='agent_not_ready')throw e;}
   }catch(e){

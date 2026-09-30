@@ -17,13 +17,21 @@ export function normalizeApp(b,old={}){
  if(!secret)throw Error('请填写 App Secret');
  return {id:old.id||uuid(),name:text(b.name,60),appId,appSecret:secret,domain:['feishu','lark','bytedance'].includes(b.domain)?b.domain:'feishu',allowedUsers,enabled:false,verifiedAt:null};
 }
+// Claude permission modes a binding starts its topic agents with: default sends the confirmations Claude asks for to Feishu as cards,
+// auto lets Claude decide and rarely asks. Codex bindings have none.
+const permissionModes=['default','auto'];
+function claudeMode(v){if(!permissionModes.includes(v))throw Error('权限模式无效');return v;}
+// The permission mode of a Claude binding; one saved before bindings had a mode has none and uses default.
+export const permissionMode=b=>b.permissionMode||'default';
 // A binding routes one chat of an app; every topic in that chat gets its own agent session in Herdr (see topics.mjs).
 // chat is the pending chat that asked for it (see pending-chats.mjs): app and chat never come from the client, and a direct chat needs no mention.
 export function normalizeBinding(b,chat,bindings){
  if(!['claude','codex'].includes(b.kind))throw Error('Agent 类型无效');
  if(bindings.some(x=>x.appId===chat.appId&&x.chatId===chat.chatId))throw Error('该聊天已有绑定，请先移除旧绑定');
- return {id:uuid(),name:text(b.name,60),appId:chat.appId,machineId:b.machineId,chatId:chat.chatId,cwd:hostPath(b.cwd,'工作目录'),kind:b.kind,requireMention:chat.chatType==='group'&&b.requireMention!==false,enabled:true};
+ return {id:uuid(),name:text(b.name,60),appId:chat.appId,machineId:b.machineId,chatId:chat.chatId,cwd:hostPath(b.cwd,'工作目录'),kind:b.kind,...b.kind==='claude'&&{permissionMode:claudeMode(permissionMode(b))},requireMention:chat.chatType==='group'&&b.requireMention!==false,enabled:true};
 }
+// Topics already open keep the mode their agent started with; the next topics start with the new one.
+export function setPermissionMode(binding,mode){if(binding.kind!=='claude')throw Error('只有 Claude 绑定可以设置权限模式');binding.permissionMode=claudeMode(mode);}
 // Bridge takes text, and rich text without resources, from a person. Mentions are left to routing and topic handling.
 export function routable(msg){return msg.senderType==='user'&&['text','post'].includes(msg.rawContentType)&&Boolean(msg.senderId)&&!msg.resources?.length;}
 export class Platforms{

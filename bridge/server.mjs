@@ -1,6 +1,6 @@
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';import {fileURLToPath} from 'node:url';
 import {Store,normalizeMachine,herdr,makeDirectory,publicText} from './core.mjs';
-import {Platforms,normalizeApp} from './platform.mjs';
+import {Platforms,normalizeApp,setPermissionMode} from './platform.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';
 import {Topics} from './topics.mjs';
@@ -50,6 +50,7 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/apps/toggle'){const a=platforms.app(b.id);if(b.enabled){await platforms.start(a);a.enabled=true;}else{a.enabled=false;await platforms.stop(a.id);}store.save();}
  else if(p==='/api/apps/remove'){if(store.data.bindings.some(x=>x.appId===b.id))throw Error('请先移除该应用的会话绑定');await platforms.remove(b.id);}
  else if(p==='/api/bindings/save'){result={id:pending.bind(b).id};}
+ else if(p==='/api/bindings/permission-mode'){const x=store.data.bindings.find(y=>y.id===b.id);if(!x)throw Error('会话绑定不存在');setPermissionMode(x,b.permissionMode);store.save();store.log('会话绑定',`${x.name}：权限模式改为 ${x.permissionMode}，之后新开的话题生效`);}
  else if(p==='/api/bindings/remove'){store.data.bindings=store.data.bindings.filter(x=>x.id!==b.id);store.data.topics=store.data.topics.filter(x=>x.bindingId!==b.id);store.save();}
  else return json(res,404,{error:'接口不存在'});
  return json(res,200,result);

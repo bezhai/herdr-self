@@ -4,6 +4,7 @@ import { expect, test, vi } from 'vitest';
 import { AppDialog } from './AppDialog.jsx';
 import { BindingDialog } from './BindingDialog.jsx';
 import { MachineDialog } from './MachineDialog.jsx';
+import { PermissionModeDialog } from './PermissionModeDialog.jsx';
 import { RegistrationDialog } from './RegistrationDialog.jsx';
 import { bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.js';
 
@@ -86,7 +87,7 @@ test('binding form shows its chat read-only, lists only connected machines and s
   expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work']);
   expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex']);
   expect(screen.getByLabelText('Agent 类型').value).toBe('claude');
-  expect(document.querySelectorAll('select')).toHaveLength(2);
+  expect(document.querySelectorAll('select')).toHaveLength(3);
   expect(screen.getByLabelText('仅 @机器人时触发').checked).toBe(true);
   expect(screen.queryByText(/私聊请取消/)).toBeNull();
   expect(screen.getByText(/^每个飞书话题会在 Herdr 中新开一个 tab/)).toBeTruthy();
@@ -96,6 +97,7 @@ test('binding form shows its chat read-only, lists only connected machines and s
   await user.selectOptions(screen.getByLabelText('机器 / Herdr 实例'), 'm-2');
   await user.type(screen.getByLabelText('工作目录'), '~/code/bridge');
   await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
+  expect(screen.queryByLabelText('权限模式')).toBeNull();
   await user.click(screen.getByLabelText('仅 @机器人时触发'));
   await user.click(screen.getByRole('button', { name: '保存绑定' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
@@ -116,7 +118,52 @@ test('binding form for a direct chat has no mention option and never requires on
   await user.type(screen.getByLabelText('工作目录'), '~/work');
   await user.click(screen.getByRole('button', { name: '保存绑定' }));
   expect(await screen.findByText('绑定链接已失效，请在飞书里重新发消息')).toBeTruthy();
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-p2p', name: '飞书私聊', machineId: 'm-1', cwd: '~/work', kind: 'claude', requireMention: false });
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-p2p', name: '飞书私聊', machineId: 'm-1', cwd: '~/work', kind: 'claude', permissionMode: 'default', requireMention: false });
+  expect(onSaved).not.toHaveBeenCalled();
+});
+
+test('binding form offers the permission mode only for Claude, explains both modes, starts from default and saves the mode chosen', async () => {
+  const fetch = stubFetch({ '/api/bindings/save': { id: 'b-2' } });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  const state = sampleState();
+  render(<BindingDialog state={state} chat={state.pendingChats[1]} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
+  expect(screen.getByLabelText('权限模式').value).toBe('default');
+
+  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
+  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
+  expect(screen.queryByLabelText('权限模式')).toBeNull();
+  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'claude');
+  expect(screen.getByLabelText('权限模式').value).toBe('auto');
+
+  await user.type(screen.getByLabelText('工作目录'), '~/work');
+  await user.click(screen.getByRole('button', { name: '保存绑定' }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-p2p', name: '飞书私聊', machineId: 'm-1', cwd: '~/work', kind: 'claude', permissionMode: 'auto', requireMention: false });
+});
+
+test('permission mode form starts from the mode of the binding, default without one, says that only new topics use it and saves only the mode', async () => {
+  const save = deferred();
+  const fetch = stubFetch({ '/api/bindings/permission-mode': () => save.promise });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  const binding = sampleState().bindings[0];
+  const { unmount } = render(<PermissionModeDialog binding={{ ...binding, permissionMode: 'auto' }} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByLabelText('权限模式').value).toBe('auto');
+  unmount();
+
+  render(<PermissionModeDialog binding={binding} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(screen.getByRole('heading', { name: '修改权限模式' })).toBeTruthy();
+  expect(screen.getByLabelText('权限模式').value).toBe('default');
+  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
+  expect(screen.getByText('只影响「个人助手」之后新开的话题；已在运行的话题保持原来的模式。')).toBeTruthy();
+
+  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  expect(bodyOf(fetch, '/api/bindings/permission-mode')).toEqual({ id: 'b-1', permissionMode: 'auto' });
+  save.resolve(reply({ error: '会话绑定不存在' }, 400));
+  expect(await screen.findByText('会话绑定不存在')).toBeTruthy();
   expect(onSaved).not.toHaveBeenCalled();
 });
 

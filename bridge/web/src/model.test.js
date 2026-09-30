@@ -1,5 +1,7 @@
 import { expect, test } from 'vitest';
-import { agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, metrics, minutesLeft, registrationView, statusLabel, statusTone, topicStatus } from './model.js';
+import {
+  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, metrics, minutesLeft, permissionModeOf, registrationView, statusLabel, statusTone, topicStatus,
+} from './model.js';
 import { sampleState } from './test/fixtures.js';
 
 test('status tones group connection and Herdr agent states', () => {
@@ -42,6 +44,12 @@ test('a binding is usable while its platform app and its machine are connected',
   expect(bindingStatus({ ...binding, machineId: 'removed' }, state)).toEqual(machineDown);
   state.apps[0].connection = 'reconnecting';
   expect(bindingStatus(binding, state)).toEqual({ tone: 'neutral', label: '等待平台连接' });
+});
+
+test('a Claude binding saved before bindings had a permission mode uses default', () => {
+  const [binding] = sampleState().bindings;
+  expect(permissionModeOf(binding)).toBe('default');
+  expect(permissionModeOf({ ...binding, permissionMode: 'auto' })).toBe('auto');
 });
 
 test('pending chats show their chat type and the whole minutes left, rounded up', () => {

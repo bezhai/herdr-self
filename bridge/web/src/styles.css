@@ -195,7 +195,7 @@ td small { display: block; margin-top: 3px; font-size: 12.5px; color: var(--mute
 td code { display: block; margin-top: 2px; font: 12px/1.6 var(--mono); color: var(--faint); overflow-wrap: anywhere; }
 td small.app-name { display: flex; align-items: center; gap: 6px; }
 .app-name .avatar, .app-name .i { width: 16px; height: 16px; border-radius: 4px; }
-td.row-action { text-align: right; vertical-align: middle; }
+td.row-action { text-align: right; vertical-align: middle; white-space: nowrap; }
 td.table-empty { padding: 44px 16px; text-align: center; color: var(--muted); }
 .topics-row td { padding: 0 16px 14px 32px; border-top: 0; }
 .topics { display: grid; gap: 8px; margin: 0; padding: 2px 0 2px 14px; border-left: 1px solid var(--line-2); list-style: none; }

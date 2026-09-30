@@ -168,6 +168,34 @@ test('binding rows show the chat, the machine with the agent kind and working di
   expect(screen.queryByText('最近投递')).toBeNull();
 });
 
+test('Claude binding rows show their permission mode, default without one, and change it in a dialog; Codex rows have neither', async () => {
+  const state = sampleState();
+  const [claude] = state.bindings;
+  state.bindings.push({ ...claude, id: 'b-2', name: '自动助手', chatId: 'oc_2', permissionMode: 'auto' }, { ...claude, id: 'b-3', name: 'Codex 助手', chatId: 'oc_3', kind: 'codex' });
+  const fetch = stubFetch({ '/api/state': () => state, '/api/bindings/permission-mode': { ok: true } });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
+
+  const row = (name) => screen.getByText(name).closest('tr');
+  expect(within(row('个人助手')).getByText('权限模式：default')).toBeTruthy();
+  expect(within(row('自动助手')).getByText('权限模式：auto')).toBeTruthy();
+  expect(within(row('Codex 助手')).queryByText(/权限模式/)).toBeNull();
+  expect(within(row('Codex 助手')).queryByRole('button', { name: '修改权限模式' })).toBeNull();
+
+  await user.click(within(row('个人助手')).getByRole('button', { name: '修改权限模式' }));
+  expect(within(dialog()).getByRole('heading', { name: '修改权限模式' })).toBeTruthy();
+  expect(screen.getByLabelText('权限模式').value).toBe('default');
+  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
+  const before = callsTo(fetch, '/api/state');
+  state.bindings[0] = { ...claude, permissionMode: 'auto' };
+  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(dialog()).toBeNull());
+  expect(bodyOf(fetch, '/api/bindings/permission-mode')).toEqual({ id: 'b-1', permissionMode: 'auto' });
+  await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
+  expect(within(row('个人助手')).getByText('权限模式：auto')).toBeTruthy();
+});
+
 test('each binding lists its topics newest first with state, pane and creation time, and shows why a topic failed', async () => {
   stubFetch({ '/api/state': sampleState() });
   const user = userEvent.setup();

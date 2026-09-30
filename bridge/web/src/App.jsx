@@ -9,6 +9,7 @@ import { AppDialog } from './dialogs/AppDialog.jsx';
 import { BindingDialog } from './dialogs/BindingDialog.jsx';
 import { MachineDialog } from './dialogs/MachineDialog.jsx';
 import { PendingChatsDialog } from './dialogs/PendingChatsDialog.jsx';
+import { PermissionModeDialog } from './dialogs/PermissionModeDialog.jsx';
 import { RegistrationDialog } from './dialogs/RegistrationDialog.jsx';
 import { assign, clearQuery, query, reload } from './location.js';
 import { BindingsPage } from './pages/BindingsPage.jsx';
@@ -95,7 +96,7 @@ export function App() {
               <Metrics state={state} />
               {page === 'platforms' && <PlatformsPage {...pageProps} openApp={(app) => openDialog('app', { app })} />}
               {page === 'machines' && <MachinesPage {...pageProps} openMachine={(machine) => openDialog('machine', { machine })} />}
-              {page === 'bindings' && <BindingsPage {...pageProps} />}
+              {page === 'bindings' && <BindingsPage {...pageProps} openPermissionMode={(binding) => openDialog('permission-mode', { binding })} />}
               {page === 'logs' && <LogsPage state={state} />}
             </div>
           </div>
@@ -107,6 +108,9 @@ export function App() {
         <PendingChatsDialog key={dialog.key} state={state} onPick={(chat) => openDialog('binding', { chat })} onClose={closeDialog} />
       )}
       {dialog?.kind === 'binding' && <BindingDialog key={dialog.key} state={state} chat={dialog.chat} onClose={closeDialog} onSaved={saved} />}
+      {dialog?.kind === 'permission-mode' && (
+        <PermissionModeDialog key={dialog.key} binding={dialog.binding} onClose={closeDialog} onSaved={saved} />
+      )}
       {dialog?.kind === 'registration' && (
         <RegistrationDialog
           key={dialog.key}

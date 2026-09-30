@@ -2,6 +2,7 @@ import { request } from '../api.js';
 import { AppAvatar } from '../components/AppAvatar.jsx';
 import { chatTypeLabel, connectedMachines } from '../model.js';
 import { FormDialog, useFields } from './FormDialog.jsx';
+import { PermissionModeField } from './PermissionModeDialog.jsx';
 
 // Herdr agent kinds a topic can start.
 const kinds = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' }];
@@ -11,19 +12,20 @@ const selected = (options, value) => (options.some((o) => o.id === value) ? valu
 
 // Route the pending chat that asked for a binding to a machine: each topic of the chat will start an agent of the chosen kind
 // in the working directory. The chat is fixed by its link token; only enabled, connected machines can be targets.
-// Mentions matter only in groups: a direct chat always triggers.
+// Mentions matter only in groups: a direct chat always triggers. Only Claude bindings have a permission mode.
 export function BindingDialog({ state, chat, onClose, onSaved }) {
   const group = chat.chatType === 'group';
   const { values, field, checkbox } = useFields({
-    name: `飞书${chatTypeLabel(chat.chatType)}`, machineId: '', cwd: '', kind: 'claude', requireMention: true,
+    name: `飞书${chatTypeLabel(chat.chatType)}`, machineId: '', cwd: '', kind: 'claude', permissionMode: 'default', requireMention: true,
   });
   const machines = connectedMachines(state);
   const machineId = selected(machines, values.machineId);
   const app = state.apps.find((a) => a.id === chat.appId);
 
   async function save() {
-    const { name, cwd, kind, requireMention } = values;
-    await request('/bindings/save', { token: chat.token, name, machineId, cwd, kind, requireMention: group && requireMention });
+    const { name, cwd, kind, permissionMode, requireMention } = values;
+    const claude = kind === 'claude' && { permissionMode };
+    await request('/bindings/save', { token: chat.token, name, machineId, cwd, kind, ...claude, requireMention: group && requireMention });
     onSaved();
   }
 
@@ -56,6 +58,7 @@ export function BindingDialog({ state, chat, onClose, onSaved }) {
             </select>
           </label>
         </div>
+        {values.kind === 'claude' && <PermissionModeField {...field('permissionMode')} />}
         <p className="fine">每个飞书话题会在 Herdr 中新开一个 tab，在该目录启动所选 Agent；这些 tab 都放在工作区「飞书 · 绑定名称」中。</p>
       </fieldset>
       {group && <label className="checkbox"><input type="checkbox" {...checkbox('requireMention')} /><span>仅 @机器人时触发</span></label>}

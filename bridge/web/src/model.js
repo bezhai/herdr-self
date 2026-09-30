@@ -42,6 +42,15 @@ export function bindingStatus(binding, state) {
   return { tone: 'ok', label: '可用' };
 }
 
+// Claude permission modes a binding starts its topic agents with, and what each does.
+export const permissionModes = [
+  { id: 'default', note: '需要确认的操作发卡片到飞书' },
+  { id: 'auto', note: '由 Claude 自动决定，很少需要确认' },
+];
+
+// Permission mode of a Claude binding: one saved before bindings had a mode has none and uses default.
+export const permissionModeOf = (binding) => binding.permissionMode || 'default';
+
 const topicStates = { starting: ['warn', '启动中'], ready: ['ok', '运行中'], failed: ['error', '失败'], closed: ['neutral', '已结束'] };
 
 // Badge of a topic session state.
