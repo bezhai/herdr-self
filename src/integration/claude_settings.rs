@@ -18,12 +18,16 @@ use super::config_edit::{
 // `new`/`load`; filter before it starts an unnecessary hook process.
 const SESSION_START_MATCHER: &str = "^(startup|resume|clear|compact|fork)$";
 const HOOK_TIMEOUT_SECONDS: u64 = 10;
+/// The permission hook waits up to 24 hours for an answer; Claude Code must not
+/// kill it before that wait ends on its own.
+const PERMISSION_HOOK_TIMEOUT_SECONDS: u64 = 24 * 60 * 60 + 60;
 
 /// A hook group that install writes and keeps in one canonical form.
 struct HookInstall {
     event: &'static str,
     action: &'static str,
     matcher: Option<&'static str>,
+    timeout: u64,
 }
 
 const HOOK_INSTALLS: &[HookInstall] = &[
@@ -31,12 +35,21 @@ const HOOK_INSTALLS: &[HookInstall] = &[
         event: "SessionStart",
         action: "session",
         matcher: Some(SESSION_START_MATCHER),
+        timeout: HOOK_TIMEOUT_SECONDS,
     },
     // `Stop`/`idle` is a removed legacy hook, so the reply report uses its own action.
     HookInstall {
         event: "Stop",
         action: "reply",
         matcher: None,
+        timeout: HOOK_TIMEOUT_SECONDS,
+    },
+    // `PermissionRequest`/`blocked` is a removed legacy hook as well.
+    HookInstall {
+        event: "PermissionRequest",
+        action: "permission",
+        matcher: None,
+        timeout: PERMISSION_HOOK_TIMEOUT_SECONDS,
     },
 ];
 
@@ -59,7 +72,7 @@ impl HookInstall {
             serde_json_value!([{
                 "type": "command",
                 "command": self.command(hook_path),
-                "timeout": HOOK_TIMEOUT_SECONDS,
+                "timeout": self.timeout,
             }]),
         );
         Value::Object(entry)
@@ -67,6 +80,7 @@ impl HookInstall {
 
     fn canonical_input(&self, hook_path: &Path) -> CstInputValue {
         let command = self.command(hook_path);
+        let timeout = self.timeout;
         let mut properties = Vec::new();
         if let Some(matcher) = self.matcher {
             properties.push((
@@ -79,7 +93,7 @@ impl HookInstall {
             json!([{
                 "type": "command",
                 command: command,
-                timeout: HOOK_TIMEOUT_SECONDS,
+                timeout: timeout,
             }]),
         ));
         CstInputValue::Object(properties)
@@ -88,7 +102,8 @@ impl HookInstall {
     fn canonical_json(&self, hook_path: &Path) -> io::Result<String> {
         let command = serde_json::to_string(&self.command(hook_path))?;
         let hooks = format!(
-            "[{{\"type\":\"command\",\"command\":{command},\"timeout\":{HOOK_TIMEOUT_SECONDS}}}]"
+            "[{{\"type\":\"command\",\"command\":{command},\"timeout\":{}}}]",
+            self.timeout
         );
         Ok(match self.matcher {
             Some(matcher) => format!(
@@ -120,7 +135,7 @@ const HOOK_REMOVALS: &[HookRemoval] = &[
     },
     HookRemoval {
         event: "PermissionRequest",
-        actions: &["blocked"],
+        actions: &["blocked", "permission"],
     },
     HookRemoval {
         event: "SessionStart",
@@ -159,7 +174,7 @@ pub(crate) fn install(content: &str, settings_path: &Path, hook_path: &Path) -> 
             hooks,
             hook.event,
             hook.command(hook_path),
-            HOOK_TIMEOUT_SECONDS,
+            hook.timeout,
             hook.matcher,
         )?;
     }
@@ -668,6 +683,13 @@ mod tests {
         )
     }
 
+    fn permission_json(hook_path: &Path) -> String {
+        format!(
+            "{{\"hooks\":[{{\"type\":\"command\",\"command\":{},\"timeout\":86460}}]}}",
+            command_json(hook_path, "permission")
+        )
+    }
+
     #[test]
     fn install_preserves_untouched_formatting_and_complete_trailing_suffix() {
         let (settings_path, hook_path) = paths();
@@ -712,41 +734,42 @@ mod tests {
         let (settings_path, hook_path) = paths();
         let canonical = session_start_json(hook_path);
         let stop = stop_json(hook_path);
+        let permission = permission_json(hook_path);
         let cases = [
             (
                 "{\"zeta\":{\"escaped\":\"\\u0061\",\"n\":1e+02},\"alpha\":1}\r\n".to_string(),
                 format!(
-                    "{{\"zeta\":{{\"escaped\":\"\\u0061\",\"n\":1e+02}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}]}}}}\r\n"
+                    "{{\"zeta\":{{\"escaped\":\"\\u0061\",\"n\":1e+02}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}\r\n"
                 ),
             ),
             (
                 "{\"hooks\":{\"Notification\":[{\"matcher\":\"keep\",\"hooks\":[]}]}, \"alpha\":1}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}],\"Stop\":[{stop}]}}, \"alpha\":1}}"
+                    "{{\"hooks\":{{\"Notification\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}, \"alpha\":1}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"SessionStart\":[{\"matcher\":\"keep\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo keep\"}]}]}}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"keep\",\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{canonical}],\"Stop\":[{stop}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"keep\",\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}"
                 ),
             ),
             (
                 "{\"zeta\":{\n  \"x\":1\n},\"alpha\":1}".to_string(),
                 format!(
-                    "{{\"zeta\":{{\n  \"x\":1\n}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}]}}}}"
+                    "{{\"zeta\":{{\n  \"x\":1\n}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"Notification\":[\n  {\"matcher\":\"keep\",\"hooks\":[]}\n]},\"alpha\":1}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}],\"Stop\":[{stop}]}},\"alpha\":1}}"
+                    "{{\"hooks\":{{\"Notification\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}},\"alpha\":1}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"SessionStart\":[{\n  \"matcher\":\"keep\",\n  \"hooks\":[{\"type\":\"command\",\"command\":\"echo keep\"}]\n}]}}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{{\n  \"matcher\":\"keep\",\n  \"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]\n}},{canonical}],\"Stop\":[{stop}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{{\n  \"matcher\":\"keep\",\n  \"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]\n}},{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}"
                 ),
             ),
             (
@@ -754,7 +777,7 @@ mod tests {
                     "{{\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}}]}}}}"
                 ),
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{stop}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{stop}],\"PermissionRequest\":[{permission}]}}}}"
                 ),
             ),
         ];
@@ -787,8 +810,9 @@ mod tests {
         let (settings_path, hook_path) = paths();
         let command = command_json(hook_path, "session");
         let reply = command_json(hook_path, "reply");
+        let permission = command_json(hook_path, "permission");
         let input = format!(
-            "{{\"hooks\":{{\"Stop\" : [ {{ \"hooks\" : [{{\"timeout\":10,\"type\":\"command\",\"command\":{reply}}}] }} ],\"SessionStart\":[{{\"hooks\":[{{\"timeout\":10,\"command\":{command},\"type\":\"command\"}}],\"matcher\":\"{SESSION_START_MATCHER}\"}}]}},\"escaped\":\"\\u0061\"}}  \r\n\r\n"
+            "{{\"hooks\":{{\"PermissionRequest\": [{{\"hooks\":[{{\"command\":{permission},\"timeout\":86460,\"type\":\"command\"}}]}}],\"Stop\" : [ {{ \"hooks\" : [{{\"timeout\":10,\"type\":\"command\",\"command\":{reply}}}] }} ],\"SessionStart\":[{{\"hooks\":[{{\"timeout\":10,\"command\":{command},\"type\":\"command\"}}],\"matcher\":\"{SESSION_START_MATCHER}\"}}]}},\"escaped\":\"\\u0061\"}}  \r\n\r\n"
         );
 
         let updated = install(&input, settings_path, hook_path).unwrap();
@@ -848,7 +872,17 @@ mod tests {
         .concat();
         let input = ["{\"hooks\":{", &session_start, ",", &old_event, "}}"].concat();
         let stop = format!("\"Stop\":[{}]", stop_json(hook_path));
-        let expected = ["{\"hooks\":{", &session_start, ",", &stop, "}}"].concat();
+        let permission = format!("\"PermissionRequest\":[{}]", permission_json(hook_path));
+        let expected = [
+            "{\"hooks\":{",
+            &session_start,
+            ",",
+            &stop,
+            ",",
+            &permission,
+            "}}",
+        ]
+        .concat();
 
         let updated = install(&input, settings_path, hook_path).unwrap();
 
@@ -952,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn install_appends_only_the_stop_hook_to_previous_canonical_settings() {
+    fn install_appends_the_stop_and_permission_hooks_to_v10_canonical_settings() {
         let (settings_path, hook_path) = paths();
         let session_start = session_start_json(hook_path);
         let input = format!(
@@ -982,8 +1016,137 @@ mod tests {
             serde_json::from_str::<Value>(&stop_json(hook_path)).unwrap()
         );
         assert_eq!(
+            settings["hooks"]["PermissionRequest"][0],
+            serde_json::from_str::<Value>(&permission_json(hook_path)).unwrap()
+        );
+        assert_eq!(
             install(&updated, settings_path, hook_path).unwrap(),
             updated
+        );
+    }
+
+    #[test]
+    fn install_appends_only_the_permission_hook_to_v11_canonical_settings() {
+        let (settings_path, hook_path) = paths();
+        let session_start = session_start_json(hook_path);
+        let stop = stop_json(hook_path);
+        let input = format!(
+            concat!(
+                "{{\n",
+                "  \"model\": \"opus\",\n",
+                "  \"hooks\": {{\n",
+                "    \"SessionStart\": [{session_start}],\n",
+                "    \"Stop\": [{stop}]\n",
+                "  }}\n",
+                "}}\n",
+            ),
+            session_start = session_start,
+            stop = stop,
+        );
+
+        let updated = install(&input, settings_path, hook_path).unwrap();
+
+        assert!(
+            updated.starts_with(&format!(
+                "{{\n  \"model\": \"opus\",\n  \"hooks\": {{\n    \"SessionStart\": [{session_start}],\n    \"Stop\": [{stop}],\n    \"PermissionRequest\": ["
+            )),
+            "{updated}"
+        );
+        assert!(updated.ends_with("\n  }\n}\n"), "{updated}");
+        let settings: Value = serde_json::from_str(&updated).unwrap();
+        assert_eq!(
+            settings["hooks"]["PermissionRequest"],
+            serde_json_value!(
+                [serde_json::from_str::<Value>(&permission_json(hook_path)).unwrap()]
+            )
+        );
+        assert_eq!(
+            install(&updated, settings_path, hook_path).unwrap(),
+            updated
+        );
+        let removed = uninstall(&updated, settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(settings["hooks"], serde_json_value!({}), "{removed}");
+        assert_eq!(settings["model"], "opus");
+    }
+
+    #[test]
+    fn install_adds_a_permission_request_hook_that_outlasts_the_day_long_wait() {
+        let (settings_path, hook_path) = paths();
+        let installed = install("{}", settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&installed).unwrap();
+
+        assert_eq!(
+            settings["hooks"]["PermissionRequest"],
+            serde_json_value!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command(hook_path, Some("permission")),
+                    "timeout": 86_460,
+                }],
+            }])
+        );
+        assert_eq!(
+            install(&installed, settings_path, hook_path).unwrap(),
+            installed
+        );
+
+        let removed = uninstall(&installed, settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(settings["hooks"], serde_json_value!({}));
+    }
+
+    #[test]
+    fn install_replaces_stale_permission_hooks_and_keeps_user_permission_hooks() {
+        let (settings_path, hook_path) = paths();
+        let blocked = command_json(hook_path, "blocked");
+        let permission = command_json(hook_path, "permission");
+        let user_hook = r#"{ "type" : "command", "command" : "echo keep", "timeout" : 3 }"#;
+        let input = format!(
+            concat!(
+                "{{\n",
+                "  \"hooks\": {{\n",
+                "    \"PermissionRequest\": [\n",
+                "      {{\"matcher\":\"*\",\"hooks\":[{{\"type\":\"command\",\"command\":{blocked},\"timeout\":10}},{user_hook}]}},\n",
+                "      {{\"hooks\":[{{\"type\":\"command\",\"command\":{permission},\"timeout\":10}}]}}\n",
+                "    ]\n",
+                "  }}\n",
+                "}}\n",
+            ),
+            blocked = blocked,
+            permission = permission,
+            user_hook = user_hook,
+        );
+
+        let installed = install(&input, settings_path, hook_path).unwrap();
+
+        assert!(installed.contains(user_hook), "{installed}");
+        assert!(!installed.contains(&blocked), "{installed}");
+        let settings: Value = serde_json::from_str(&installed).unwrap();
+        let groups = settings["hooks"]["PermissionRequest"].as_array().unwrap();
+        assert_eq!(groups.len(), 2, "{installed}");
+        assert_eq!(groups[0]["matcher"], "*");
+        assert_eq!(groups[0]["hooks"].as_array().unwrap().len(), 1);
+        assert_eq!(groups[0]["hooks"][0]["command"], "echo keep");
+        assert_eq!(
+            groups[1],
+            serde_json::from_str::<Value>(&permission_json(hook_path)).unwrap()
+        );
+        assert_eq!(
+            install(&installed, settings_path, hook_path).unwrap(),
+            installed
+        );
+
+        let removed = uninstall(&installed, settings_path, hook_path).unwrap();
+        assert!(removed.contains(user_hook), "{removed}");
+        assert!(!removed.contains(&permission), "{removed}");
+        let settings: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(
+            settings["hooks"]["PermissionRequest"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
         );
     }
 

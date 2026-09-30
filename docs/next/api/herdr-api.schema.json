@@ -1228,6 +1228,53 @@
     },
     "request": {
       "$defs": {
+        "AgentAnswerParams": {
+          "description": "`decision` and an optional `message` answer a permission request; `answers`\nanswers a question request.",
+          "properties": {
+            "answers": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "description": "Question text to the chosen answers, one entry per question.",
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "decision": {
+              "anyOf": [
+                {
+                  "$ref": "#/schemas/request/$defs/AgentRequestDecision"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "message": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "request_id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "request_id"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -1270,6 +1317,49 @@
               "type": "array"
             }
           },
+          "type": "object"
+        },
+        "AgentQuestion": {
+          "properties": {
+            "header": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "multi_select": {
+              "type": "boolean"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentQuestionOption"
+              },
+              "type": "array"
+            },
+            "question": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        },
+        "AgentQuestionOption": {
+          "properties": {
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label"
+          ],
           "type": "object"
         },
         "AgentReadParams": {
@@ -1339,6 +1429,37 @@
             "target"
           ],
           "type": "object"
+        },
+        "AgentRequestDecision": {
+          "oneOf": [
+            {
+              "enum": [
+                "allow",
+                "deny"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "allow_always",
+              "description": "Allow and stop asking for matching uses.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentRequestKind": {
+          "description": "What an agent asks the user through an integration hook.",
+          "oneOf": [
+            {
+              "const": "permission",
+              "description": "Permission to use a tool.",
+              "type": "string"
+            },
+            {
+              "const": "question",
+              "description": "Questions for the user, such as Claude Code's AskUserQuestion.",
+              "type": "string"
+            }
+          ]
         },
         "AgentSendKeysParams": {
           "properties": {
@@ -3168,6 +3289,74 @@
             "source",
             "agent",
             "text"
+          ],
+          "type": "object"
+        },
+        "PaneReportAgentRequestParams": {
+          "description": "A permission request or question reported by an agent integration hook.\nThe connection stays open until the request is answered or ends.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "decisions": {
+              "description": "Permission requests only: the decisions the user may choose.",
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentRequestDecision"
+              },
+              "type": "array"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "input_preview": {
+              "description": "Preview of the tool input, at most 8 KiB of UTF-8.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/request/$defs/AgentRequestKind"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "questions": {
+              "description": "Question requests only: one to four questions with distinct text.",
+              "items": {
+                "$ref": "#/schemas/request/$defs/AgentQuestion"
+              },
+              "type": "array"
+            },
+            "source": {
+              "type": "string"
+            },
+            "timeout_ms": {
+              "description": "Longest wait in milliseconds; defaults to and is capped at 86400000 (24 hours).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "tool_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "agent",
+            "kind",
+            "tool_name",
+            "input_preview"
           ],
           "type": "object"
         },
@@ -5559,6 +5748,38 @@
         {
           "properties": {
             "method": {
+              "const": "agent.requests",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentTarget"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "agent.answer",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentAnswerParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.send_keys",
               "type": "string"
             },
@@ -6279,6 +6500,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.report_agent_request",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentRequestParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.report_metadata",
               "type": "string"
             },
@@ -6930,6 +7167,15 @@
                 "null"
               ]
             },
+            "request_ids": {
+              "description": "Ids of pending requests in ascending order; read them with `agent.requests`.",
+              "items": {
+                "format": "uint64",
+                "minimum": 0,
+                "type": "integer"
+              },
+              "type": "array"
+            },
             "revision": {
               "format": "uint64",
               "minimum": 0,
@@ -7060,6 +7306,49 @@
           ],
           "type": "object"
         },
+        "AgentQuestion": {
+          "properties": {
+            "header": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "multi_select": {
+              "type": "boolean"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentQuestionOption"
+              },
+              "type": "array"
+            },
+            "question": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "question"
+          ],
+          "type": "object"
+        },
+        "AgentQuestionOption": {
+          "properties": {
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "label": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "label"
+          ],
+          "type": "object"
+        },
         "AgentReplyInfo": {
           "description": "A final assistant reply retained for an agent, in memory only.",
           "properties": {
@@ -7081,6 +7370,105 @@
             "truncated"
           ],
           "type": "object"
+        },
+        "AgentRequestDecision": {
+          "oneOf": [
+            {
+              "enum": [
+                "allow",
+                "deny"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "allow_always",
+              "description": "Allow and stop asking for matching uses.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentRequestEndReason": {
+          "description": "Why an agent request ended without an answer.",
+          "oneOf": [
+            {
+              "enum": [
+                "timeout"
+              ],
+              "type": "string"
+            },
+            {
+              "const": "ignored",
+              "description": "The report does not belong to the pane's current agent.",
+              "type": "string"
+            },
+            {
+              "const": "closed",
+              "description": "The turn ended, or the agent changed, exited, or was released.",
+              "type": "string"
+            }
+          ]
+        },
+        "AgentRequestInfo": {
+          "description": "A pending agent request, in memory only.",
+          "properties": {
+            "decisions": {
+              "description": "Permission requests only: the decisions the user may choose.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentRequestDecision"
+              },
+              "type": "array"
+            },
+            "description": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "id": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "input_preview": {
+              "description": "Preview of the tool input, at most 8 KiB of UTF-8.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/schemas/success_response/$defs/AgentRequestKind"
+            },
+            "questions": {
+              "description": "Question requests only: one to four questions with distinct text.",
+              "items": {
+                "$ref": "#/schemas/success_response/$defs/AgentQuestion"
+              },
+              "type": "array"
+            },
+            "tool_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "tool_name",
+            "input_preview"
+          ],
+          "type": "object"
+        },
+        "AgentRequestKind": {
+          "description": "What an agent asks the user through an integration hook.",
+          "oneOf": [
+            {
+              "const": "permission",
+              "description": "Permission to use a tool.",
+              "type": "string"
+            },
+            {
+              "const": "question",
+              "description": "Questions for the user, such as Claude Code's AskUserQuestion.",
+              "type": "string"
+            }
+          ]
         },
         "AgentSessionInfo": {
           "properties": {
@@ -9877,6 +10265,101 @@
                 "type",
                 "agent",
                 "replies"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "requests": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentRequestInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_requests",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent",
+                "requests"
+              ],
+              "type": "object"
+            },
+            {
+              "description": "`decision` and an optional `message` answer a permission request; `answers`\nanswers a question request.",
+              "properties": {
+                "answers": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "description": "Question text to the chosen answers, one entry per question.",
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "decision": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentRequestDecision"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "message": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "request_id": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "agent_request_answered",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "request_id"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "reason": {
+                  "$ref": "#/schemas/success_response/$defs/AgentRequestEndReason"
+                },
+                "request_id": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "type": {
+                  "const": "agent_request_ended",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "reason"
               ],
               "type": "object"
             },

@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::detect::{Agent, AgentState};
 use crate::terminal::agent_replies::{AgentReplies, AgentReplyReport};
+use crate::terminal::agent_requests::{AgentRequest, AgentRequestReport, AgentRequests};
 use crate::terminal::TerminalId;
 
 #[path = "metadata.rs"]
@@ -145,6 +146,7 @@ pub struct TerminalState {
     pub last_agent_state_change_seq: Option<u64>,
     pub last_agent_completion_seq: Option<u64>,
     agent_replies: AgentReplies,
+    agent_requests: AgentRequests,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -183,6 +185,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             last_agent_completion_seq: None,
             agent_replies: AgentReplies::default(),
+            agent_requests: AgentRequests::default(),
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -2111,7 +2114,7 @@ impl TerminalState {
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
-        self.agent_replies.clear();
+        self.clear_agent_conversation();
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2130,10 +2133,11 @@ impl TerminalState {
         next_reply_seq: &mut u64,
     ) -> Option<u64> {
         if report.text.is_empty()
-            || !crate::agent_resume::is_official_agent_source(&report.source, &report.agent_label)
-            || !self.is_agent_terminal()
-            || self.known_agent_label_conflicts_with_detected_agent(&report.agent_label)
-            || self.agent_reply_session_conflicts(report.agent_session_id.as_deref())
+            || !self.hook_report_matches_current_agent(
+                &report.source,
+                &report.agent_label,
+                report.agent_session_id.as_deref(),
+            )
             || !self.accept_hook_report(&report.source, report.seq)
         {
             return None;
@@ -2144,7 +2148,45 @@ impl TerminalState {
         Some(*next_reply_seq)
     }
 
-    fn agent_reply_session_conflicts(&self, agent_session_id: Option<&str>) -> bool {
+    /// Records a pending request from an official integration and returns its id.
+    ///
+    /// Reports that cannot belong to the pane's current agent are ignored.
+    /// Concurrent tool calls report independent requests, so the hook sequence
+    /// is neither checked nor consumed.
+    pub fn record_agent_request(
+        &mut self,
+        report: AgentRequestReport,
+        next_request_id: &mut u64,
+    ) -> Option<u64> {
+        if !self.hook_report_matches_current_agent(
+            &report.source,
+            &report.agent_label,
+            report.agent_session_id.as_deref(),
+        ) {
+            return None;
+        }
+        *next_request_id += 1;
+        self.agent_requests.insert(AgentRequest {
+            id: *next_request_id,
+            content: report.content,
+        });
+        Some(*next_request_id)
+    }
+
+    /// Whether a hook report can come from the agent currently in this terminal.
+    fn hook_report_matches_current_agent(
+        &self,
+        source: &str,
+        agent_label: &str,
+        agent_session_id: Option<&str>,
+    ) -> bool {
+        crate::agent_resume::is_official_agent_source(source, agent_label)
+            && self.is_agent_terminal()
+            && !self.known_agent_label_conflicts_with_detected_agent(agent_label)
+            && !self.agent_session_id_conflicts(agent_session_id)
+    }
+
+    fn agent_session_id_conflicts(&self, agent_session_id: Option<&str>) -> bool {
         let Some(agent_session_id) = agent_session_id else {
             return false;
         };
@@ -2156,8 +2198,19 @@ impl TerminalState {
         &self.agent_replies
     }
 
-    pub fn clear_agent_replies(&mut self) {
+    pub fn agent_requests(&self) -> &AgentRequests {
+        &self.agent_requests
+    }
+
+    pub fn remove_agent_request(&mut self, id: u64) -> Option<AgentRequest> {
+        self.agent_requests.remove(id)
+    }
+
+    /// Drops the replies and pending requests that belong to the agent's
+    /// current conversation.
+    pub fn clear_agent_conversation(&mut self) {
         self.agent_replies.clear();
+        self.agent_requests.clear();
     }
 
     pub fn is_agent_terminal(&self) -> bool {
@@ -2245,6 +2298,13 @@ impl TerminalState {
             return None;
         }
 
+        if state == AgentState::Idle
+            && matches!(previous_state, AgentState::Working | AgentState::Blocked)
+        {
+            // The turn ended, so nothing still waits on this turn's requests.
+            // Leaving Unknown is only the first detection of the agent.
+            self.agent_requests.clear();
+        }
         self.state = state;
         Some(EffectiveStateChange {
             previous_agent_label,
@@ -2470,6 +2530,194 @@ mod tests {
         terminal.clear_agent_runtime_identity_after_respawn();
 
         assert_eq!(terminal.agent_replies().latest_seq(), None);
+    }
+
+    fn agent_request(source: &str, agent: &str, tool_name: &str) -> AgentRequestReport {
+        AgentRequestReport {
+            source: source.into(),
+            agent_label: agent.into(),
+            agent_session_id: None,
+            content: crate::api::schema::AgentRequestContent {
+                kind: crate::api::schema::AgentRequestKind::Permission,
+                tool_name: tool_name.into(),
+                description: None,
+                input_preview: "ls".into(),
+                decisions: vec![crate::api::schema::AgentRequestDecision::Allow],
+                questions: Vec::new(),
+            },
+        }
+    }
+
+    fn claude_request(tool_name: &str) -> AgentRequestReport {
+        agent_request("herdr:claude", "claude", tool_name)
+    }
+
+    fn request_ids(terminal: &TerminalState) -> Vec<u64> {
+        terminal.agent_requests().ids().collect()
+    }
+
+    #[test]
+    fn agent_requests_are_recorded_with_increasing_ids() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_request_id = 0;
+
+        assert_eq!(
+            terminal.record_agent_request(claude_request("Bash"), &mut next_request_id),
+            Some(1)
+        );
+        assert_eq!(
+            terminal.record_agent_request(claude_request("Edit"), &mut next_request_id),
+            Some(2)
+        );
+
+        assert_eq!(next_request_id, 2);
+        assert_eq!(request_ids(&terminal), [1, 2]);
+        let removed = terminal.remove_agent_request(1).unwrap();
+        assert_eq!(removed.content.tool_name, "Bash");
+        assert_eq!(terminal.remove_agent_request(1), None);
+        assert_eq!(request_ids(&terminal), [2]);
+    }
+
+    #[test]
+    fn agent_request_is_ignored_without_a_matching_official_agent() {
+        let mut next_request_id = 0;
+
+        let mut shell = test_terminal();
+        assert_eq!(
+            shell.record_agent_request(claude_request("Bash"), &mut next_request_id),
+            None
+        );
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("current").unwrap(),
+        });
+        let other_session = AgentRequestReport {
+            agent_session_id: Some("previous".into()),
+            ..claude_request("Bash")
+        };
+        for report in [
+            agent_request("custom:claude", "claude", "unofficial source"),
+            agent_request("herdr:codex", "claude", "source and agent disagree"),
+            agent_request("herdr:codex", "codex", "other detected agent"),
+            other_session,
+        ] {
+            assert_eq!(
+                terminal.record_agent_request(report.clone(), &mut next_request_id),
+                None,
+                "{report:?}"
+            );
+        }
+        assert_eq!(next_request_id, 0);
+        assert!(request_ids(&terminal).is_empty());
+
+        let current_session = AgentRequestReport {
+            agent_session_id: Some("current".into()),
+            ..claude_request("Bash")
+        };
+        assert_eq!(
+            terminal.record_agent_request(current_session, &mut next_request_id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn agent_requests_do_not_consume_hook_report_order() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
+            Some(50),
+            Some("startup".into()),
+        );
+        let mut next_request_id = 0;
+        let mut next_reply_seq = 0;
+
+        for tool_name in ["Bash", "Edit"] {
+            assert!(terminal
+                .record_agent_request(claude_request(tool_name), &mut next_request_id)
+                .is_some());
+        }
+        assert_eq!(
+            terminal.record_agent_reply(claude_reply(51, "after requests"), &mut next_reply_seq),
+            Some(1),
+            "requests leave the hook sequence to other reports"
+        );
+    }
+
+    #[test]
+    fn agent_requests_end_when_the_turn_ends() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_request_id = 0;
+        terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
+
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Blocked);
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        assert_eq!(request_ids(&terminal), [1]);
+
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert!(request_ids(&terminal).is_empty());
+
+        terminal.record_agent_request(claude_request("Edit"), &mut next_request_id);
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert_eq!(
+            request_ids(&terminal),
+            [2],
+            "an idle agent has no turn to end until it works again"
+        );
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+        assert!(request_ids(&terminal).is_empty());
+    }
+
+    #[test]
+    fn agent_requests_survive_the_first_detection_of_an_idle_agent() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Unknown);
+        let mut next_request_id = 0;
+        terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
+
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        assert_eq!(
+            request_ids(&terminal),
+            [1],
+            "leaving unknown is the first detection, not the end of a turn"
+        );
+    }
+
+    #[test]
+    fn agent_conversation_clears_replies_and_requests() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_request_id = 0;
+        let mut next_reply_seq = 0;
+        terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
+        terminal.record_agent_reply(claude_reply(1, "reply"), &mut next_reply_seq);
+
+        terminal.clear_agent_conversation();
+
+        assert!(request_ids(&terminal).is_empty());
+        assert_eq!(terminal.agent_replies().latest_seq(), None);
+    }
+
+    #[test]
+    fn agent_requests_are_cleared_after_respawn() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_request_id = 0;
+        terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
+
+        terminal.clear_agent_runtime_identity_after_respawn();
+
+        assert!(request_ids(&terminal).is_empty());
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod agent_request_wait;
 pub mod client;
 mod event_hub;
 pub mod schema;
@@ -92,7 +93,27 @@ pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
     pub response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
+    /// True while the requesting connection is still open. For
+    /// `pane.report_agent_request` it stays true while the hook still waits;
+    /// see [`end_connection_wait`].
     pub stream_active: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+/// Ends the wait of a connection that waits for a deferred outcome, such as a
+/// hook waiting in `pane.report_agent_request`.
+///
+/// The app ends the wait before it delivers an outcome, and the connection
+/// ends it when it stops waiting. Only the first caller gets `true`, so
+/// exactly one side decides how the wait ended.
+pub(crate) fn end_connection_wait(waiting: &std::sync::atomic::AtomicBool) -> bool {
+    waiting
+        .compare_exchange(
+            true,
+            false,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
 }
 
 pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;

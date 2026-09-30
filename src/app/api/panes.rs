@@ -2011,7 +2011,7 @@ fn normalize_state_labels(
         .collect()
 }
 
-fn pane_not_found(id: String, pane_id: &str) -> String {
+pub(super) fn pane_not_found(id: String, pane_id: &str) -> String {
     encode_error(id, "pane_not_found", format!("pane {pane_id} not found"))
 }
 
@@ -2237,7 +2237,7 @@ fn split_path_id(idx: usize, path: &[bool]) -> String {
     format!("split_{idx}_{path}")
 }
 
-fn invalid_agent(id: String) -> String {
+pub(super) fn invalid_agent(id: String) -> String {
     encode_error(id, "invalid_agent", "agent label must not be empty")
 }
 

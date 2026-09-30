@@ -1,4 +1,5 @@
 pub mod agent_replies;
+pub mod agent_requests;
 mod history_read;
 mod id;
 mod runtime;
@@ -15,3 +16,14 @@ pub use state::{
     TerminalStateMutation,
 };
 pub(crate) use title::stripped_terminal_title;
+
+/// Truncates `text` to at most `max_bytes` at a UTF-8 character boundary,
+/// returning whether anything was cut.
+fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) -> bool {
+    if text.len() <= max_bytes {
+        return false;
+    }
+    let end = text.floor_char_boundary(max_bytes);
+    text.truncate(end);
+    true
+}

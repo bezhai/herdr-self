@@ -3,10 +3,18 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentRepliesParams, AgentReplyInfo, AgentSendKeysParams,
-    AgentStartParams, AgentTarget, PaneReadResult, ResponseResult,
+    AgentInfo, AgentPromptParams, AgentRenameParams, AgentRepliesParams, AgentReplyInfo,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, ErrorBody, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
+
+/// An agent target resolved to the pane and terminal that host the agent.
+pub(super) struct ResolvedAgent {
+    pub(super) ws_idx: usize,
+    pub(super) pane_id: crate::layout::PaneId,
+    pub(super) terminal_id: crate::terminal::TerminalId,
+    pub(super) agent: AgentInfo,
+}
 
 use super::responses::{encode_error, encode_error_body, encode_success};
 
@@ -52,30 +60,44 @@ impl App {
         encode_success(id, ResponseResult::AgentInfo { agent })
     }
 
+    /// Resolves `target` like `agent.get` to the agent and the terminal hosting it.
+    pub(super) fn resolve_agent(&mut self, target: &str) -> Result<ResolvedAgent, ErrorBody> {
+        self.reconcile_managed_agent_target(target);
+        let resolved = self
+            .resolve_agent_target(target)
+            .map_err(|err| self.agent_target_error_body(err))?;
+        let agent = self.agent_info(resolved.ws_idx, resolved.pane_id);
+        let terminal_id = self
+            .state
+            .terminal_id_for_pane(resolved.ws_idx, resolved.pane_id);
+        let (Some(agent), Some(terminal_id)) = (agent, terminal_id) else {
+            return Err(self.agent_target_error_body(
+                crate::app::terminal_targets::TerminalTargetError::NotFound {
+                    target: target.to_string(),
+                },
+            ));
+        };
+        Ok(ResolvedAgent {
+            ws_idx: resolved.ws_idx,
+            pane_id: resolved.pane_id,
+            terminal_id,
+            agent,
+        })
+    }
+
     pub(super) fn handle_agent_replies(
         &mut self,
         id: String,
         params: AgentRepliesParams,
     ) -> String {
-        self.reconcile_managed_agent_target(&params.target);
-        let resolved = match self.resolve_agent_target(&params.target) {
+        let resolved = match self.resolve_agent(&params.target) {
             Ok(resolved) => resolved,
-            Err(err) => return encode_error_body(id, self.agent_target_error_body(err)),
-        };
-        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
-            return encode_error_body(
-                id,
-                self.agent_target_error_body(
-                    crate::app::terminal_targets::TerminalTargetError::NotFound {
-                        target: params.target,
-                    },
-                ),
-            );
+            Err(err) => return encode_error_body(id, err),
         };
         let replies = self
             .state
-            .terminal_id_for_pane(resolved.ws_idx, resolved.pane_id)
-            .and_then(|terminal_id| self.state.terminals.get(&terminal_id))
+            .terminals
+            .get(&resolved.terminal_id)
             .map(|terminal| {
                 terminal
                     .agent_replies()
@@ -89,7 +111,13 @@ impl App {
             })
             .unwrap_or_default();
 
-        encode_success(id, ResponseResult::AgentReplies { agent, replies })
+        encode_success(
+            id,
+            ResponseResult::AgentReplies {
+                agent: resolved.agent,
+                replies,
+            },
+        )
     }
 
     pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {

@@ -64,6 +64,10 @@ use super::{
     QWEN_HOOK_ASSET, QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
 };
 
+/// The Codex permission hook waits up to 10 minutes for an answer, then Codex
+/// shows its own approval prompt; Codex must not kill the hook before that.
+const CODEX_PERMISSION_HOOK_TIMEOUT_SECONDS: u64 = 10 * 60 + 60;
+
 fn ensure_extension_dir(dir: &Path, agent: &str) -> io::Result<()> {
     if dir.is_dir() {
         return Ok(());
@@ -193,6 +197,7 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
     remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
     remove_hook_commands(hooks, "Stop", &hook_path, Some("reply"))?;
+    remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("permission"))?;
     ensure_command_hook(
         hooks,
         "SessionStart",
@@ -205,6 +210,13 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         "Stop",
         hook_command(&hook_path, Some("reply")),
         10,
+        None,
+    )?;
+    ensure_command_hook(
+        hooks,
+        "PermissionRequest",
+        hook_command(&hook_path, Some("permission")),
+        CODEX_PERMISSION_HOOK_TIMEOUT_SECONDS,
         None,
     )?;
     remove_legacy_bash_hook_file(&hook_path)?;
@@ -638,6 +650,8 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
                 remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("blocked"))?;
             updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("idle"))?;
             updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("reply"))?;
+            updated_hooks |=
+                remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("permission"))?;
         }
 
         if updated_hooks {

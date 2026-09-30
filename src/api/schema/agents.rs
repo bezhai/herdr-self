@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -30,6 +30,100 @@ pub struct AgentReplyInfo {
     pub seq: u64,
     pub text: String,
     pub truncated: bool,
+}
+
+/// What an agent asks the user through an integration hook.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRequestKind {
+    /// Permission to use a tool.
+    Permission,
+    /// Questions for the user, such as Claude Code's AskUserQuestion.
+    Question,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRequestDecision {
+    Allow,
+    /// Allow and stop asking for matching uses.
+    AllowAlways,
+    Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentQuestionOption {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentQuestion {
+    pub question: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<AgentQuestionOption>,
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub multi_select: bool,
+}
+
+/// A request an agent is waiting on, as reported by its integration hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentRequestContent {
+    pub kind: AgentRequestKind,
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Preview of the tool input, at most 8 KiB of UTF-8.
+    pub input_preview: String,
+    /// Permission requests only: the decisions the user may choose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<AgentRequestDecision>,
+    /// Question requests only: one to four questions with distinct text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<AgentQuestion>,
+}
+
+/// A pending agent request, in memory only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentRequestInfo {
+    pub id: u64,
+    #[serde(flatten)]
+    pub content: AgentRequestContent,
+}
+
+/// `decision` and an optional `message` answer a permission request; `answers`
+/// answers a question request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentRequestAnswer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<AgentRequestDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Question text to the chosen answers, one entry per question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answers: Option<BTreeMap<String, Vec<String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentAnswerParams {
+    pub target: String,
+    pub request_id: u64,
+    #[serde(flatten)]
+    pub answer: AgentRequestAnswer,
+}
+
+/// Why an agent request ended without an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRequestEndReason {
+    /// The report does not belong to the pane's current agent.
+    Ignored,
+    Timeout,
+    /// The turn ended, or the agent changed, exited, or was released.
+    Closed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -240,6 +334,9 @@ pub struct AgentInfo {
     /// Seq of the latest retained reply; read the text with `agent.replies`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_seq: Option<u64>,
+    /// Ids of pending requests in ascending order; read them with `agent.requests`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub request_ids: Vec<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

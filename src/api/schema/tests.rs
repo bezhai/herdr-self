@@ -356,6 +356,7 @@ fn agent_reply_requests_and_response_round_trip() {
                 state_change_seq: 3,
                 completion_seq: None,
                 reply_seq: Some(2),
+                request_ids: Vec::new(),
                 cwd: None,
                 foreground_cwd: None,
                 revision: 5,
@@ -388,6 +389,313 @@ fn agent_reply_requests_and_response_round_trip() {
     agent.reply_seq = None;
     let json = serde_json::to_value(&agent).unwrap();
     assert!(json.get("reply_seq").is_none());
+    assert!(json.get("request_ids").is_none());
+}
+
+fn permission_request_content() -> AgentRequestContent {
+    AgentRequestContent {
+        kind: AgentRequestKind::Permission,
+        tool_name: "Bash".into(),
+        description: Some("列出文件".into()),
+        input_preview: "ls -la".into(),
+        decisions: vec![
+            AgentRequestDecision::Allow,
+            AgentRequestDecision::AllowAlways,
+            AgentRequestDecision::Deny,
+        ],
+        questions: Vec::new(),
+    }
+}
+
+#[test]
+fn agent_request_report_is_flat_and_round_trips() {
+    let report = Request {
+        id: "req_request".into(),
+        method: Method::PaneReportAgentRequest(PaneReportAgentRequestParams {
+            pane_id: "w1:p1".into(),
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            agent_session_id: Some("claude-session".into()),
+            request: permission_request_content(),
+            timeout_ms: Some(600_000),
+        }),
+    };
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "id": "req_request",
+            "method": "pane.report_agent_request",
+            "params": {
+                "pane_id": "w1:p1",
+                "source": "herdr:claude",
+                "agent": "claude",
+                "agent_session_id": "claude-session",
+                "kind": "permission",
+                "tool_name": "Bash",
+                "description": "列出文件",
+                "input_preview": "ls -la",
+                "decisions": ["allow", "allow_always", "deny"],
+                "timeout_ms": 600000,
+            },
+        })
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), report);
+
+    let question: Request = serde_json::from_value(serde_json::json!({
+        "id": "req_question",
+        "method": "pane.report_agent_request",
+        "params": {
+            "pane_id": "w1:p1",
+            "source": "herdr:claude",
+            "agent": "claude",
+            "kind": "question",
+            "tool_name": "AskUserQuestion",
+            "input_preview": "{}",
+            "questions": [
+                {
+                    "question": "Which color?",
+                    "header": "Color",
+                    "options": [{"label": "Red", "description": "warm"}, {"label": "Blue"}],
+                    "multi_select": true,
+                },
+                {"question": "Proceed?"},
+            ],
+        },
+    }))
+    .unwrap();
+    let Method::PaneReportAgentRequest(params) = question.method else {
+        panic!("expected an agent request report");
+    };
+    assert_eq!(params.agent_session_id, None);
+    assert_eq!(params.timeout_ms, None);
+    assert_eq!(params.request.kind, AgentRequestKind::Question);
+    assert_eq!(params.request.description, None);
+    assert!(params.request.decisions.is_empty());
+    assert_eq!(
+        params.request.questions,
+        vec![
+            AgentQuestion {
+                question: "Which color?".into(),
+                header: Some("Color".into()),
+                options: vec![
+                    AgentQuestionOption {
+                        label: "Red".into(),
+                        description: Some("warm".into()),
+                    },
+                    AgentQuestionOption {
+                        label: "Blue".into(),
+                        description: None,
+                    },
+                ],
+                multi_select: true,
+            },
+            AgentQuestion {
+                question: "Proceed?".into(),
+                header: None,
+                options: Vec::new(),
+                multi_select: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn agent_request_list_and_answer_round_trip() {
+    let requests = Request {
+        id: "req_requests".into(),
+        method: Method::AgentRequests(AgentTarget {
+            target: "w1:p1".into(),
+        }),
+    };
+    let json = serde_json::to_value(&requests).unwrap();
+    assert_eq!(json["method"], "agent.requests");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), requests);
+
+    let decision = Request {
+        id: "req_answer".into(),
+        method: Method::AgentAnswer(AgentAnswerParams {
+            target: "w1:p1".into(),
+            request_id: 7,
+            answer: AgentRequestAnswer {
+                decision: Some(AgentRequestDecision::Deny),
+                message: Some("用户拒绝".into()),
+                answers: None,
+            },
+        }),
+    };
+    let json = serde_json::to_value(&decision).unwrap();
+    assert_eq!(
+        json["params"],
+        serde_json::json!({
+            "target": "w1:p1",
+            "request_id": 7,
+            "decision": "deny",
+            "message": "用户拒绝",
+        })
+    );
+    assert_eq!(json["method"], "agent.answer");
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), decision);
+
+    let answers: Request = serde_json::from_value(serde_json::json!({
+        "id": "req_answers",
+        "method": "agent.answer",
+        "params": {
+            "target": "reviewer",
+            "request_id": 8,
+            "answers": {"Which color?": ["Red", "Blue"]},
+        },
+    }))
+    .unwrap();
+    let Method::AgentAnswer(params) = answers.method else {
+        panic!("expected an agent answer");
+    };
+    assert_eq!(params.answer.decision, None);
+    assert_eq!(params.answer.message, None);
+    assert_eq!(
+        params.answer.answers,
+        Some(std::collections::BTreeMap::from([(
+            "Which color?".to_string(),
+            vec!["Red".to_string(), "Blue".to_string()],
+        )]))
+    );
+}
+
+#[test]
+fn agent_request_results_round_trip() {
+    let listed = SuccessResponse {
+        id: "req_requests".into(),
+        result: ResponseResult::AgentRequests {
+            agent: AgentInfo {
+                terminal_id: "term_1".into(),
+                name: None,
+                agent: Some("claude".into()),
+                title: None,
+                terminal_title: None,
+                terminal_title_stripped: None,
+                display_agent: None,
+                agent_status: AgentStatus::Blocked,
+                screen_detection_skipped: false,
+                state_labels: HashMap::new(),
+                tokens: HashMap::new(),
+                agent_session: None,
+                workspace_id: "w1".into(),
+                tab_id: "w1:t1".into(),
+                pane_id: "w1:p1".into(),
+                focused: false,
+                launch_pending: false,
+                interactive_ready: false,
+                state_change_seq: 3,
+                completion_seq: None,
+                reply_seq: None,
+                request_ids: vec![4],
+                cwd: None,
+                foreground_cwd: None,
+                revision: 5,
+            },
+            requests: vec![AgentRequestInfo {
+                id: 4,
+                content: permission_request_content(),
+            }],
+        },
+    };
+    let json = serde_json::to_value(&listed).unwrap();
+    assert_eq!(json["result"]["type"], "agent_requests");
+    assert_eq!(
+        json["result"]["agent"]["request_ids"],
+        serde_json::json!([4])
+    );
+    assert_eq!(
+        json["result"]["requests"],
+        serde_json::json!([{
+            "id": 4,
+            "kind": "permission",
+            "tool_name": "Bash",
+            "description": "列出文件",
+            "input_preview": "ls -la",
+            "decisions": ["allow", "allow_always", "deny"],
+        }])
+    );
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(json).unwrap(),
+        listed
+    );
+
+    for (result, expected) in [
+        (
+            ResponseResult::AgentRequestAnswered {
+                request_id: 4,
+                answer: AgentRequestAnswer {
+                    decision: Some(AgentRequestDecision::AllowAlways),
+                    message: None,
+                    answers: None,
+                },
+            },
+            serde_json::json!({
+                "type": "agent_request_answered",
+                "request_id": 4,
+                "decision": "allow_always",
+            }),
+        ),
+        (
+            ResponseResult::AgentRequestAnswered {
+                request_id: 5,
+                answer: AgentRequestAnswer {
+                    decision: None,
+                    message: None,
+                    answers: Some(std::collections::BTreeMap::from([(
+                        "Proceed?".to_string(),
+                        vec!["是".to_string()],
+                    )])),
+                },
+            },
+            serde_json::json!({
+                "type": "agent_request_answered",
+                "request_id": 5,
+                "answers": {"Proceed?": ["是"]},
+            }),
+        ),
+        (
+            ResponseResult::AgentRequestEnded {
+                request_id: Some(6),
+                reason: AgentRequestEndReason::Timeout,
+            },
+            serde_json::json!({
+                "type": "agent_request_ended",
+                "request_id": 6,
+                "reason": "timeout",
+            }),
+        ),
+        (
+            ResponseResult::AgentRequestEnded {
+                request_id: None,
+                reason: AgentRequestEndReason::Ignored,
+            },
+            serde_json::json!({"type": "agent_request_ended", "reason": "ignored"}),
+        ),
+        (
+            ResponseResult::AgentRequestEnded {
+                request_id: Some(7),
+                reason: AgentRequestEndReason::Closed,
+            },
+            serde_json::json!({
+                "type": "agent_request_ended",
+                "request_id": 7,
+                "reason": "closed",
+            }),
+        ),
+    ] {
+        let response = SuccessResponse {
+            id: "req_request".into(),
+            result,
+        };
+        let json = serde_json::to_value(&response).unwrap();
+        assert_eq!(json["result"], expected);
+        assert_eq!(
+            serde_json::from_value::<SuccessResponse>(json).unwrap(),
+            response
+        );
+    }
 }
 
 #[test]

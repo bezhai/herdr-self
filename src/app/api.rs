@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+mod agent_requests;
 mod agent_view;
 mod agents;
 mod env;
@@ -16,6 +17,7 @@ mod worktrees;
 
 use super::{api_helpers::pane_agent_status, App, Mode, OverlayPaneState, ToastKind};
 use crate::events::AppEvent;
+pub(super) use agent_requests::AgentRequestWaiter;
 
 const API_NOTIFICATION_RATE_LIMIT: Duration = Duration::from_secs(1);
 #[cfg(windows)]
@@ -887,6 +889,7 @@ impl App {
         request: crate::api::schema::Request,
     ) -> String {
         self.sync_pending_terminal_titles();
+        self.settle_agent_requests(Instant::now());
         use crate::api::schema::{
             ErrorBody, ErrorResponse, Method, ResponseResult, SuccessResponse,
         };
@@ -1093,6 +1096,10 @@ impl App {
             Method::AgentRead(params) => return self.handle_agent_read(request.id, params),
             Method::AgentExplain(target) => return self.handle_agent_explain(request.id, target),
             Method::AgentReplies(params) => return self.handle_agent_replies(request.id, params),
+            Method::AgentRequests(target) => {
+                return self.handle_agent_requests(request.id, target);
+            }
+            Method::AgentAnswer(params) => return self.handle_agent_answer(request.id, params),
             Method::AgentSendKeys(params) => {
                 return self.handle_agent_send_keys(request.id, params);
             }
@@ -1178,6 +1185,13 @@ impl App {
             }
             Method::PaneReportAgentReply(params) => {
                 return self.handle_pane_report_agent_reply(request.id, params);
+            }
+            Method::PaneReportAgentRequest(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "pane.report_agent_request needs a waiting API connection",
+                );
             }
             Method::PaneReportMetadata(params) => {
                 return self.handle_pane_report_metadata(request.id, params);

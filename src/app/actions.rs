@@ -1615,15 +1615,32 @@ impl AppState {
         pane_id: PaneId,
         report: crate::terminal::agent_replies::AgentReplyReport,
     ) -> Option<u64> {
-        let terminal_id = self
-            .workspaces
-            .iter()
-            .find_map(|ws| ws.pane_state(pane_id))?
-            .attached_terminal_id
-            .clone();
+        let terminal_id = self.terminal_id_attached_to(pane_id)?;
         self.terminals
             .get_mut(&terminal_id)?
             .record_agent_reply(report, &mut self.next_agent_reply_seq)
+    }
+
+    /// Records a pending agent request for the terminal attached to `pane_id`
+    /// and returns that terminal with the new request id.
+    pub(crate) fn record_agent_request(
+        &mut self,
+        pane_id: PaneId,
+        report: crate::terminal::agent_requests::AgentRequestReport,
+    ) -> Option<(crate::terminal::TerminalId, u64)> {
+        let terminal_id = self.terminal_id_attached_to(pane_id)?;
+        let request_id = self
+            .terminals
+            .get_mut(&terminal_id)?
+            .record_agent_request(report, &mut self.next_agent_request_id)?;
+        Some((terminal_id, request_id))
+    }
+
+    fn terminal_id_attached_to(&self, pane_id: PaneId) -> Option<crate::terminal::TerminalId> {
+        self.workspaces
+            .iter()
+            .find_map(|ws| ws.pane_state(pane_id))
+            .map(|pane| pane.attached_terminal_id.clone())
     }
 
     fn update_terminal_state<F>(&mut self, pane_id: PaneId, update: F) -> Option<PaneStateUpdate>
@@ -1671,7 +1688,7 @@ impl AppState {
                     .is_some_and(|change| change.previous_agent_label != change.agent_label);
             if completion_reset {
                 terminal.last_agent_completion_seq = None;
-                terminal.clear_agent_replies();
+                terminal.clear_agent_conversation();
             }
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
@@ -3344,6 +3361,161 @@ mod tests {
         assert_eq!(record_claude_reply(&mut app, pane_id, 2, "again"), Some(2));
         app.publish_pane_process_exit_if_agent(pane_id, false);
         assert_eq!(latest_reply_seq(&app, 0, pane_id), None);
+    }
+
+    fn record_claude_request(app: &mut AppState, pane_id: PaneId) -> Option<u64> {
+        app.record_agent_request(
+            pane_id,
+            crate::terminal::agent_requests::AgentRequestReport {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                agent_session_id: None,
+                content: crate::api::schema::AgentRequestContent {
+                    kind: crate::api::schema::AgentRequestKind::Permission,
+                    tool_name: "Bash".into(),
+                    description: None,
+                    input_preview: "ls".into(),
+                    decisions: vec![crate::api::schema::AgentRequestDecision::Allow],
+                    questions: Vec::new(),
+                },
+            },
+        )
+        .map(|(_, request_id)| request_id)
+    }
+
+    fn pending_request_ids(app: &AppState, ws_idx: usize, pane_id: PaneId) -> Vec<u64> {
+        app.terminals[&app.workspaces[ws_idx].panes[&pane_id].attached_terminal_id]
+            .agent_requests()
+            .ids()
+            .collect()
+    }
+
+    #[test]
+    fn agent_request_ids_are_shared_across_panes() {
+        let mut app = app_with_workspaces(&["one", "two"]);
+        let first = app.workspaces[0].tabs[0].root_pane;
+        let second = app.workspaces[1].tabs[0].root_pane;
+        for pane_id in [first, second] {
+            app.handle_app_event(state_changed(
+                pane_id,
+                Some(Agent::Claude),
+                AgentState::Working,
+            ));
+        }
+
+        let recorded = app.record_agent_request(
+            first,
+            crate::terminal::agent_requests::AgentRequestReport {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                agent_session_id: None,
+                content: crate::api::schema::AgentRequestContent {
+                    kind: crate::api::schema::AgentRequestKind::Permission,
+                    tool_name: "Bash".into(),
+                    description: None,
+                    input_preview: "ls".into(),
+                    decisions: vec![crate::api::schema::AgentRequestDecision::Allow],
+                    questions: Vec::new(),
+                },
+            },
+        );
+        assert_eq!(
+            recorded,
+            Some((
+                app.workspaces[0].panes[&first].attached_terminal_id.clone(),
+                1
+            ))
+        );
+        assert_eq!(record_claude_request(&mut app, second), Some(2));
+        assert_eq!(record_claude_request(&mut app, first), Some(3));
+
+        assert_eq!(app.next_agent_request_id, 3);
+        assert_eq!(pending_request_ids(&app, 0, first), [1, 3]);
+        assert_eq!(pending_request_ids(&app, 1, second), [2]);
+        app.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_requests_end_when_the_agent_turn_ends() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        assert_eq!(record_claude_request(&mut app, pane_id), Some(1));
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Blocked,
+        ));
+        assert_eq!(pending_request_ids(&app, 0, pane_id), [1]);
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Idle,
+        ));
+        assert!(pending_request_ids(&app, 0, pane_id).is_empty());
+    }
+
+    #[test]
+    fn agent_requests_clear_when_the_session_changes() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        let report_session = |app: &mut AppState, seq: u64, session: &str, source: &str| {
+            app.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session),
+                session_start_source: Some(source.into()),
+            });
+        };
+        report_session(&mut app, 1, "old-session", "startup");
+        assert_eq!(record_claude_request(&mut app, pane_id), Some(1));
+
+        report_session(&mut app, 2, "old-session", "resume");
+        assert_eq!(pending_request_ids(&app, 0, pane_id), [1]);
+
+        report_session(&mut app, 3, "new-session", "clear");
+        assert!(pending_request_ids(&app, 0, pane_id).is_empty());
+    }
+
+    #[test]
+    fn agent_requests_clear_when_the_agent_changes_or_exits() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        assert_eq!(record_claude_request(&mut app, pane_id), Some(1));
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Codex),
+            AgentState::Working,
+        ));
+        assert!(pending_request_ids(&app, 0, pane_id).is_empty());
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        assert_eq!(record_claude_request(&mut app, pane_id), Some(2));
+        app.publish_pane_process_exit_if_agent(pane_id, false);
+        assert!(pending_request_ids(&app, 0, pane_id).is_empty());
     }
 
     #[test]

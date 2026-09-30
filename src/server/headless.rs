@@ -528,6 +528,7 @@ impl HeadlessServer {
             }
 
             self.poll_pending_alt_screen_reads(now);
+            self.app.settle_agent_requests(now);
             if self.process_deferred_alt_screen_reads() {
                 needs_render = true;
                 needs_full_render = true;
@@ -3149,6 +3150,15 @@ impl HeadlessServer {
                 .app
                 .handle_deferred_agent_api_request(msg.request, msg.respond_to);
             return changed | deferred_changed;
+        }
+        if let api::schema::Method::PaneReportAgentRequest(params) = msg.request.method {
+            self.app.handle_agent_request_report(
+                msg.request.id,
+                params,
+                msg.respond_to,
+                msg.stream_active,
+            );
+            return changed;
         }
         if matches!(
             &msg.request.method,

@@ -491,6 +491,22 @@ pub struct PaneReportAgentReplyParams {
     pub truncated: bool,
 }
 
+/// A permission request or question reported by an agent integration hook.
+/// The connection stays open until the request is answered or ends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportAgentRequestParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    #[serde(flatten)]
+    pub request: super::agents::AgentRequestContent,
+    /// Longest wait in milliseconds; defaults to and is capped at 86400000 (24 hours).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneReportMetadataParams {
     pub pane_id: String,

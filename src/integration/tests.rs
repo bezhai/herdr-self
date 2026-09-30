@@ -977,9 +977,18 @@ fn install_claude_writes_hook_and_updates_settings() {
             }],
         }])
     );
+    assert_eq!(
+        settings["hooks"]["PermissionRequest"],
+        serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": hook_command(&installed.hook_path, Some("permission")),
+                "timeout": 86_460,
+            }],
+        }])
+    );
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
@@ -1030,9 +1039,15 @@ fn install_claude_is_idempotent_for_hook_entries() {
         1
     );
     assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        settings["hooks"]["PermissionRequest"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
     assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
@@ -1228,6 +1243,8 @@ fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
             "PermissionRequest": [{
                 "matcher": "*",
                 "hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]
+            }, {
+                "hooks": [{"type": "command", "command": format!("bash '{}' permission", hook_path.display()), "timeout": 86460}]
             }],
             "PostToolUse": [{
                 "matcher": "*",
@@ -1418,9 +1435,18 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
             }],
         }])
     );
+    assert_eq!(
+        hooks["hooks"]["PermissionRequest"],
+        serde_json::json!([{
+            "hooks": [{
+                "type": "command",
+                "command": hook_command(&installed.hook_path, Some("permission")),
+                "timeout": 660,
+            }],
+        }])
+    );
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
-    assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert!(config.contains("model = \"gpt-5.4\""));
     assert!(config.contains("[features]"));
     assert!(config.contains("hooks = true"));
@@ -1464,7 +1490,17 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
     std::env::set_var("HOME", &home);
 
     install_codex().unwrap();
+    let first_hooks = fs::read_to_string(codex_dir.join("hooks.json")).unwrap();
+    let first_config = fs::read_to_string(codex_dir.join("config.toml")).unwrap();
     install_codex().unwrap();
+    assert_eq!(
+        fs::read_to_string(codex_dir.join("hooks.json")).unwrap(),
+        first_hooks
+    );
+    assert_eq!(
+        fs::read_to_string(codex_dir.join("config.toml")).unwrap(),
+        first_config
+    );
 
     let hooks: Value =
         serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
@@ -1472,9 +1508,15 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
 
     assert_eq!(hooks["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
     assert_eq!(hooks["hooks"]["Stop"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        hooks["hooks"]["PermissionRequest"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
-    assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert_eq!(config.matches("hooks = true").count(), 1);
     assert!(!config.contains("codex_hooks"));
     assert!(config.contains("other = true"));
@@ -1525,7 +1567,10 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
                 {"type": "command", "command": "echo keep", "timeout": 10}
             ]}],
             "PreToolUse": [{"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}],
-            "PermissionRequest": [{"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]}],
+            "PermissionRequest": [
+                {"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]},
+                {"hooks": [{"type": "command", "command": format!("bash '{}' permission", hook_path.display()), "timeout": 660}]}
+            ],
             "Stop": [
                 {"hooks": [{"type": "command", "command": format!("bash '{}' idle", hook_path.display()), "timeout": 10}]},
                 {"hooks": [
@@ -1621,6 +1666,62 @@ fn install_codex_preserves_user_stop_hooks_and_replaces_legacy_idle() {
                 "command": hook_command(&hook_path, Some("reply")),
                 "timeout": 10,
             }]}
+        ])
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codex_replaces_stale_permission_hooks_and_keeps_user_permission_hooks() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let hooks = serde_json::json!({
+        "hooks": {
+            "PermissionRequest": [
+                {"matcher": "^Bash$", "hooks": [
+                    {"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10},
+                    {"type": "command", "command": "echo keep-permission", "timeout": 10}
+                ]},
+                {"hooks": [{"type": "command", "command": format!("bash '{}' permission", hook_path.display()), "timeout": 10}]}
+            ]
+        }
+    });
+    fs::write(
+        codex_dir.join("hooks.json"),
+        serde_json::to_string(&hooks).unwrap(),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    install_codex().unwrap();
+
+    let hooks: Value =
+        serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        hooks["hooks"]["PermissionRequest"],
+        serde_json::json!([
+            {"matcher": "^Bash$", "hooks": [{"type": "command", "command": "echo keep-permission", "timeout": 10}]},
+            {"hooks": [{
+                "type": "command",
+                "command": hook_command(&hook_path, Some("permission")),
+                "timeout": 660,
+            }]}
+        ])
+    );
+
+    uninstall_codex().unwrap();
+    let hooks: Value =
+        serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        hooks["hooks"]["PermissionRequest"],
+        serde_json::json!([
+            {"matcher": "^Bash$", "hooks": [{"type": "command", "command": "echo keep-permission", "timeout": 10}]}
         ])
     );
 

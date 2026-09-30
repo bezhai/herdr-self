@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use super::truncate_to_char_boundary;
+
 /// Number of replies retained per agent terminal.
 pub const MAX_AGENT_REPLIES: usize = 8;
 /// Largest stored reply text in UTF-8 bytes.
@@ -61,16 +63,6 @@ impl AgentReplies {
     pub fn clear(&mut self) {
         self.replies.clear();
     }
-}
-
-/// Truncates `text` to at most `max_bytes`, returning whether anything was cut.
-fn truncate_to_char_boundary(text: &mut String, max_bytes: usize) -> bool {
-    if text.len() <= max_bytes {
-        return false;
-    }
-    let end = text.floor_char_boundary(max_bytes);
-    text.truncate(end);
-    true
 }
 
 #[cfg(test)]

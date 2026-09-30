@@ -1,10 +1,10 @@
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentRepliesParams, AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams,
-    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat,
-    ReadSource, Request,
+    AgentAnswerParams, AgentPromptParams, AgentPromptWaitOptions, AgentReadParams,
+    AgentRenameParams, AgentRepliesParams, AgentRequestAnswer, AgentRequestDecision,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
+    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -20,6 +20,8 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "list" => agent_list(&args[1..]),
         "get" => agent_get(&args[1..]),
         "replies" => agent_replies(&args[1..]),
+        "requests" => agent_requests(&args[1..]),
+        "answer" => agent_answer(&args[1..]),
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
@@ -515,6 +517,104 @@ fn agent_replies(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
+fn agent_requests(args: &[String]) -> std::io::Result<i32> {
+    let [target] = args else {
+        eprintln!("usage: herdr agent requests <target>");
+        return Ok(2);
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:requests".into(),
+        method: Method::AgentRequests(AgentTarget {
+            target: target.clone(),
+        }),
+    })?)
+}
+
+const AGENT_ANSWER_USAGE: &str = "usage: herdr agent answer <target> <request_id> (--decision allow|allow_always|deny [--message TEXT] | --answers JSON)";
+
+fn agent_answer(args: &[String]) -> std::io::Result<i32> {
+    match parse_agent_answer(args) {
+        Ok(params) => super::print_response(&super::send_request(&Request {
+            id: "cli:agent:answer".into(),
+            method: Method::AgentAnswer(params),
+        })?),
+        Err(message) => {
+            eprintln!("{message}");
+            Ok(2)
+        }
+    }
+}
+
+fn parse_agent_answer(args: &[String]) -> Result<AgentAnswerParams, String> {
+    let args = super::expand_equals_args(args, &["--decision", "--message", "--answers"]);
+    let mut positionals = Vec::new();
+    let mut decision = None;
+    let mut message = None;
+    let mut answers = None;
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--decision" | "--message" | "--answers" => {
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| format!("missing value for {arg}"))?;
+                match arg {
+                    "--decision" => decision = Some(parse_agent_decision(value)?),
+                    "--message" => message = Some(value.clone()),
+                    _ => answers = Some(parse_agent_answers(value)?),
+                }
+                index += 2;
+            }
+            other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
+            value => {
+                positionals.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+    let [target, request_id] = positionals.as_slice() else {
+        return Err(AGENT_ANSWER_USAGE.into());
+    };
+    let request_id =
+        super::parse_u64_flag("<request_id>", request_id).map_err(|err| err.to_string())?;
+    if decision.is_some() && answers.is_some() {
+        return Err("use either --decision or --answers".into());
+    }
+    if message.is_some() && decision.is_none() {
+        return Err("--message requires --decision".into());
+    }
+    if decision.is_none() && answers.is_none() {
+        return Err(AGENT_ANSWER_USAGE.into());
+    }
+    Ok(AgentAnswerParams {
+        target: target.clone(),
+        request_id,
+        answer: AgentRequestAnswer {
+            decision,
+            message,
+            answers,
+        },
+    })
+}
+
+fn parse_agent_decision(value: &str) -> Result<AgentRequestDecision, String> {
+    serde_json::from_value(serde_json::Value::String(value.to_string())).map_err(|_| {
+        format!("invalid value for --decision: {value} (expected allow, allow_always, or deny)")
+    })
+}
+
+fn parse_agent_answers(
+    value: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, String> {
+    serde_json::from_str(value).map_err(|err| {
+        format!(
+            "invalid value for --answers: expected a JSON object mapping each question to an array of strings ({err})"
+        )
+    })
+}
+
 fn agent_focus(args: &[String]) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!("usage: herdr agent focus <target>");
@@ -978,6 +1078,9 @@ fn print_agent_help() {
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
     eprintln!("  herdr agent replies <target> [--after SEQ]");
+    eprintln!("  herdr agent requests <target>");
+    eprintln!("  herdr agent answer <target> <request_id> --decision allow|allow_always|deny [--message TEXT]");
+    eprintln!("  herdr agent answer <target> <request_id> --answers JSON");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");

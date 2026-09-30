@@ -103,10 +103,10 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_reply`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_reply`, `pane.report_agent_request`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.replies`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.replies`, `agent.requests`, `agent.answer`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -800,6 +800,74 @@ Herdr keeps the 8 most recent replies per agent. Each reply gets a `seq` from on
 ```
 
 `replies` is an empty array when nothing matches. Target errors match `agent.get`, for example `agent_not_found`.
+
+Integration hooks report the permission requests and questions an agent is waiting on with `pane.report_agent_request`. Unlike other reports, this request waits: Herdr writes the response on the same connection once the request is answered with `agent.answer` or ends. Keep the connection open after sending the request line; closing it, or writing anything more on it, withdraws the request.
+
+```json
+{
+  "id": "req_5",
+  "method": "pane.report_agent_request",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:claude",
+    "agent": "claude",
+    "agent_session_id": "...",
+    "kind": "permission",
+    "tool_name": "Bash",
+    "description": "Run the test suite",
+    "input_preview": "cargo test",
+    "decisions": ["allow", "allow_always", "deny"],
+    "timeout_ms": 86400000
+  }
+}
+```
+
+`kind` is `permission` or `question`. A permission request lists the `decisions` the user may choose: `allow`, `allow_always`, or `deny`. A question request has 1 to 4 `questions` instead, each with distinct `question` text and optional `header`, `options` (`label` plus optional `description`), and `multi_select`. `description` is optional, and `input_preview` is cut to 8 KiB of UTF-8 at a character boundary. `timeout_ms` defaults to and is capped at 86400000 (24 hours). Herdr accepts a request under the same conditions as a reply, except that requests carry no `seq`: concurrent tool calls report independent requests. An unknown pane returns `pane_not_found`, an empty agent label returns `invalid_agent`, and a request that breaks the shape rules above returns `invalid_agent_request`.
+
+The response is either an answer or the reason the request ended:
+
+```json
+{"id":"req_5","result":{"type":"agent_request_answered","request_id":1,"decision":"deny","message":"Not now"}}
+{"id":"req_5","result":{"type":"agent_request_answered","request_id":2,"answers":{"Which color?":["Red"]}}}
+{"id":"req_5","result":{"type":"agent_request_ended","request_id":1,"reason":"timeout"}}
+```
+
+`reason` is `ignored` when the report does not belong to the pane's current agent (nothing is recorded and `request_id` is omitted), `timeout` when `timeout_ms` passes, or `closed` when the request ends in Herdr: the agent's status moves from `working` or `blocked` to `idle` or `done` after the request was reported, the pane's native session changes, the agent changes, is released, or exits, or the pane respawns or closes. Requests live in server memory only; a server restart or live handoff closes waiting connections without a response.
+
+Each request gets an `id` from one server-wide counter that starts at 1. `agent.get` and `agent.list` expose `request_ids`, the ids of pending requests in ascending order, omitted when there are none. `agent.requests` resolves `target` like `agent.get` and returns the agent with its pending requests in ascending `id` order:
+
+```json
+{"id":"req_6","method":"agent.requests","params":{"target":"w1:p1"}}
+```
+
+```json
+{
+  "id": "req_6",
+  "result": {
+    "type": "agent_requests",
+    "agent": { "pane_id": "w1:p1", "agent": "claude", "request_ids": [1], "...": "..." },
+    "requests": [
+      {
+        "id": 1,
+        "kind": "permission",
+        "tool_name": "Bash",
+        "description": "Run the test suite",
+        "input_preview": "cargo test",
+        "decisions": ["allow", "allow_always", "deny"]
+      }
+    ]
+  }
+}
+```
+
+`agent.answer` answers one pending request, delivers the answer to the waiting connection, and returns the agent as `agent_info`. A permission request takes a `decision` from its `decisions` and an optional `message`. A question request takes `answers`, an object that maps the text of every question to a non-empty array of answers; a question that is not `multi_select` takes exactly one answer. Answers do not have to match an option label.
+
+```json
+{"id":"req_7","method":"agent.answer","params":{"target":"w1:p1","request_id":1,"decision":"deny","message":"Not now"}}
+{"id":"req_8","method":"agent.answer","params":{"target":"w1:p1","request_id":2,"answers":{"Which color?":["Red"]}}}
+```
+
+`request_not_found` means the request already ended or is not pending for that agent. `invalid_answer` means the answer does not fit the request, which stays pending. Other target errors match `agent.get`. Requests do not affect agent state, waits, notifications, or events.
 
 `pane.get`, `pane.list`, `agent.get`, and `agent.list` also expose `foreground_cwd` when Herdr can resolve the cwd of the process currently controlling the pane PTY. The existing `cwd` field remains the pane/workspace cwd used for labels, follow-cwd behavior, and restored session state.
 

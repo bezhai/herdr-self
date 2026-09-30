@@ -60,6 +60,84 @@ fn agent_replies_rejects_invalid_arguments_before_contacting_the_server() {
 }
 
 #[test]
+fn agent_request_commands_reject_invalid_arguments_before_contacting_the_server() {
+    let socket_path = Path::new("/tmp/herdr-cli-agent-requests-no-server.sock");
+
+    for (args, expected) in [
+        (vec!["agent", "requests"], "usage: herdr agent requests"),
+        (
+            vec!["agent", "requests", "w1:p1", "extra"],
+            "usage: herdr agent requests",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1"],
+            "usage: herdr agent answer",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "1"],
+            "usage: herdr agent answer",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "one", "--decision", "allow"],
+            "invalid value for <request_id>: one",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "1", "--decision", "maybe"],
+            "invalid value for --decision: maybe",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "1", "--decision"],
+            "missing value for --decision",
+        ),
+        (
+            vec![
+                "agent",
+                "answer",
+                "w1:p1",
+                "1",
+                "--decision",
+                "allow",
+                "--answers",
+                "{}",
+            ],
+            "use either --decision or --answers",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "1", "--message", "why"],
+            "--message requires --decision",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "1", "--answers", "[\"Red\"]"],
+            "invalid value for --answers",
+        ),
+        (
+            vec![
+                "agent",
+                "answer",
+                "w1:p1",
+                "1",
+                "--answers",
+                "{\"Color?\": \"Red\"}",
+            ],
+            "invalid value for --answers",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "1", "--bogus"],
+            "unknown option: --bogus",
+        ),
+        (
+            vec!["agent", "answer", "w1:p1", "1", "2", "--decision", "deny"],
+            "usage: herdr agent answer",
+        ),
+    ] {
+        let output = run_cli(socket_path, &args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
 fn agent_replies_returns_final_replies_reported_by_the_claude_stop_hook() {
     use std::os::unix::fs::PermissionsExt;
 
@@ -153,6 +231,544 @@ fn agent_replies_returns_final_replies_reported_by_the_claude_stop_hook() {
     assert_eq!(none["result"]["replies"], serde_json::json!([]));
 
     cleanup_spawned_herdr(herdr, base);
+}
+
+/// A real server whose only pane runs a fake `claude` that Herdr detects as Claude Code.
+struct FakeClaudeServer {
+    herdr: SpawnedHerdr,
+    base: PathBuf,
+    socket_path: PathBuf,
+    pane_id: String,
+}
+
+impl FakeClaudeServer {
+    fn start() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = unique_test_dir();
+        let config_home = base.join("config");
+        let runtime_dir = base.join("runtime");
+        let socket_path = runtime_dir.join("herdr.sock");
+        let bin_dir = base.join("bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let fake_claude = bin_dir.join("claude");
+        fs::write(
+            &fake_claude,
+            "#!/bin/sh\nwhile IFS= read -r line; do :; done\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+        let path_override = format!(
+            "{}:{}",
+            bin_dir.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let herdr = spawn_herdr_with_path(
+            &config_home,
+            &runtime_dir,
+            &socket_path,
+            Some(Path::new(&path_override)),
+        );
+        wait_for_socket(&socket_path, Duration::from_secs(5));
+        let created = run_cli_json(
+            &socket_path,
+            &["workspace", "create", "--cwd", base.to_str().unwrap()],
+        );
+        let pane_id = created["result"]["root_pane"]["pane_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(run_cli(&socket_path, &["pane", "run", &pane_id, "claude"])
+            .status
+            .success());
+        assert!(
+            wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+                run_cli(&socket_path, &["agent", "get", &pane_id])
+                    .status
+                    .success()
+            }),
+            "fake claude was not detected"
+        );
+        Self {
+            herdr,
+            base,
+            socket_path,
+            pane_id,
+        }
+    }
+
+    /// Opens a hook connection that reports a request and waits for its outcome.
+    fn report_request(&self, id: &str, request: serde_json::Value) -> BufReader<UnixStream> {
+        let mut params = serde_json::json!({
+            "pane_id": self.pane_id,
+            "source": "herdr:claude",
+            "agent": "claude",
+        });
+        params
+            .as_object_mut()
+            .unwrap()
+            .extend(request.as_object().unwrap().clone());
+        let mut stream = UnixStream::connect(&self.socket_path).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let request = serde_json::json!({
+            "id": id,
+            "method": "pane.report_agent_request",
+            "params": params,
+        });
+        writeln!(stream, "{request}").unwrap();
+        stream.flush().unwrap();
+        BufReader::new(stream)
+    }
+
+    fn pending_request_ids(&self) -> Vec<u64> {
+        run_cli_json(&self.socket_path, &["agent", "requests", &self.pane_id])["result"]["requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|request| request["id"].as_u64().unwrap())
+            .collect()
+    }
+
+    fn wait_for_pending_requests(&self, expected: &[u64]) {
+        assert!(
+            wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+                self.pending_request_ids() == expected
+            }),
+            "pending requests never became {expected:?}; last: {:?}",
+            self.pending_request_ids()
+        );
+    }
+
+    fn report_state(&self, state: &str) {
+        let output = run_cli(
+            &self.socket_path,
+            &[
+                "pane",
+                "report-agent",
+                &self.pane_id,
+                "--source",
+                "e2e:lifecycle",
+                "--agent",
+                "claude",
+                "--state",
+                state,
+            ],
+        );
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+                run_cli_json(&self.socket_path, &["agent", "get", &self.pane_id])["result"]["agent"]
+                    ["agent_status"]
+                    == state
+            }),
+            "agent never became {state}"
+        );
+    }
+
+    fn stop(self) {
+        cleanup_spawned_herdr(self.herdr, self.base);
+    }
+}
+
+fn read_request_outcome(hook: &mut BufReader<UnixStream>) -> serde_json::Value {
+    let mut line = String::new();
+    hook.read_line(&mut line).unwrap();
+    serde_json::from_str(&line).unwrap_or_else(|err| panic!("{err}: {line:?}"))
+}
+
+fn run_cli_error(socket_path: &Path, args: &[&str]) -> serde_json::Value {
+    let output = run_cli(socket_path, args);
+    assert_eq!(output.status.code(), Some(1), "{args:?}: {output:?}");
+    serde_json::from_slice(&output.stderr).unwrap()
+}
+
+#[test]
+fn agent_answer_reaches_the_hook_connection_waiting_on_the_request() {
+    let server = FakeClaudeServer::start();
+    let socket_path = server.socket_path.as_path();
+    let pane_id = server.pane_id.as_str();
+    let mut permission_hook = server.report_request(
+        "hook-permission",
+        serde_json::json!({
+            "kind": "permission",
+            "tool_name": "Bash",
+            "description": "列出文件",
+            "input_preview": "ls -la",
+            "decisions": ["allow", "allow_always", "deny"],
+            "timeout_ms": 600000,
+        }),
+    );
+    server.wait_for_pending_requests(&[1]);
+
+    let agents = run_cli_json(socket_path, &["agent", "list"]);
+    assert_eq!(
+        agents["result"]["agents"][0]["request_ids"],
+        serde_json::json!([1])
+    );
+    let listed = run_cli_json(socket_path, &["agent", "requests", pane_id]);
+    assert_eq!(listed["result"]["type"], "agent_requests");
+    assert_eq!(
+        listed["result"]["requests"],
+        serde_json::json!([{
+            "id": 1,
+            "kind": "permission",
+            "tool_name": "Bash",
+            "description": "列出文件",
+            "input_preview": "ls -la",
+            "decisions": ["allow", "allow_always", "deny"],
+        }])
+    );
+
+    let invalid = run_cli_error(
+        socket_path,
+        &[
+            "agent",
+            "answer",
+            pane_id,
+            "1",
+            "--answers",
+            r#"{"Which color?":["Red"]}"#,
+        ],
+    );
+    assert_eq!(invalid["error"]["code"], "invalid_answer", "{invalid}");
+    let missing = run_cli_error(
+        socket_path,
+        &["agent", "answer", pane_id, "42", "--decision", "allow"],
+    );
+    assert_eq!(missing["error"]["code"], "request_not_found", "{missing}");
+
+    let answered = run_cli_json(
+        socket_path,
+        &[
+            "agent",
+            "answer",
+            pane_id,
+            "1",
+            "--decision=deny",
+            "--message",
+            "用户在飞书中拒绝了这次操作",
+        ],
+    );
+    assert_eq!(answered["result"]["type"], "agent_info", "{answered}");
+    assert!(answered["result"]["agent"].get("request_ids").is_none());
+    assert_eq!(
+        read_request_outcome(&mut permission_hook),
+        serde_json::json!({
+            "id": "hook-permission",
+            "result": {
+                "type": "agent_request_answered",
+                "request_id": 1,
+                "decision": "deny",
+                "message": "用户在飞书中拒绝了这次操作",
+            },
+        })
+    );
+
+    let mut question_hook = server.report_request(
+        "hook-question",
+        serde_json::json!({
+            "kind": "question",
+            "tool_name": "AskUserQuestion",
+            "input_preview": "{}",
+            "questions": [{
+                "question": "Which color?",
+                "options": [{"label": "Red"}, {"label": "Blue"}],
+                "multi_select": true,
+            }],
+        }),
+    );
+    server.wait_for_pending_requests(&[2]);
+    run_cli_json(
+        socket_path,
+        &[
+            "agent",
+            "answer",
+            pane_id,
+            "2",
+            "--answers",
+            r#"{"Which color?":["Red","其他颜色"]}"#,
+        ],
+    );
+    assert_eq!(
+        read_request_outcome(&mut question_hook)["result"],
+        serde_json::json!({
+            "type": "agent_request_answered",
+            "request_id": 2,
+            "answers": {"Which color?": ["Red", "其他颜色"]},
+        })
+    );
+    let answered_again = run_cli_error(
+        socket_path,
+        &[
+            "agent",
+            "answer",
+            pane_id,
+            "2",
+            "--answers",
+            r#"{"Which color?":["Red"]}"#,
+        ],
+    );
+    assert_eq!(answered_again["error"]["code"], "request_not_found");
+
+    server.stop();
+}
+
+#[test]
+fn agent_request_reports_end_without_an_answer() {
+    let server = FakeClaudeServer::start();
+    let permission = |timeout_ms: u64| {
+        serde_json::json!({
+            "kind": "permission",
+            "tool_name": "Bash",
+            "input_preview": "make deploy",
+            "decisions": ["allow", "deny"],
+            "timeout_ms": timeout_ms,
+        })
+    };
+
+    let mut ignored = server.report_request("hook-ignored", {
+        let mut request = permission(600_000);
+        request["source"] = "custom:claude".into();
+        request
+    });
+    assert_eq!(
+        read_request_outcome(&mut ignored)["result"],
+        serde_json::json!({"type": "agent_request_ended", "reason": "ignored"})
+    );
+
+    let started = Instant::now();
+    let mut timed_out = server.report_request("hook-timeout", permission(300));
+    assert_eq!(
+        read_request_outcome(&mut timed_out),
+        serde_json::json!({
+            "id": "hook-timeout",
+            "result": {"type": "agent_request_ended", "request_id": 1, "reason": "timeout"},
+        })
+    );
+    assert!(started.elapsed() >= Duration::from_millis(300));
+    assert!(server.pending_request_ids().is_empty());
+
+    let disconnected = server.report_request("hook-disconnected", permission(600_000));
+    server.wait_for_pending_requests(&[2]);
+    drop(disconnected);
+    server.wait_for_pending_requests(&[]);
+    let withdrawn = run_cli_error(
+        &server.socket_path,
+        &[
+            "agent",
+            "answer",
+            &server.pane_id,
+            "2",
+            "--decision",
+            "allow",
+        ],
+    );
+    assert_eq!(withdrawn["error"]["code"], "request_not_found");
+
+    server.report_state("working");
+    let mut turn = server.report_request("hook-turn", permission(600_000));
+    server.wait_for_pending_requests(&[3]);
+    server.report_state("blocked");
+    assert_eq!(server.pending_request_ids(), [3]);
+    server.report_state("idle");
+    assert_eq!(
+        read_request_outcome(&mut turn)["result"],
+        serde_json::json!({"type": "agent_request_ended", "request_id": 3, "reason": "closed"})
+    );
+    assert!(server.pending_request_ids().is_empty());
+
+    server.stop();
+}
+
+/// Starts the real Claude hook `permission` action as Claude Code in the pane would.
+fn spawn_claude_permission_hook(
+    server: &FakeClaudeServer,
+    hook_input: &serde_json::Value,
+) -> std::process::Child {
+    let hook = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/claude/herdr-agent-state.sh");
+    let mut child = Command::new("bash")
+        .arg(hook)
+        .arg("permission")
+        .env("HERDR_ENV", "1")
+        .env("HERDR_SOCKET_PATH", &server.socket_path)
+        .env("HERDR_PANE_ID", &server.pane_id)
+        .env("HERDR_REMOTE_ANSWERS", "1")
+        .env_remove("CURSOR_VERSION")
+        .env_remove("GROK_SESSION_ID")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(hook_input.to_string().as_bytes())
+        .unwrap();
+    child
+}
+
+fn claude_hook_decision(hook: std::process::Child) -> serde_json::Value {
+    let output = hook.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    serde_json::from_slice(&output.stdout)
+        .unwrap_or_else(|err| panic!("{err}: {}", String::from_utf8_lossy(&output.stdout)))
+}
+
+#[test]
+fn claude_permission_hook_prints_the_answer_given_with_herdr_agent_answer() {
+    let server = FakeClaudeServer::start();
+    // A status change ends pending requests as a finished turn; keep one turn running.
+    server.report_state("working");
+    let socket_path = server.socket_path.as_path();
+    let pane_id = server.pane_id.as_str();
+    let suggestions = serde_json::json!([{
+        "type": "addRules",
+        "rules": [{"toolName": "Bash", "ruleContent": "cargo publish:*"}],
+        "behavior": "allow",
+        "destination": "localSettings",
+    }]);
+    let bash_request = serde_json::json!({
+        "hook_event_name": "PermissionRequest",
+        "session_id": "e2e-session",
+        "tool_name": "Bash",
+        "tool_input": {"command": "cargo publish --dry-run", "description": "试运行发布"},
+        "permission_suggestions": suggestions,
+    });
+
+    let permission = spawn_claude_permission_hook(&server, &bash_request);
+    server.wait_for_pending_requests(&[1]);
+    assert_eq!(
+        run_cli_json(socket_path, &["agent", "requests", pane_id])["result"]["requests"],
+        serde_json::json!([{
+            "id": 1,
+            "kind": "permission",
+            "tool_name": "Bash",
+            "description": "试运行发布",
+            "input_preview": "cargo publish --dry-run",
+            "decisions": ["allow", "allow_always", "deny"],
+        }])
+    );
+    run_cli_json(
+        socket_path,
+        &[
+            "agent",
+            "answer",
+            pane_id,
+            "1",
+            "--decision",
+            "allow_always",
+        ],
+    );
+    assert_eq!(
+        claude_hook_decision(permission),
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "allow", "updatedPermissions": suggestions},
+            },
+        })
+    );
+
+    let questions = serde_json::json!([{
+        "question": "Which color?",
+        "header": "Color",
+        "options": [{"label": "Red"}, {"label": "Blue"}],
+        "multiSelect": true,
+    }]);
+    let question = spawn_claude_permission_hook(
+        &server,
+        &serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "session_id": "e2e-session",
+            "tool_name": "AskUserQuestion",
+            "tool_input": {"questions": questions},
+        }),
+    );
+    server.wait_for_pending_requests(&[2]);
+    run_cli_json(
+        socket_path,
+        &[
+            "agent",
+            "answer",
+            pane_id,
+            "2",
+            "--answers",
+            r#"{"Which color?":["Red","其他颜色"]}"#,
+        ],
+    );
+    assert_eq!(
+        claude_hook_decision(question),
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "allow",
+                    "updatedInput": {
+                        "questions": questions,
+                        "answers": {"Which color?": "Red, 其他颜色"},
+                    },
+                },
+            },
+        })
+    );
+
+    let denied = spawn_claude_permission_hook(&server, &bash_request);
+    server.wait_for_pending_requests(&[3]);
+    run_cli_json(
+        socket_path,
+        &[
+            "agent",
+            "answer",
+            pane_id,
+            "3",
+            "--decision",
+            "deny",
+            "--message",
+            "用户在飞书中拒绝了这次操作",
+        ],
+    );
+    assert_eq!(
+        claude_hook_decision(denied),
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {
+                    "behavior": "deny",
+                    "message": "用户在飞书中拒绝了这次操作",
+                    "interrupt": true,
+                },
+            },
+        })
+    );
+
+    server.stop();
+}
+
+#[test]
+fn killing_the_claude_permission_hook_withdraws_its_request() {
+    let server = FakeClaudeServer::start();
+    // Keep one turn running so that only the closed hook connection can end the request.
+    server.report_state("working");
+    let mut hook = spawn_claude_permission_hook(
+        &server,
+        &serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "Bash",
+            "tool_input": {"command": "make deploy"},
+        }),
+    );
+    server.wait_for_pending_requests(&[1]);
+
+    hook.kill().unwrap();
+    hook.wait().unwrap();
+
+    server.wait_for_pending_requests(&[]);
+    server.stop();
 }
 
 fn write_delayed_shell_and_fake_pi(

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::agents::{AgentInfo, AgentReplyInfo};
+use super::agents::{
+    AgentInfo, AgentReplyInfo, AgentRequestAnswer, AgentRequestEndReason, AgentRequestInfo,
+};
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
 use super::integrations::{
@@ -110,6 +112,20 @@ pub enum ResponseResult {
     AgentReplies {
         agent: AgentInfo,
         replies: Vec<AgentReplyInfo>,
+    },
+    AgentRequests {
+        agent: AgentInfo,
+        requests: Vec<AgentRequestInfo>,
+    },
+    AgentRequestAnswered {
+        request_id: u64,
+        #[serde(flatten)]
+        answer: AgentRequestAnswer,
+    },
+    AgentRequestEnded {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+        reason: AgentRequestEndReason,
     },
     AgentView {
         active: bool,

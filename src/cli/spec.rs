@@ -330,6 +330,42 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("requests")
+                .about("Show the permission requests and questions an agent is waiting on")
+                .arg(required("target", "TARGET"))
+                .after_help(
+                    "Integration hooks report requests and wait for an answer. Requests end when answered, when the turn ends, when the agent changes or exits, when the hook stops waiting, or at the hook's timeout.",
+                ),
+        )
+        .subcommand(
+            Command::new("answer")
+                .about("Answer a pending agent request")
+                .override_usage(
+                    "herdr agent answer <TARGET> <REQUEST_ID> --decision <DECISION> [--message <TEXT>]\n       herdr agent answer <TARGET> <REQUEST_ID> --answers <JSON>",
+                )
+                .arg(required("target", "TARGET"))
+                .arg(required("request_id", "REQUEST_ID"))
+                .arg(
+                    option("decision", "DECISION")
+                        .value_parser(["allow", "allow_always", "deny"])
+                        .conflicts_with("answers")
+                        .help("Answer a permission request with one of its offered decisions"),
+                )
+                .arg(
+                    option("message", "TEXT")
+                        .requires("decision")
+                        .help("Message passed to the agent with the decision"),
+                )
+                .arg(option("answers", "JSON").help(
+                    "Answer a question request: a JSON object mapping each question to an array of answers",
+                ))
+                .group(
+                    ArgGroup::new("answer")
+                        .args(["decision", "answers"])
+                        .required(true),
+                ),
+        )
+        .subcommand(
             Command::new("read")
                 .about("Read agent terminal output")
                 .override_usage("herdr agent read <TARGET> [OPTIONS]")
@@ -1262,6 +1298,37 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Usage: herdr agent replies"), "{output}");
         assert!(output.contains("--after"), "{output}");
+    }
+
+    #[test]
+    fn spec_describes_agent_requests_and_answer() {
+        let cmd = super::command();
+        let requests = command_path(&cmd, &["agent", "requests"]);
+        assert!(requests.get_about().is_some());
+        assert!(requests
+            .get_arguments()
+            .any(|arg| arg.get_id() == "target" && arg.is_required_set()));
+
+        let answer = command_path(&cmd, &["agent", "answer"]);
+        assert!(answer.get_about().is_some());
+        for positional in ["target", "request_id"] {
+            assert!(answer
+                .get_arguments()
+                .any(|arg| arg.get_id() == positional && arg.is_required_set()));
+        }
+        assert_eq!(
+            option_values(answer, "decision"),
+            ["allow", "allow_always", "deny"]
+        );
+        assert!(has_option(answer, "message"));
+        assert!(has_option(answer, "answers"));
+
+        let args = ["herdr", "agent", "answer", "--help"].map(String::from);
+        let mut output = Vec::new();
+        assert!(super::write_requested_help(&args, &mut output, || {}).unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Usage: herdr agent answer"), "{output}");
+        assert!(output.contains("--answers"), "{output}");
     }
 
     #[test]

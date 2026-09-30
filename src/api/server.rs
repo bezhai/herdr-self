@@ -10,6 +10,7 @@ use tracing::{debug, error, info, warn};
 #[cfg(all(test, unix))]
 use std::fs;
 
+use crate::api::agent_request_wait::wait_for_agent_request;
 use crate::api::schema::{
     ErrorBody, ErrorResponse, Method, Request, ResponseResult, ServerCapabilities, SuccessResponse,
 };
@@ -176,7 +177,7 @@ fn restrict_socket_permissions(path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-fn handle_connection(
+pub(super) fn handle_connection(
     stream: LocalStream,
     api_tx: &ApiRequestSender,
     event_hub: &EventHub,
@@ -372,6 +373,11 @@ fn handle_connection_with_stop(
                 wait_for_output(request_id.clone(), params, &mut stream, api_tx, running)?;
             finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
         }
+        Method::PaneReportAgentRequest(params) => {
+            let response =
+                wait_for_agent_request(request_id.clone(), params, &mut stream, api_tx, running)?;
+            finish_wait_response(&mut stream, response, &request_id, method, changes_ui)
+        }
         method_body => {
             let (response_write_tx, response_write_rx) = std::sync::mpsc::channel();
             let response = handle_request(
@@ -524,6 +530,8 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::AgentRead(_) => "agent.read",
         Method::AgentExplain(_) => "agent.explain",
         Method::AgentReplies(_) => "agent.replies",
+        Method::AgentRequests(_) => "agent.requests",
+        Method::AgentAnswer(_) => "agent.answer",
         Method::AgentSendKeys(_) => "agent.send_keys",
         Method::AgentRename(_) => "agent.rename",
         Method::AgentViewSet(_) => "agent.view.set",
@@ -574,6 +582,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneReportAgent(_) => "pane.report_agent",
         Method::PaneReportAgentSession(_) => "pane.report_agent_session",
         Method::PaneReportAgentReply(_) => "pane.report_agent_reply",
+        Method::PaneReportAgentRequest(_) => "pane.report_agent_request",
         Method::PaneReportMetadata(_) => "pane.report_metadata",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",
@@ -1059,7 +1068,7 @@ fn caller_timeout_dispatch_uses_timeout_error() {
     assert_eq!(error.error.code, "timeout");
 }
 
-fn error_response_json(id: String, code: &str, message: String) -> String {
+pub(super) fn error_response_json(id: String, code: &str, message: String) -> String {
     serde_json::to_string(&ErrorResponse {
         id,
         error: ErrorBody {
