@@ -16,7 +16,8 @@ function registrationFixture(register,options={}){
 }
 const ready=o=>o.onQRCodeReady({url:'https://open.feishu.cn/page/launcher?user_code=test',expireIn:600});
 test('registration stores credentials server-side, uses minimal bot scopes and allows only the creator',async()=>{
- const f=registrationFixture(async o=>{assert.equal(o.createOnly,false);assert.equal(o.addons.preset,false);assert.equal(o.addons.scopes.user,undefined);assert.deepEqual(o.addons.events.items.tenant,['im.message.receive_v1']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
+ const f=registrationFixture(async o=>{assert.equal(o.createOnly,false);assert.equal(o.addons.preset,false);assert.equal(o.addons.scopes.user,undefined);assert.deepEqual(o.addons.events.items.tenant,['im.message.receive_v1']);
+  assert.deepEqual(o.addons.scopes.tenant,['im:message:send_as_bot','im:message.p2p_msg:readonly','im:message.group_at_msg:readonly','application:bot.basic_info:read','im:message.reactions:write_only']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
  try{f.registrations.start({name:'test'});await f.registrations.current.done;assert.equal(f.registrations.status().status,'completed');const a=new Store(f.store.dir).data.apps[0];assert.equal(a.appSecret,'private-test-secret');assert.deepEqual(a.allowedUsers,['ou_owner']);assert.equal(a.enabled,false);assert.equal(a.domain,'feishu');assert.ok(!JSON.stringify(f.registrations.status()).includes('private-test-secret'));assert.equal(f.registrations.status().url,undefined);assert.equal(fs.statSync(path.join(f.store.dir,'state.json')).mode&0o777,0o600);}finally{f.close();}
 });
 test('duplicate starts reuse pending flow; cancellation fences a late SDK result and stale cancel',async()=>{
@@ -101,6 +102,17 @@ test('replies go into the topic thread as text or markdown and fail without a co
   assert.deepEqual(sent,[['oc_1',{text:'hi'},{replyTo:'om_1',replyInThread:true}],['oc_1',{markdown:'**done**\n\n- a'},{replyTo:'om_1',replyInThread:true}]]);
  }finally{f.close();}
 });
+test('message reactions are added and removed through the connected channel and fail without one',async()=>{
+ const f=platformFixture(),calls=[];try{
+  await assert.rejects(f.platforms.react(allowed,'om_1','OneSecond'),/飞书未连接/);await assert.rejects(f.platforms.unreact(allowed,'om_1','r_1'),/飞书未连接/);
+  const channel={getConnectionStatus:()=>({state:'reconnecting'}),addReaction:async(...args)=>{calls.push(['add',...args]);return 'r_1';},removeReaction:async(...args)=>{calls.push(['remove',...args]);}};
+  f.platforms.runtime.set('a',{channel});
+  await assert.rejects(f.platforms.react(allowed,'om_1','OneSecond'),/飞书未连接/);await assert.rejects(f.platforms.unreact(allowed,'om_1','r_1'),/飞书未连接/);assert.deepEqual(calls,[]);
+  channel.getConnectionStatus=()=>({state:'connected'});
+  assert.equal(await f.platforms.react(allowed,'om_1','OneSecond'),'r_1');assert.equal(await f.platforms.unreact(allowed,'om_1','r_1'),undefined);
+  assert.deepEqual(calls,[['add','om_1','OneSecond'],['remove','om_1','r_1']]);
+ }finally{f.close();}
+});
 test('a start failure with a local path and an English Herdr error keeps them out of the Feishu notice',async()=>{
  const f=topicFixture(),raw='no herdr server is running at /home/someone/.config/herdr/herdr.sock; run `herdr server`';try{
   f.h.on['workspace list']=()=>{throw Error(raw);};await f.send({messageId:'om_1',content:'one'});
@@ -128,6 +140,7 @@ test('Herdr commands keep Herdr error codes, honor per-call timeouts and expand 
 
 const coded=(code,message)=>Object.assign(Error(message),{code});
 // In-memory Herdr: records every CLI call; h.on['<group> <verb>'] replaces the next such call and may call run(args) for the default result.
+// Agents start idle with state_change_seq 1; a prompt returns the agent as it is.
 // h.retained[paneId] holds the replies Herdr keeps for the agent of that pane.
 function fakeHerdr(){
  const h={calls:[],timeouts:[],machines:[],workspaces:[],agents:[],retained:{},created:0,panes:0,on:{}};
@@ -137,7 +150,7 @@ function fakeHerdr(){
   if(group==='workspace'&&verb==='create'){const id='w'+ ++h.created,n=++h.panes;h.workspaces.push({workspace_id:id,label:args[5]});return {type:'workspace_created',workspace:{workspace_id:id},tab:{tab_id:`${id}:t${n}`},root_pane:{pane_id:`${id}:p${n}`}};}
   if(group==='tab'&&verb==='rename')return {type:'tab_info',tab:{tab_id:args[2],label:args[3]}};
   if(group==='tab'&&verb==='create'){const n=++h.panes;return {type:'tab_created',tab:{tab_id:`${args[3]}:t${n}`},root_pane:{pane_id:`${args[3]}:p${n}`}};}
-  if(group==='agent'&&verb==='start'){const agent={name:args[2],agent:args[4],pane_id:args[6],agent_status:'idle'};h.agents.push(agent);return {type:'agent_started',agent,argv:[args[4]]};}
+  if(group==='agent'&&verb==='start'){const agent={name:args[2],agent:args[4],pane_id:args[6],agent_status:'idle',state_change_seq:1};h.agents.push(agent);return {type:'agent_started',agent,argv:[args[4]]};}
   if(group==='agent'&&verb==='list')return {type:'agent_list',agents:h.agents};
   if(group==='agent'&&verb==='prompt')return {type:'agent_prompted',agent:h.agents.find(a=>a.pane_id===args[2])};
   if(group==='agent'&&verb==='replies'){const after=args[3]==='--after'?Number(args[4]):0;return {type:'agent_replies',agent:h.agents.find(a=>a.pane_id===args[2]),replies:(h.retained[args[2]]||[]).filter(r=>r.seq>after)};}
@@ -147,12 +160,13 @@ function fakeHerdr(){
  return h;
 }
 function topicFixture({binding,machine}={}){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],m={id:'m',name:'cpu2',enabled:true,...machine};
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],reacted=[],unreacted=[],m={id:'m',name:'cpu2',enabled:true,...machine};
  store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];
  const topics=new Topics(store,{herdr:h.herdr,machine:id=>{if(id!==m.id)throw Error('机器连接不存在');return m;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
-  reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);}});
+  reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);},
+  react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);}});
  const send=msg=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg});
- return {dir,store,h,m,topics,replies,b,send,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,replies,reacted,unreacted,b,send,close(){fs.rmSync(dir,{recursive:true});}};
 }
 const later=ms=>new Promise(r=>setTimeout(r,ms));
 test('a new topic creates the binding workspace, names its root tab after the topic, starts the agent there with a longer timeout and prompts it',async()=>{
@@ -162,9 +176,9 @@ test('a new topic creates the binding workspace, names its root tab after the to
   assert.equal(agentName,'feishu-'+id.slice(0,8));assert.match(agentName,/^feishu-[0-9a-f]{8}$/);assert.ok(createdAt>0);
   assert.deepEqual(f.h.calls,[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w1:t1',title],['agent','start',agentName,'--kind','claude','--pane','w1:p1','--timeout','60000'],['agent','prompt','w1:p1',text]]);
   assert.deepEqual(f.h.timeouts,[undefined,undefined,undefined,70000,undefined]);assert.deepEqual([...new Set(f.h.machines)],['m']);
-  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0});
+  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[{messageId:'om_1',reactionId:'r_om_1',stateSeq:1}]});
   assert.equal(new Store(f.dir).data.bindings[0].workspaceId,'w1');assert.equal(new Store(f.dir).data.topics[0].state,'ready');
-  assert.deepEqual(f.replies,[['a','oc_1','om_1',{text:`已在 cpu2 的 Herdr 中启动 claude：飞书 · 个人助手 / ${title}`}]]);
+  assert.deepEqual(f.replies,[]);assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['话题会话','info',`个人助手：已在 cpu2 启动 ${agentName}`],['消息投递','info',`bot → 个人助手：已发送到 ${agentName}`]]);
  }finally{f.close();}
 });
 test('another topic opens a tab in the same workspace; replies in a topic prompt its pane without a new tab',async()=>{
@@ -175,7 +189,8 @@ test('another topic opens a tab in the same workspace; replies in a topic prompt
   assert.deepEqual([second.rootId,second.tabId,second.title],['om_2','w1:t2','第二个 话题']);
   f.h.calls.length=0;await f.send({messageId:'om_3',rootId:'om_1',content:'继续第一个'});
   assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','继续第一个']]);
-  assert.equal(f.store.data.topics.length,2);assert.deepEqual(f.store.data.topics[0].messageIds,['om_1','om_3']);assert.deepEqual(f.replies.map(r=>r[2]),['om_1','om_2']);
+  assert.equal(f.store.data.topics.length,2);assert.deepEqual(f.store.data.topics[0].messageIds,['om_1','om_3']);assert.deepEqual(f.replies,[]);
+  assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>t.reactions.map(r=>r.messageId)),[['om_1','om_3'],['om_2']]);
  }finally{f.close();}
 });
 test('a message id is persisted before any Herdr call and handled at most once; each topic keeps its latest 50 ids',async()=>{
@@ -249,7 +264,7 @@ test('agent_not_ready at start still opens the topic; agent_blocked sends a noti
   f.h.on['agent start']=(args,run)=>{run(args);throw coded('agent_not_ready','agent is blocked during startup and is not ready for prompts');};
   f.h.on['agent prompt']=()=>{throw coded('agent_blocked','agent w1:p1 is blocked and requires interactive input');};
   await f.send({messageId:'om_1',content:'one'});
-  assert.equal(f.store.data.topics[0].state,'ready');assert.deepEqual(f.replies.map(r=>r[3]).slice(1),[{text:'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息'}]);
+  assert.equal(f.store.data.topics[0].state,'ready');assert.deepEqual(f.replies.map(r=>r[3]),[{text:'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息'}]);
   f.h.on['agent prompt']=()=>{throw coded('agent_prompt_failed','pty closed');};f.replies.length=0;const logs=f.store.data.logs.length;
   await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
   assert.deepEqual(f.replies,[]);assert.equal(f.h.calls.filter(c=>c[1]==='prompt').length,2);assert.equal(f.store.data.topics[0].state,'ready');
@@ -354,6 +369,87 @@ test('a queued reply fetch whose binding was removed meanwhile sends nothing',as
   const done=Promise.all([f.send({messageId:'om_2',rootId:'om_1',content:'two'}),f.topics.sync(f.m,f.snapshot(1))]);
   f.store.data.bindings=[];f.store.data.topics=[];await done;
   assert.deepEqual(f.h.calls.map(c=>c[1]),['list','prompt']);assert.deepEqual(f.replies,[]);
+ }finally{f.close();}
+});
+
+const onDisk=f=>new Store(f.dir).data.topics[0].reactions;
+test('every message a topic accepts gets a OneSecond reaction at once, even while an earlier message is still starting the agent; no start notice is sent',async()=>{
+ const f=topicFixture();try{
+  let during;f.h.on['agent start']=async(args,run)=>{await later(20);during=f.reacted.map(r=>r[1]);return run(args);};
+  await Promise.all([f.send({messageId:'om_1',content:'one'}),f.send({messageId:'om_2',rootId:'om_1',content:'two'})]);
+  assert.deepEqual(during,['om_1','om_2']);assert.deepEqual(f.reacted,[['a','om_1','OneSecond'],['a','om_2','OneSecond']]);
+  assert.deepEqual(f.replies,[]);assert.deepEqual(f.unreacted,[]);assert.deepEqual(onDisk(f).map(r=>r.messageId),['om_1','om_2']);
+  await f.send({messageId:'om_1',content:'one'});assert.equal(f.reacted.length,2);
+ }finally{f.close();}
+});
+test('a reaction is recorded on disk without a state seq, which becomes the state_change_seq that the prompt returned',async()=>{
+ const f=topicFixture();try{
+  let before;f.h.on['agent prompt']=(args,run)=>{before=onDisk(f);const r=run(args);return {...r,agent:{...r.agent,state_change_seq:7}};};
+  await f.send({messageId:'om_1',content:'one'});
+  assert.deepEqual(before,[{messageId:'om_1',reactionId:'r_om_1',stateSeq:null}]);assert.deepEqual(onDisk(f),[{messageId:'om_1',reactionId:'r_om_1',stateSeq:7}]);assert.deepEqual(f.unreacted,[]);
+ }finally{f.close();}
+});
+test('sync removes the reaction of a turn that has ended: the agent is idle or done and has changed state since the prompt',async()=>{
+ const f=await readyTopic();try{
+  const agent=(agent_status,state_change_seq)=>[{...f.h.agents[0],agent_status,state_change_seq}];
+  // A message still waiting for its prompt keeps its reaction whatever the agent does.
+  f.t.reactions.push({messageId:'om_waiting',reactionId:'r_waiting',stateSeq:null});
+  for(const snapshot of [agent('working',5),agent('blocked',5),agent('unknown',5),agent('idle',1),agent('done',1),[{...agent('done',5)[0],name:'someone-else'}],[]])await f.topics.sync(f.m,snapshot);
+  assert.deepEqual(f.unreacted,[]);assert.deepEqual(onDisk(f).map(r=>r.messageId),['om_1']);assert.equal(f.t.reactions.length,2);
+  await f.topics.sync(f.m,agent('done',2));
+  assert.deepEqual(f.unreacted,[['a','om_1','r_om_1']]);assert.deepEqual(onDisk(f),[{messageId:'om_waiting',reactionId:'r_waiting',stateSeq:null}]);
+  f.t.reactions=[];await f.send({messageId:'om_2',rootId:'om_1',content:'two'});f.unreacted.length=0;
+  await f.topics.sync(f.m,agent('idle',3));await f.topics.sync(f.m,agent('idle',3));
+  assert.deepEqual(f.unreacted,[['a','om_2','r_om_2']]);assert.deepEqual(onDisk(f),[]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='replies'),[]);
+ }finally{f.close();}
+});
+test('when a snapshot has new replies and ends a turn, the replies are sent before the reaction is removed',async()=>{
+ const f=await readyTopic();try{
+  const events=[];f.topics.reply=async(a,chatId,rootId,{markdown})=>{events.push('reply '+markdown);};f.topics.unreact=async(a,messageId)=>{events.push('unreact '+messageId);};
+  f.h.retained['w1:p1']=[{seq:1,text:'a'},{seq:2,text:'b'}];
+  await f.topics.sync(f.m,f.h.agents.map(a=>({...a,agent_status:'done',state_change_seq:3,reply_seq:2})));
+  assert.deepEqual(events,['reply a','reply b','unreact om_1']);
+ }finally{f.close();}
+});
+test('a message that is not prompted loses its reaction: failed start, blocked agent, prompt error or closed topic',async()=>{
+ const f=topicFixture();try{
+  f.h.on['agent start']=()=>{throw coded('agent_pane_busy','busy');};await f.send({messageId:'om_1',content:'one'});
+  f.h.on['agent prompt']=()=>{throw coded('agent_blocked','blocked');};await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
+  f.h.on['agent prompt']=()=>{throw coded('agent_prompt_failed','pty closed');};await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
+  assert.deepEqual(f.replies.map(r=>r[3].text),['启动失败，请在 Bridge 管理台查看原因','Agent 正在等待确认，请到 Herdr 中处理后重发这条消息']);
+  assert.deepEqual(f.unreacted,[['a','om_1','r_om_1'],['a','om_2','r_om_2'],['a','om_3','r_om_3']]);assert.deepEqual(onDisk(f),[]);
+  const t=f.store.data.topics[0];t.state='closed';f.h.calls.length=0;await f.send({messageId:'om_4',rootId:'om_1',content:'four'});
+  assert.deepEqual(f.h.calls,[]);assert.deepEqual(f.unreacted.at(-1),['a','om_4','r_om_4']);assert.deepEqual(onDisk(f),[]);
+ }finally{f.close();}
+});
+test('a topic closed because its agent is gone loses every reaction',async()=>{
+ const f=await readyTopic();try{
+  await f.send({messageId:'om_2',rootId:'om_1',content:'two'});f.t.reactions.push({messageId:'om_waiting',reactionId:'r_waiting',stateSeq:null});
+  f.h.agents.length=0;await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
+  assert.equal(f.t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[{text:'该话题的会话已结束，请发起新话题'}]);
+  assert.deepEqual(f.unreacted.map(r=>r[1]).sort(),['om_1','om_2','om_3','om_waiting']);assert.equal(f.unreacted.length,4);assert.deepEqual(onDisk(f),[]);
+ }finally{f.close();}
+});
+test('a reaction Feishu refuses is logged and the message is still prompted without a record',async()=>{
+ const f=topicFixture();try{
+  f.topics.react=async()=>{throw Error('飞书未连接');};await f.send({messageId:'om_1',content:'one'});
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['one']);assert.deepEqual(onDisk(f),[]);assert.deepEqual(f.unreacted,[]);
+  const t=f.store.data.topics[0];assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='消息表情').map(l=>[l.level,l.message]),[['error',`${t.agentName}：未能贴上表情，飞书未连接`]]);
+ }finally{f.close();}
+});
+test('a message still settles without rejecting when its turn seq cannot be saved',async()=>{
+ const f=topicFixture();try{
+  const save=f.store.save.bind(f.store);let failed=0;
+  f.store.save=()=>{if(!failed&&f.store.data.topics[0]?.reactions?.[0]?.stateSeq!=null){failed++;throw Error('disk full');}save();};
+  await f.send({messageId:'om_1',content:'one'});
+  assert.equal(failed,1);assert.deepEqual([f.store.data.logs.at(-1).level,f.store.data.logs.at(-1).kind],['error','消息投递']);assert.match(f.store.data.logs.at(-1).message,/disk full/);
+ }finally{f.close();}
+});
+test('a removal Feishu refuses is logged once and its record is dropped anyway',async()=>{
+ const f=await readyTopic();try{
+  let calls=0;f.topics.unreact=async()=>{calls++;throw Error('飞书未连接');};const done=f.h.agents.map(a=>({...a,agent_status:'done',state_change_seq:2}));
+  await f.topics.sync(f.m,done);await f.topics.sync(f.m,done);
+  assert.equal(calls,1);assert.deepEqual(onDisk(f),[]);assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='消息表情').map(l=>[l.level,l.message]),[['error',`${f.t.agentName}：未能取消表情，飞书未连接`]]);
  }finally{f.close();}
 });
 
@@ -509,10 +605,10 @@ test('channel startup and shutdown do not revive a cancelled connection',async()
  const store=new Store(dir),messages=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}}),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true};
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety.batch.text.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server lists pending chats, saves bindings only through a link token, serves app avatars and reports topics without message ids',async()=>{
+test('the server lists pending chats, saves bindings only through a link token, serves app avatars and reports topics without message ids or reactions',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
  fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'initialized'),'1');fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
- const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],createdAt:1};
+ const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],createdAt:1};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({apps:[{...app,id:'app-avatar',avatar:{type:'image/png',updatedAt:5}},{...app,id:'app-plain',appId:'cli_plain'},{...app,id:'app-gone',appId:'cli_gone',avatar:{type:'image/png',updatedAt:5}}],
   bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'}],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready'}]}));
@@ -528,7 +624,7 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
   const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
   assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
-  const {messageIds,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);assert.equal('messageIds' in s.topics[1],false);
+  const {messageIds,reactions,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);assert.equal('messageIds' in s.topics[1],false);assert.equal('reactions' in s.topics[1],false);
   assert.equal((await api('bindings/remove',{id:'b-old'})).status,200);assert.deepEqual((await api('state')).body.topics.map(t=>t.id),['t2']);
   const avatar=async(id,headers={authorization:'Bearer '+key})=>fetch(`http://127.0.0.1:${port}/api/apps/avatar?id=${encodeURIComponent(id)}`,{headers});
   const image=await avatar('app-avatar');assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');assert.equal(image.headers.get('cache-control'),'private, max-age=300');assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);
@@ -540,13 +636,14 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.equal((await api('machines/install',{id:machineId})).status,404);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
-test('the server hands every refreshed agent list to the topics, which fetch and forward new replies',async()=>{
+test('the server hands every refreshed agent list to the topics, which forward new replies and then remove the reactions of ended turns',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),calls=path.join(dir,'calls');
- const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',reply_seq:1};
+ const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',state_change_seq:2,reply_seq:1};
  fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'fake',type:'local',session:'default',binary:herdr,enabled:true}],
   apps:[{id:'app',name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false}],bindings:[{id:'b',name:'助手',appId:'app',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false,enabled:true}],
-  topics:[{id:'t',bindingId:'b',appId:'app',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',state:'ready',error:'',messageIds:['om_1'],createdAt:1}]}));
+  topics:[{id:'t',bindingId:'b',appId:'app',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',state:'ready',error:'',messageIds:['om_1'],
+   reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],createdAt:1}]}));
  fs.writeFileSync(herdr,['#!/bin/sh',`echo "$*" >> ${quote(calls)}`,'case "$3 $4" in',
   ` 'agent list') echo ${quote(JSON.stringify({result:{type:'agent_list',agents:[agent]}}))};;`,
   ` 'agent replies') echo ${quote(JSON.stringify({result:{type:'agent_replies',agent,replies:[{seq:1,text:'hi'}]}}))};;`,
@@ -556,9 +653,10 @@ test('the server hands every refreshed agent list to the topics, which fetch and
  try{
   await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async p=>(await fetch(`http://127.0.0.1:${port}/api/${p}`,{headers:{authorization:'Bearer '+key}})).json();
-  // The app is not connected, so the forward fails and is logged; no Feishu request is made.
-  let s;for(let i=0;i<100;i++){s=await api('state');if(s.logs.some(l=>l.kind==='回复转发'))break;await later(50);}
-  assert.equal(s.topics[0].replySeq,1);assert.deepEqual(s.logs.filter(l=>l.kind==='回复转发').map(l=>[l.level,l.message]),[['error','助手：feishu-1 的回复未发出，飞书未连接']]);
+  // The app is not connected, so the forward and the removal fail and are logged; no Feishu request is made.
+  let s;for(let i=0;i<100;i++){s=await api('state');if(s.logs.some(l=>l.kind==='消息表情'))break;await later(50);}
+  assert.equal(s.topics[0].replySeq,1);assert.deepEqual(s.logs.filter(l=>['回复转发','消息表情'].includes(l.kind)).map(l=>[l.level,l.message]),[['error','助手：feishu-1 的回复未发出，飞书未连接'],['error','feishu-1：未能取消表情，飞书未连接']]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).topics[0].reactions,[]);
   assert.deepEqual(fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('replies')),['--session default agent replies w1:p1 --after 0']);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });

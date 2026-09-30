@@ -108,8 +108,9 @@ export class Platforms{
   else if(msg.chatType==='p2p'||msg.mentionedBot)this.onUnbound(a,msg);
  }
  // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic. content is {text} or {markdown}.
- async reply(a,chatId,rootId,content){
-  const channel=this.runtime.get(a.id)?.channel;if(!channel||channel.getConnectionStatus()?.state!=='connected')throw Error('飞书未连接');
-  await channel.send(chatId,content,{replyTo:rootId,replyInThread:true});
- }
+ async reply(a,chatId,rootId,content){await this.connected(a).send(chatId,content,{replyTo:rootId,replyInThread:true});}
+ // The bot's emoji reaction on a message. Resolves to the reaction id, which is the only way to remove it again.
+ async react(a,messageId,emojiType){return this.connected(a).addReaction(messageId,emojiType);}
+ async unreact(a,messageId,reactionId){await this.connected(a).removeReaction(messageId,reactionId);}
+ connected(a){const channel=this.runtime.get(a.id)?.channel;if(!channel||channel.getConnectionStatus()?.state!=='connected')throw Error('飞书未连接');return channel;}
 }

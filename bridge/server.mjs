@@ -15,14 +15,14 @@ async function refresh(m){if(refreshes.has(m.id))return refreshes.get(m.id);cons
  // Topic agents' new replies go back to Feishu; this does not wait for them and never throws.
  topics.sync(m,agents);
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
-const topics=new Topics(store,{herdr,machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
+const topics=new Topics(store,{herdr,machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
 const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>pending.open(...args)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
  if(!a.enabled||platforms.status(a).connection!=='connected'){await platforms.start(a);a.enabled=true;store.save();}
  for(let i=0;i<20;i++){if(platforms.status(a).connection==='connected')return true;await new Promise(r=>setTimeout(r,750));}
  throw Error('connection_timeout');
 }});
-function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(m=>({...m,...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,...t})=>t),logs:store.data.logs.slice(-60)};}
+function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(m=>({...m,...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,...t})=>t),logs:store.data.logs.slice(-60)};}
 function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
