@@ -1,7 +1,7 @@
 id = "agy"
-version = "2026.06.24.1"
+version = "2026.10.01.1"
 min_engine_version = 1
-updated_at = "2026-06-24T00:00:00Z"
+updated_at = "2026-10-01T00:00:00Z"
 aliases = ["antigravity", "antigravity-cli"]
 
 [[rules]]
@@ -15,6 +15,32 @@ any = [
   { contains = ["do you want to proceed?"] },
   { contains = ["tab amend", "edit command"] },
 ]
+
+[[rules]]
+id = "approval_prompt"
+state = "blocked"
+priority = 300
+region = "bottom_non_empty_lines(16)"
+visible_blocker = true
+contains = ["esc to cancel"]
+line_regex = ['^\W*1\.\s+Yes,', '^\W*[2-9]\.\s+No,']
+
+[[rules]]
+id = "question_prompt"
+state = "blocked"
+priority = 300
+region = "bottom_non_empty_lines(24)"
+visible_blocker = true
+contains = ["esc to cancel"]
+line_regex = ['^\s*Question\s+[0-9]+/[0-9]+:']
+
+[[rules]]
+id = "workspace_trust_prompt"
+state = "blocked"
+priority = 300
+region = "bottom_non_empty_lines(12)"
+visible_blocker = true
+contains = ["do you trust the contents of this project?", "no, exit"]
 
 [[rules]]
 id = "spinner_working"

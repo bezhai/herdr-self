@@ -158,6 +158,41 @@ line_regex = ["^exact line$"]
 }
 
 #[test]
+fn line_regex_patterns_each_need_a_matching_line_inside_the_rule_region() {
+    with_manifest_dirs("line-regex-region", || {
+        write_local_codex(&rules_manifest(
+            r#"
+[[rules]]
+id = "two_lines"
+state = "blocked"
+region = "bottom_non_empty_lines(3)"
+line_regex = ['^first\b', '^second\b']
+"#,
+        ));
+
+        let separate_lines = explain(Agent::Codex, "first line\nsecond line\nfooter\n");
+        assert_eq!(separate_lines.state, AgentState::Blocked);
+        assert_eq!(
+            separate_lines
+                .matched_rule
+                .as_ref()
+                .map(|rule| rule.id.as_str()),
+            Some("two_lines")
+        );
+
+        let one_pattern_missing = explain(Agent::Codex, "first line\nfooter\n");
+        assert_eq!(one_pattern_missing.state, AgentState::Idle);
+
+        let same_line = explain(Agent::Codex, "first second\nfooter\n");
+        assert_eq!(same_line.state, AgentState::Idle);
+
+        let first_above_region =
+            explain(Agent::Codex, "first line\n\nmiddle\nsecond line\nfooter\n");
+        assert_eq!(first_above_region.state, AgentState::Idle);
+    });
+}
+
+#[test]
 fn remote_manifest_loads_between_local_override_and_bundled() {
     with_manifest_dirs("remote-source", || {
         write_remote_codex(&remote_manifest("9999.01.01.1", "blocked", "remote-ready"));
