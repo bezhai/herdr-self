@@ -3433,11 +3433,23 @@ fn bundled_integration_asset_versions_match_expected_versions() {
         );
     }
 
-    // Reply reporting on Stop shipped with Claude 11 and Codex 9. Both platform
-    // assets carry the marker even though Windows does not report replies yet.
+    // Reply reporting on Stop shipped with Claude 11, Codex 9, and Antigravity
+    // CLI 4. Both platform assets carry the marker even though Windows does not
+    // report replies yet.
     assert_eq!(CLAUDE_INTEGRATION_VERSION, 11);
     assert_eq!(CODEX_INTEGRATION_VERSION, 9);
+    assert_eq!(ANTIGRAVITY_CLI_INTEGRATION_VERSION, 4);
     for (name, asset, expected_version) in [
+        (
+            "antigravity_cli sh",
+            include_str!("assets/antigravity_cli/herdr-agent-state.sh"),
+            ANTIGRAVITY_CLI_INTEGRATION_VERSION,
+        ),
+        (
+            "antigravity_cli ps1",
+            include_str!("assets/antigravity_cli/herdr-agent-state.ps1"),
+            ANTIGRAVITY_CLI_INTEGRATION_VERSION,
+        ),
         (
             "claude sh",
             include_str!("assets/claude/herdr-agent-state.sh"),
@@ -4683,16 +4695,23 @@ fn install_antigravity_cli_writes_hook_and_updates_hooks_json() {
         );
     }
 
-    // The integration is session-only. Antigravity CLI cannot express blocked
-    // state, skips PostInvocation on interruption, and fires Stop at end of
-    // turn rather than process exit, so Herdr never claims lifecycle authority
-    // here and screen detection owns agent state.
-    for event in ["PreToolUse", "PostToolUse", "PostInvocation", "Stop"] {
-        assert!(
-            block.get(event).is_none(),
-            "{event} must not be registered; lifecycle stays with screen detection"
-        );
-    }
+    // PreInvocation reports the conversation and Stop reports the turn's final
+    // reply. Neither reports state: Antigravity CLI cannot express blocked
+    // state and skips PostInvocation on interruption, so screen detection owns
+    // agent state.
+    assert_eq!(
+        block.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["PreInvocation", "Stop"]
+    );
+    assert_eq!(
+        block
+            .get("Stop")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(|handler| handler.get("command"))
+            .and_then(Value::as_str),
+        Some(antigravity_cli_hook_command(&installed.hook_path, "reply").as_str())
+    );
 
     // Other named hooks are left untouched.
     assert_eq!(
@@ -4711,16 +4730,17 @@ fn install_antigravity_cli_writes_hook_and_updates_hooks_json() {
 }
 
 #[test]
-fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
+fn antigravity_cli_v3_install_is_outdated_until_reinstalled() {
     let _lock = integration_env_lock();
     let base = unique_base();
     let agy_dir = base.join(".gemini").join("config");
     let hook_dir = agy_dir.join("hooks");
     fs::create_dir_all(&hook_dir).unwrap();
+    // v3 reported only the conversation; v4 adds the Stop reply hook.
     fs::write(
         hook_dir.join(ANTIGRAVITY_CLI_HOOK_INSTALL_NAME),
         ANTIGRAVITY_CLI_HOOK_ASSET
-            .replace("HERDR_INTEGRATION_VERSION=3", "HERDR_INTEGRATION_VERSION=2"),
+            .replace("HERDR_INTEGRATION_VERSION=4", "HERDR_INTEGRATION_VERSION=3"),
     )
     .unwrap();
     std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
@@ -4733,8 +4753,8 @@ fn antigravity_cli_v2_install_is_outdated_until_reinstalled() {
     };
     let outdated = status();
     assert_eq!(outdated.state, IntegrationStatusKind::Outdated);
-    assert_eq!(outdated.installed_version, Some(2));
-    assert_eq!(outdated.expected_version, 3);
+    assert_eq!(outdated.installed_version, Some(3));
+    assert_eq!(outdated.expected_version, 4);
 
     install_antigravity_cli().unwrap();
     assert_eq!(status().state, IntegrationStatusKind::Current);
@@ -4768,22 +4788,24 @@ fn install_antigravity_cli_rewrites_stale_herdr_block() {
         .unwrap();
 
     // The block is Herdr-owned and rewritten wholesale, so a stale lifecycle
-    // install is migrated to session-only rather than merged with.
+    // install is migrated to the current events rather than merged with.
     assert_eq!(
         block.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["PreInvocation"],
+        vec!["PreInvocation", "Stop"],
         "stale lifecycle events should be gone"
     );
-    let entries = block
-        .get("PreInvocation")
-        .and_then(Value::as_array)
-        .unwrap();
-    assert_eq!(entries.len(), 1);
-    assert!(entries[0].get("hooks").is_none());
-    assert!(entries[0]
-        .get("command")
-        .and_then(Value::as_str)
-        .is_some_and(|command| command != "stale" && command != "stale idle"));
+    let hook_path = agy_dir
+        .join("hooks")
+        .join(ANTIGRAVITY_CLI_HOOK_INSTALL_NAME);
+    for (event, action) in [("PreInvocation", "session"), ("Stop", "reply")] {
+        let entries = block.get(event).and_then(Value::as_array).unwrap();
+        assert_eq!(entries.len(), 1, "{event} should hold one Herdr entry");
+        assert!(entries[0].get("hooks").is_none() && entries[0].get("matcher").is_none());
+        assert_eq!(
+            entries[0].get("command").and_then(Value::as_str),
+            Some(antigravity_cli_hook_command(&hook_path, action).as_str())
+        );
+    }
 
     std::env::remove_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR);
     let _ = fs::remove_dir_all(base);

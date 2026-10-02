@@ -463,6 +463,683 @@ fn codex_hook_reports_persisted_root_session_and_ignores_ephemeral_or_nested_ses
     .is_none());
 }
 
+const ANTIGRAVITY_HOOK_ASSET: &str = "src/integration/assets/antigravity_cli/herdr-agent-state.sh";
+const AGY_MAIN_CONVERSATION: &str = "176ae574-4a86-43ba-ab88-4ee9f74a2539";
+const AGY_SUBAGENT_CONVERSATION: &str = "be0252c5-8c75-4f4a-900b-e15651ad60ad";
+
+/// Runs the Antigravity CLI hook against a fake Herdr socket that answers
+/// every connection, collecting each request line: the `reply` action reports
+/// the conversation before the reply.
+struct AntigravityHook {
+    action: &'static str,
+    input: String,
+    envs: Vec<(&'static str, &'static str)>,
+    address_space_limit_kib: Option<u64>,
+}
+
+/// What one Antigravity CLI hook run sent to Herdr.
+struct AntigravityHookRun {
+    raw_requests: Vec<String>,
+}
+
+impl AntigravityHook {
+    fn new(action: &'static str, payload: serde_json::Value) -> Self {
+        Self::raw(action, payload.to_string())
+    }
+
+    fn raw(action: &'static str, input: impl Into<String>) -> Self {
+        Self {
+            action,
+            input: input.into(),
+            envs: Vec::new(),
+            address_space_limit_kib: None,
+        }
+    }
+
+    fn env(mut self, key: &'static str, value: &'static str) -> Self {
+        self.envs.push((key, value));
+        self
+    }
+
+    /// Runs the hook under `ulimit -v`, so reading a large transcript whole
+    /// runs out of memory instead of succeeding slowly.
+    fn address_space_limit_kib(mut self, kib: u64) -> Self {
+        self.address_space_limit_kib = Some(kib);
+        self
+    }
+
+    fn run(self) -> AntigravityHookRun {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let base = unique_test_dir();
+        fs::create_dir_all(&base).unwrap();
+        let socket_path = base.join("herdr.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let hook_exited = Arc::new(AtomicBool::new(false));
+
+        let server = thread::spawn({
+            let hook_exited = Arc::clone(&hook_exited);
+            move || {
+                let mut requests = Vec::new();
+                loop {
+                    // Read the flag before accepting, so a connection made just
+                    // before the hook exited is still collected.
+                    let exited = hook_exited.load(Ordering::Acquire);
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            stream.set_nonblocking(false).unwrap();
+                            let mut line = String::new();
+                            BufReader::new(stream.try_clone().unwrap())
+                                .read_line(&mut line)
+                                .unwrap();
+                            let _ = (&stream)
+                                .write_all(b"{\"id\":\"test\",\"result\":{\"type\":\"ok\"}}\n");
+                            requests.push(line);
+                        }
+                        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            if exited {
+                                return requests;
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(err) => panic!("accept failed: {err}"),
+                    }
+                }
+            }
+        });
+
+        let hook_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(ANTIGRAVITY_HOOK_ASSET);
+        let mut command = Command::new("bash");
+        if let Some(kib) = self.address_space_limit_kib {
+            command
+                .arg("-c")
+                .arg(format!("ulimit -v {kib} && exec bash \"$0\" \"$1\""));
+        }
+        command
+            .arg(hook_path)
+            .arg(self.action)
+            .env("HERDR_ENV", "1")
+            .env("HERDR_SOCKET_PATH", &socket_path)
+            .env("HERDR_PANE_ID", "p_test")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        for (key, value) in &self.envs {
+            command.env(key, value);
+        }
+        let mut child = command.spawn().unwrap();
+        // A hook that ignores its input may exit before reading it.
+        let _ = child.stdin.take().unwrap().write_all(self.input.as_bytes());
+        let output = child.wait_with_output().unwrap();
+        hook_exited.store(true, Ordering::Release);
+        let raw_requests = server.join().unwrap();
+        cleanup_test_base(&base);
+
+        assert!(
+            output.status.success(),
+            "hook failed: status={:?} stderr={} stdout={}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+            String::from_utf8_lossy(&output.stdout)
+        );
+        // Antigravity CLI rejects hook output that is not a JSON object.
+        assert_eq!(String::from_utf8(output.stdout).unwrap(), "{}\n");
+        AntigravityHookRun { raw_requests }
+    }
+}
+
+impl AntigravityHookRun {
+    fn requests(&self) -> Vec<serde_json::Value> {
+        self.raw_requests
+            .iter()
+            .map(|raw| serde_json::from_str(raw).unwrap_or_else(|err| panic!("{err}: {raw:?}")))
+            .collect()
+    }
+
+    fn methods(&self) -> Vec<String> {
+        self.requests()
+            .iter()
+            .map(|request| request["method"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// The params of the only request sent with `method`.
+    fn params(&self, method: &str) -> serde_json::Value {
+        let mut matching = self
+            .requests()
+            .into_iter()
+            .filter(|request| request["method"] == method)
+            .collect::<Vec<_>>();
+        assert_eq!(matching.len(), 1, "requests: {:?}", self.raw_requests);
+        let mut request = matching.remove(0);
+        request["params"].take()
+    }
+}
+
+/// Antigravity CLI conversation transcripts laid out like
+/// `~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl`.
+struct AgyBrain {
+    base: PathBuf,
+}
+
+impl AgyBrain {
+    fn new() -> Self {
+        let base = unique_test_dir();
+        fs::create_dir_all(&base).unwrap();
+        Self { base }
+    }
+
+    fn transcript_path(&self, conversation_id: &str) -> PathBuf {
+        self.base
+            .join("brain")
+            .join(conversation_id)
+            .join(".system_generated/logs/transcript_full.jsonl")
+    }
+
+    /// Writes one compact JSON record per line, as Antigravity CLI 1.2.14 does.
+    fn write(&self, conversation_id: &str, records: &[serde_json::Value]) -> PathBuf {
+        let lines = records
+            .iter()
+            .map(|record| format!("{record}\n"))
+            .collect::<String>();
+        self.write_raw(conversation_id, lines.as_bytes())
+    }
+
+    fn write_raw(&self, conversation_id: &str, contents: &[u8]) -> PathBuf {
+        let path = self.transcript_path(conversation_id);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, contents).unwrap();
+        path
+    }
+}
+
+impl Drop for AgyBrain {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.base);
+    }
+}
+
+fn agy_record(step: u64, source: &str, kind: &str, fields: serde_json::Value) -> serde_json::Value {
+    let mut record = serde_json::json!({
+        "step_index": step,
+        "source": source,
+        "type": kind,
+        "status": "DONE",
+        "created_at": "2026-10-01T13:56:39Z",
+    });
+    record
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    record
+}
+
+fn agy_user_input(step: u64, request: &str) -> serde_json::Value {
+    agy_record(
+        step,
+        "USER_EXPLICIT",
+        "USER_INPUT",
+        serde_json::json!({ "content": format!("<USER_REQUEST>\n{request}\n</USER_REQUEST>") }),
+    )
+}
+
+fn agy_system_message(step: u64, content: &str) -> serde_json::Value {
+    agy_record(
+        step,
+        "SYSTEM",
+        "SYSTEM_MESSAGE",
+        serde_json::json!({ "content": content }),
+    )
+}
+
+fn agy_tool_call(step: u64) -> serde_json::Value {
+    agy_record(
+        step,
+        "MODEL",
+        "PLANNER_RESPONSE",
+        serde_json::json!({
+            "tool_calls": [{
+                "name": "run_command",
+                "args": { "CommandLine": "date", "toolSummary": "Run date" },
+            }],
+        }),
+    )
+}
+
+fn agy_tool_result(step: u64) -> serde_json::Value {
+    agy_record(
+        step,
+        "MODEL",
+        "GENERIC",
+        serde_json::json!({ "content": "Command completed." }),
+    )
+}
+
+fn agy_final_reply(step: u64, text: &str) -> serde_json::Value {
+    agy_record(
+        step,
+        "MODEL",
+        "PLANNER_RESPONSE",
+        serde_json::json!({ "thinking": "The command ran.", "content": text }),
+    )
+}
+
+/// A main conversation whose turn ends with `last`.
+fn agy_main_transcript(last: serde_json::Value) -> Vec<serde_json::Value> {
+    vec![
+        agy_user_input(0, "在终端运行 date 命令"),
+        agy_tool_call(1),
+        agy_tool_result(2),
+        agy_system_message(
+            3,
+            "The following is a <SYSTEM_MESSAGE> not actually sent by the user.",
+        ),
+        last,
+    ]
+}
+
+/// A subagent conversation: it starts with its parent's message, not user input.
+fn agy_subagent_transcript() -> Vec<serde_json::Value> {
+    vec![
+        agy_system_message(
+            0,
+            &format!(
+                "The following is a <SYSTEM_MESSAGE> not actually sent by the user. [Message] sender={AGY_MAIN_CONVERSATION} content=Reply OK"
+            ),
+        ),
+        agy_final_reply(1, "OK"),
+    ]
+}
+
+fn agy_pre_invocation(conversation_id: &str, transcript_path: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "conversationId": conversation_id,
+        "transcriptPath": transcript_path,
+        "artifactDirectoryPath": transcript_path.parent().unwrap(),
+        "modelName": "auto",
+        "workspacePaths": ["/tmp/project"],
+        "invocationNum": 1,
+        "initialNumSteps": 1,
+    })
+}
+
+fn agy_stop(
+    conversation_id: &str,
+    transcript_path: &Path,
+    termination_reason: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "conversationId": conversation_id,
+        "transcriptPath": transcript_path,
+        "artifactDirectoryPath": transcript_path.parent().unwrap(),
+        "modelName": "auto",
+        "workspacePaths": ["/tmp/project"],
+        "error": "",
+        "executionNum": 0,
+        "fullyIdle": true,
+        "terminationReason": termination_reason,
+    })
+}
+
+#[test]
+fn antigravity_session_hook_reports_the_main_conversation() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(AGY_MAIN_CONVERSATION, &[agy_user_input(0, "只回复：收到")]);
+
+    let run = AntigravityHook::new(
+        "session",
+        agy_pre_invocation(AGY_MAIN_CONVERSATION, &transcript),
+    )
+    .run();
+
+    assert_eq!(run.methods(), ["pane.report_agent_session"]);
+    let params = run.params("pane.report_agent_session");
+    assert_eq!(params["pane_id"], "p_test");
+    assert_eq!(params["source"], "herdr:antigravity_cli");
+    assert_eq!(params["agent"], "agy");
+    assert_eq!(params["agent_session_id"], AGY_MAIN_CONVERSATION);
+    assert_eq!(params["agent_session_path"], transcript.to_str().unwrap());
+    assert!(params["seq"].as_u64().is_some_and(|seq| seq > 0));
+}
+
+#[test]
+fn antigravity_session_hook_ignores_subagent_conversations() {
+    let brain = AgyBrain::new();
+    let subagent = brain.write(AGY_SUBAGENT_CONVERSATION, &agy_subagent_transcript());
+    let empty = brain.write_raw("empty-conversation", b"");
+    let malformed = brain.write_raw("malformed-conversation", b"{\"step_index\":0,\n");
+    // A subagent's first PreInvocation runs before its transcript exists.
+    let missing = brain.transcript_path("missing-conversation");
+
+    for (case, payload) in [
+        (
+            "subagent transcript",
+            agy_pre_invocation(AGY_SUBAGENT_CONVERSATION, &subagent),
+        ),
+        (
+            "missing transcript",
+            agy_pre_invocation("missing-conversation", &missing),
+        ),
+        (
+            "empty transcript",
+            agy_pre_invocation("empty-conversation", &empty),
+        ),
+        (
+            "malformed transcript",
+            agy_pre_invocation("malformed-conversation", &malformed),
+        ),
+        (
+            "no transcript path",
+            serde_json::json!({ "conversationId": AGY_MAIN_CONVERSATION }),
+        ),
+    ] {
+        let run = AntigravityHook::new("session", payload).run();
+        assert!(
+            run.raw_requests.is_empty(),
+            "{case}: reported {:?}",
+            run.raw_requests
+        );
+    }
+}
+
+#[test]
+fn antigravity_reply_hook_reports_the_conversation_then_the_final_reply() {
+    let brain = AgyBrain::new();
+    let reply = "已完成：\n- **苹果**\n- `香蕉`";
+    let transcript = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_final_reply(4, reply)),
+    );
+
+    let run = AntigravityHook::new(
+        "reply",
+        agy_stop(AGY_MAIN_CONVERSATION, &transcript, "NO_TOOL_CALL"),
+    )
+    .run();
+
+    // The conversation reaches Herdr no later than the end of its first turn,
+    // and before the reply that must match it.
+    assert_eq!(
+        run.methods(),
+        ["pane.report_agent_session", "pane.report_agent_reply"]
+    );
+    let session = run.params("pane.report_agent_session");
+    assert_eq!(session["agent_session_id"], AGY_MAIN_CONVERSATION);
+    assert_eq!(session["agent_session_path"], transcript.to_str().unwrap());
+
+    let params = run.params("pane.report_agent_reply");
+    assert_eq!(params["pane_id"], "p_test");
+    assert_eq!(params["source"], "herdr:antigravity_cli");
+    assert_eq!(params["agent"], "agy");
+    assert_eq!(params["agent_session_id"], AGY_MAIN_CONVERSATION);
+    assert_eq!(params["text"], reply);
+    assert!(params.get("truncated").is_none());
+    assert!(
+        params["seq"].as_u64().unwrap() > session["seq"].as_u64().unwrap(),
+        "the reply must be newer than the session report from the same source"
+    );
+    let raw_reply = &run.raw_requests[1];
+    assert!(raw_reply.contains("已完成"), "raw request: {raw_reply}");
+    assert!(!raw_reply.contains("\\u"), "raw request: {raw_reply}");
+}
+
+#[test]
+fn antigravity_reply_hook_prefers_a_non_empty_final_model_output() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_final_reply(4, "from the transcript")),
+    );
+    let stop_with_output = |output: &str| {
+        let mut payload = agy_stop(AGY_MAIN_CONVERSATION, &transcript, "NO_TOOL_CALL");
+        payload["finalModelOutput"] = serde_json::json!(output);
+        payload
+    };
+
+    let from_payload = AntigravityHook::new("reply", stop_with_output("from the payload")).run();
+    assert_eq!(
+        from_payload.params("pane.report_agent_reply")["text"],
+        "from the payload"
+    );
+
+    let empty_output = AntigravityHook::new("reply", stop_with_output("")).run();
+    assert_eq!(
+        empty_output.params("pane.report_agent_reply")["text"],
+        "from the transcript"
+    );
+}
+
+#[test]
+fn antigravity_reply_hook_truncates_long_replies_at_a_character_boundary() {
+    let brain = AgyBrain::new();
+    // Longer than one 64 KiB read from the end of the transcript.
+    let reply = "界".repeat(30_000);
+    let transcript = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_final_reply(4, &reply)),
+    );
+
+    let run = AntigravityHook::new(
+        "reply",
+        agy_stop(AGY_MAIN_CONVERSATION, &transcript, "NO_TOOL_CALL"),
+    )
+    .run();
+
+    let params = run.params("pane.report_agent_reply");
+    let text = params["text"].as_str().unwrap();
+    assert_eq!(text.len(), MAX_REPLY_BYTES / 3 * 3);
+    assert!(reply.starts_with(text));
+    assert_eq!(params["truncated"], true);
+}
+
+#[test]
+fn antigravity_reply_hook_reads_only_the_ends_of_a_large_transcript() {
+    use std::io::Seek;
+
+    let brain = AgyBrain::new();
+    let transcript = brain.write(AGY_MAIN_CONVERSATION, &[agy_user_input(0, "总结这个仓库")]);
+    // A 512 MiB sparse gap stands in for a long conversation; reading it whole
+    // exceeds the hook's address space limit below.
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .open(&transcript)
+        .unwrap();
+    let end = file.seek(std::io::SeekFrom::End(0)).unwrap();
+    file.set_len(end + 512 * 1024 * 1024).unwrap();
+    file.seek(std::io::SeekFrom::End(0)).unwrap();
+    writeln!(file).unwrap();
+    writeln!(file, "{}", agy_final_reply(9, "总结完成")).unwrap();
+    drop(file);
+
+    let run = AntigravityHook::new(
+        "reply",
+        agy_stop(AGY_MAIN_CONVERSATION, &transcript, "NO_TOOL_CALL"),
+    )
+    .address_space_limit_kib(256 * 1024)
+    .run();
+
+    assert_eq!(
+        run.methods(),
+        ["pane.report_agent_session", "pane.report_agent_reply"]
+    );
+    assert_eq!(run.params("pane.report_agent_reply")["text"], "总结完成");
+}
+
+#[test]
+fn antigravity_reply_hook_ignores_subagent_stops() {
+    let brain = AgyBrain::new();
+    let subagent = brain.write(AGY_SUBAGENT_CONVERSATION, &agy_subagent_transcript());
+    let missing = brain.transcript_path("missing-conversation");
+
+    for (case, payload) in [
+        (
+            "subagent transcript",
+            agy_stop(AGY_SUBAGENT_CONVERSATION, &subagent, "NO_TOOL_CALL"),
+        ),
+        (
+            "missing transcript",
+            agy_stop("missing-conversation", &missing, "NO_TOOL_CALL"),
+        ),
+        (
+            "no transcript path",
+            serde_json::json!({
+                "conversationId": AGY_MAIN_CONVERSATION,
+                "terminationReason": "NO_TOOL_CALL",
+                "finalModelOutput": "done",
+            }),
+        ),
+    ] {
+        let run = AntigravityHook::new("reply", payload).run();
+        assert!(
+            run.raw_requests.is_empty(),
+            "{case}: reported {:?}",
+            run.raw_requests
+        );
+    }
+}
+
+#[test]
+fn antigravity_reply_hook_reports_no_reply_for_turns_that_did_not_end_normally() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_final_reply(4, "partial answer")),
+    );
+
+    let mut errored = agy_stop(AGY_MAIN_CONVERSATION, &transcript, "ERROR");
+    errored["error"] = serde_json::json!("model unavailable");
+    let mut without_reason = agy_stop(AGY_MAIN_CONVERSATION, &transcript, "");
+    without_reason
+        .as_object_mut()
+        .unwrap()
+        .remove("terminationReason");
+
+    for (case, payload) in [
+        ("error", errored),
+        (
+            "max invocations",
+            agy_stop(AGY_MAIN_CONVERSATION, &transcript, "MAX_INVOCATIONS"),
+        ),
+        ("no termination reason", without_reason),
+    ] {
+        let run = AntigravityHook::new("reply", payload).run();
+        // The conversation is still the pane's; only the reply is withheld.
+        assert_eq!(
+            run.methods(),
+            ["pane.report_agent_session"],
+            "{case}: requests {:?}",
+            run.raw_requests
+        );
+    }
+}
+
+#[test]
+fn antigravity_reply_hook_requires_a_final_model_reply_as_the_last_record() {
+    let brain = AgyBrain::new();
+    let mut with_tool_calls = agy_final_reply(4, "Let me check.");
+    with_tool_calls["tool_calls"] = agy_tool_call(4)["tool_calls"].clone();
+
+    for (case, last) in [
+        ("tool call", agy_tool_call(4)),
+        ("reply with tool calls", with_tool_calls),
+        ("empty reply", agy_final_reply(4, "")),
+        ("tool result", agy_tool_result(4)),
+        ("user input", agy_user_input(4, "继续")),
+        (
+            "system message",
+            agy_system_message(4, "The following is a <SYSTEM_MESSAGE>."),
+        ),
+        (
+            "checkpoint",
+            agy_record(
+                4,
+                "SYSTEM",
+                "CHECKPOINT",
+                serde_json::json!({ "content": "{{ CHECKPOINT 1 }}" }),
+            ),
+        ),
+        (
+            "user-sourced planner response",
+            agy_record(
+                4,
+                "USER_EXPLICIT",
+                "PLANNER_RESPONSE",
+                serde_json::json!({ "content": "done" }),
+            ),
+        ),
+    ] {
+        let transcript = brain.write(AGY_MAIN_CONVERSATION, &agy_main_transcript(last));
+        let run = AntigravityHook::new(
+            "reply",
+            agy_stop(AGY_MAIN_CONVERSATION, &transcript, "NO_TOOL_CALL"),
+        )
+        .run();
+        assert_eq!(
+            run.methods(),
+            ["pane.report_agent_session"],
+            "{case}: requests {:?}",
+            run.raw_requests
+        );
+    }
+
+    // A record still being written is not a reply.
+    let mut partial = agy_main_transcript(agy_tool_result(4))
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>();
+    partial.push_str(
+        "{\"step_index\":5,\"source\":\"MODEL\",\"type\":\"PLANNER_RESPONSE\",\"content\":\"hal",
+    );
+    let transcript = brain.write_raw(AGY_MAIN_CONVERSATION, partial.as_bytes());
+    let run = AntigravityHook::new(
+        "reply",
+        agy_stop(AGY_MAIN_CONVERSATION, &transcript, "NO_TOOL_CALL"),
+    )
+    .run();
+    assert_eq!(run.methods(), ["pane.report_agent_session"]);
+}
+
+#[test]
+fn antigravity_hook_prints_an_empty_object_without_reporting_outside_its_actions() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_final_reply(4, "done")),
+    );
+    let stop = agy_stop(AGY_MAIN_CONVERSATION, &transcript, "NO_TOOL_CALL");
+
+    for (case, hook) in [
+        (
+            "outside herdr",
+            AntigravityHook::new("reply", stop.clone()).env("HERDR_ENV", "0"),
+        ),
+        (
+            "without a pane",
+            AntigravityHook::new("reply", stop.clone()).env("HERDR_PANE_ID", ""),
+        ),
+        ("unknown action", AntigravityHook::new("idle", stop.clone())),
+        ("invalid json", AntigravityHook::raw("reply", "not json")),
+        ("non-object json", AntigravityHook::raw("reply", "[]")),
+        (
+            "no conversation",
+            AntigravityHook::new("reply", {
+                let mut payload = stop.clone();
+                payload.as_object_mut().unwrap().remove("conversationId");
+                payload
+            }),
+        ),
+    ] {
+        let run = hook.run();
+        assert!(
+            run.raw_requests.is_empty(),
+            "{case}: reported {:?}",
+            run.raw_requests
+        );
+    }
+}
+
 #[test]
 fn copilot_hook_reports_session_id_from_stdin() {
     let request = run_copilot_hook(

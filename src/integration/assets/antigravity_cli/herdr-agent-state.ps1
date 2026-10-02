@@ -2,15 +2,17 @@
 # managed by herdr; reinstalling or updating the integration overwrites this file.
 # add custom hooks beside this file instead of editing it.
 # HERDR_INTEGRATION_ID=antigravity_cli
-# HERDR_INTEGRATION_VERSION=3
+# HERDR_INTEGRATION_VERSION=4
 
-# Session-only: this hook reports the Antigravity conversation so Herdr can
-# resume the pane. Lifecycle state comes from Herdr's screen detection.
+# `session` runs on PreInvocation and reports the Antigravity conversation so
+# Herdr can resume the pane. Lifecycle state comes from Herdr's screen
+# detection. Windows does not report replies yet: Stop runs this hook with
+# `reply`, which only emits the empty object.
 
 param([string]$Action = "")
 
-# Antigravity CLI expects a JSON object on stdout and this hook never injects
-# anything, so every exit path emits an empty object.
+# Antigravity CLI expects a JSON object on stdout. This hook never injects
+# steps or keeps a turn running, so every exit path emits an empty object.
 function Exit-Hook {
     Write-Output "{}"
     exit 0

@@ -759,7 +759,7 @@ Session-only official integrations report native session references with `pane.r
 
 If no native session reference is stored, the field is omitted.
 
-The Claude Code and Codex integrations report each turn's final assistant message from their `Stop` hook with `pane.report_agent_reply`. The text is the agent's original Markdown, not rendered terminal output. Subagent and nested-session turns are not reported.
+The Claude Code, Codex, and Antigravity CLI integrations report each turn's final assistant message from their `Stop` hook with `pane.report_agent_reply`. The text is the agent's original Markdown, not rendered terminal output. Subagent and nested-session turns are not reported.
 
 ```json
 {

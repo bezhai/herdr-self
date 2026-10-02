@@ -265,21 +265,21 @@ const ANTIGRAVITY_CLI_HOOK_ASSET: &str =
 #[cfg(not(windows))]
 const ANTIGRAVITY_CLI_HOOK_ASSET: &str =
     include_str!("assets/antigravity_cli/herdr-agent-state.sh");
-const ANTIGRAVITY_CLI_INTEGRATION_VERSION: u32 = 3;
+const ANTIGRAVITY_CLI_INTEGRATION_VERSION: u32 = 4;
 /// Antigravity CLI keys `hooks.json` by hook name, so every Herdr entry lives
 /// under one Herdr-owned block that install rewrites and uninstall removes.
 const ANTIGRAVITY_CLI_HOOK_BLOCK_NAME: &str = "herdr";
 const ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC: u64 = 10;
-/// `(event, reported action)`. Session-only: `PreInvocation` is the only event
-/// we need because it carries `conversationId`. The others cannot express
-/// lifecycle safely — Antigravity CLI has no blocked event, `PostInvocation` is
-/// skipped on interruption, and `Stop` is end-of-turn rather than process exit.
-/// Screen detection owns agent state instead.
+/// `(event, reported action)`. `PreInvocation` carries `conversationId` for
+/// the session; `Stop` ends a turn and reports its final reply. Neither reports
+/// state: Antigravity CLI has no blocked event and skips `PostInvocation` on
+/// interruption, so screen detection owns agent state.
 ///
-/// `PreInvocation` takes a flat handler list; only the `PreToolUse`/`PostToolUse`
+/// Both events take a flat handler list; only the `PreToolUse`/`PostToolUse`
 /// events accept a `matcher`/`hooks` wrapper, and sending one here would
 /// invalidate the whole file.
-const ANTIGRAVITY_CLI_HOOK_EVENTS: [(&str, &str); 1] = [("PreInvocation", "session")];
+const ANTIGRAVITY_CLI_HOOK_EVENTS: [(&str, &str); 2] =
+    [("PreInvocation", "session"), ("Stop", "reply")];
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 const MASTRACODE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"
