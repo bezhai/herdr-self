@@ -3,11 +3,13 @@ import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed}
 import {permissionMode} from './platform.mjs';
 // One Feishu topic = one Herdr agent session in its own tab of the binding's workspace. Everything goes through the Herdr CLI.
 const workspaceLabel=b=>'飞书 · '+b.name;
-// Arguments that Herdr passes on to the agent it starts, after --: a Claude binding's permission mode. Codex runs in the topic pane
-// instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started that server.
-const agentArgs=b=>b.kind==='claude'?['--','--permission-mode',permissionMode(b)]:['--','--no-daemon'];
+// Arguments that Herdr passes on to the agent it starts, after --, per binding kind. Claude gets the binding's permission mode. Codex runs
+// in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
+// that server. Antigravity (agy) gets nothing, not even the --.
+const agentArgs={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon'],agy:()=>[]};
 const brief=e=>publicText(e.message).split('\n')[0].slice(0,200);
-// Set in every topic pane: the agent's permission and question hooks then wait for an answer from Feishu (see cards).
+// Set in every topic pane: the permission and question hooks of Claude and Codex then wait for an answer from Feishu (see cards).
+// Antigravity has no such hooks; its approvals and questions get the blocked notice (see blocked).
 const remoteAnswers=['--env','HERDR_REMOTE_ANSWERS=1'];
 // Marks a message from the moment a topic accepts it until the agent's turn for it ends.
 const reaction='OneSecond';
@@ -89,7 +91,7 @@ export class Topics{
   try{
    m=this.target(t);
    Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();
-   try{await this.herdr(m,['agent','start',t.agentName,'--kind',b.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs(b)],{timeoutMs:70000});}
+   try{await this.herdr(m,['agent','start',t.agentName,'--kind',b.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs[b.kind](b)],{timeoutMs:70000});}
    // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
    catch(e){if(e.code!=='agent_not_ready')throw e;}
   }catch(e){
@@ -132,8 +134,9 @@ export class Topics{
    }).catch(e=>this.store.log('话题通知',`${t.agentName}：${brief(e)}`,'error'));
   }));
  }
- // A blocked agent without requests waits on something that Feishu cannot answer, such as a Codex question or a trust prompt. Resolves to
- // the state_change_seq of such a blocked episode once two lists in a row report it and no notice covers it yet, else to nothing.
+ // A blocked agent without requests waits on something that Feishu cannot answer, such as a Codex question, any Antigravity approval or
+ // question, or a trust prompt. Resolves to the state_change_seq of such a blocked episode once two lists in a row report it and no
+ // notice covers it yet, else to nothing.
  blocked(t,agent,ids){
   const seq=agent?.agent_status==='blocked'&&!ids.length?agent.state_change_seq:undefined,previous=this.blockedSeen.get(t.id);
   if(seq==null){this.blockedSeen.delete(t.id);return;}

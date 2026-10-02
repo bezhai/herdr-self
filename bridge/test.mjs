@@ -59,21 +59,23 @@ test('a binding routes the pending chat of an app to a working directory and age
  assert.equal(normalizeBinding({...input,requireMention:undefined},chat,[]).requireMention,true);assert.equal(normalizeBinding({...input,cwd:'/srv/app',kind:'claude'},chat,[]).cwd,'/srv/app');
  for(const requireMention of [true,undefined])assert.equal(normalizeBinding({...input,requireMention},{...chat,chatType:'p2p'},[]).requireMention,false);
  for(const cwd of ['relative','/a b','~/$(id)','/x;y','',undefined])assert.throws(()=>normalizeBinding({...input,cwd},chat,[]));assert.throws(()=>normalizeBinding({...input,cwd:'work'},chat,[]),/工作目录/);
- for(const kind of ['bash','',undefined])assert.throws(()=>normalizeBinding({...input,kind},chat,[]),/Agent 类型/);
+ for(const kind of ['claude','codex','agy'])assert.equal(normalizeBinding({...input,kind},chat,[]).kind,kind);
+ for(const kind of ['bash','antigravity','Agy','',undefined])assert.throws(()=>normalizeBinding({...input,kind},chat,[]),/^Error: Agent 类型无效$/,String(kind));
  assert.throws(()=>normalizeBinding(input,chat,[{appId:'a',chatId:'oc_1'}]),/该聊天已有绑定/);assert.equal(normalizeBinding(input,chat,[{appId:'other',chatId:'oc_1'},{appId:'a',chatId:'oc_2'}]).chatId,'oc_1');
 });
-test('a Claude binding has the permission mode default or auto, default when none is given; a Codex binding has none',()=>{
+test('a Claude binding has the permission mode default or auto, default when none is given; Codex and Antigravity bindings have none',()=>{
  const chat={token:'t',appId:'a',chatId:'oc_1',chatType:'group'},input={name:'助手',machineId:'m',cwd:'~/code/x',kind:'claude'};
  const {id,...b}=normalizeBinding(input,chat,[]);assert.deepEqual(b,{name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'claude',permissionMode:'default',requireMention:true,enabled:true});
  for(const permissionMode of ['default','auto'])assert.equal(normalizeBinding({...input,permissionMode},chat,[]).permissionMode,permissionMode);
  for(const permissionMode of ['acceptEdits','plan','bypassPermissions','dontAsk','AUTO',1])assert.throws(()=>normalizeBinding({...input,permissionMode},chat,[]),/^Error: 权限模式无效$/,String(permissionMode));
- for(const permissionMode of [undefined,'auto','bypassPermissions'])assert.equal('permissionMode' in normalizeBinding({...input,kind:'codex',permissionMode},chat,[]),false);
+ for(const kind of ['codex','agy'])for(const permissionMode of [undefined,'auto','bypassPermissions'])assert.equal('permissionMode' in normalizeBinding({...input,kind,permissionMode},chat,[]),false,kind+' '+permissionMode);
+ const {id:agyId,...agy}=normalizeBinding({...input,kind:'agy',permissionMode:'auto'},chat,[]);assert.deepEqual(agy,{name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'agy',requireMention:true,enabled:true});
 });
-test('changing the permission mode of a Claude binding changes that field only; Codex bindings and other modes are refused',()=>{
- const claude={...route},codex={...route,kind:'codex'};
+test('changing the permission mode of a Claude binding changes that field only; Codex and Antigravity bindings and other modes are refused',()=>{
+ const claude={...route},codex={...route,kind:'codex'},agy={...route,kind:'agy'};
  setPermissionMode(claude,'auto');assert.deepEqual(claude,{...route,permissionMode:'auto'});setPermissionMode(claude,'default');assert.deepEqual(claude,{...route,permissionMode:'default'});
  for(const mode of ['bypassPermissions','plan','',undefined])assert.throws(()=>setPermissionMode(claude,mode),/^Error: 权限模式无效$/);assert.equal(claude.permissionMode,'default');
- assert.throws(()=>setPermissionMode(codex,'auto'),/^Error: 只有 Claude 绑定可以设置权限模式$/);assert.deepEqual(codex,{...route,kind:'codex'});
+ for(const other of [codex,agy]){const before={...other};assert.throws(()=>setPermissionMode(other,'auto'),/^Error: 只有 Claude 绑定可以设置权限模式$/,other.kind);assert.deepEqual(other,before);}
 });
 test('Bridge takes text and rich text without resources from a person; mentions are left to topic handling',async()=>{
  const raw={sender:{sender_type:'user',sender_id:{open_id:'ou_user'}},message:{message_id:'om_message',chat_id:'oc_1',chat_type:'group',root_id:'om_root',message_type:'text',content:'{"text":"@_user_1 hi"}',mentions:[{key:'@_user_1',id:{open_id:'ou_bot'},name:'bot'}]}};
@@ -247,8 +249,8 @@ test('another topic opens a tab in the same workspace, also with HERDR_REMOTE_AN
   assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>t.reactions.map(r=>r.messageId)),[['om_1','om_3'],['om_2']]);
  }finally{f.close();}
 });
-test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding starts its agent with -- --no-daemon',async()=>{
- for(const [binding,args] of [[{},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],[{kind:'codex'},['--','--no-daemon']]]){
+test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding starts its agent with -- --no-daemon; an Antigravity binding passes nothing on',async()=>{
+ for(const [binding,args] of [[{},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],[{kind:'codex'},['--','--no-daemon']],[{kind:'agy'},[]]]){
   const f=topicFixture({binding});try{
    await f.send({messageId:'om_1',content:'one'});
    assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',f.b.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(binding));
@@ -922,9 +924,9 @@ test('the server lists pending chats, saves bindings only through a link token, 
  fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'initialized'),'1');fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
  const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],createdAt:1};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
- const claude={id:'b-claude',name:'助手',appId:'x',machineId:'m',chatId:'oc_8',cwd:'~/work',kind:'claude',requireMention:false,enabled:true},codex={...claude,id:'b-codex',chatId:'oc_7',kind:'codex'};
+ const claude={id:'b-claude',name:'助手',appId:'x',machineId:'m',chatId:'oc_8',cwd:'~/work',kind:'claude',requireMention:false,enabled:true},codex={...claude,id:'b-codex',chatId:'oc_7',kind:'codex'},agy={...claude,id:'b-agy',chatId:'oc_6',kind:'agy'};
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({apps:[{...app,id:'app-avatar',avatar:{type:'image/png',updatedAt:5}},{...app,id:'app-plain',appId:'cli_plain'},{...app,id:'app-gone',appId:'cli_gone',avatar:{type:'image/png',updatedAt:5}}],
-  bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'},claude,codex],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready'}]}));
+  bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'},claude,codex,agy],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready'}]}));
  fs.writeFileSync(herdr,`#!/bin/sh\nif [ "$3" = agent ]; then echo '${JSON.stringify({result:{agents}})}'; else echo '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'; fi\n`,{mode:0o700});
  const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
  const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:'http://127.0.0.1:'+port+'/'},stdio:['ignore','pipe','inherit']});
@@ -936,12 +938,12 @@ test('the server lists pending chats, saves bindings only through a link token, 
   const input={token:'forged',name:'route',appId:'app-plain',machineId,chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:true};
   assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
   const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
-  assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old','b-claude','b-codex']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
+  assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old','b-claude','b-codex','b-agy']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
   const {messageIds,reactions,cards,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards'])assert.equal(key in s.topics[1],false,key);
   // Other fields sent along are ignored; a refused change keeps the saved bindings as they are.
   assert.deepEqual(await api('bindings/permission-mode',{id:'b-claude',permissionMode:'auto',name:'改名',cwd:'/etc',kind:'codex'}),{status:200,body:{ok:true}});
-  for(const [body,error] of [[{id:'b-claude',permissionMode:'bypassPermissions'},'权限模式无效'],[{id:'b-codex',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'unknown',permissionMode:'auto'},'会话绑定不存在']])assert.deepEqual(await api('bindings/permission-mode',body),{status:400,body:{error}},body.id);
-  const changed=(await api('state')).body;assert.deepEqual(changed.bindings.slice(1),[{...claude,permissionMode:'auto'},codex]);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).bindings.slice(1),[{...claude,permissionMode:'auto'},codex]);
+  for(const [body,error] of [[{id:'b-claude',permissionMode:'bypassPermissions'},'权限模式无效'],[{id:'b-codex',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'b-agy',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'unknown',permissionMode:'auto'},'会话绑定不存在']])assert.deepEqual(await api('bindings/permission-mode',body),{status:400,body:{error}},body.id);
+  const changed=(await api('state')).body;assert.deepEqual(changed.bindings.slice(1),[{...claude,permissionMode:'auto'},codex,agy]);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).bindings.slice(1),[{...claude,permissionMode:'auto'},codex,agy]);
   assert.deepEqual(changed.logs.filter(l=>l.kind==='会话绑定').map(l=>l.message),['助手：权限模式改为 auto，之后新开的话题生效']);
   assert.equal((await api('bindings/remove',{id:'b-old'})).status,200);assert.deepEqual((await api('state')).body.topics.map(t=>t.id),['t2']);
   const avatar=async(id,headers={authorization:'Bearer '+key})=>fetch(`http://127.0.0.1:${port}/api/apps/avatar?id=${encodeURIComponent(id)}`,{headers});

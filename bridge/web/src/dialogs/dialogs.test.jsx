@@ -85,7 +85,8 @@ test('binding form shows its chat read-only, lists only connected machines and s
   expect(screen.queryByLabelText('Chat ID')).toBeNull();
   expect(screen.getByLabelText('绑定名称').value).toBe('飞书群聊');
   expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work']);
-  expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex']);
+  expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
+  expect([...screen.getByLabelText('Agent 类型').options].map((option) => option.value)).toEqual(['claude', 'codex', 'agy']);
   expect(screen.getByLabelText('Agent 类型').value).toBe('claude');
   expect(document.querySelectorAll('select')).toHaveLength(3);
   expect(screen.getByLabelText('仅 @机器人时触发').checked).toBe(true);
@@ -141,6 +142,24 @@ test('binding form offers the permission mode only for Claude, explains both mod
   await user.click(screen.getByRole('button', { name: '保存绑定' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
   expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-p2p', name: '飞书私聊', machineId: 'm-1', cwd: '~/work', kind: 'claude', permissionMode: 'auto', requireMention: false });
+});
+
+test('binding form for Antigravity hides the permission mode and saves kind agy without one', async () => {
+  const fetch = stubFetch({ '/api/bindings/save': { id: 'b-2' } });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  const state = sampleState();
+  render(<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={onSaved} />);
+  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
+  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'agy');
+  expect(screen.getByLabelText('Agent 类型').value).toBe('agy');
+  expect(screen.queryByLabelText('权限模式')).toBeNull();
+  expect(document.querySelectorAll('select')).toHaveLength(2);
+
+  await user.type(screen.getByLabelText('工作目录'), '~/code/agy');
+  await user.click(screen.getByRole('button', { name: '保存绑定' }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-group', name: '飞书群聊', machineId: 'm-1', cwd: '~/code/agy', kind: 'agy', requireMention: true });
 });
 
 test('permission mode form starts from the mode of the binding, default without one, says that only new topics use it and saves only the mode', async () => {

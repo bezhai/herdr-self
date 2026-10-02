@@ -5,7 +5,7 @@ import { FormDialog, useFields } from './FormDialog.jsx';
 import { PermissionModeField } from './PermissionModeDialog.jsx';
 
 // Herdr agent kinds a topic can start.
-const kinds = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' }];
+const kinds = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' }, { id: 'agy', name: 'Antigravity' }];
 
 // A select's effective value: the chosen option while it still exists, otherwise the first option.
 const selected = (options, value) => (options.some((o) => o.id === value) ? value : options[0]?.id || '');
