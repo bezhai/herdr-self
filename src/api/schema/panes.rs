@@ -555,6 +555,19 @@ pub struct PaneReleaseAgentParams {
     pub seq: Option<u64>,
 }
 
+/// Turns remote answers on or off for the pane's current agent.
+///
+/// While remote answers are on, the permission requests and questions that the
+/// agent's integration hook reports with `pane.report_agent_request` wait for
+/// an answer through `agent.answer`; while they are off, such reports end at
+/// once as `ignored`. The setting belongs to the agent: Herdr clears it when
+/// the agent exits, is released, or another agent replaces it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneSetRemoteAnswersParams {
+    pub pane_id: String,
+    pub enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PaneInfo {
     pub pane_id: String,
@@ -590,6 +603,10 @@ pub struct PaneInfo {
     pub agent_session: Option<AgentSessionInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scroll: Option<PaneScrollInfo>,
+    /// Requests reported by the pane's agent wait for an answer through
+    /// `agent.answer`; see `pane.set_remote_answers`.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub remote_answers: bool,
     pub revision: u64,
 }
 

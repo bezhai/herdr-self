@@ -357,6 +357,7 @@ fn agent_reply_requests_and_response_round_trip() {
                 completion_seq: None,
                 reply_seq: Some(2),
                 request_ids: Vec::new(),
+                remote_answers: false,
                 cwd: None,
                 foreground_cwd: None,
                 revision: 5,
@@ -390,6 +391,81 @@ fn agent_reply_requests_and_response_round_trip() {
     let json = serde_json::to_value(&agent).unwrap();
     assert!(json.get("reply_seq").is_none());
     assert!(json.get("request_ids").is_none());
+}
+
+#[test]
+fn pane_set_remote_answers_round_trips() {
+    let request = Request {
+        id: "req_remote_answers".into(),
+        method: Method::PaneSetRemoteAnswers(PaneSetRemoteAnswersParams {
+            pane_id: "w1:p1".into(),
+            enabled: true,
+        }),
+    };
+    let json = serde_json::to_value(&request).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "id": "req_remote_answers",
+            "method": "pane.set_remote_answers",
+            "params": {"pane_id": "w1:p1", "enabled": true},
+        })
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), request);
+
+    let missing_enabled = serde_json::from_value::<Request>(serde_json::json!({
+        "id": "req_remote_answers",
+        "method": "pane.set_remote_answers",
+        "params": {"pane_id": "w1:p1"},
+    }));
+    assert!(missing_enabled.is_err());
+}
+
+#[test]
+fn remote_answers_is_an_optional_flag_of_pane_and_agent_info() {
+    let pane = serde_json::json!({
+        "pane_id": "w1:p1",
+        "terminal_id": "term_1",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "focused": false,
+        "agent_status": "idle",
+        "revision": 0,
+    });
+    let parsed: PaneInfo = serde_json::from_value(pane.clone()).unwrap();
+    assert!(!parsed.remote_answers);
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), pane);
+    let enabled = PaneInfo {
+        remote_answers: true,
+        ..parsed
+    };
+    assert_eq!(
+        serde_json::to_value(&enabled).unwrap()["remote_answers"],
+        true
+    );
+
+    let agent = serde_json::json!({
+        "terminal_id": "term_1",
+        "agent": "claude",
+        "agent_status": "idle",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p1",
+        "focused": false,
+        "state_change_seq": 0,
+        "revision": 0,
+    });
+    let parsed: AgentInfo = serde_json::from_value(agent.clone()).unwrap();
+    assert!(!parsed.remote_answers);
+    assert_eq!(serde_json::to_value(&parsed).unwrap(), agent);
+    let enabled = AgentInfo {
+        remote_answers: true,
+        ..parsed
+    };
+    assert_eq!(
+        serde_json::to_value(&enabled).unwrap()["remote_answers"],
+        true
+    );
 }
 
 fn permission_request_content() -> AgentRequestContent {
@@ -589,6 +665,7 @@ fn agent_request_results_round_trip() {
                 completion_seq: None,
                 reply_seq: None,
                 request_ids: vec![4],
+                remote_answers: false,
                 cwd: None,
                 foreground_cwd: None,
                 revision: 5,
@@ -1263,6 +1340,7 @@ fn worktree_request_and_response_round_trip() {
                 tokens: HashMap::new(),
                 agent_session: None,
                 scroll: None,
+                remote_answers: false,
                 revision: 0,
             },
             worktree: WorktreeInfo {
@@ -1692,6 +1770,7 @@ fn create_response_round_trips_with_root_pane() {
                 tokens: HashMap::new(),
                 agent_session: None,
                 scroll: None,
+                remote_answers: false,
                 revision: 0,
             },
         },

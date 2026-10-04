@@ -1690,6 +1690,12 @@ impl AppState {
                 terminal.last_agent_completion_seq = None;
                 terminal.clear_agent_conversation();
             }
+            if mutation.agent_left() {
+                // Remote answers belong to the agent, not the pane. A native
+                // session change keeps them: the same agent still runs, and
+                // its first session report arrives after a client turns them on.
+                terminal.disable_remote_answers();
+            }
             let managed_changed = terminal.reconcile_managed_agent_at(now, false);
             let suppress_acquisition_completion = terminal.finish_agent_process_acquisition();
             let agent_name_changed = terminal.agent_name != previous_agent_name;
@@ -3383,6 +3389,21 @@ mod tests {
         .map(|(_, request_id)| request_id)
     }
 
+    fn enable_remote_answers(app: &mut AppState, ws_idx: usize, pane_id: PaneId) {
+        let terminal_id = app.workspaces[ws_idx].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        assert!(app
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .enable_remote_answers());
+    }
+
+    fn remote_answers(app: &AppState, ws_idx: usize, pane_id: PaneId) -> bool {
+        app.terminals[&app.workspaces[ws_idx].panes[&pane_id].attached_terminal_id].remote_answers()
+    }
+
     fn pending_request_ids(app: &AppState, ws_idx: usize, pane_id: PaneId) -> Vec<u64> {
         app.terminals[&app.workspaces[ws_idx].panes[&pane_id].attached_terminal_id]
             .agent_requests()
@@ -3395,12 +3416,13 @@ mod tests {
         let mut app = app_with_workspaces(&["one", "two"]);
         let first = app.workspaces[0].tabs[0].root_pane;
         let second = app.workspaces[1].tabs[0].root_pane;
-        for pane_id in [first, second] {
+        for (ws_idx, pane_id) in [(0, first), (1, second)] {
             app.handle_app_event(state_changed(
                 pane_id,
                 Some(Agent::Claude),
                 AgentState::Working,
             ));
+            enable_remote_answers(&mut app, ws_idx, pane_id);
         }
 
         let recorded = app.record_agent_request(
@@ -3444,6 +3466,7 @@ mod tests {
             Some(Agent::Claude),
             AgentState::Working,
         ));
+        enable_remote_answers(&mut app, 0, pane_id);
         assert_eq!(record_claude_request(&mut app, pane_id), Some(1));
 
         app.handle_app_event(state_changed(
@@ -3481,6 +3504,7 @@ mod tests {
             });
         };
         report_session(&mut app, 1, "old-session", "startup");
+        enable_remote_answers(&mut app, 0, pane_id);
         assert_eq!(record_claude_request(&mut app, pane_id), Some(1));
 
         report_session(&mut app, 2, "old-session", "resume");
@@ -3499,6 +3523,7 @@ mod tests {
             Some(Agent::Claude),
             AgentState::Working,
         ));
+        enable_remote_answers(&mut app, 0, pane_id);
         assert_eq!(record_claude_request(&mut app, pane_id), Some(1));
 
         app.handle_app_event(state_changed(
@@ -3513,9 +3538,104 @@ mod tests {
             Some(Agent::Claude),
             AgentState::Working,
         ));
+        enable_remote_answers(&mut app, 0, pane_id);
         assert_eq!(record_claude_request(&mut app, pane_id), Some(2));
         app.publish_pane_process_exit_if_agent(pane_id, false);
         assert!(pending_request_ids(&app, 0, pane_id).is_empty());
+    }
+
+    #[test]
+    fn remote_answers_clear_when_the_agent_changes_or_exits() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        enable_remote_answers(&mut app, 0, pane_id);
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Idle,
+        ));
+        assert!(
+            remote_answers(&app, 0, pane_id),
+            "a finished turn keeps the setting"
+        );
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Codex),
+            AgentState::Working,
+        ));
+        assert!(
+            !remote_answers(&app, 0, pane_id),
+            "another agent replaced claude"
+        );
+
+        enable_remote_answers(&mut app, 0, pane_id);
+        app.publish_pane_process_exit_if_agent(pane_id, false);
+        assert!(!remote_answers(&app, 0, pane_id), "the agent exited");
+    }
+
+    #[test]
+    fn remote_answers_clear_when_the_agent_is_released() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority(
+                "custom:agent".into(),
+                "custom-agent".into(),
+                AgentState::Working,
+                None,
+                Some(1),
+            );
+        enable_remote_answers(&mut app, 0, pane_id);
+
+        app.handle_app_event(AppEvent::HookAgentReleased {
+            pane_id,
+            source: "custom:agent".into(),
+            agent_label: "custom-agent".into(),
+            known_agent: None,
+            seq: Some(2),
+        });
+
+        assert!(!remote_answers(&app, 0, pane_id));
+    }
+
+    #[test]
+    fn remote_answers_survive_session_changes_of_the_same_agent() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Idle,
+        ));
+        enable_remote_answers(&mut app, 0, pane_id);
+
+        for (seq, session, source) in [
+            (1, "first-session", "startup"),
+            (2, "first-session", "resume"),
+            (3, "cleared-session", "clear"),
+        ] {
+            app.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session),
+                session_start_source: Some(source.into()),
+            });
+            assert!(remote_answers(&app, 0, pane_id), "{source}");
+        }
     }
 
     #[test]

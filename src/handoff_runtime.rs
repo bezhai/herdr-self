@@ -27,6 +27,11 @@ pub(crate) struct HandoffRuntimeState {
     pub terminal_title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_history_ansi: Option<String>,
+    /// Requests of the pane's agent wait for remote answers. The agent keeps
+    /// running across the handoff, and the client that turned this on is not
+    /// told that the server changed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_answers: bool,
 }
 
 #[cfg(unix)]
@@ -43,4 +48,53 @@ pub(crate) struct ImportedHandoffRuntime {
     pub master_fd: std::os::fd::RawFd,
     #[cfg(unix)]
     pub state: HandoffRuntimeState,
+}
+
+impl ImportedHandoffRuntime {
+    /// Whether the pane's agent waited for remote answers on the old server.
+    pub fn remote_answers(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.state.remote_answers
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::HandoffRuntimeState;
+
+    #[test]
+    fn remote_answers_cross_a_handoff_only_when_on() {
+        let older: HandoffRuntimeState = serde_json::from_value(serde_json::json!({
+            "pane_id": 1,
+            "child_pid": 42,
+            "rows": 24,
+            "cols": 80,
+            "cell_width_px": 8,
+            "cell_height_px": 16,
+        }))
+        .unwrap();
+        assert!(
+            !older.remote_answers,
+            "panes from a server without the field load as off"
+        );
+        assert!(serde_json::to_value(&older)
+            .unwrap()
+            .get("remote_answers")
+            .is_none());
+
+        let on = HandoffRuntimeState {
+            remote_answers: true,
+            ..older
+        };
+        let json = serde_json::to_value(&on).unwrap();
+        assert_eq!(json["remote_answers"], true);
+        let restored: HandoffRuntimeState = serde_json::from_value(json).unwrap();
+        assert!(restored.remote_answers);
+    }
 }

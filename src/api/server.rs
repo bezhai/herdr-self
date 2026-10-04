@@ -586,6 +586,7 @@ pub(crate) fn api_method_name(method: &Method) -> &'static str {
         Method::PaneReportMetadata(_) => "pane.report_metadata",
         Method::PaneClearAgentAuthority(_) => "pane.clear_agent_authority",
         Method::PaneReleaseAgent(_) => "pane.release_agent",
+        Method::PaneSetRemoteAnswers(_) => "pane.set_remote_answers",
         Method::PaneClose(_) => "pane.close",
         Method::PopupClose(_) => "popup.close",
         Method::EventsSubscribe(_) => "events.subscribe",
@@ -1192,6 +1193,7 @@ mod tests {
             tokens: HashMap::new(),
             agent_session: None,
             scroll: None,
+            remote_answers: false,
             revision: 0,
         }
     }

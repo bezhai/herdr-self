@@ -103,7 +103,7 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_reply`, `pane.report_agent_request`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_reply`, `pane.report_agent_request`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.set_remote_answers`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
 | Agent | `agent.list`, `agent.get`, `agent.replies`, `agent.requests`, `agent.answer`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
@@ -801,7 +801,15 @@ Herdr keeps the 8 most recent replies per agent. Each reply gets a `seq` from on
 
 `replies` is an empty array when nothing matches. Target errors match `agent.get`, for example `agent_not_found`.
 
-Integration hooks report the permission requests and questions an agent is waiting on with `pane.report_agent_request`. Unlike other reports, this request waits: Herdr writes the response on the same connection once the request is answered with `agent.answer` or ends. Keep the connection open after sending the request line; closing it, or writing anything more on it, withdraws the request.
+Integration hooks report the permission requests and questions an agent is waiting on with `pane.report_agent_request`. Herdr holds such a request for an answer only while remote answers are on for the pane's agent; otherwise the report ends at once and the agent falls back to its own prompt. A client that answers on the user's behalf, such as a chat relay, turns remote answers on with `pane.set_remote_answers`:
+
+```json
+{"id":"req_remote","method":"pane.set_remote_answers","params":{"pane_id":"w1:p1","enabled":true}}
+```
+
+The response is the pane as `pane_info`. `enabled: false` turns remote answers off and ends the agent's pending requests as `closed`. Turning them on for a pane without an agent returns `agent_not_found`, and an unknown pane returns `pane_not_found`. The setting belongs to the pane's current agent rather than the pane: Herdr clears it when the agent exits, is released, or another agent replaces it. A new native session of the same agent, such as Claude Code's `/clear`, keeps it, and so does a live handoff. It lives in server memory only and is gone after a server restart. `pane.get`, `pane.list`, `agent.get`, and `agent.list` expose `remote_answers: true` while it is on and omit the field while it is off. Changing it emits `pane.updated`.
+
+Unlike other reports, `pane.report_agent_request` waits: Herdr writes the response on the same connection once the request is answered with `agent.answer` or ends. Keep the connection open after sending the request line; closing it, or writing anything more on it, withdraws the request.
 
 ```json
 {
@@ -832,7 +840,7 @@ The response is either an answer or the reason the request ended:
 {"id":"req_5","result":{"type":"agent_request_ended","request_id":1,"reason":"timeout"}}
 ```
 
-`reason` is `ignored` when the report does not belong to the pane's current agent (nothing is recorded and `request_id` is omitted), `timeout` when `timeout_ms` passes, or `closed` when the request ends in Herdr: the agent's status moves from `working` or `blocked` to `idle` or `done` after the request was reported, the pane's native session changes, the agent changes, is released, or exits, or the pane respawns or closes. Requests live in server memory only; a server restart or live handoff closes waiting connections without a response.
+`reason` is `ignored` when remote answers are off for the pane's agent or the report does not belong to the pane's current agent (nothing is recorded and `request_id` is omitted), `timeout` when `timeout_ms` passes, or `closed` when the request ends in Herdr: the agent's status moves from `working` or `blocked` to `idle` or `done` after the request was reported, remote answers are turned off, the pane's native session changes, the agent changes, is released, or exits, or the pane respawns or closes. Requests live in server memory only; a server restart or live handoff closes waiting connections without a response.
 
 Each request gets an `id` from one server-wide counter that starts at 1. `agent.get` and `agent.list` expose `request_ids`, the ids of pending requests in ascending order, omitted when there are none. `agent.requests` resolves `target` like `agent.get` and returns the agent with its pending requests in ascending `id` order:
 

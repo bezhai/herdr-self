@@ -561,6 +561,9 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        let handoff_remote_answers = imported_runtime
+            .as_ref()
+            .is_some_and(crate::handoff_runtime::ImportedHandoffRuntime::remote_answers);
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -692,6 +695,9 @@ fn restore_tab(
                         false,
                         std::time::Instant::now(),
                     );
+                }
+                if handoff_remote_answers {
+                    terminal.restore_remote_answers_after_handoff();
                 }
                 panes.insert(*id, PaneState::new(terminal_id.clone()));
                 terminal_runtimes.insert(terminal_id, runtime);

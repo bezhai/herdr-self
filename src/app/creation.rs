@@ -352,6 +352,7 @@ impl App {
             tokens: terminal.metadata_tokens.values(),
             agent_session: terminal_agent_session_info(terminal),
             scroll,
+            remote_answers: terminal.remote_answers(),
             revision: terminal.revision,
         })
     }

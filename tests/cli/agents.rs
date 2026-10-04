@@ -322,6 +322,14 @@ impl FakeClaudeServer {
         BufReader::new(stream)
     }
 
+    /// Turns remote answers for the pane's agent on or off with the CLI.
+    fn remote_answers(&self, setting: &str) -> serde_json::Value {
+        run_cli_json(
+            &self.socket_path,
+            &["pane", "remote-answers", &self.pane_id, setting],
+        )
+    }
+
     fn pending_request_ids(&self) -> Vec<u64> {
         run_cli_json(&self.socket_path, &["agent", "requests", &self.pane_id])["result"]["requests"]
             .as_array()
@@ -387,6 +395,7 @@ fn run_cli_error(socket_path: &Path, args: &[&str]) -> serde_json::Value {
 #[test]
 fn agent_answer_reaches_the_hook_connection_waiting_on_the_request() {
     let server = FakeClaudeServer::start();
+    server.remote_answers("on");
     let socket_path = server.socket_path.as_path();
     let pane_id = server.pane_id.as_str();
     let mut permission_hook = server.report_request(
@@ -518,6 +527,7 @@ fn agent_answer_reaches_the_hook_connection_waiting_on_the_request() {
 #[test]
 fn agent_request_reports_end_without_an_answer() {
     let server = FakeClaudeServer::start();
+    server.remote_answers("on");
     let permission = |timeout_ms: u64| {
         serde_json::json!({
             "kind": "permission",
@@ -582,6 +592,65 @@ fn agent_request_reports_end_without_an_answer() {
     server.stop();
 }
 
+#[test]
+fn pane_remote_answers_decides_whether_agent_requests_wait() {
+    let server = FakeClaudeServer::start();
+    let socket_path = server.socket_path.as_path();
+    let pane_id = server.pane_id.as_str();
+    let permission = serde_json::json!({
+        "kind": "permission",
+        "tool_name": "Bash",
+        "input_preview": "ls",
+        "decisions": ["allow"],
+        "timeout_ms": 600000,
+    });
+
+    let mut ignored = server.report_request("hook-off", permission.clone());
+    assert_eq!(
+        read_request_outcome(&mut ignored)["result"],
+        serde_json::json!({"type": "agent_request_ended", "reason": "ignored"})
+    );
+    let agent = run_cli_json(socket_path, &["agent", "get", pane_id]);
+    assert!(agent["result"]["agent"].get("remote_answers").is_none());
+
+    let enabled = server.remote_answers("on");
+    assert_eq!(enabled["result"]["type"], "pane_info", "{enabled}");
+    assert_eq!(enabled["result"]["pane"]["remote_answers"], true);
+    let agents = run_cli_json(socket_path, &["agent", "list"]);
+    assert_eq!(agents["result"]["agents"][0]["remote_answers"], true);
+    let mut waiting = server.report_request("hook-on", permission);
+    server.wait_for_pending_requests(&[1]);
+
+    let disabled = server.remote_answers("off");
+    assert!(disabled["result"]["pane"].get("remote_answers").is_none());
+    assert_eq!(
+        read_request_outcome(&mut waiting)["result"],
+        serde_json::json!({"type": "agent_request_ended", "request_id": 1, "reason": "closed"})
+    );
+
+    let split = run_cli_json(
+        socket_path,
+        &[
+            "pane",
+            "split",
+            pane_id,
+            "--direction",
+            "right",
+            "--no-focus",
+        ],
+    );
+    let shell_pane_id = split["result"]["pane"]["pane_id"].as_str().unwrap();
+    let refused = run_cli_error(
+        socket_path,
+        &["pane", "remote-answers", shell_pane_id, "on"],
+    );
+    assert_eq!(refused["error"]["code"], "agent_not_found", "{refused}");
+    let invalid = run_cli(socket_path, &["pane", "remote-answers", pane_id, "yes"]);
+    assert_eq!(invalid.status.code(), Some(2), "{invalid:?}");
+
+    server.stop();
+}
+
 /// Starts the real Claude hook `permission` action as Claude Code in the pane would.
 fn spawn_claude_permission_hook(
     server: &FakeClaudeServer,
@@ -595,7 +664,6 @@ fn spawn_claude_permission_hook(
         .env("HERDR_ENV", "1")
         .env("HERDR_SOCKET_PATH", &server.socket_path)
         .env("HERDR_PANE_ID", &server.pane_id)
-        .env("HERDR_REMOTE_ANSWERS", "1")
         .env_remove("CURSOR_VERSION")
         .env_remove("GROK_SESSION_ID")
         .stdin(Stdio::piped())
@@ -622,6 +690,7 @@ fn claude_hook_decision(hook: std::process::Child) -> serde_json::Value {
 #[test]
 fn claude_permission_hook_prints_the_answer_given_with_herdr_agent_answer() {
     let server = FakeClaudeServer::start();
+    server.remote_answers("on");
     // A status change ends pending requests as a finished turn; keep one turn running.
     server.report_state("working");
     let socket_path = server.socket_path.as_path();
@@ -752,6 +821,7 @@ fn claude_permission_hook_prints_the_answer_given_with_herdr_agent_answer() {
 #[test]
 fn killing_the_claude_permission_hook_withdraws_its_request() {
     let server = FakeClaudeServer::start();
+    server.remote_answers("on");
     // Keep one turn running so that only the closed hook connection can end the request.
     server.report_state("working");
     let mut hook = spawn_claude_permission_hook(

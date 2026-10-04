@@ -1570,6 +1570,117 @@ fn live_handoff_keeps_unmanaged_agent_name_bound_to_saved_session() {
     cleanup_test_base(&base);
 }
 
+/// Polls `agent.get` until `accept` takes the result, or fails after five seconds.
+fn wait_for_agent(
+    api_socket: &Path,
+    pane_id: &str,
+    what: &str,
+    accept: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = request(
+            api_socket,
+            serde_json::json!({
+                "id": "test:agent:get",
+                "method": "agent.get",
+                "params": {"target": pane_id}
+            }),
+        );
+        if accept(&response) {
+            return response;
+        }
+        assert!(Instant::now() < deadline, "{what}: {response}");
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn live_handoff_keeps_remote_answers_of_the_pane_agent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    let started_marker = base.join("agent-started");
+    let fake_pi = base.join("pi");
+    fs::create_dir_all(&base).unwrap();
+    fs::write(
+        &fake_pi,
+        format!(
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 30\n:\n",
+            started_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:start-agent",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": fake_pi, "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&started_marker, Duration::from_secs(5));
+    wait_for_agent(
+        &api_socket,
+        &pane_id,
+        "agent process was not detected",
+        |response| response.get("result").is_some(),
+    );
+    let enabled = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:remote-answers",
+            "method": "pane.set_remote_answers",
+            "params": {"pane_id": pane_id, "enabled": true}
+        }),
+    );
+    assert_eq!(
+        enabled["result"]["pane"]["remote_answers"], true,
+        "{enabled}"
+    );
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    wait_for_agent(
+        &api_socket,
+        &pane_id,
+        "remote answers did not survive the handoff",
+        |response| response["result"]["agent"]["remote_answers"] == true,
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
     use std::os::unix::fs::PermissionsExt;

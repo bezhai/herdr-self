@@ -12,13 +12,11 @@ hook_input_file="$(mktemp "${TMPDIR:-/tmp}/herdr-codex-hook.XXXXXX")" || exit 0
 trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
+# Herdr decides whether a permission request waits: it ends the report at once
+# unless a client turned remote answers on for the pane's agent, since Codex
+# shows no approval prompt of its own while the hook waits.
 case "$action" in
-  session|reply) ;;
-  permission)
-    # Only panes whose clients answer permission requests wait on Herdr: Codex
-    # shows no approval prompt of its own while the hook waits.
-    [ -n "${HERDR_REMOTE_ANSWERS:-}" ] || exit 0
-    ;;
+  session|reply|permission) ;;
   *) exit 0 ;;
 esac
 

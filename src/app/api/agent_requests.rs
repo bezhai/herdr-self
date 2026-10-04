@@ -1,10 +1,13 @@
 //! Agent requests over the API.
 //!
-//! A hook reports a request with `pane.report_agent_request`, and its
-//! connection waits in the API server until the request is answered with
-//! `agent.answer`, times out, or ends because the turn ended or the agent went
-//! away. Pending requests are terminal state; this module keeps the waiting
-//! hook connections and delivers each request's outcome to its hook.
+//! A client that answers on the user's behalf turns remote answers on for a
+//! pane's agent with `pane.set_remote_answers`. A hook then reports each
+//! request with `pane.report_agent_request`, and its connection waits in the
+//! API server until the request is answered with `agent.answer`, times out, or
+//! ends because the turn ended, the agent went away, or remote answers were
+//! turned off. Without remote answers the report ends at once as `ignored`.
+//! Pending requests are terminal state; this module keeps the waiting hook
+//! connections and delivers each request's outcome to its hook.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
@@ -13,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use crate::api::schema::{
     AgentAnswerParams, AgentRequestEndReason, AgentRequestInfo, AgentTarget,
-    PaneReportAgentRequestParams, ResponseResult,
+    PaneReportAgentRequestParams, PaneSetRemoteAnswersParams, ResponseResult,
 };
 use crate::app::App;
 use crate::terminal::agent_requests::{validate_agent_request, AgentRequestReport};
@@ -188,6 +191,49 @@ impl App {
         }
     }
 
+    /// Handles `pane.set_remote_answers`: whether the requests of the pane's
+    /// current agent wait for an answer through `agent.answer`.
+    pub(super) fn handle_pane_set_remote_answers(
+        &mut self,
+        id: String,
+        params: PaneSetRemoteAnswersParams,
+    ) -> String {
+        let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let Some(terminal) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+            .and_then(|terminal_id| self.state.terminals.get_mut(&terminal_id))
+        else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        let was_enabled = terminal.remote_answers();
+        if params.enabled {
+            if !terminal.enable_remote_answers() {
+                return encode_error(
+                    id,
+                    "agent_not_found",
+                    format!("pane {} does not currently host an agent", params.pane_id),
+                );
+            }
+        } else {
+            terminal.disable_remote_answers();
+            // Hooks still waiting learn now that no answer will come.
+            self.settle_agent_requests(Instant::now());
+        }
+        if was_enabled != params.enabled {
+            self.emit_pane_updated(ws_idx, pane_id);
+        }
+        let Some(pane) = self.pane_info(ws_idx, pane_id) else {
+            return pane_not_found(id, &params.pane_id);
+        };
+        encode_success(id, ResponseResult::PaneInfo { pane })
+    }
+
     pub(super) fn handle_agent_requests(&mut self, id: String, target: AgentTarget) -> String {
         let resolved = match self.resolve_agent(&target.target) {
             Ok(resolved) => resolved,
@@ -275,13 +321,22 @@ mod tests {
 
     use crate::api::schema::{
         AgentAnswerParams, AgentQuestion, AgentRequestAnswer, AgentRequestContent,
-        AgentRequestDecision, AgentRequestKind, AgentTarget, Method, PaneReportAgentRequestParams,
-        Request,
+        AgentRequestDecision, AgentRequestKind, AgentTarget, EmptyParams, Method,
+        PaneReportAgentRequestParams, PaneSetRemoteAnswersParams, PaneTarget, Request,
     };
     use crate::app::App;
     use crate::detect::{Agent, AgentState};
 
+    /// A working Claude pane whose requests wait for remote answers.
     fn claude_app() -> (App, String) {
+        let (mut app, pane_id) = claude_pane_app();
+        let enabled = set_remote_answers(&mut app, &pane_id, true);
+        assert_eq!(enabled["result"]["type"], "pane_info", "{enabled}");
+        (app, pane_id)
+    }
+
+    /// A working Claude pane with remote answers off.
+    fn claude_pane_app() -> (App, String) {
         let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(
             &crate::config::Config::default(),
@@ -396,6 +451,16 @@ mod tests {
             method,
         });
         serde_json::from_str(&response).unwrap()
+    }
+
+    fn set_remote_answers(app: &mut App, pane_id: &str, enabled: bool) -> serde_json::Value {
+        api_request(
+            app,
+            Method::PaneSetRemoteAnswers(PaneSetRemoteAnswersParams {
+                pane_id: pane_id.into(),
+                enabled,
+            }),
+        )
     }
 
     fn requests(app: &mut App, target: &str) -> serde_json::Value {
@@ -808,6 +873,138 @@ mod tests {
     }
 
     #[test]
+    fn reports_end_as_ignored_while_remote_answers_are_off() {
+        let (mut app, pane_id) = claude_pane_app();
+
+        let hook = report(
+            &mut app,
+            report_params(&pane_id, "herdr:claude", permission(&[Allow])),
+        );
+
+        assert_eq!(
+            hook.response().unwrap(),
+            serde_json::json!({
+                "id": "hook",
+                "result": {"type": "agent_request_ended", "reason": "ignored"},
+            })
+        );
+        assert!(!hook.waiting.load(Ordering::Acquire));
+        assert!(request_ids(&mut app, &pane_id).is_null());
+
+        set_remote_answers(&mut app, &pane_id, true);
+        let hook = report(
+            &mut app,
+            report_params(&pane_id, "herdr:claude", permission(&[Allow])),
+        );
+        assert!(hook.response().is_none(), "the hook waits for an answer");
+        assert_eq!(
+            request_ids(&mut app, &pane_id),
+            serde_json::json!([1]),
+            "an ignored report takes no request id"
+        );
+    }
+
+    #[test]
+    fn remote_answers_turn_on_only_for_a_pane_with_an_agent() {
+        let (mut app, _pane_id) = claude_pane_app();
+        app.state
+            .workspaces
+            .push(crate::workspace::Workspace::test_new("shell"));
+        app.state.ensure_test_terminals();
+        let shell_pane = app.state.workspaces[1].tabs[0].root_pane;
+        let shell_pane_id = app.public_pane_id(1, shell_pane).unwrap();
+
+        let enabled = set_remote_answers(&mut app, &shell_pane_id, true);
+        assert_eq!(enabled["error"]["code"], "agent_not_found", "{enabled}");
+
+        let disabled = set_remote_answers(&mut app, &shell_pane_id, false);
+        assert_eq!(disabled["result"]["type"], "pane_info", "{disabled}");
+        assert!(disabled["result"]["pane"].get("remote_answers").is_none());
+
+        for enabled in [true, false] {
+            assert_eq!(
+                set_remote_answers(&mut app, "w9:p9", enabled)["error"]["code"],
+                "pane_not_found"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_answers_show_in_agent_and_pane_info() {
+        let (mut app, pane_id) = claude_pane_app();
+        let shown = |app: &mut App| {
+            let agent = api_request(
+                app,
+                Method::AgentGet(AgentTarget {
+                    target: pane_id.clone(),
+                }),
+            );
+            let agents = api_request(app, Method::AgentList(EmptyParams::default()));
+            let pane = api_request(
+                app,
+                Method::PaneGet(PaneTarget {
+                    pane_id: pane_id.clone(),
+                }),
+            );
+            [
+                agent["result"]["agent"].get("remote_answers").cloned(),
+                agents["result"]["agents"][0].get("remote_answers").cloned(),
+                pane["result"]["pane"].get("remote_answers").cloned(),
+            ]
+        };
+        assert_eq!(shown(&mut app), [None, None, None]);
+
+        let enabled = set_remote_answers(&mut app, &pane_id, true);
+        assert_eq!(enabled["result"]["pane"]["pane_id"], pane_id.as_str());
+        assert_eq!(enabled["result"]["pane"]["remote_answers"], true);
+        let on = Some(serde_json::Value::Bool(true));
+        assert_eq!(shown(&mut app), [on.clone(), on.clone(), on]);
+
+        let disabled = set_remote_answers(&mut app, &pane_id, false);
+        assert!(disabled["result"]["pane"].get("remote_answers").is_none());
+        assert_eq!(shown(&mut app), [None, None, None]);
+    }
+
+    #[test]
+    fn turning_remote_answers_off_closes_pending_requests() {
+        let (mut app, pane_id) = claude_app();
+        let hook = report(
+            &mut app,
+            report_params(&pane_id, "herdr:claude", permission(&[Allow])),
+        );
+        assert!(hook.response().is_none());
+
+        set_remote_answers(&mut app, &pane_id, false);
+
+        assert_eq!(
+            hook.response().unwrap()["result"],
+            serde_json::json!({"type": "agent_request_ended", "request_id": 1, "reason": "closed"})
+        );
+        assert!(request_ids(&mut app, &pane_id).is_null());
+    }
+
+    #[test]
+    fn remote_answers_clear_when_the_agent_changes() {
+        let (mut app, pane_id) = claude_app();
+
+        set_agent_state(&mut app, Agent::Codex, AgentState::Working);
+        let hook = report(&mut app, {
+            let mut params = report_params(&pane_id, "herdr:codex", permission(&[Allow]));
+            params.agent = "codex".into();
+            params
+        });
+
+        assert_eq!(hook.response().unwrap()["result"]["reason"], "ignored");
+        let agent = api_request(
+            &mut app,
+            Method::AgentGet(AgentTarget {
+                target: pane_id.clone(),
+            }),
+        );
+        assert!(agent["result"]["agent"].get("remote_answers").is_none());
+    }
+
+    #[test]
     fn agent_request_methods_do_not_change_the_ui() {
         for method in [
             Method::PaneReportAgentRequest(report_params(
@@ -822,6 +1019,10 @@ mod tests {
                 target: "w1:p1".into(),
                 request_id: 1,
                 answer: decision(Allow, None),
+            }),
+            Method::PaneSetRemoteAnswers(PaneSetRemoteAnswersParams {
+                pane_id: "w1:p1".into(),
+                enabled: true,
             }),
         ] {
             assert!(!crate::api::request_changes_ui(&Request {

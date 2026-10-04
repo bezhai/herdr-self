@@ -119,10 +119,12 @@ pub struct AgentAnswerParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRequestEndReason {
-    /// The report does not belong to the pane's current agent.
+    /// Remote answers are off for the pane's agent, or the report does not
+    /// belong to the pane's current agent.
     Ignored,
     Timeout,
-    /// The turn ended, or the agent changed, exited, or was released.
+    /// The turn ended, remote answers were turned off, or the agent changed,
+    /// exited, or was released.
     Closed,
 }
 
@@ -337,6 +339,10 @@ pub struct AgentInfo {
     /// Ids of pending requests in ascending order; read them with `agent.requests`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_ids: Vec<u64>,
+    /// Requests reported by this agent wait for an answer through
+    /// `agent.answer`; see `pane.set_remote_answers`.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub remote_answers: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

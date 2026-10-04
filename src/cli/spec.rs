@@ -334,7 +334,7 @@ fn agent_command() -> Command {
                 .about("Show the permission requests and questions an agent is waiting on")
                 .arg(required("target", "TARGET"))
                 .after_help(
-                    "Integration hooks report requests and wait for an answer. Requests end when answered, when the turn ends, when the agent changes or exits, when the hook stops waiting, or at the hook's timeout.",
+                    "Integration hooks report requests, which wait for an answer only while remote answers are on for the agent (see `herdr pane remote-answers`). Requests end when answered, when the turn ends, when the agent changes or exits, when remote answers are turned off, when the hook stops waiting, or at the hook's timeout.",
                 ),
         )
         .subcommand(
@@ -678,6 +678,7 @@ fn pane_command() -> Command {
         .subcommand(report_agent_command())
         .subcommand(report_agent_session_command())
         .subcommand(release_agent_command())
+        .subcommand(remote_answers_command())
         .subcommand(report_metadata_command())
 }
 
@@ -713,6 +714,16 @@ fn release_agent_command() -> Command {
         .arg(option("source", "ID").required(true))
         .arg(option("agent", "LABEL").required(true))
         .arg(option("seq", "N"))
+}
+
+fn remote_answers_command() -> Command {
+    Command::new("remote-answers")
+        .about("Turn remote answers for the pane's agent on or off")
+        .arg(required("pane_id", "PANE_ID"))
+        .arg(required("setting", "SETTING").value_parser(["on", "off"]))
+        .after_help(
+            "While on, requests reported by the agent's integration hook wait for `herdr agent answer`. The setting belongs to the agent: it is cleared when the agent exits, is released, or another agent replaces it. Turning it off ends pending requests.",
+        )
 }
 
 fn report_metadata_command() -> Command {
@@ -1329,6 +1340,33 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("Usage: herdr agent answer"), "{output}");
         assert!(output.contains("--answers"), "{output}");
+    }
+
+    #[test]
+    fn spec_describes_pane_remote_answers() {
+        let cmd = super::command();
+        let remote_answers = command_path(&cmd, &["pane", "remote-answers"]);
+        assert!(remote_answers.get_about().is_some());
+        assert!(argument(remote_answers, "pane_id").is_required_set());
+        let setting = argument(remote_answers, "setting");
+        assert!(setting.is_required_set());
+        let values: Vec<String> = setting
+            .get_value_parser()
+            .possible_values()
+            .into_iter()
+            .flatten()
+            .map(|value| value.get_name().to_string())
+            .collect();
+        assert_eq!(values, ["on", "off"]);
+
+        let args = ["herdr", "pane", "remote-answers", "--help"].map(String::from);
+        let mut output = Vec::new();
+        assert!(super::write_requested_help(&args, &mut output, || {}).unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(
+            output.contains("Usage: herdr pane remote-answers"),
+            "{output}"
+        );
     }
 
     #[test]

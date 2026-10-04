@@ -4,9 +4,9 @@ use crate::api::schema::{
     PaneMoveDestination, PaneMoveParams, PaneNeighborParams, PaneProcessInfoParams, PaneReadParams,
     PaneReleaseAgentParams, PaneRenameParams, PaneReportAgentParams, PaneReportAgentSessionParams,
     PaneReportMetadataParams, PaneResizeParams, PaneRightClickTarget, PaneSendInputParams,
-    PaneSendKeysParams, PaneSendTextParams, PaneSplitParams, PaneSwapParams, PaneTarget,
-    PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat, ReadSource, Request,
-    SplitDirection,
+    PaneSendKeysParams, PaneSendTextParams, PaneSetRemoteAnswersParams, PaneSplitParams,
+    PaneSwapParams, PaneTarget, PaneWaitForOutputParams, PaneZoomMode, PaneZoomParams, ReadFormat,
+    ReadSource, Request, SplitDirection,
 };
 
 pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
@@ -39,6 +39,7 @@ pub(super) fn run_pane_command(args: &[String]) -> std::io::Result<i32> {
         "report-agent" => pane_report_agent(&args[1..]),
         "report-agent-session" => pane_report_agent_session(&args[1..]),
         "release-agent" => pane_release_agent(&args[1..]),
+        "remote-answers" => pane_remote_answers(&args[1..]),
         "report-metadata" => pane_report_metadata(&args[1..]),
         "run" => pane_run(&args[1..]),
         "help" | "--help" | "-h" => {
@@ -1467,6 +1468,38 @@ fn pane_release_agent(args: &[String]) -> std::io::Result<i32> {
     }))
 }
 
+const PANE_REMOTE_ANSWERS_USAGE: &str = "usage: herdr pane remote-answers <pane_id> on|off";
+
+fn pane_remote_answers(args: &[String]) -> std::io::Result<i32> {
+    let params = match parse_pane_remote_answers_args(args) {
+        Ok(params) => params,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    super::runtime::pane_set_remote_answers(params)
+}
+
+fn parse_pane_remote_answers_args(args: &[String]) -> Result<PaneSetRemoteAnswersParams, String> {
+    let [raw_pane_id, setting] = args else {
+        return Err(PANE_REMOTE_ANSWERS_USAGE.into());
+    };
+    let enabled = match setting.as_str() {
+        "on" => true,
+        "off" => false,
+        other => {
+            return Err(format!(
+                "invalid setting: {other}\n{PANE_REMOTE_ANSWERS_USAGE}"
+            ))
+        }
+    };
+    Ok(PaneSetRemoteAnswersParams {
+        pane_id: super::normalize_pane_id(raw_pane_id),
+        enabled,
+    })
+}
+
 fn pane_report_metadata(args: &[String]) -> std::io::Result<i32> {
     let Some(raw_pane_id) = args.first() else {
         eprintln!("usage: herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
@@ -1690,6 +1723,7 @@ fn print_pane_help() {
     eprintln!("  herdr pane report-agent <pane_id> --source ID --agent LABEL --state idle|working|blocked|unknown [--message TEXT] [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane report-agent-session <pane_id> --source ID --agent LABEL [--seq N] [--agent-session-id ID] [--agent-session-path PATH]");
     eprintln!("  herdr pane release-agent <pane_id> --source ID --agent LABEL [--seq N]");
+    eprintln!("  herdr pane remote-answers <pane_id> on|off");
     eprintln!("  herdr pane report-metadata <pane_id> --source ID [--agent LABEL] [--applies-to-source ID] [--title TEXT|--clear-title] [--display-agent TEXT|--clear-display-agent] [--state-label STATUS=TEXT] [--clear-state-labels] [--token NAME=VALUE] [--clear-token NAME] [--seq N] [--ttl-ms N]");
     eprintln!("  herdr pane run <pane_id> <command>");
 }
@@ -1700,6 +1734,35 @@ mod tests {
 
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_string()).collect()
+    }
+
+    #[test]
+    fn parse_pane_remote_answers_args_takes_a_pane_and_on_or_off() {
+        assert_eq!(
+            parse_pane_remote_answers_args(&args(&["w1:p2", "on"])),
+            Ok(PaneSetRemoteAnswersParams {
+                pane_id: "w1:p2".into(),
+                enabled: true,
+            })
+        );
+        assert_eq!(
+            parse_pane_remote_answers_args(&args(&["w1:p2", "off"])),
+            Ok(PaneSetRemoteAnswersParams {
+                pane_id: "w1:p2".into(),
+                enabled: false,
+            })
+        );
+        for invalid in [
+            &[][..],
+            &["w1:p2"][..],
+            &["w1:p2", "yes"][..],
+            &["w1:p2", "on", "extra"][..],
+        ] {
+            assert!(
+                parse_pane_remote_answers_args(&args(invalid)).is_err(),
+                "{invalid:?}"
+            );
+        }
     }
 
     #[test]

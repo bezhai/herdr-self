@@ -102,6 +102,19 @@ pub struct TerminalStateMutation {
     pub agent_released: bool,
 }
 
+impl TerminalStateMutation {
+    /// Whether the agent that was in the terminal left it: it exited, was
+    /// released, or another agent replaced it. The first detection of an agent
+    /// and a new native session of the same agent are not departures.
+    pub fn agent_left(&self) -> bool {
+        self.agent_released
+            || self.effective_state_change.as_ref().is_some_and(|change| {
+                change.previous_agent_label.is_some()
+                    && change.previous_agent_label != change.agent_label
+            })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AgentNameOwner {
     agent_label: String,
@@ -147,6 +160,9 @@ pub struct TerminalState {
     pub last_agent_completion_seq: Option<u64>,
     agent_replies: AgentReplies,
     agent_requests: AgentRequests,
+    /// Requests of the current agent wait for an answer from outside the
+    /// terminal; see [`TerminalState::enable_remote_answers`].
+    remote_answers: bool,
     pub revision: u64,
     pub launch_argv: Option<Vec<String>>,
     pub respawn_shell_on_exit: bool,
@@ -186,6 +202,7 @@ impl TerminalState {
             last_agent_completion_seq: None,
             agent_replies: AgentReplies::default(),
             agent_requests: AgentRequests::default(),
+            remote_answers: false,
             revision: 0,
             launch_argv: None,
             respawn_shell_on_exit: false,
@@ -2115,6 +2132,7 @@ impl TerminalState {
         self.last_agent_state_change_seq = None;
         self.last_agent_completion_seq = None;
         self.clear_agent_conversation();
+        self.disable_remote_answers();
         self.launch_argv = None;
         self.respawn_shell_on_exit = false;
         self.recent_agent_process_exit = None;
@@ -2150,7 +2168,8 @@ impl TerminalState {
 
     /// Records a pending request from an official integration and returns its id.
     ///
-    /// Reports that cannot belong to the pane's current agent are ignored.
+    /// Reports are ignored while remote answers are off, since nothing would
+    /// answer them, and when they cannot belong to the pane's current agent.
     /// Concurrent tool calls report independent requests, so the hook sequence
     /// is neither checked nor consumed.
     pub fn record_agent_request(
@@ -2158,11 +2177,13 @@ impl TerminalState {
         report: AgentRequestReport,
         next_request_id: &mut u64,
     ) -> Option<u64> {
-        if !self.hook_report_matches_current_agent(
-            &report.source,
-            &report.agent_label,
-            report.agent_session_id.as_deref(),
-        ) {
+        if !self.remote_answers
+            || !self.hook_report_matches_current_agent(
+                &report.source,
+                &report.agent_label,
+                report.agent_session_id.as_deref(),
+            )
+        {
             return None;
         }
         *next_request_id += 1;
@@ -2204,6 +2225,37 @@ impl TerminalState {
 
     pub fn remove_agent_request(&mut self, id: u64) -> Option<AgentRequest> {
         self.agent_requests.remove(id)
+    }
+
+    pub fn remote_answers(&self) -> bool {
+        self.remote_answers
+    }
+
+    /// Lets the current agent's requests wait for an answer from outside the
+    /// terminal. Returns false, changing nothing, when no agent is here.
+    ///
+    /// The setting belongs to the agent: the caller clears it when the agent
+    /// leaves the terminal (see [`TerminalStateMutation::agent_left`]).
+    pub fn enable_remote_answers(&mut self) -> bool {
+        if !self.is_agent_terminal() {
+            return false;
+        }
+        self.remote_answers = true;
+        true
+    }
+
+    /// Stops waiting for remote answers and drops the requests that were
+    /// waiting for one.
+    pub fn disable_remote_answers(&mut self) {
+        self.remote_answers = false;
+        self.agent_requests.clear();
+    }
+
+    /// Takes over remote answers from the server that handed this terminal
+    /// off. The agent is detected again after the handoff, so this does not
+    /// require one yet.
+    pub fn restore_remote_answers_after_handoff(&mut self) {
+        self.remote_answers = true;
     }
 
     /// Drops the replies and pending requests that belong to the agent's
@@ -2552,14 +2604,21 @@ mod tests {
         agent_request("herdr:claude", "claude", tool_name)
     }
 
+    /// A terminal whose Claude agent waits for remote answers to its requests.
+    fn remotely_answered_claude(state: AgentState) -> TerminalState {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), state);
+        assert!(terminal.enable_remote_answers());
+        terminal
+    }
+
     fn request_ids(terminal: &TerminalState) -> Vec<u64> {
         terminal.agent_requests().ids().collect()
     }
 
     #[test]
     fn agent_requests_are_recorded_with_increasing_ids() {
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut terminal = remotely_answered_claude(AgentState::Working);
         let mut next_request_id = 0;
 
         assert_eq!(
@@ -2589,8 +2648,7 @@ mod tests {
             None
         );
 
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut terminal = remotely_answered_claude(AgentState::Working);
         terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
             source: "herdr:claude".into(),
             agent: "claude".into(),
@@ -2627,8 +2685,7 @@ mod tests {
 
     #[test]
     fn agent_requests_do_not_consume_hook_report_order() {
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut terminal = remotely_answered_claude(AgentState::Working);
         terminal.set_agent_session_ref_for_session_start(
             "herdr:claude".into(),
             "claude".into(),
@@ -2653,8 +2710,7 @@ mod tests {
 
     #[test]
     fn agent_requests_end_when_the_turn_ends() {
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut terminal = remotely_answered_claude(AgentState::Working);
         let mut next_request_id = 0;
         terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
 
@@ -2679,8 +2735,7 @@ mod tests {
 
     #[test]
     fn agent_requests_survive_the_first_detection_of_an_idle_agent() {
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Unknown);
+        let mut terminal = remotely_answered_claude(AgentState::Unknown);
         let mut next_request_id = 0;
         terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
 
@@ -2695,8 +2750,7 @@ mod tests {
 
     #[test]
     fn agent_conversation_clears_replies_and_requests() {
-        let mut terminal = test_terminal();
-        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut terminal = remotely_answered_claude(AgentState::Working);
         let mut next_request_id = 0;
         let mut next_reply_seq = 0;
         terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
@@ -2709,9 +2763,102 @@ mod tests {
     }
 
     #[test]
-    fn agent_requests_are_cleared_after_respawn() {
+    fn agent_requests_are_ignored_unless_remote_answers_are_on() {
         let mut terminal = test_terminal();
         terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_request_id = 0;
+
+        assert!(!terminal.remote_answers());
+        assert_eq!(
+            terminal.record_agent_request(claude_request("Bash"), &mut next_request_id),
+            None
+        );
+        assert_eq!(next_request_id, 0);
+
+        assert!(terminal.enable_remote_answers());
+        assert!(terminal.remote_answers());
+        assert_eq!(
+            terminal.record_agent_request(claude_request("Bash"), &mut next_request_id),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn remote_answers_need_an_agent_in_the_terminal() {
+        let mut terminal = test_terminal();
+
+        assert!(!terminal.enable_remote_answers());
+        assert!(!terminal.remote_answers());
+
+        terminal.set_detected_state(Some(Agent::Codex), AgentState::Idle);
+        assert!(terminal.enable_remote_answers());
+        assert!(terminal.remote_answers());
+    }
+
+    #[test]
+    fn turning_remote_answers_off_ends_pending_requests() {
+        let mut terminal = remotely_answered_claude(AgentState::Working);
+        let mut next_request_id = 0;
+        terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
+
+        terminal.disable_remote_answers();
+
+        assert!(!terminal.remote_answers());
+        assert!(request_ids(&terminal).is_empty());
+        assert_eq!(
+            terminal.record_agent_request(claude_request("Edit"), &mut next_request_id),
+            None
+        );
+    }
+
+    #[test]
+    fn remote_answers_are_cleared_after_respawn() {
+        let mut terminal = remotely_answered_claude(AgentState::Working);
+
+        terminal.clear_agent_runtime_identity_after_respawn();
+
+        assert!(!terminal.remote_answers());
+    }
+
+    #[test]
+    fn mutations_tell_whether_the_agent_left_the_terminal() {
+        let mut terminal = test_terminal();
+        let mut left = |agent: Option<Agent>, state: AgentState, process_exited: bool| {
+            terminal
+                .set_detected_state_with_screen_signals_at(
+                    agent,
+                    state,
+                    false,
+                    false,
+                    false,
+                    process_exited,
+                    Instant::now(),
+                )
+                .agent_left()
+        };
+
+        assert!(
+            !left(Some(Agent::Claude), AgentState::Idle, false),
+            "first detection"
+        );
+        assert!(
+            !left(Some(Agent::Claude), AgentState::Working, false),
+            "same agent"
+        );
+        assert!(
+            left(Some(Agent::Codex), AgentState::Working, false),
+            "another agent"
+        );
+        assert!(
+            left(Some(Agent::Codex), AgentState::Idle, true),
+            "agent exited"
+        );
+        assert!(!left(None, AgentState::Unknown, false), "no agent to leave");
+    }
+
+    #[test]
+    fn agent_requests_are_cleared_after_respawn() {
+        let mut terminal = remotely_answered_claude(AgentState::Working);
         let mut next_request_id = 0;
         terminal.record_agent_request(claude_request("Bash"), &mut next_request_id);
 

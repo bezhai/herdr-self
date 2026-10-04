@@ -808,6 +808,10 @@
             "pane_id": {
               "type": "string"
             },
+            "remote_answers": {
+              "description": "Requests reported by the pane's agent wait for an answer through\n`agent.answer`; see `pane.set_remote_answers`.",
+              "type": "boolean"
+            },
             "restore_error": {
               "type": [
                 "string",
@@ -3617,6 +3621,22 @@
           "required": [
             "pane_id",
             "text"
+          ],
+          "type": "object"
+        },
+        "PaneSetRemoteAnswersParams": {
+          "description": "Turns remote answers on or off for the pane's current agent.\n\nWhile remote answers are on, the permission requests and questions that the\nagent's integration hook reports with `pane.report_agent_request` wait for\nan answer through `agent.answer`; while they are off, such reports end at\nonce as `ignored`. The setting belongs to the agent: Herdr clears it when\nthe agent exits, is released, or another agent replaces it.",
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "enabled"
           ],
           "type": "object"
         },
@@ -6564,6 +6584,22 @@
         {
           "properties": {
             "method": {
+              "const": "pane.set_remote_answers",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneSetRemoteAnswersParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "pane.close",
               "type": "string"
             },
@@ -7158,6 +7194,10 @@
             "pane_id": {
               "type": "string"
             },
+            "remote_answers": {
+              "description": "Requests reported by this agent wait for an answer through\n`agent.answer`; see `pane.set_remote_answers`.",
+              "type": "boolean"
+            },
             "reply_seq": {
               "description": "Seq of the latest retained reply; read the text with `agent.replies`.",
               "format": "uint64",
@@ -7398,12 +7438,12 @@
             },
             {
               "const": "ignored",
-              "description": "The report does not belong to the pane's current agent.",
+              "description": "Remote answers are off for the pane's agent, or the report does not\nbelong to the pane's current agent.",
               "type": "string"
             },
             {
               "const": "closed",
-              "description": "The turn ended, or the agent changed, exited, or was released.",
+              "description": "The turn ended, remote answers were turned off, or the agent changed,\nexited, or was released.",
               "type": "string"
             }
           ]
@@ -8649,6 +8689,10 @@
             },
             "pane_id": {
               "type": "string"
+            },
+            "remote_answers": {
+              "description": "Requests reported by the pane's agent wait for an answer through\n`agent.answer`; see `pane.set_remote_answers`.",
+              "type": "boolean"
             },
             "restore_error": {
               "type": [

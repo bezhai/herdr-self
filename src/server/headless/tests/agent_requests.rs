@@ -40,6 +40,25 @@ fn a_reported_agent_request_is_answered_on_the_hook_channel() {
             crate::detect::AgentState::Working,
         );
     let public_pane_id = server.app.public_pane_id(0, pane_id).unwrap();
+    let (remote_answers, remote_answers_rx) = api_message(
+        "remote-answers",
+        api::schema::Method::PaneSetRemoteAnswers(api::schema::PaneSetRemoteAnswersParams {
+            pane_id: public_pane_id.clone(),
+            enabled: true,
+        }),
+        None,
+    );
+    server.handle_api_request_with_shutdown_check(remote_answers);
+    let enabled: serde_json::Value = serde_json::from_str(
+        &remote_answers_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        enabled["result"]["pane"]["remote_answers"], true,
+        "{enabled}"
+    );
 
     let waiting = Arc::new(AtomicBool::new(true));
     let (report, hook_rx) = api_message(

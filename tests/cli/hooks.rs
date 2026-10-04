@@ -1300,13 +1300,12 @@ fn devin_hook_ignores_non_matching_session_list_entries() {
 
 const MAX_PREVIEW_BYTES: usize = 8 * 1024;
 
-/// Runs the `permission` action as an agent in a pane that takes remote answers
-/// would, against a fake Herdr socket.
+/// Runs the `permission` action as an agent in a Herdr pane would, against a
+/// fake Herdr socket.
 struct PermissionHook {
     asset_path: &'static str,
     input: String,
     envs: Vec<(&'static str, &'static str)>,
-    removed_envs: Vec<&'static str>,
     response: Option<String>,
     answer_after: Duration,
 }
@@ -1334,7 +1333,6 @@ impl PermissionHook {
             asset_path,
             input,
             envs: Vec::new(),
-            removed_envs: Vec::new(),
             response: None,
             answer_after: Duration::from_millis(300),
         }
@@ -1342,11 +1340,6 @@ impl PermissionHook {
 
     fn env(mut self, key: &'static str, value: &'static str) -> Self {
         self.envs.push((key, value));
-        self
-    }
-
-    fn without_env(mut self, key: &'static str) -> Self {
-        self.removed_envs.push(key);
         self
     }
 
@@ -1422,7 +1415,6 @@ impl PermissionHook {
             .env("HERDR_ENV", "1")
             .env("HERDR_SOCKET_PATH", &socket_path)
             .env("HERDR_PANE_ID", "p_test")
-            .env("HERDR_REMOTE_ANSWERS", "1")
             .env_remove("CODEX_THREAD_ID")
             .env_remove("CURSOR_VERSION")
             .env_remove("GROK_SESSION_ID")
@@ -1431,9 +1423,6 @@ impl PermissionHook {
             .stderr(Stdio::piped());
         for (key, value) in &self.envs {
             command.env(key, value);
-        }
-        for key in &self.removed_envs {
-            command.env_remove(key);
         }
         let mut child = command.spawn().unwrap();
         child
@@ -1871,14 +1860,6 @@ fn claude_permission_hook_ignores_other_events_panes_and_tools() {
             PermissionHook::claude(with(serde_json::json!({ "hook_event_name": "PreToolUse" }))),
         ),
         (
-            "missing HERDR_REMOTE_ANSWERS",
-            PermissionHook::claude(with(serde_json::json!({}))).without_env("HERDR_REMOTE_ANSWERS"),
-        ),
-        (
-            "empty HERDR_REMOTE_ANSWERS",
-            PermissionHook::claude(with(serde_json::json!({}))).env("HERDR_REMOTE_ANSWERS", ""),
-        ),
-        (
             "cursor environment",
             PermissionHook::claude(with(serde_json::json!({})))
                 .env("CURSOR_VERSION", "2026.08.11-e8db854"),
@@ -2057,14 +2038,6 @@ fn codex_permission_hook_ignores_other_events_panes_and_nested_sessions() {
     }));
     let cases = [
         ("stop event", PermissionHook::codex(stop)),
-        (
-            "missing HERDR_REMOTE_ANSWERS",
-            PermissionHook::codex(codex_bash_request()).without_env("HERDR_REMOTE_ANSWERS"),
-        ),
-        (
-            "empty HERDR_REMOTE_ANSWERS",
-            PermissionHook::codex(codex_bash_request()).env("HERDR_REMOTE_ANSWERS", ""),
-        ),
         (
             "nested session",
             PermissionHook::codex(codex_bash_request()).env("CODEX_THREAD_ID", "parent-session"),
