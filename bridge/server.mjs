@@ -51,7 +51,7 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/apps/remove'){if(store.data.bindings.some(x=>x.appId===b.id))throw Error('请先移除该应用的会话绑定');await platforms.remove(b.id);}
  else if(p==='/api/bindings/save'){result={id:pending.bind(b).id};}
  else if(p==='/api/bindings/permission-mode'){const x=store.data.bindings.find(y=>y.id===b.id);if(!x)throw Error('会话绑定不存在');setPermissionMode(x,b.permissionMode);store.save();store.log('会话绑定',`${x.name}：权限模式改为 ${x.permissionMode}，之后新开的话题生效`);}
- else if(p==='/api/bindings/remove'){store.data.bindings=store.data.bindings.filter(x=>x.id!==b.id);store.data.topics=store.data.topics.filter(x=>x.bindingId!==b.id);store.save();}
+ else if(p==='/api/bindings/remove'){store.data.bindings=store.data.bindings.filter(x=>x.id!==b.id);store.save();topics.unbind(b.id);}
  else return json(res,404,{error:'接口不存在'});
  return json(res,200,result);
  }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});

@@ -51,7 +51,8 @@ export const permissionModes = [
 // Permission mode of a Claude binding: one saved before bindings had a mode has none and uses default.
 export const permissionModeOf = (binding) => binding.permissionMode || 'default';
 
-const topicStates = { starting: ['warn', '启动中'], ready: ['ok', '运行中'], failed: ['error', '失败'], closed: ['neutral', '已结束'] };
+// choosing: a topic opened by /接管 that waits for an agent to be picked in Feishu.
+const topicStates = { starting: ['warn', '启动中'], choosing: ['warn', '待选择'], ready: ['ok', '运行中'], failed: ['error', '失败'], closed: ['neutral', '已结束'] };
 
 // Badge of a topic session state.
 export function topicStatus(state) {

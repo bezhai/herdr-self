@@ -20,9 +20,9 @@ test('Herdr agent statuses have their own labels', () => {
 });
 
 test('topic states have a label and a tone', () => {
-  expect(['starting', 'ready', 'failed', 'closed', 'other'].map(topicStatus)).toEqual([
-    { tone: 'warn', label: '启动中' }, { tone: 'ok', label: '运行中' }, { tone: 'error', label: '失败' }, { tone: 'neutral', label: '已结束' },
-    { tone: 'neutral', label: 'other' },
+  expect(['starting', 'choosing', 'ready', 'failed', 'closed', 'other'].map(topicStatus)).toEqual([
+    { tone: 'warn', label: '启动中' }, { tone: 'warn', label: '待选择' }, { tone: 'ok', label: '运行中' }, { tone: 'error', label: '失败' },
+    { tone: 'neutral', label: '已结束' }, { tone: 'neutral', label: 'other' },
   ]);
 });
 
