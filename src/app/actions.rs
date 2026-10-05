@@ -646,10 +646,10 @@ impl AppState {
         }
     }
 
-    pub(crate) fn remove_plugin_pane_records(
-        &mut self,
-        pane_ids: impl IntoIterator<Item = PaneId>,
-    ) {
+    /// Drops what the app keeps about panes that were just removed from their
+    /// workspaces: plugin records, the previous-focus target, and the old ids
+    /// that still resolved to them. Every pane removal path calls this.
+    pub(crate) fn forget_removed_panes(&mut self, pane_ids: impl IntoIterator<Item = PaneId>) {
         let pane_ids = pane_ids.into_iter().collect::<Vec<_>>();
         if self
             .previous_pane_focus
@@ -658,9 +658,13 @@ impl AppState {
         {
             self.previous_pane_focus = None;
         }
-        for pane_id in pane_ids {
-            self.plugin_panes.remove(&pane_id);
+        for pane_id in &pane_ids {
+            self.plugin_panes.remove(pane_id);
         }
+        self.pane_id_aliases
+            .retain(|_, alias| !pane_ids.contains(alias));
+        self.public_pane_id_aliases
+            .retain(|_, alias| !pane_ids.contains(alias));
     }
 
     pub fn close_selected_workspace(&mut self) {
@@ -683,7 +687,7 @@ impl AppState {
             .active
             .and_then(|idx| self.workspaces.get(idx))
             .map(|ws| ws.id.clone());
-        self.remove_plugin_pane_records(pane_ids);
+        self.forget_removed_panes(pane_ids);
         for idx in close_indices.iter().rev() {
             self.workspaces.remove(*idx);
         }
@@ -957,7 +961,7 @@ impl AppState {
         let should_close_workspace = active
             .and_then(|i| self.workspaces.get_mut(i))
             .is_some_and(|ws| ws.close_focused());
-        self.remove_plugin_pane_records(pane_ids);
+        self.forget_removed_panes(pane_ids);
         if should_close_workspace {
             if let Some(active) = active {
                 self.selected = active;
@@ -1015,7 +1019,7 @@ impl AppState {
             let closing_tab_id =
                 public_tab_id_for_index(ws, ws.active_tab).unwrap_or_else(|| workspace_id.clone());
             ws.close_active_tab();
-            self.remove_plugin_pane_records(pane_ids);
+            self.forget_removed_panes(pane_ids);
             self.remove_unattached_terminal_ids(terminal_ids);
             crate::logging::tab_closed(&workspace_id, &closing_tab_id);
         }
@@ -2029,7 +2033,7 @@ impl AppState {
 
     fn handle_pane_died(&mut self, pane_id: PaneId) {
         self.pending_agent_notifications.remove(&pane_id);
-        self.remove_plugin_pane_records([pane_id]);
+        self.forget_removed_panes([pane_id]);
         let ws_idx = self
             .workspaces
             .iter()
@@ -2042,9 +2046,6 @@ impl AppState {
 
         let pane_terminal_id = self.terminal_id_for_pane(ws_idx, pane_id);
         let workspace_terminal_ids = self.terminal_ids_for_workspace(ws_idx);
-        self.pane_id_aliases.retain(|_, alias| *alias != pane_id);
-        self.public_pane_id_aliases
-            .retain(|_, alias| *alias != pane_id);
         let should_close_workspace = {
             let ws = &mut self.workspaces[ws_idx];
             ws.remove_pane(pane_id)
@@ -2879,6 +2880,58 @@ mod tests {
         assert_eq!(state.workspaces[1].display_name(), "c");
         assert_eq!(state.selected, 0);
         assert_eq!(state.active, Some(0));
+        state.assert_invariants_for_test();
+    }
+
+    /// Adversarial identity state with a second workspace whose split pane
+    /// still answers to a retired public id from workspace 0.
+    fn state_with_retired_public_id() -> (AppState, PaneId, String) {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        state
+            .workspaces
+            .push(crate::workspace::Workspace::test_adversarial_identity_state());
+        state.ensure_test_terminals();
+        let ws = &state.workspaces[1];
+        let tab = ws
+            .tabs
+            .iter()
+            .find(|tab| tab.panes.len() > 1)
+            .expect("adversarial workspace has a split tab");
+        let pane_id = tab
+            .layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane_id| *pane_id != tab.root_pane)
+            .expect("split tab has a non-root pane");
+        let retired = crate::workspace::public_pane_id_for_number(
+            &state.workspaces[0].id,
+            state.workspaces[0].next_public_pane_number + 7,
+        );
+        state
+            .public_pane_id_aliases
+            .insert(retired.clone(), pane_id);
+        state.assert_invariants_for_test();
+        (state, pane_id, retired)
+    }
+
+    #[test]
+    fn closing_the_workspace_of_a_pane_forgets_its_retired_public_id() {
+        let (mut state, _pane_id, retired) = state_with_retired_public_id();
+        state.selected = 1;
+
+        state.close_selected_workspace();
+
+        assert!(!state.public_pane_id_aliases.contains_key(&retired));
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn a_dying_pane_forgets_its_retired_public_id() {
+        let (mut state, pane_id, retired) = state_with_retired_public_id();
+
+        state.handle_pane_died(pane_id);
+
+        assert!(!state.public_pane_id_aliases.contains_key(&retired));
         state.assert_invariants_for_test();
     }
 

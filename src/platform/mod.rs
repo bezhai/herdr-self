@@ -478,15 +478,26 @@ pub fn process_agent_hint(_pid: u32) -> Option<crate::detect::Agent> {
     None
 }
 
+/// Process environments are read only where a live handoff can carry running
+/// processes over to a new server.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn process_environ_var(_pid: u32, _name: &str) -> Option<String> {
+    None
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn parse_agent_env_hint(environ: &[u8]) -> Option<crate::detect::Agent> {
-    for record in environ.split(|&byte| byte == 0) {
-        let Some(value) = record.strip_prefix(b"HERDR_AGENT=") else {
-            continue;
-        };
-        return crate::detect::parse_agent_label(std::str::from_utf8(value).ok()?);
-    }
-    None
+    crate::detect::parse_agent_label(&parse_environ_var(environ, "HERDR_AGENT")?)
+}
+
+/// Read one variable from a NUL-separated process environment block. The
+/// first record with that name wins, as with `getenv`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) fn parse_environ_var(environ: &[u8], name: &str) -> Option<String> {
+    let value = environ
+        .split(|&byte| byte == 0)
+        .find_map(|record| record.strip_prefix(name.as_bytes())?.strip_prefix(b"="))?;
+    std::str::from_utf8(value).ok().map(str::to_owned)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -625,6 +636,22 @@ mod tests {
     fn parse_agent_env_hint_ignores_missing_or_unknown_agents() {
         assert_eq!(parse_agent_env_hint(b"PATH=/bin\0TERM=xterm\0"), None);
         assert_eq!(parse_agent_env_hint(b"HERDR_AGENT=not-an-agent\0"), None);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn parse_environ_var_reads_only_the_exactly_named_record() {
+        let environ =
+            b"HERDR_PANE_ID_OLD=w9:p9\0PATH=/bin\0HERDR_PANE_ID=w1:p4\0HERDR_PANE_ID=w2:p1\0";
+        assert_eq!(
+            parse_environ_var(environ, "HERDR_PANE_ID").as_deref(),
+            Some("w1:p4")
+        );
+        assert_eq!(parse_environ_var(environ, "HERDR_TAB_ID"), None);
+        assert_eq!(
+            parse_environ_var(b"HERDR_PANE_ID=\xff\0", "HERDR_PANE_ID"),
+            None
+        );
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

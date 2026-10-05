@@ -904,6 +904,49 @@ impl AppState {
         self.pane_id_aliases.remove(&pane_id.raw());
     }
 
+    /// Keeps `public_id`, a public pane id that no live pane holds, resolving
+    /// to `pane_id`: processes launched in the pane keep reporting with the id
+    /// from their launch environment. The id's workspace and pane numbers are
+    /// reserved, so it is never issued to another pane. Returns false and
+    /// records nothing for an id that is malformed, held by a live pane, or
+    /// already retired, and for a pane that is gone.
+    pub(crate) fn retire_public_pane_id(&mut self, public_id: String, pane_id: PaneId) -> bool {
+        let Some((workspace_id, pane_number)) = crate::workspace::parse_public_pane_id(&public_id)
+        else {
+            return false;
+        };
+        if self.public_pane_id_aliases.contains_key(&public_id)
+            || self.pane_with_current_public_id(&public_id).is_some()
+            || !self
+                .workspaces
+                .iter()
+                .any(|ws| ws.pane_state(pane_id).is_some())
+        {
+            return false;
+        }
+        if let Some(workspace_number) = crate::workspace::public_workspace_number(workspace_id) {
+            crate::workspace::reserve_workspace_number(workspace_number.saturating_add(1));
+        }
+        if let Some(ws) = self.workspaces.iter_mut().find(|ws| ws.id == workspace_id) {
+            ws.reserve_public_pane_number(pane_number);
+        }
+        self.public_pane_id_aliases.insert(public_id, pane_id);
+        true
+    }
+
+    /// The live pane whose current public id is `public_id`, ignoring retired ids.
+    pub(crate) fn pane_with_current_public_id(&self, public_id: &str) -> Option<(usize, PaneId)> {
+        let (workspace_id, pane_number) = crate::workspace::parse_public_pane_id(public_id)?;
+        let (ws_idx, ws) = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .find(|(_, ws)| ws.id == workspace_id)?;
+        ws.public_pane_numbers
+            .iter()
+            .find_map(|(pane_id, number)| (*number == pane_number).then_some((ws_idx, *pane_id)))
+    }
+
     pub(crate) fn pane_exposes_host_cursor(
         &self,
         _ws_idx: usize,
@@ -1260,6 +1303,21 @@ impl AppState {
         for (public_id, &pane_id) in &self.public_pane_id_aliases {
             assert_live_pane(pane_id, &format!("public pane alias {public_id}"));
         }
+        let live_public_pane_ids: std::collections::HashSet<String> = self
+            .workspaces
+            .iter()
+            .flat_map(|ws| {
+                ws.public_pane_numbers
+                    .values()
+                    .map(|number| crate::workspace::public_pane_id_for_number(&ws.id, *number))
+            })
+            .collect();
+        for public_id in self.public_pane_id_aliases.keys() {
+            assert!(
+                !live_public_pane_ids.contains(public_id),
+                "public pane alias {public_id} shadows the current id of a live pane"
+            );
+        }
         if let Some(focus) = &self.previous_pane_focus {
             assert_workspace_pane(&focus.workspace_id, focus.pane_id, "previous pane focus");
         }
@@ -1358,6 +1416,21 @@ mod tests {
         let new_pane = ws.test_split(ratatui::layout::Direction::Horizontal);
         assert!(ws.public_pane_number(new_pane).is_some());
         state.ensure_test_terminals();
+
+        state.assert_invariants_for_test();
+    }
+
+    #[test]
+    #[should_panic(expected = "shadows the current id of a live pane")]
+    fn invariants_reject_a_public_alias_that_shadows_a_live_pane_id() {
+        let mut state = AppState::test_with_adversarial_identity_state();
+        let ws = &state.workspaces[0];
+        let mut numbers = ws.public_pane_numbers.iter();
+        let (_, &live_number) = numbers.next().expect("live pane");
+        let (&other_pane, _) = numbers.next().expect("second live pane");
+        let live_id = crate::workspace::public_pane_id_for_number(&ws.id, live_number);
+
+        state.public_pane_id_aliases.insert(live_id, other_pane);
 
         state.assert_invariants_for_test();
     }

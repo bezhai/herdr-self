@@ -26,6 +26,11 @@ pub struct SessionSnapshot {
     pub sidebar_section_split: Option<f32>,
     #[serde(default)]
     pub collapsed_space_keys: std::collections::HashSet<String>,
+    /// Number of the next workspace id to issue. Ids of closed workspaces stay
+    /// below it, so a restored server never issues them again. Absent from
+    /// snapshots saved before it existed, which keep their layout fingerprint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_workspace_number: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -186,6 +191,8 @@ struct RawSessionSnapshot {
     sidebar_section_split: Option<f32>,
     #[serde(default)]
     collapsed_space_keys: std::collections::HashSet<String>,
+    #[serde(default)]
+    next_workspace_number: Option<usize>,
 }
 
 fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> {
@@ -201,6 +208,7 @@ fn migrate_snapshot(raw: RawSessionSnapshot) -> Result<SessionSnapshot, String> 
         sidebar_width: raw.sidebar_width,
         sidebar_section_split: raw.sidebar_section_split,
         collapsed_space_keys: raw.collapsed_space_keys,
+        next_workspace_number: raw.next_workspace_number,
     })
 }
 
@@ -272,6 +280,7 @@ pub fn capture(
         sidebar_width: None,
         sidebar_section_split: None,
         collapsed_space_keys: std::collections::HashSet::new(),
+        next_workspace_number: Some(crate::workspace::next_workspace_number()),
     }
 }
 
@@ -615,6 +624,32 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_saved_without_a_workspace_counter_keeps_its_layout_fingerprint() {
+        let source = include_str!("../../tests/fixtures/session/current-herdr-session.json");
+        let snapshot = parse_snapshot(source).unwrap();
+
+        let value = serde_json::to_value(&snapshot).unwrap();
+
+        assert!(
+            value.get("next_workspace_number").is_none(),
+            "a snapshot from before the workspace counter must serialize, and so \
+             fingerprint, as it did then, or its pane history is dropped"
+        );
+    }
+
+    #[test]
+    fn capture_records_the_workspace_id_counter() {
+        let state = AppState::test_with_adversarial_identity_state();
+
+        let snapshot = capture_from_state(&state);
+
+        assert_eq!(
+            snapshot.next_workspace_number,
+            Some(crate::workspace::next_workspace_number())
+        );
+    }
+
+    #[test]
     fn layout_fingerprint_survives_json_round_trip() {
         let mut snapshot = parse_snapshot(include_str!(
             "../../tests/fixtures/session/current-herdr-session.json"
@@ -646,6 +681,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            next_workspace_number: None,
         };
         let json = serde_json::to_string(&snap).unwrap();
         let restored = parse_snapshot(&json).unwrap();
@@ -733,6 +769,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            next_workspace_number: None,
             version: SNAPSHOT_VERSION,
         };
 
@@ -1398,6 +1435,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: std::collections::HashSet::new(),
+            next_workspace_number: None,
         };
 
         let json = serde_json::to_string(&snap).unwrap();

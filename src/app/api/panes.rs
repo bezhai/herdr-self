@@ -968,16 +968,12 @@ impl App {
         else {
             return encode_error(id, "pane_not_found", "source pane not found");
         };
-        let recovery_context = PaneMoveRecoveryContext {
+        let recovery_context = PaneMoveRecoveryContext::new(
+            &self.state,
             source_ws_idx,
-            previous_workspace_id: previous_workspace_id.clone(),
-            previous_workspace_label: self.state.workspaces[source_ws_idx].custom_name.clone(),
-            previous_tab_label: self.state.workspaces[source_ws_idx].tabs[source_tab_idx]
-                .custom_name
-                .clone(),
-            previous_worktree_space: self.state.workspaces[source_ws_idx].worktree_space.clone(),
-            identity_cwd: self.state.workspaces[source_ws_idx].identity_cwd.clone(),
-        };
+            source_tab_idx,
+            source_pane_id,
+        );
 
         if self.state.workspaces[source_ws_idx].tabs[source_tab_idx].zoomed {
             let Some(layout) = self.pane_layout_snapshot(source_ws_idx, source_tab_idx) else {
@@ -1151,9 +1147,6 @@ impl App {
             if let Some(ws) = self.state.workspaces.get_mut(source_ws_idx) {
                 ws.unregister_moved_pane(source_pane_id);
             }
-            self.state
-                .public_pane_id_aliases
-                .insert(previous_pane_id.clone(), source_pane_id);
         }
 
         let mut closed_workspace_id = None;
@@ -1261,6 +1254,11 @@ impl App {
             }
         };
 
+        if cross_workspace {
+            self.state
+                .retire_public_pane_id(previous_pane_id.clone(), moved_pane_id);
+        }
+
         if focus || self.state.active.is_none() {
             self.state
                 .switch_workspace_tab(target_ws_idx, target_tab_idx);
@@ -1364,7 +1362,8 @@ impl App {
         context: PaneMoveRecoveryContext,
         moved: crate::workspace::MovedPane,
     ) {
-        if let Some(ws_idx) = self.parse_workspace_id(&context.previous_workspace_id) {
+        let pane_id = moved.pane_id;
+        let ws_idx = if let Some(ws_idx) = self.parse_workspace_id(&context.previous_workspace_id) {
             self.state.workspaces[ws_idx].create_tab_from_existing_pane(
                 moved,
                 context.previous_tab_label,
@@ -1372,6 +1371,7 @@ impl App {
                 self.render_notify.clone(),
                 self.render_dirty.clone(),
             );
+            ws_idx
         } else {
             let mut workspace = crate::workspace::Workspace::from_existing_pane(
                 context.previous_workspace_label,
@@ -1394,6 +1394,14 @@ impl App {
                 self.state.selected += 1;
             }
             self.state.workspaces.insert(insert_idx, workspace);
+            insert_idx
+        };
+        if let Some(number) = context.previous_public_pane_number {
+            self.state.workspaces[ws_idx].restore_public_pane_number(
+                pane_id,
+                number,
+                context.previous_next_public_pane_number,
+            );
         }
         self.state.mark_session_dirty();
         self.schedule_session_save();
@@ -1919,7 +1927,7 @@ impl App {
             };
             ws.close_pane(pane_id)
         };
-        self.state.remove_plugin_pane_records([pane_id]);
+        self.state.forget_removed_panes([pane_id]);
         if should_close_workspace {
             self.state.selected = ws_idx;
             self.state.close_selected_workspace();
@@ -2170,6 +2178,30 @@ struct PaneMoveRecoveryContext {
     previous_tab_label: Option<String>,
     previous_worktree_space: Option<crate::workspace::WorktreeSpaceMembership>,
     identity_cwd: std::path::PathBuf,
+    previous_public_pane_number: Option<usize>,
+    previous_next_public_pane_number: usize,
+}
+
+impl PaneMoveRecoveryContext {
+    /// Records where a pane came from, before a move takes it out of its tab.
+    fn new(
+        state: &crate::app::AppState,
+        source_ws_idx: usize,
+        source_tab_idx: usize,
+        source_pane_id: PaneId,
+    ) -> Self {
+        let workspace = &state.workspaces[source_ws_idx];
+        Self {
+            source_ws_idx,
+            previous_workspace_id: workspace.id.clone(),
+            previous_workspace_label: workspace.custom_name.clone(),
+            previous_tab_label: workspace.tabs[source_tab_idx].custom_name.clone(),
+            previous_worktree_space: workspace.worktree_space.clone(),
+            identity_cwd: workspace.identity_cwd.clone(),
+            previous_public_pane_number: workspace.public_pane_number(source_pane_id),
+            previous_next_public_pane_number: workspace.next_public_pane_number,
+        }
+    }
 }
 
 fn encode_unchanged_pane_move(
@@ -3278,6 +3310,377 @@ mod tests {
             Some(&source_terminal)
         );
     }
+
+    fn adversarial_app_with_two_workspaces() -> App {
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        app.state.workspaces =
+            crate::app::AppState::test_with_adversarial_identity_state().workspaces;
+        app.state
+            .workspaces
+            .push(Workspace::test_adversarial_identity_state());
+        app.state.active = Some(0);
+        app.state.selected = 0;
+        app.state.ensure_test_terminals();
+        app.state.assert_invariants_for_test();
+        app
+    }
+
+    /// A pane in workspace 0 that shares its tab, so moving it keeps the tab.
+    fn split_pane_of_first_workspace(app: &App) -> PaneId {
+        let ws = &app.state.workspaces[0];
+        let tab = ws
+            .tabs
+            .iter()
+            .find(|tab| tab.panes.len() > 1)
+            .expect("adversarial workspace has a split tab");
+        tab.layout
+            .pane_ids()
+            .into_iter()
+            .find(|pane_id| *pane_id != tab.root_pane)
+            .expect("split tab has a non-root pane")
+    }
+
+    fn move_to_second_workspace(app: &mut App, pane_id: &str) -> PaneMoveResult {
+        let tab_id = app.public_tab_id(1, 0).unwrap();
+        let response = app.handle_pane_move(
+            "req".into(),
+            PaneMoveParams {
+                pane_id: pane_id.into(),
+                destination: PaneMoveDestination::Tab {
+                    tab_id,
+                    target_pane_id: None,
+                    split: SplitDirection::Right,
+                    ratio: None,
+                },
+                focus: false,
+            },
+        );
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        let ResponseResult::PaneMove { move_result } = success.result else {
+            panic!("expected pane move response, got {response}");
+        };
+        assert!(move_result.changed);
+        move_result
+    }
+
+    #[test]
+    fn api_pane_move_across_workspaces_keeps_hook_reports_on_the_previous_public_id() {
+        let mut app = adversarial_app_with_two_workspaces();
+        let source = split_pane_of_first_workspace(&app);
+        let previous_pane_id = app.public_pane_id(0, source).unwrap();
+        let terminal_id = app.state.terminal_id_for_pane(0, source).unwrap();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        let move_result = move_to_second_workspace(&mut app, &previous_pane_id);
+        assert_ne!(move_result.pane.pane_id, previous_pane_id);
+
+        let response = app.handle_pane_report_agent_reply(
+            "reply".into(),
+            PaneReportAgentReplyParams {
+                pane_id: previous_pane_id,
+                source: "herdr:claude".into(),
+                agent: "claude".into(),
+                seq: Some(1),
+                agent_session_id: None,
+                text: "done".into(),
+                truncated: false,
+            },
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(
+            app.state.terminals[&terminal_id]
+                .agent_replies()
+                .latest_seq(),
+            Some(1)
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    fn assert_pane_has_no_retired_public_ids(app: &App, pane_id: PaneId) {
+        assert!(
+            !app.state
+                .public_pane_id_aliases
+                .values()
+                .any(|alias| *alias == pane_id),
+            "removed pane {pane_id:?} keeps a retired public id"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn closing_a_moved_pane_forgets_its_retired_public_id() {
+        let mut app = adversarial_app_with_two_workspaces();
+        let source = split_pane_of_first_workspace(&app);
+        let previous_pane_id = app.public_pane_id(0, source).unwrap();
+        let move_result = move_to_second_workspace(&mut app, &previous_pane_id);
+
+        let response = app.handle_pane_close(
+            "close".into(),
+            PaneTarget {
+                pane_id: move_result.pane.pane_id,
+            },
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.parse_pane_id(&previous_pane_id), None);
+        assert_pane_has_no_retired_public_ids(&app, source);
+    }
+
+    #[test]
+    fn closing_the_tab_of_a_moved_pane_forgets_its_retired_public_id() {
+        let mut app = adversarial_app_with_two_workspaces();
+        let source = split_pane_of_first_workspace(&app);
+        let previous_pane_id = app.public_pane_id(0, source).unwrap();
+        let move_result = move_to_second_workspace(&mut app, &previous_pane_id);
+        assert!(app.state.workspaces[1].tabs.len() > 1);
+
+        let response = app.handle_tab_close(
+            "close".into(),
+            crate::api::schema::TabTarget {
+                tab_id: move_result.pane.tab_id,
+            },
+        );
+
+        let _: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(app.parse_pane_id(&previous_pane_id), None);
+        assert_pane_has_no_retired_public_ids(&app, source);
+    }
+
+    /// Builds the server that a live handoff starts from `old`: the same public
+    /// ids rebuilt on fresh internal pane ids, as `restore_handoff` does.
+    #[cfg(unix)]
+    fn handoff_successor(old: &mut App) -> App {
+        let missing = std::env::temp_dir().join("herdr-missing-handoff-successor-cwd");
+        assert!(!missing.exists());
+        for terminal in old.state.terminals.values_mut() {
+            terminal.cwd = missing.clone();
+        }
+        let snapshot = crate::persist::capture(
+            &old.state.workspaces,
+            &old.state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::default(),
+            old.state.active,
+            old.state.selected,
+        );
+        let (events, _rx) = tokio::sync::mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = crate::persist::restore(
+            &snapshot,
+            None,
+            24,
+            80,
+            0,
+            "/bin/sh",
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            std::sync::Arc::new(tokio::sync::Notify::new()),
+            std::sync::Arc::new(crate::render_signal::RenderSignal::new()),
+        );
+        assert!(runtimes.is_empty());
+        let (_api_tx, api_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut new = App::new(
+            &Config::default(),
+            crate::app::AppPolicy::TEST,
+            None,
+            api_rx,
+            crate::api::EventHub::default(),
+        );
+        new.state.workspaces = workspaces;
+        new.state.terminals = terminals;
+        new.state.active = Some(0);
+        new.state.selected = 0;
+        new
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retired_public_pane_ids_survive_a_live_handoff() {
+        let mut old = adversarial_app_with_two_workspaces();
+        let source = split_pane_of_first_workspace(&old);
+        let retired = old.public_pane_id(0, source).unwrap();
+        let move_result = move_to_second_workspace(&mut old, &retired);
+        let carried = old.public_pane_aliases_for_handoff();
+        assert_eq!(carried.get(&retired), Some(&move_result.pane.pane_id));
+
+        let mut new = handoff_successor(&mut old);
+        new.restore_public_pane_aliases(&carried);
+
+        let (ws_idx, pane_id) = new
+            .parse_pane_id(&retired)
+            .expect("a retired public id resolves after the handoff");
+        assert_ne!(pane_id, source, "the handoff rebuilds internal pane ids");
+        assert_eq!(
+            new.public_pane_id(ws_idx, pane_id),
+            Some(move_result.pane.pane_id)
+        );
+        new.state.assert_invariants_for_test();
+    }
+
+    /// Gives every pane a runtime whose child process was launched with the
+    /// `HERDR_PANE_ID` returned by `launched_as`.
+    #[cfg(unix)]
+    fn launch_panes(
+        app: &mut App,
+        launched_as: impl Fn(&App, usize, PaneId) -> String,
+    ) -> std::collections::HashMap<u32, String> {
+        let panes: Vec<(usize, PaneId)> = app
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, ws)| {
+                ws.public_pane_numbers
+                    .keys()
+                    .map(move |pane| (ws_idx, *pane))
+            })
+            .collect();
+        let mut environments = std::collections::HashMap::new();
+        for (index, (ws_idx, pane_id)) in panes.into_iter().enumerate() {
+            let pid = 40_000 + index as u32;
+            let (runtime, _rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+            runtime.test_set_child_pid(pid);
+            environments.insert(pid, launched_as(app, ws_idx, pane_id));
+            app.state.insert_test_runtime(pane_id, runtime);
+        }
+        environments
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_seeds_retired_public_pane_ids_from_pane_launch_environment() {
+        let mut app = adversarial_app_with_two_workspaces();
+        let moved = app.state.workspaces[1].tabs[0].root_pane;
+        let launched_as_id = crate::workspace::public_pane_id_for_number(
+            &app.state.workspaces[0].id,
+            app.state.workspaces[0].next_public_pane_number + 3,
+        );
+        let launch_id = launched_as_id.clone();
+        let environments = launch_panes(&mut app, move |app, ws_idx, pane_id| {
+            if pane_id == moved {
+                launch_id.clone()
+            } else {
+                app.public_pane_id(ws_idx, pane_id).unwrap()
+            }
+        });
+
+        app.seed_public_pane_aliases_from_launch_env(|pid| environments.get(&pid).cloned());
+
+        assert_eq!(app.parse_pane_id(&launched_as_id), Some((1, moved)));
+        assert_eq!(app.state.public_pane_id_aliases.len(), 1);
+        app.state.assert_invariants_for_test();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn handoff_never_seeds_a_live_public_pane_id() {
+        let mut app = adversarial_app_with_two_workspaces();
+        let claimant = app.state.workspaces[1].tabs[0].root_pane;
+        let owner = split_pane_of_first_workspace(&app);
+        let owner_id = app.public_pane_id(0, owner).unwrap();
+        let claimed_id = owner_id.clone();
+        let environments = launch_panes(&mut app, move |app, ws_idx, pane_id| {
+            if pane_id == claimant {
+                claimed_id.clone()
+            } else {
+                app.public_pane_id(ws_idx, pane_id).unwrap()
+            }
+        });
+
+        app.seed_public_pane_aliases_from_launch_env(|pid| environments.get(&pid).cloned());
+
+        assert!(app.state.public_pane_id_aliases.is_empty());
+        assert_eq!(app.parse_pane_id(&owner_id), Some((0, owner)));
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn retired_public_pane_ids_are_never_issued_again() {
+        let mut app = adversarial_app_with_two_workspaces();
+        let pane_id = app.state.workspaces[1].tabs[0].root_pane;
+        let live_workspace_number = app.state.workspaces[0].next_public_pane_number + 4;
+        let retired_in_live_workspace = crate::workspace::public_pane_id_for_number(
+            &app.state.workspaces[0].id,
+            live_workspace_number,
+        );
+        let closed_workspace = Workspace::test_new("closed").id;
+        let future_workspace = format!(
+            "w{}",
+            crate::workspace::encode_public_number(
+                crate::workspace::public_workspace_number(&closed_workspace).unwrap() + 5
+            )
+        );
+        let retired_in_future_workspace = format!("{future_workspace}:p1");
+
+        assert!(app
+            .state
+            .retire_public_pane_id(retired_in_live_workspace.clone(), pane_id));
+        assert!(app
+            .state
+            .retire_public_pane_id(retired_in_future_workspace.clone(), pane_id));
+
+        assert!(app.state.workspaces[0].next_public_pane_number > live_workspace_number);
+        let issued: Vec<String> = (0..8)
+            .map(|_| crate::workspace::generate_workspace_id())
+            .collect();
+        assert!(
+            !issued.contains(&future_workspace),
+            "workspace id {future_workspace} of a retired pane id was issued again: {issued:?}"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn api_pane_move_recovery_gives_the_pane_back_its_public_id_and_numbering() {
+        let mut app = adversarial_app_with_two_workspaces();
+        let mut source_workspace = Workspace::test_new("source");
+        let root = source_workspace.tabs[0].root_pane;
+        let first_split = source_workspace.test_split(ratatui::layout::Direction::Horizontal);
+        let source = source_workspace.test_split(ratatui::layout::Direction::Vertical);
+        assert!(!source_workspace.close_pane(root));
+        assert!(!source_workspace.close_pane(first_split));
+        let next_public_pane_number = source_workspace.next_public_pane_number;
+        app.state.workspaces[0] = source_workspace;
+        app.state.ensure_test_terminals();
+        let previous_pane_id = app.public_pane_id(0, source).unwrap();
+        assert_ne!(
+            previous_pane_id,
+            format!("{}:p1", app.public_workspace_id(0)),
+            "the moved pane must not hold the number a recreated workspace starts from"
+        );
+        let context = PaneMoveRecoveryContext::new(&app.state, 0, 0, source);
+        let taken = app.state.workspaces[0]
+            .take_pane_for_move(source)
+            .expect("source pane should be movable");
+        assert!(taken.workspace_empty);
+        app.state.workspaces[0].unregister_moved_pane(source);
+        app.state.workspaces.remove(0);
+
+        app.recover_failed_pane_move(context, taken.moved);
+
+        let (ws_idx, _) = app.find_pane(source).expect("recovered pane");
+        assert_eq!(
+            app.public_pane_id(ws_idx, source).as_deref(),
+            Some(previous_pane_id.as_str())
+        );
+        assert!(
+            app.state.workspaces[ws_idx].next_public_pane_number >= next_public_pane_number,
+            "recovery must keep the source workspace's pane counter"
+        );
+        app.state.assert_invariants_for_test();
+    }
+
     #[test]
     fn api_pane_move_to_existing_tab_across_workspace_reassigns_public_pane_id() {
         let mut app = app_with_linked_worktree();
@@ -3720,14 +4123,7 @@ mod tests {
             .unwrap()
             .clone();
         let previous_workspace_id = app.public_workspace_id(0);
-        let context = PaneMoveRecoveryContext {
-            source_ws_idx: 0,
-            previous_workspace_id: previous_workspace_id.clone(),
-            previous_workspace_label: app.state.workspaces[0].custom_name.clone(),
-            previous_tab_label: app.state.workspaces[0].tabs[0].custom_name.clone(),
-            previous_worktree_space: app.state.workspaces[0].worktree_space.clone(),
-            identity_cwd: app.state.workspaces[0].identity_cwd.clone(),
-        };
+        let context = PaneMoveRecoveryContext::new(&app.state, 0, 0, source);
         let taken = app.state.workspaces[0]
             .take_pane_for_move(source)
             .expect("source pane should be movable");

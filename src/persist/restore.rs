@@ -308,6 +308,9 @@ fn restore_with_imports_and_failures(
         }
     }
     crate::workspace::reserve_workspace_ids(&workspaces);
+    if let Some(next_workspace_number) = snapshot.next_workspace_number {
+        crate::workspace::reserve_workspace_number(next_workspace_number);
+    }
     ((workspaces, terminals, terminal_runtimes), failed_imports)
 }
 
@@ -1344,6 +1347,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            next_workspace_number: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1437,6 +1441,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            next_workspace_number: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1544,6 +1549,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            next_workspace_number: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1572,6 +1578,95 @@ mod tests {
             .pane_details(&terminals)
             .into_iter()
             .all(|detail| detail.pane_id != agent_pane));
+    }
+
+    /// Captures `state` with every pane's cwd missing, so restoring it builds
+    /// panes without launching processes.
+    fn capture_without_launchable_panes(
+        state: &mut crate::app::AppState,
+        name: &str,
+    ) -> SessionSnapshot {
+        let missing = std::env::temp_dir().join(format!("herdr-missing-restore-cwd-{name}"));
+        assert!(!missing.exists());
+        for terminal in state.terminals.values_mut() {
+            terminal.cwd = missing.clone();
+        }
+        crate::persist::capture(
+            &state.workspaces,
+            &state.terminals,
+            &crate::terminal::TerminalRuntimeRegistry::default(),
+            state.active,
+            state.selected,
+        )
+    }
+
+    fn restore_without_runtimes(snapshot: &SessionSnapshot) -> crate::app::AppState {
+        let (events, _rx) = mpsc::channel(32);
+        let (workspaces, terminals, runtimes) = restore(
+            snapshot,
+            None,
+            24,
+            80,
+            0,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+        assert!(runtimes.is_empty());
+        let mut state = crate::app::AppState::test_new();
+        state.workspaces = workspaces;
+        state.terminals = terminals;
+        state.active = Some(0);
+        state.selected = 0;
+        state
+    }
+
+    fn public_pane_ids(workspace: &Workspace) -> std::collections::BTreeSet<String> {
+        workspace
+            .public_pane_numbers
+            .values()
+            .map(|number| crate::workspace::public_pane_id_for_number(&workspace.id, *number))
+            .collect()
+    }
+
+    #[test]
+    fn restore_keeps_workspace_ids_public_pane_numbers_and_counters() {
+        let mut state = crate::app::AppState::test_with_adversarial_identity_state();
+        let snapshot = capture_without_launchable_panes(&mut state, "keeps-ids");
+
+        let restored = restore_without_runtimes(&snapshot);
+
+        let original = &state.workspaces[0];
+        let workspace = &restored.workspaces[0];
+        assert_eq!(workspace.id, original.id);
+        assert_eq!(public_pane_ids(workspace), public_pane_ids(original));
+        assert_eq!(
+            workspace.next_public_pane_number,
+            original.next_public_pane_number
+        );
+        assert_eq!(
+            workspace.next_public_tab_number,
+            original.next_public_tab_number
+        );
+        restored.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn restore_never_reissues_the_id_of_a_closed_highest_workspace() {
+        let mut state = crate::app::AppState::test_with_adversarial_identity_state();
+        let closed = Workspace::test_new("closed");
+        let closed_id = closed.id.clone();
+        drop(closed);
+        let snapshot = capture_without_launchable_panes(&mut state, "closed-highest");
+
+        crate::workspace::test_restart_workspace_ids();
+        let restored = restore_without_runtimes(&snapshot);
+
+        assert_ne!(crate::workspace::generate_workspace_id(), closed_id);
+        restored.assert_invariants_for_test();
     }
 
     #[test]
@@ -1655,6 +1750,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            next_workspace_number: None,
         };
         let (events, _event_rx) = mpsc::channel(4);
 
@@ -1892,6 +1988,7 @@ mod tests {
             sidebar_width: Some(26),
             sidebar_section_split: Some(0.5),
             collapsed_space_keys: Default::default(),
+            next_workspace_number: None,
         };
         history.layout_fingerprint = super::super::snapshot::layout_fingerprint(&snapshot);
         (snapshot, history)

@@ -109,6 +109,12 @@ pub(crate) fn generate_workspace_id() -> String {
     format!("w{}", encode_public_number(counter as usize))
 }
 
+/// Puts the workspace id counter back where a freshly started server begins.
+#[cfg(test)]
+pub(crate) fn test_restart_workspace_ids() {
+    NEXT_WORKSPACE_ID.store(1, Ordering::Relaxed);
+}
+
 pub(crate) fn encode_public_number(mut value: usize) -> String {
     if value == 0 {
         return "0".to_string();
@@ -144,20 +150,39 @@ pub(crate) fn public_pane_id_for_number(workspace_id: &str, pane_number: usize) 
     format!("{workspace_id}:p{}", encode_public_number(pane_number))
 }
 
+/// Splits a public pane id into its workspace id and pane number.
+pub(crate) fn parse_public_pane_id(public_id: &str) -> Option<(&str, usize)> {
+    let (workspace_id, encoded) = public_id.rsplit_once(":p")?;
+    let pane_number = decode_public_number(encoded).filter(|number| *number > 0)?;
+    (!workspace_id.is_empty()).then_some((workspace_id, pane_number))
+}
+
 pub(crate) fn public_tab_id_for_number(workspace_id: &str, tab_number: usize) -> String {
     format!("{workspace_id}:t{}", encode_public_number(tab_number))
 }
 
+/// The number the next generated workspace id will carry. Every lower number
+/// was already issued, possibly to a workspace that is closed by now.
+pub(crate) fn next_workspace_number() -> usize {
+    NEXT_WORKSPACE_ID.load(Ordering::Relaxed) as usize
+}
+
 pub(crate) fn reserve_workspace_ids(workspaces: &[Workspace]) {
-    let Some(next) = workspaces
+    if let Some(next) = workspaces
         .iter()
         .filter_map(|workspace| public_workspace_number(&workspace.id))
         .max()
-        .and_then(|max| u64::try_from(max.checked_add(1)?).ok())
-    else {
+        .and_then(|max| max.checked_add(1))
+    {
+        reserve_workspace_number(next);
+    }
+}
+
+/// Makes sure no workspace id numbered below `next` is generated again.
+pub(crate) fn reserve_workspace_number(next: usize) {
+    let Ok(next) = u64::try_from(next) else {
         return;
     };
-
     let mut current = NEXT_WORKSPACE_ID.load(Ordering::Relaxed);
     while current < next {
         match NEXT_WORKSPACE_ID.compare_exchange_weak(
@@ -970,6 +995,23 @@ impl Workspace {
 
     pub(crate) fn unregister_moved_pane(&mut self, pane_id: PaneId) {
         self.unregister_pane(pane_id);
+    }
+
+    /// Gives a pane back the public number it held before a move that failed,
+    /// keeping every number issued before the move unavailable.
+    pub(crate) fn restore_public_pane_number(
+        &mut self,
+        pane_id: PaneId,
+        number: usize,
+        next_public_pane_number: usize,
+    ) {
+        self.register_new_pane_with_number(pane_id, number);
+        self.next_public_pane_number = self.next_public_pane_number.max(next_public_pane_number);
+    }
+
+    /// Makes sure `number` is never issued to a pane of this workspace again.
+    pub(crate) fn reserve_public_pane_number(&mut self, number: usize) {
+        self.next_public_pane_number = self.next_public_pane_number.max(number + 1);
     }
 
     pub fn public_pane_number(&self, pane_id: PaneId) -> Option<usize> {

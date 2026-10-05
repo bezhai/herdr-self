@@ -149,4 +149,63 @@ impl App {
         let (ws_idx, pane_id) = self.parse_pane_id(id)?;
         (self.public_pane_id(ws_idx, pane_id).as_deref() == Some(id)).then_some((ws_idx, pane_id))
     }
+
+    /// Retired public pane ids mapped to the current public id of the pane
+    /// each resolves to, for the server that takes over in a live handoff.
+    #[cfg(unix)]
+    pub(crate) fn public_pane_aliases_for_handoff(
+        &self,
+    ) -> std::collections::HashMap<String, String> {
+        self.state
+            .public_pane_id_aliases
+            .iter()
+            .filter_map(|(retired, &pane_id)| {
+                let (ws_idx, _) = self.find_pane(pane_id)?;
+                Some((retired.clone(), self.public_pane_id(ws_idx, pane_id)?))
+            })
+            .collect()
+    }
+
+    /// Keeps resolving the retired public pane ids that the previous server
+    /// carried over in a live handoff.
+    #[cfg(unix)]
+    pub(crate) fn restore_public_pane_aliases(
+        &mut self,
+        carried: &std::collections::HashMap<String, String>,
+    ) {
+        for (retired, current) in carried {
+            if let Some((_, pane_id)) = self.state.pane_with_current_public_id(current) {
+                self.state.retire_public_pane_id(retired.clone(), pane_id);
+            }
+        }
+    }
+
+    /// Retires the public pane id that each pane's process was launched with,
+    /// where it is not the pane's current id. A previous server may have moved
+    /// the pane without carrying that id over a handoff, and the pane's
+    /// processes still report with it.
+    #[cfg(unix)]
+    pub(crate) fn seed_public_pane_aliases_from_launch_env(
+        &mut self,
+        read_launch_pane_id: impl Fn(u32) -> Option<String>,
+    ) {
+        let launched: Vec<(crate::layout::PaneId, String)> = self
+            .state
+            .workspaces
+            .iter()
+            .enumerate()
+            .flat_map(|(ws_idx, ws)| {
+                ws.public_pane_numbers
+                    .keys()
+                    .map(move |pane_id| (ws_idx, *pane_id))
+            })
+            .filter_map(|(ws_idx, pane_id)| {
+                let child_pid = self.lookup_runtime_sender(ws_idx, pane_id)?.child_pid()?;
+                Some((pane_id, read_launch_pane_id(child_pid)?))
+            })
+            .collect();
+        for (pane_id, launch_pane_id) in launched {
+            self.state.retire_public_pane_id(launch_pane_id, pane_id);
+        }
+    }
 }

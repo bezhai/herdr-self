@@ -642,6 +642,7 @@ impl App {
         api_rx: tokio::sync::mpsc::UnboundedReceiver<crate::api::ApiRequestMessage>,
         event_hub: crate::api::EventHub,
         snapshot: &crate::persist::SessionSnapshot,
+        public_pane_aliases: &std::collections::HashMap<String, String>,
         imports: &mut std::collections::HashMap<
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
@@ -670,6 +671,13 @@ impl App {
         app.state.workspaces = workspaces;
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
+        app.restore_public_pane_aliases(public_pane_aliases);
+        app.seed_public_pane_aliases_from_launch_env(|child_pid| {
+            crate::platform::process_environ_var(
+                child_pid,
+                crate::integration::HERDR_PANE_ID_ENV_VAR,
+            )
+        });
         app.state.active = snapshot
             .active
             .filter(|&idx| idx < app.state.workspaces.len());

@@ -47,6 +47,12 @@ pub(crate) struct HandoffManifest {
     /// Absent from manifests written before this field existed.
     #[serde(default)]
     pub api_window_title: Option<String>,
+    /// Public pane ids that panes left behind when they moved to another
+    /// workspace, mapped to each pane's current public id. Processes started in
+    /// a pane keep the id from their launch environment, so the ids must keep
+    /// resolving for as long as the pane lives. Absent from older manifests.
+    #[serde(default)]
+    pub public_pane_aliases: std::collections::HashMap<String, String>,
 }
 
 #[cfg(unix)]
@@ -307,6 +313,7 @@ pub(crate) fn manifest_for(
     expected_protocol: Option<u32>,
     expected_version: Option<String>,
     api_window_title: Option<String>,
+    public_pane_aliases: std::collections::HashMap<String, String>,
 ) -> HandoffManifest {
     HandoffManifest {
         version: HANDOFF_VERSION,
@@ -317,6 +324,7 @@ pub(crate) fn manifest_for(
         snapshot,
         panes,
         api_window_title,
+        public_pane_aliases,
     }
 }
 
@@ -528,6 +536,7 @@ pub(crate) fn log_import_result(panes: usize) {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn empty_snapshot() -> crate::persist::SessionSnapshot {
         crate::persist::SessionSnapshot {
@@ -538,6 +547,7 @@ mod tests {
             sidebar_width: None,
             sidebar_section_split: None,
             collapsed_space_keys: Default::default(),
+            next_workspace_number: None,
         }
     }
 
@@ -549,6 +559,7 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            HashMap::new(),
         );
 
         assert_eq!(manifest.api_window_title.as_deref(), Some("deploying"));
@@ -562,6 +573,7 @@ mod tests {
             None,
             None,
             Some("deploying".to_string()),
+            HashMap::new(),
         );
         let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
         value
@@ -573,5 +585,49 @@ mod tests {
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.api_window_title.is_none());
+    }
+
+    #[test]
+    fn a_handoff_carries_retired_public_pane_ids() {
+        let aliases = HashMap::from([
+            ("w1:p4".to_string(), "w5:p3".to_string()),
+            ("w1:p3".to_string(), "w5:p2".to_string()),
+        ]);
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            aliases.clone(),
+        );
+
+        let value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        let received: HandoffManifest =
+            serde_json::from_value(value).expect("manifest should load");
+
+        assert_eq!(received.public_pane_aliases, aliases);
+    }
+
+    #[test]
+    fn a_manifest_written_before_retired_public_pane_ids_still_loads() {
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            HashMap::from([("w1:p4".to_string(), "w5:p3".to_string())]),
+        );
+        let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        value
+            .as_object_mut()
+            .expect("manifest should be a json object")
+            .remove("public_pane_aliases");
+
+        let older: HandoffManifest =
+            serde_json::from_value(value).expect("an older manifest should still load");
+
+        assert!(older.public_pane_aliases.is_empty());
     }
 }

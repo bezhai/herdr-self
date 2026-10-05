@@ -953,6 +953,15 @@ pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     super::parse_agent_env_hint(procargs2_env(&buf)?)
 }
 
+/// Read one variable from the environment a process started with.
+pub(crate) fn process_environ_var(pid: u32, name: &str) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let buf = kern_procargs2(pid)?;
+    super::parse_environ_var(procargs2_env(&buf)?, name)
+}
+
 fn procargs2_argv_start(rest: &[u8]) -> Option<usize> {
     let exec_end = rest.iter().position(|&byte| byte == 0)?;
     let mut pos = exec_end;
@@ -1228,6 +1237,24 @@ mod tests {
 
         let env = procargs2_env(&buf).expect("expected env block");
         assert_eq!(crate::platform::parse_agent_env_hint(env), None);
+    }
+
+    #[test]
+    fn process_environ_var_reads_the_initial_environment_of_another_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env("HERDR_PANE_ID", "w1:p4")
+            .spawn()
+            .expect("spawn sleep");
+
+        let pane_id = process_environ_var(child.id(), "HERDR_PANE_ID");
+        let missing = process_environ_var(child.id(), "HERDR_TEST_UNSET_VARIABLE");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(pane_id.as_deref(), Some("w1:p4"));
+        assert_eq!(missing, None);
+        assert_eq!(process_environ_var(0, "HERDR_PANE_ID"), None);
     }
 
     #[test]

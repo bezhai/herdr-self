@@ -710,8 +710,9 @@ pub fn process_cwd(pid: u32) -> Option<PathBuf> {
     std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
 }
 
-/// Read a Herdr agent identity hint from a process environment.
-pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
+/// Read the environment block a process started with, unless reading it could
+/// block (see `process_allows_remote_memory_read`).
+fn process_environ(pid: u32) -> Option<Vec<u8>> {
     if pid == 0 {
         return None;
     }
@@ -719,8 +720,17 @@ pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
     if !process_allows_remote_memory_read(state, &comm, running_inside_wsl()) {
         return None;
     }
-    let environ = std::fs::read(format!("/proc/{pid}/environ")).ok()?;
-    super::parse_agent_env_hint(&environ)
+    std::fs::read(format!("/proc/{pid}/environ")).ok()
+}
+
+/// Read a Herdr agent identity hint from a process environment.
+pub fn process_agent_hint(pid: u32) -> Option<crate::detect::Agent> {
+    super::parse_agent_env_hint(&process_environ(pid)?)
+}
+
+/// Read one variable from the environment a process started with.
+pub(crate) fn process_environ_var(pid: u32, name: &str) -> Option<String> {
+    super::parse_environ_var(&process_environ(pid)?, name)
 }
 
 pub fn session_processes(child_pid: u32) -> Vec<u32> {
@@ -1167,6 +1177,24 @@ mod tests {
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    #[test]
+    fn process_environ_var_reads_the_initial_environment_of_another_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .env("HERDR_PANE_ID", "w1:p4")
+            .spawn()
+            .expect("spawn sleep");
+
+        let pane_id = process_environ_var(child.id(), "HERDR_PANE_ID");
+        let missing = process_environ_var(child.id(), "HERDR_TEST_UNSET_VARIABLE");
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(pane_id.as_deref(), Some("w1:p4"));
+        assert_eq!(missing, None);
+        assert_eq!(process_environ_var(0, "HERDR_PANE_ID"), None);
     }
 
     #[test]
