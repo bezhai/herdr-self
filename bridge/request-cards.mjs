@@ -13,6 +13,12 @@ export const plain=content=>({tag:'div',text:{tag:'plain_text',content}});
 export const card=(heading,template,elements)=>({schema:'2.0',config:{update_multi:true},header:{title:{tag:'plain_text',content:heading},template},body:{elements}});
 // open_id comes from the app's allowlist, which only holds ou_ ids.
 export const by=(text,openId)=>({tag:'markdown',content:`${text} · <at id=${openId}></at>`});
+// An option of a select: the text shown and the value that a submission carries.
+export const option=(content,value)=>({text:{tag:'plain_text',content},value});
+// A select of one option in a form, showing the option whose value is initial when given.
+export const select=(name,placeholder,options,initial)=>({tag:'select_static',name,width:'fill',placeholder:{tag:'plain_text',content:placeholder},options,...initial!=null?{initial_option:initial}:{}});
+// A form whose button submits what its elements hold together with the button's callback value.
+export const submitForm=(name,elements,label,value)=>({tag:'form',name,elements:[...elements,{tag:'button',text:{tag:'plain_text',content:label},type:'primary',form_action_type:'submit',name:'submit',behaviors:[{type:'callback',value}]}]});
 const describe=r=>[...r.description?[plain(r.description)]:[],plain(r.input_preview)];
 // What a submitted form holds for question i: the 其他 text, which takes precedence, and the indexes of the chosen options.
 function choice(form,i){
@@ -23,18 +29,17 @@ function choice(form,i){
 export const answered=(n,form)=>Array.from({length:Number(n)||0},(_,i)=>choice(form,i)).every(c=>c.other||c.picked.length);
 // A question without options has only the 其他 input.
 function question(q,i,form){
- const c=choice(form,i),list=q.options||[],options=list.map((o,j)=>({text:{tag:'plain_text',content:o.label},value:String(j)}));
+ const c=choice(form,i),list=q.options||[],options=list.map((o,j)=>option(o.label,String(j)));
  const text=[(q.header?q.header+'：':'')+q.question,...list.filter(o=>o.description).map(o=>`· ${o.label}：${o.description}`)].join('\n');
- const select=!list.length?[]:q.multi_select?[{tag:'multi_select_static',name:'q'+i,width:'fill',placeholder:{tag:'plain_text',content:'选择一项或多项'},options,...c.picked.length?{selected_values:c.picked.map(String)}:{}}]
-  :[{tag:'select_static',name:'q'+i,width:'fill',placeholder:{tag:'plain_text',content:'选择一项'},options,...c.picked.length?{initial_option:String(c.picked[0])}:{}}];
- return [plain(text),...select,{tag:'input',name:'other'+i,width:'fill',placeholder:{tag:'plain_text',content:'其他（填写后以此为准）'},...c.other?{default_value:c.other}:{}}];
+ const menu=!list.length?[]:q.multi_select?[{tag:'multi_select_static',name:'q'+i,width:'fill',placeholder:{tag:'plain_text',content:'选择一项或多项'},options,...c.picked.length?{selected_values:c.picked.map(String)}:{}}]
+  :[select('q'+i,'选择一项',options,c.picked.length?String(c.picked[0]):undefined)];
+ return [plain(text),...menu,{tag:'input',name:'other'+i,width:'fill',placeholder:{tag:'plain_text',content:'其他（填写后以此为准）'},...c.other?{default_value:c.other}:{}}];
 }
 // The card of a waiting request. Every drawing needs its own render number: the channel drops a click that repeats the card, person and
 // button value of an earlier one. form holds the choices of a submission to keep when a question card is drawn again.
 export function pending(r,render,form){
  const value={request:r.id,check:check(r),render};
- if(r.kind==='question')return card(title(r),'blue',[{tag:'form',name:'answers',elements:[...r.questions.flatMap((q,i)=>question(q,i,form)),
-  {tag:'button',text:{tag:'plain_text',content:'提交'},type:'primary',form_action_type:'submit',name:'submit',behaviors:[{type:'callback',value:{...value,questions:r.questions.length}}]}]}]);
+ if(r.kind==='question')return card(title(r),'blue',[submitForm('answers',r.questions.flatMap((q,i)=>question(q,i,form)),'提交',{...value,questions:r.questions.length})]);
  const buttons=(r.decisions||[]).filter(d=>decisions[d]).map(d=>({tag:'column',width:'auto',elements:[{tag:'button',text:{tag:'plain_text',content:decisions[d].label},type:decisions[d].type,behaviors:[{type:'callback',value:{...value,decision:d}}]}]}));
  return card(title(r),'orange',[...describe(r),...buttons.length?[{tag:'column_set',horizontal_spacing:'8px',columns:buttons}]:[]]);
 }

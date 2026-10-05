@@ -1,6 +1,6 @@
 import {uuid,publicText} from './core.mjs';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.mjs';
-import {picker,adoptedPicker,intro,label,stillChosen} from './adoption.mjs';
+import {picker,adoptedPicker,intro,nameOf,stillChosen,chosen} from './adoption.mjs';
 import {permissionMode} from './platform.mjs';
 // One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, or one that already runs
 // in any pane of any machine and that the topic adopted (/接管). Everything goes through the Herdr CLI.
@@ -18,7 +18,7 @@ const linked=(t,agents)=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers==
 const remoteAnswers=(pane,on)=>['pane','remote-answers',pane,on?'on':'off'];
 // /接管 as a root message offers agents to adopt; /结束接管 in an adopted topic lets go of its agent. Anywhere else they are messages.
 const adoptCommand='/接管',releaseCommand='/结束接管';
-const endedNotice='该话题的会话已结束，请发起新话题',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管';
+const endedNotice='该话题的会话已结束，请发起新话题',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 // A reply of the agent as Feishu shows it; Herdr cuts long replies.
 const markdownOf=r=>r.truncated?r.text+'\n\n（回复过长，已截断，完整内容请在 Herdr 中查看）':r.text;
 // Marks a message from the moment a topic accepts it until the agent's turn for it ends.
@@ -33,8 +33,6 @@ function enqueue(queues,key,task){
  const run=(queues.get(key)||Promise.resolve()).then(task),tail=run.catch(()=>{});
  queues.set(key,tail);tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});return run;
 }
-// fn over list, at most limit at a time: every Herdr call over SSH opens a connection, and sshd refuses connections beyond its limit.
-async function chunked(list,limit,fn){const out=[];for(let i=0;i<list.length;i+=limit)out.push(...await Promise.all(list.slice(i,i+limit).map(fn)));return out;}
 export class Topics{
  // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path) creates a directory and its parents on machine m;
  // machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{text}|{markdown}|{card}) answers in the topic
@@ -241,53 +239,58 @@ export class Topics{
    catch(e){this.update(t,{state:'closed'});this.store.log('话题接管',`${b.name}：可接管的 Agent 列表未发出，${brief(e)}`,'error');}
   }).catch(e=>this.store.log('话题接管',`${b.name}：${brief(e)}`,'error'));
  }
- // The agents a topic can adopt, per connected machine in store order: {machine, failed, agents:[{agent, latest}]}, where each agent runs
- // in a pane that no topic holds and latest is its latest reply or null. A machine whose agent list fails is failed. Never rejects.
+ // The agents a topic can adopt, per connected machine in store order: {machine, failed, agents:[{agent, name}]}, where name is what
+ // the person calls the agent (see nameOf). One snapshot per machine carries the agents together with the pane, tab and workspace labels
+ // that name them. A machine whose snapshot fails is failed. Never rejects.
  candidates(){
   return Promise.all(this.store.data.machines.filter(m=>m.enabled).map(async machine=>{
-   let agents;try{({agents}=await this.herdr(machine,['agent','list']));}
+   let snapshot;try{({snapshot}=await this.herdr(machine,['api','snapshot']));}
    catch(e){this.store.log('话题接管',`${machine.name}：${brief(e)}`,'error');return {machine,failed:true,agents:[]};}
-   const free=agents.filter(x=>x.agent&&!this.held(machine.id,x.pane_id));
-   // A reply that cannot be read only leaves out its first line.
-   return {machine,failed:false,agents:await chunked(free,4,async x=>({agent:x,latest:await this.latest(machine,x).catch(()=>null)}))};
+   const s=this.free(machine,snapshot);return {machine,failed:false,agents:s.agents.map(x=>({agent:x,name:nameOf(s,x)}))};
   }));
  }
+ // Snapshot s of machine m with only the agents that a topic can adopt: those with an agent kind, in a pane that no topic holds.
+ free(m,s){return {...s,agents:s.agents.filter(x=>x.agent&&!this.held(m.id,x.pane_id))};}
  // The latest reply of agent x from the list of machine m, or null.
  async latest(m,x){if(x.reply_seq==null)return null;const {replies}=await this.herdr(m,['agent','replies',x.pane_id,'--after',String(x.reply_seq-1)]);return replies.at(-1)||null;}
  // Whether a topic holds pane p of machine m: a topic starting or ready in it, or a selection that is adopting it.
  held(m,p){return this.claims.has(m+' '+p)||this.store.data.topics.some(t=>['starting','ready'].includes(t.state)&&t.machineId===m&&t.paneId===p);}
- // A click on a 接管 button by someone on the app's allowlist (see click). The selection is adopted afterwards in the topic's queue.
+ // A submission of a picker by someone on the app's allowlist (see click). The chosen agent is adopted afterwards in the topic's queue;
+ // a submission without a choice draws the picker again, so that the next one is not dropped as a repeat.
  choose(a,evt){
   const t=this.store.data.topics.find(x=>x.appId===a.id&&x.adopted?.picker===evt.messageId);
   if(!t)return toast('info','这张卡片已失效，请重新发送 /接管');
   if(t.state!=='choosing')return toast('info','这个话题已接管 Agent，不能再选择');
   const key=t.id+' adopt';if(this.answering.has(key))return toast('info','正在接管，请稍候');
-  this.answering.set(key,enqueue(this.topicQueues,t.id,()=>this.adopt(a,t,evt)).finally(()=>this.answering.delete(key)));
-  return toast('info','正在接管');
+  const v=chosen(evt.action.formValue);
+  this.answering.set(key,enqueue(this.topicQueues,t.id,()=>this.adopt(a,t,v,evt.operator)).finally(()=>this.answering.delete(key)));
+  return v?toast('info','正在接管'):toast('warning',unchosen);
  }
- // Adopts the agent that a picker click chose when its pane still runs that agent and no topic holds it: remote answers are turned on,
- // then the topic is linked and ready, and the intro with the agent's latest reply goes into the thread. The pane stays where it is.
- // Otherwise the picker is drawn again with the reason. Never rejects.
- async adopt(a,t,{operator,action}){
-  const v=action.value.adopt,b=this.store.data.bindings.find(x=>x.id===t.bindingId),name=b?.name||a.name;let claim;
+ // Adopts agent v that the person operator chose on a picker when its pane still runs that agent and no topic holds it: remote answers
+ // are turned on, then the topic is linked and ready under the agent's name, and the intro with the agent's latest reply goes into the
+ // thread. The pane stays where it is. Otherwise, also without a choice, the picker is drawn again with the reason. Never rejects.
+ async adopt(a,t,v,operator){
+  const b=this.store.data.bindings.find(x=>x.id===t.bindingId),name=b?.name||a.name;let claim;
   try{
    if(t.state!=='choosing')return;
+   if(!v)return await this.redraw(a,t,unchosen);
    const m=this.store.data.machines.find(x=>x.id===v.machine);
    if(!m?.enabled)return await this.redraw(a,t,'所选的机器已断开，请重新选择');
-   const {agents}=await this.herdr(m,['agent','list']),x=agents.find(y=>y.pane_id===v.pane);
+   const {snapshot}=await this.herdr(m,['api','snapshot']),x=snapshot.agents.find(y=>y.pane_id===v.pane);
    if(!x||!stillChosen(v,x))return await this.redraw(a,t,'所选的 Agent 已退出或已变化，请重新选择');
    if(this.held(m.id,x.pane_id))return await this.redraw(a,t,'所选的 Agent 已被其他话题接管，请重新选择');
+   const called=nameOf(this.free(m,snapshot),x);
    // Held from here until the ready topic holds it, so that another selection cannot take it while Herdr is called.
    claim=m.id+' '+x.pane_id;this.claims.add(claim);
    await this.herdr(m,remoteAnswers(x.pane_id,true));
    let latest=null;try{latest=await this.latest(m,x);}catch(e){this.store.log('话题接管',`${name}：未能读取最近一条回复，${brief(e)}`,'error');}
    // The reply shown in the intro is not forwarded again.
-   this.update(t,{machineId:m.id,workspaceId:x.workspace_id||'',tabId:x.tab_id||'',paneId:x.pane_id,agentName:label(x),title:'接管 · '+label(x),state:'ready',
+   this.update(t,{machineId:m.id,workspaceId:x.workspace_id||'',tabId:x.tab_id||'',paneId:x.pane_id,agentName:called,title:'接管 · '+called,state:'ready',
     replySeq:latest?.seq??x.reply_seq??0,adopted:{picker:t.adopted.picker,kind:x.agent,...x.agent_session&&{session:x.agent_session.value}}});
    this.store.log('话题接管',`${name}：已接管 ${m.name} 上的 ${t.agentName}`);
-   await this.notify(a,t,intro(m,x,latest));
+   await this.notify(a,t,intro(m,x,called,latest));
    if(latest)try{await this.reply(a,t.chatId,t.rootId,{markdown:markdownOf(latest)});}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}
-   try{await this.updateCard(a,t.adopted.picker,adoptedPicker(m,x,operator.openId));}catch(e){this.store.log('话题接管',`${name}：接管卡片未能更新，${brief(e)}`,'error');}
+   try{await this.updateCard(a,t.adopted.picker,adoptedPicker(m,x,called,operator.openId));}catch(e){this.store.log('话题接管',`${name}：接管卡片未能更新，${brief(e)}`,'error');}
   }catch(e){
    this.store.log('话题接管',`${name}：接管失败，${brief(e)}`,'error');
    if(t.state==='choosing')await this.redraw(a,t,'接管失败，请稍后重试');
