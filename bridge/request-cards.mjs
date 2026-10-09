@@ -8,8 +8,10 @@ const refused='用户在飞书中拒绝了这次操作';
 export const title=r=>r.kind==='question'?'Agent 提问':'权限确认 · '+r.tool_name;
 // What a card shows. Herdr counts request ids from 1 again after a restart, so an id alone can name another request.
 export const check=r=>crypto.createHash('sha256').update(JSON.stringify([r.kind,r.tool_name,r.description,r.input_preview,r.decisions,r.questions])).digest('hex').slice(0,16);
-// Building blocks shared with the adoption cards (see adoption.mjs).
+// Building blocks shared with the adoption cards and the cards without a header (see adoption.mjs and message-cards.mjs).
 export const plain=content=>({tag:'div',text:{tag:'plain_text',content}});
+// s cut to n code points, the last one an ellipsis.
+export const clip=(s,n)=>[...s].length>n?[...s].slice(0,n-1).join('')+'…':s;
 export const card=(heading,template,elements)=>({schema:'2.0',config:{update_multi:true},header:{title:{tag:'plain_text',content:heading},template},body:{elements}});
 // open_id comes from the app's allowlist, which only holds ou_ ids.
 export const by=(text,openId)=>({tag:'markdown',content:`${text} · <at id=${openId}></at>`});

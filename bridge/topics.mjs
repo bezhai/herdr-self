@@ -1,6 +1,7 @@
 import {uuid,publicText} from './core.mjs';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.mjs';
 import {picker,adoptedPicker,intro,nameOf,stillChosen,chosen} from './adoption.mjs';
+import {notice,replyCards} from './message-cards.mjs';
 import {permissionMode} from './platform.mjs';
 // One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, or one that already runs
 // in any pane of any machine and that the topic adopted (/接管). Everything goes through the Herdr CLI.
@@ -19,8 +20,6 @@ const remoteAnswers=(pane,on)=>['pane','remote-answers',pane,on?'on':'off'];
 // /接管 as a root message offers agents to adopt; /结束接管 in an adopted topic lets go of its agent. Anywhere else they are messages.
 const adoptCommand='/接管',releaseCommand='/结束接管';
 const endedNotice='该话题的会话已结束，请发起新话题',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
-// A reply of the agent as Feishu shows it; Herdr cuts long replies.
-const markdownOf=r=>r.truncated?r.text+'\n\n（回复过长，已截断，完整内容请在 Herdr 中查看）':r.text;
 // Marks a message from the moment a topic accepts it until the agent's turn for it ends.
 const reaction='OneSecond';
 // Reactions of prompted messages whose turn has ended: the agent is idle or done and has changed state since the prompt.
@@ -35,8 +34,8 @@ function enqueue(queues,key,task){
 }
 export class Topics{
  // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path) creates a directory and its parents on machine m;
- // machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{text}|{markdown}|{card}) answers in the topic
- // thread and resolves to the message id; updateCard(app,messageId,card) replaces a card sent that way;
+ // machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card}) answers in the topic thread with a card
+ // and resolves to the message id; updateCard(app,messageId,card) replaces a card sent that way;
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId).
  constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact}){
   this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.topicQueues=new Map();this.workspaceQueues=new Map();
@@ -289,7 +288,7 @@ export class Topics{
     replySeq:latest?.seq??x.reply_seq??0,adopted:{picker:t.adopted.picker,kind:x.agent,...x.agent_session&&{session:x.agent_session.value}}});
    this.store.log('话题接管',`${name}：已接管 ${m.name} 上的 ${t.agentName}`);
    await this.notify(a,t,intro(m,x,called,latest));
-   if(latest)try{await this.reply(a,t.chatId,t.rootId,{markdown:markdownOf(latest)});}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}
+   if(latest)try{await this.post(a,t,latest);}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}
    try{await this.updateCard(a,t.adopted.picker,adoptedPicker(m,x,called,operator.openId));}catch(e){this.store.log('话题接管',`${name}：接管卡片未能更新，${brief(e)}`,'error');}
   }catch(e){
    this.store.log('话题接管',`${name}：接管失败，${brief(e)}`,'error');
@@ -331,11 +330,18 @@ export class Topics{
   // A seq below the stored one means Herdr restarted or handed off and counts from 1 again: take its replies up to seq.
   const a=this.app(t.appId),reset=seq<last,{replies}=await this.herdr(m,['agent','replies',t.paneId,...reset?[]:['--after',String(last)]]);
   for(const r of replies)if(!reset||r.seq<=seq){
-   // At most once, like messages: the seq is on disk before the send, and a failed send is not repeated.
+   // At most once, like messages: the seq is on disk before the send, and a failed card is not sent again (see post).
    this.update(t,{replySeq:r.seq});
-   try{await this.reply(a,t.chatId,t.rootId,{markdown:markdownOf(r)});this.store.log('回复转发',`${b.name}：已转发 ${t.agentName} 的回复`);}
-   catch(e){this.store.log('回复转发',`${b.name}：${t.agentName} 的回复未发出，${brief(e)}`,'error');}
+   try{await this.post(a,t,r);this.store.log('回复转发',`${b.name}：已转发 ${t.agentName} 的回复`);}
+   catch(e){this.store.log('回复转发',`${b.name}：${t.agentName} 的回复${e.sent?`只发出了前 ${e.sent} 张卡片`:'未发出'}，${brief(e)}`,'error');}
   }
+ }
+ // Posts reply r of the agent into the thread as its cards, in order. The first card that fails ends the reply: the cards after it are
+ // dropped rather than posted after a gap, and most failures (Feishu not connected) would meet them too. Rejects with the error of that
+ // card, its sent property counting the cards that went out before it.
+ async post(a,t,r){
+  const cards=replyCards(r);
+  for(const [i,card] of cards.entries())try{await this.reply(a,t.chatId,t.rootId,{card});}catch(e){throw Object.assign(e,{sent:i});}
  }
  // Resolves to the record kept in t.reactions, or to null when Feishu refused the reaction; delivery goes on either way.
  async addReaction(a,t,messageId){
@@ -349,5 +355,5 @@ export class Topics{
  }
  target(t){const m=this.machine(t.machineId);if(!m.enabled)throw Error('机器连接已停用');return m;}
  update(t,fields){Object.assign(t,fields);this.store.save();}
- async notify(a,t,text){try{await this.reply(a,t.chatId,t.rootId,{text});}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}}
+ async notify(a,t,text){try{await this.reply(a,t.chatId,t.rootId,{card:notice(text)});}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}}
 }

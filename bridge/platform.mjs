@@ -121,8 +121,8 @@ export class Platforms{
  }
  // Like messages, a card click counts only from someone on the allowlist; anyone else in the chat can click too.
  cardAction(a,evt){if(!a.enabled||!a.allowedUsers.includes(evt.operator?.openId))return {toast:{type:'error',content:'你不在这个应用的允许名单中，不能处理这个请求'}};return this.onCardAction(a,evt);}
- // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic. content is {text}, {markdown}
- // or {card} with a card JSON; resolves to the id of the message sent.
+ // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic. content is {card} with a card
+ // JSON, which goes out as one message whatever its size; resolves to the id of the message sent.
  async reply(a,chatId,rootId,content){return (await this.connected(a).send(chatId,content,{replyTo:rootId,replyInThread:true})).messageId;}
  // Replaces the whole content of a card the bot sent.
  async updateCard(a,messageId,card){await this.connected(a).updateCard(messageId,card);}

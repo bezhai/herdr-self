@@ -1,4 +1,4 @@
-import {card,plain,by,option,select,submitForm} from './request-cards.mjs';
+import {card,plain,clip,by,option,select,submitForm} from './request-cards.mjs';
 // What Feishu shows when a topic adopts an agent that already runs in a Herdr pane (see Topics.offer and Topics.adopt): the picker card,
 // the picker once an agent was adopted, and the intro of the adopted topic. An agent is an entry of the agents of `herdr api snapshot`,
 // which are those of `herdr agent list`; text from Herdr and the agent is shown as plain text, never as markdown.
@@ -6,7 +6,6 @@ import {card,plain,by,option,select,submitForm} from './request-cards.mjs';
 const statuses={idle:'空闲',working:'运行中',blocked:'等待确认',done:'已完成',unknown:'未知'};
 // The kinds that bindings start, named as in the console; other agents go by what Herdr calls them.
 const kinds={claude:'Claude',codex:'Codex',agy:'Antigravity'};
-const clip=(s,n)=>[...s].length>n?[...s].slice(0,n-1).join('')+'…':s;
 // A path under a home directory starts with ~. Display only: the machine's home is not known, so the usual home locations count, also
 // below a mount point such as /data00/home/<user>.
 export const home=path=>path.replace(/^(?:.*?\/home\/[^/]+|\/Users\/[^/]+|\/root)(?=\/|$)/,'~');
