@@ -143,6 +143,8 @@ herdr integration install claude
 
 このフックは、セッション開始時に Claude Code のセッション識別をローカルの Herdr ソケットに報告します。Claude Code の状態は Herdr のスクリーンマニフェスト検出から得られます。
 
+Claude 統合 v11 は `PreToolUse`、`PostToolUse`、`PostToolUseFailure` フックも登録し、すべてのツール呼び出しの開始と終了を報告します。報告は `herdr agent tool-calls` と `agent.tool_calls` ソケットメソッドで読み取れます。フックはバックグラウンド（`"async": true`）で実行されるためツールを遅らせず、エージェント状態も報告しません。`PostToolUseFailure` で終わった呼び出しは失敗として記録されます。各イベントには、Bash コマンドの説明やコマンド、作業ディレクトリからの相対ファイルパス、検索パターンなど、ツール入力から作った短いタイトルが付きます。タスクリストの管理（`TodoWrite`、`TaskCreate`、`TaskUpdate`、`TaskList`、`TaskGet`）と `ToolSearch`、サブエージェント内部のツール呼び出しは報告しません。Windows ではツール呼び出しを報告しません。
+
 Claude 統合 v10 は、文書化された `SessionStart` の source 値 `startup`、`resume`、`clear`、`compact`、`fork` のみに一致します。これにより、ほかの Claude 互換フックを無効にせずに、Grok の `new` と `load` イベントがインポートされた Herdr の Claude フックを起動するのを防ぎます。アップグレード後に Claude 統合を再インストールして、従来のワイルドカードマッチャーを移行してください。Claude に新しい source 値が追加された場合は、統合の更新が必要です。
 
 Herdr はデフォルトで `~/.claude` を使い、`CLAUDE_CONFIG_DIR` が設定されていればそちらを使います。Claude の設定ディレクトリはあらかじめ存在している必要があります。インストールは `hooks/herdr-agent-state.sh` を書き込み、`settings.json` に Herdr のフックエントリを追加します。アンインストールは一致するフックエントリを削除し、フックスクリプトを削除します。
@@ -156,6 +158,8 @@ herdr integration install codex
 ```
 
 Codex フックは、他のインテグレーションと同じローカルソケット API を通じてセッション識別を報告します。Codex の状態は Herdr のスクリーンマニフェスト検出から得られます。
+
+Codex 統合 v9 は `PreToolUse` と `PostToolUse` フックも登録し、シェルコマンド、`apply_patch`、MCP ツールなどのツール呼び出しの開始と終了を報告します。報告は `herdr agent tool-calls` と `agent.tool_calls` ソケットメソッドで読み取れます。フックは何も出力しないため呼び出しを変更せず、エージェント状態も報告しません。タイムアウトは 10 秒です。Codex には失敗イベントがないため、失敗した `apply_patch` や MCP 呼び出しには終了イベントがありません。`update_plan`、サブエージェント、ネストしたセッションのツール呼び出しは報告しません。再インストール後、変更されたフックを Codex で信頼してください。Windows ではツール呼び出しを報告しません。
 
 Herdr はデフォルトで `~/.codex` を使い、`CODEX_HOME` が設定されていればそちらを使います。Codex の設定ディレクトリはあらかじめ存在している必要があります。インストールは `herdr-agent-state.sh` を書き込み、`hooks.json` を更新し、`config.toml` に `[features] hooks = true` があることを保証します。非推奨のトップレベル `codex_hooks` フラグが存在すれば削除もします。アンインストールは `hooks.json` から Herdr のエントリを削除してフックスクリプトを削除しますが、`config.toml` は変更しません。
 
@@ -339,9 +343,11 @@ herdr integration install antigravity-cli
 
 Herdr はデフォルトで `~/.gemini/config/` を使い、`ANTIGRAVITY_CLI_CONFIG_DIR` が設定されていればそちらを使います。これは Antigravity CLI がグローバルカスタマイズを読み込むディレクトリで、あらかじめ存在している必要があります。インストールは `hooks/herdr-agent-state.sh`（Windows では `herdr-agent-state.ps1`）を書き込み、`hooks.json` に Herdr 所有の `herdr` ブロックを追加します。Antigravity CLI は `hooks.json` をフック名で管理するため、インストールはそのブロックだけを書き換え、ほかの名前付きフックには触れません。アンインストールは `herdr` ブロックとフックスクリプトを削除します。
 
-このインテグレーションはセッション専用です。ペインで実行中の会話を報告しますが、エージェント状態は報告しません。そのため、Herdr は Antigravity CLI の画面表示から `working`、`idle`、`blocked` を引き続き判定します。
+このインテグレーションは、ペインで実行中の会話、各ターンの最終返信、ツール呼び出しを報告しますが、エージェント状態は報告しません。そのため、Herdr は Antigravity CLI の画面表示から `working`、`idle`、`blocked` を引き続き判定します。
 
 フックは `PreInvocation` で実行されるため、最初のプロンプト送信後に Herdr が会話を認識します。それ以降、Herdr サーバーの再起動後に `agy --conversation <id>` でペインを resume できます。
+
+Antigravity CLI 統合 v4 は、すべてのツールに一致する `PreToolUse` と `PostToolUse` フックも登録し、メイン会話のツール呼び出しの開始と終了を報告します。報告は `herdr agent tool-calls` と `agent.tool_calls` ソケットメソッドで読み取れます。Antigravity CLI はツール呼び出しに ID を付けないため、会話内で一意なステップ番号（`stepIdx`）で開始と終了を対応付けます。タイトルは `toolSummary`、なければコマンドライン、ファイルパス、URL です。`error` を含む `PostToolUse` は失敗として記録されます。再インストール後、実行中の Antigravity CLI セッションを再起動してフックを読み込ませてください。Windows ではツール呼び出しを報告しません。
 
 ## Grok CLI
 

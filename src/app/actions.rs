@@ -1640,6 +1640,19 @@ impl AppState {
         Some((terminal_id, request_id))
     }
 
+    /// Records a tool call event for the terminal attached to `pane_id` and
+    /// returns its seq.
+    pub(crate) fn record_agent_tool_call(
+        &mut self,
+        pane_id: PaneId,
+        report: crate::terminal::agent_tool_calls::AgentToolCallReport,
+    ) -> Option<u64> {
+        let terminal_id = self.terminal_id_attached_to(pane_id)?;
+        self.terminals
+            .get_mut(&terminal_id)?
+            .record_agent_tool_call(report, &mut self.next_agent_tool_call_seq)
+    }
+
     fn terminal_id_attached_to(&self, pane_id: PaneId) -> Option<crate::terminal::TerminalId> {
         self.workspaces
             .iter()
@@ -3420,6 +3433,145 @@ mod tests {
         assert_eq!(record_claude_reply(&mut app, pane_id, 2, "again"), Some(2));
         app.publish_pane_process_exit_if_agent(pane_id, false);
         assert_eq!(latest_reply_seq(&app, 0, pane_id), None);
+    }
+
+    fn record_claude_tool_start(
+        app: &mut AppState,
+        pane_id: PaneId,
+        tool_call_id: &str,
+    ) -> Option<u64> {
+        app.record_agent_tool_call(
+            pane_id,
+            crate::terminal::agent_tool_calls::AgentToolCallReport {
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                agent_session_id: None,
+                tool_call_id: tool_call_id.into(),
+                phase: crate::api::schema::AgentToolCallPhase::Start,
+                tool_name: "Bash".into(),
+                title: None,
+                failed: false,
+            },
+        )
+    }
+
+    fn latest_tool_call_seq(app: &AppState, ws_idx: usize, pane_id: PaneId) -> Option<u64> {
+        app.terminals[&app.workspaces[ws_idx].panes[&pane_id].attached_terminal_id]
+            .agent_tool_calls()
+            .latest_seq()
+    }
+
+    #[test]
+    fn agent_tool_call_seq_is_shared_across_panes_and_survives_turns() {
+        let mut app = app_with_workspaces(&["one", "two"]);
+        let first = app.workspaces[0].tabs[0].root_pane;
+        let second = app.workspaces[1].tabs[0].root_pane;
+        for pane_id in [first, second] {
+            app.handle_app_event(state_changed(
+                pane_id,
+                Some(Agent::Claude),
+                AgentState::Working,
+            ));
+        }
+
+        assert_eq!(record_claude_tool_start(&mut app, first, "a"), Some(1));
+        assert_eq!(record_claude_tool_start(&mut app, second, "b"), Some(2));
+        for state in [AgentState::Idle, AgentState::Working] {
+            app.handle_app_event(state_changed(first, Some(Agent::Claude), state));
+        }
+        assert_eq!(record_claude_tool_start(&mut app, first, "c"), Some(3));
+
+        assert_eq!(app.next_agent_tool_call_seq, 3);
+        assert_eq!(latest_tool_call_seq(&app, 0, first), Some(3));
+        assert_eq!(latest_tool_call_seq(&app, 1, second), Some(2));
+        app.assert_invariants_for_test();
+    }
+
+    #[test]
+    fn agent_tool_calls_clear_when_the_session_changes() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        let report_session = |app: &mut AppState, seq: u64, session: &str, source: &str| {
+            app.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session),
+                session_start_source: Some(source.into()),
+            });
+        };
+        report_session(&mut app, 1, "old-session", "startup");
+        assert_eq!(record_claude_tool_start(&mut app, pane_id, "a"), Some(1));
+
+        report_session(&mut app, 2, "old-session", "resume");
+        assert_eq!(latest_tool_call_seq(&app, 0, pane_id), Some(1));
+
+        report_session(&mut app, 3, "new-session", "clear");
+        assert_eq!(latest_tool_call_seq(&app, 0, pane_id), None);
+    }
+
+    #[test]
+    fn agent_tool_calls_clear_when_the_agent_changes_or_exits() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        assert_eq!(record_claude_tool_start(&mut app, pane_id, "a"), Some(1));
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Codex),
+            AgentState::Working,
+        ));
+        assert_eq!(latest_tool_call_seq(&app, 0, pane_id), None);
+
+        app.handle_app_event(state_changed(
+            pane_id,
+            Some(Agent::Claude),
+            AgentState::Working,
+        ));
+        assert_eq!(record_claude_tool_start(&mut app, pane_id, "b"), Some(2));
+        app.publish_pane_process_exit_if_agent(pane_id, false);
+        assert_eq!(latest_tool_call_seq(&app, 0, pane_id), None);
+    }
+
+    #[test]
+    fn agent_tool_calls_clear_when_the_agent_is_released() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.workspaces[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .set_hook_authority(
+                "custom:agent".into(),
+                "custom-agent".into(),
+                AgentState::Working,
+                None,
+                Some(1),
+            );
+        assert_eq!(record_claude_tool_start(&mut app, pane_id, "a"), Some(1));
+
+        app.handle_app_event(AppEvent::HookAgentReleased {
+            pane_id,
+            source: "custom:agent".into(),
+            agent_label: "custom-agent".into(),
+            known_agent: None,
+            seq: Some(2),
+        });
+
+        assert_eq!(latest_tool_call_seq(&app, 0, pane_id), None);
     }
 
     fn record_claude_request(app: &mut AppState, pane_id: PaneId) -> Option<u64> {

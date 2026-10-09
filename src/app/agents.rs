@@ -397,6 +397,7 @@ impl App {
             state_change_seq: terminal.last_agent_state_change_seq.unwrap_or(0),
             completion_seq: terminal.last_agent_completion_seq,
             reply_seq: terminal.agent_replies().latest_seq(),
+            tool_call_seq: terminal.agent_tool_calls().latest_seq(),
             request_ids: terminal.agent_requests().ids().collect(),
             remote_answers: pane.remote_answers,
             cwd: pane.cwd,

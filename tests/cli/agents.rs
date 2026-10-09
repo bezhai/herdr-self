@@ -233,6 +233,143 @@ fn agent_replies_returns_final_replies_reported_by_the_claude_stop_hook() {
     cleanup_spawned_herdr(herdr, base);
 }
 
+#[test]
+fn agent_tool_calls_rejects_invalid_arguments_before_contacting_the_server() {
+    let socket_path = Path::new("/tmp/herdr-cli-agent-tool-calls-no-server.sock");
+
+    for (args, expected) in [
+        (vec!["agent", "tool-calls"], "usage: herdr agent tool-calls"),
+        (
+            vec!["agent", "tool-calls", "w1:p1", "--after", "nope"],
+            "invalid value for --after: nope",
+        ),
+        (
+            vec!["agent", "tool-calls", "w1:p1", "--after"],
+            "missing value for --after",
+        ),
+        (
+            vec!["agent", "tool-calls", "w1:p1", "--bogus"],
+            "unknown option: --bogus",
+        ),
+        (
+            vec!["agent", "tool-calls", "w1:p1", "extra"],
+            "usage: herdr agent tool-calls",
+        ),
+    ] {
+        let output = run_cli(socket_path, &args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains(expected), "{args:?}: {stderr}");
+    }
+}
+
+#[test]
+fn agent_tool_calls_returns_events_reported_by_the_claude_tool_hooks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let socket_path = runtime_dir.join("herdr.sock");
+    let bin_dir = base.join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let hook = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/integration/assets/claude/herdr-agent-state.sh");
+    // Every input line is one Bash call described by that line: the real hook
+    // reports its start, then its end. The second call fails.
+    let fake_claude = bin_dir.join("claude");
+    fs::write(
+        &fake_claude,
+        format!(
+            "#!/bin/sh\nn=0\nwhile IFS= read -r line; do\n  n=$((n + 1))\n  end=PostToolUse\n  [ \"$n\" = 2 ] && end=PostToolUseFailure\n  for event in PreToolUse \"$end\"; do\n    printf '{{\"hook_event_name\":\"%s\",\"session_id\":\"e2e-session\",\"tool_name\":\"Bash\",\"tool_input\":{{\"command\":\"true\",\"description\":\"%s\"}},\"tool_use_id\":\"toolu_%s\"}}' \"$event\" \"$line\" \"$n\" | bash '{}' tool\n  done\ndone\n",
+            hook.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_claude, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    let path_override = format!("{}:{}", bin_dir.display(), inherited_path);
+    let herdr = spawn_herdr_with_path(
+        &config_home,
+        &runtime_dir,
+        &socket_path,
+        Some(Path::new(&path_override)),
+    );
+    wait_for_socket(&socket_path, Duration::from_secs(5));
+    let created = run_cli_json(
+        &socket_path,
+        &["workspace", "create", "--cwd", base.to_str().unwrap()],
+    );
+    let pane_id = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    assert!(run_cli(&socket_path, &["pane", "run", &pane_id, "claude"])
+        .status
+        .success());
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+            run_cli(&socket_path, &["agent", "get", &pane_id])
+                .status
+                .success()
+        }),
+        "fake claude was not detected"
+    );
+    let empty = run_cli_json(&socket_path, &["agent", "tool-calls", &pane_id]);
+    assert_eq!(empty["result"]["type"], "agent_tool_calls");
+    assert_eq!(empty["result"]["tool_calls"], serde_json::json!([]));
+
+    let tool_call_seq = |socket_path: &Path| {
+        run_cli_json(socket_path, &["agent", "get", &pane_id])["result"]["agent"]["tool_call_seq"]
+            .as_u64()
+    };
+    for (call, description) in ["第一步 build", "second step"].into_iter().enumerate() {
+        assert!(
+            run_cli(&socket_path, &["pane", "run", &pane_id, description])
+                .status
+                .success()
+        );
+        assert!(
+            wait_until(Duration::from_secs(10), Duration::from_millis(50), || {
+                tool_call_seq(&socket_path) == Some(call as u64 * 2 + 2)
+            }),
+            "tool call {description:?} was not recorded"
+        );
+    }
+
+    let all = run_cli_json(&socket_path, &["agent", "tool-calls", &pane_id]);
+    assert_eq!(all["result"]["agent"]["tool_call_seq"], 4);
+    assert_eq!(
+        all["result"]["tool_calls"],
+        serde_json::json!([
+            {"seq": 1, "tool_call_id": "toolu_1", "phase": "start", "tool_name": "Bash", "title": "第一步 build"},
+            {"seq": 2, "tool_call_id": "toolu_1", "phase": "end", "tool_name": "Bash", "title": "第一步 build"},
+            {"seq": 3, "tool_call_id": "toolu_2", "phase": "start", "tool_name": "Bash", "title": "second step"},
+            {"seq": 4, "tool_call_id": "toolu_2", "phase": "end", "tool_name": "Bash", "title": "second step", "failed": true},
+        ])
+    );
+    let after = run_cli_json(
+        &socket_path,
+        &["agent", "tool-calls", &pane_id, "--after", "3"],
+    );
+    let seqs: Vec<u64> = after["result"]["tool_calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event["seq"].as_u64().unwrap())
+        .collect();
+    assert_eq!(seqs, [4]);
+    let none = run_cli_json(
+        &socket_path,
+        &["agent", "tool-calls", &pane_id, "--after=4"],
+    );
+    assert_eq!(none["result"]["tool_calls"], serde_json::json!([]));
+
+    cleanup_spawned_herdr(herdr, base);
+}
+
 /// A real server whose only pane runs a fake `claude` that Herdr detects as Claude Code.
 struct FakeClaudeServer {
     herdr: SpawnedHerdr,

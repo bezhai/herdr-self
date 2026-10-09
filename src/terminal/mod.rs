@@ -1,5 +1,6 @@
 pub mod agent_replies;
 pub mod agent_requests;
+pub mod agent_tool_calls;
 mod history_read;
 mod id;
 mod runtime;

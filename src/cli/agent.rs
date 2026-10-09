@@ -3,8 +3,9 @@ use std::time::{Duration, Instant};
 use crate::api::schema::{
     AgentAnswerParams, AgentPromptParams, AgentPromptWaitOptions, AgentReadParams,
     AgentRenameParams, AgentRepliesParams, AgentRequestAnswer, AgentRequestDecision,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentToolCallsParams, AgentWaitParams,
+    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat,
+    ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -20,6 +21,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "list" => agent_list(&args[1..]),
         "get" => agent_get(&args[1..]),
         "replies" => agent_replies(&args[1..]),
+        "tool-calls" => agent_tool_calls(&args[1..]),
         "requests" => agent_requests(&args[1..]),
         "answer" => agent_answer(&args[1..]),
         "read" => agent_read(&args[1..]),
@@ -469,9 +471,43 @@ fn agent_get(args: &[String]) -> std::io::Result<i32> {
     })?)
 }
 
-const AGENT_REPLIES_USAGE: &str = "usage: herdr agent replies <target> [--after SEQ]";
-
 fn agent_replies(args: &[String]) -> std::io::Result<i32> {
+    let (target, after_seq) =
+        match parse_target_after_seq(args, "usage: herdr agent replies <target> [--after SEQ]") {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                eprintln!("{message}");
+                return Ok(2);
+            }
+        };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:replies".into(),
+        method: Method::AgentReplies(AgentRepliesParams { target, after_seq }),
+    })?)
+}
+
+fn agent_tool_calls(args: &[String]) -> std::io::Result<i32> {
+    let (target, after_seq) = match parse_target_after_seq(
+        args,
+        "usage: herdr agent tool-calls <target> [--after SEQ]",
+    ) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+
+    super::print_response(&super::send_request(&Request {
+        id: "cli:agent:tool-calls".into(),
+        method: Method::AgentToolCalls(AgentToolCallsParams { target, after_seq }),
+    })?)
+}
+
+/// Parses `<target> [--after SEQ]`, the arguments of commands that read an
+/// agent's retained records incrementally.
+fn parse_target_after_seq(args: &[String], usage: &str) -> Result<(String, Option<u64>), String> {
     let args = super::expand_equals_args(args, &["--after"]);
     let mut target = None;
     let mut after_seq = None;
@@ -479,42 +515,23 @@ fn agent_replies(args: &[String]) -> std::io::Result<i32> {
     while index < args.len() {
         match args[index].as_str() {
             "--after" => {
-                let Some(value) = args.get(index + 1) else {
-                    eprintln!("missing value for --after");
-                    return Ok(2);
-                };
-                after_seq = match super::parse_u64_flag("--after", value) {
-                    Ok(seq) => Some(seq),
-                    Err(err) => {
-                        eprintln!("{err}");
-                        return Ok(2);
-                    }
-                };
+                let value = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --after".to_string())?;
+                after_seq =
+                    Some(super::parse_u64_flag("--after", value).map_err(|err| err.to_string())?);
                 index += 2;
             }
-            other if other.starts_with('-') => {
-                eprintln!("unknown option: {other}");
-                return Ok(2);
-            }
+            other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
             value if target.is_none() => {
                 target = Some(value.to_string());
                 index += 1;
             }
-            _ => {
-                eprintln!("{AGENT_REPLIES_USAGE}");
-                return Ok(2);
-            }
+            _ => return Err(usage.to_string()),
         }
     }
-    let Some(target) = target else {
-        eprintln!("{AGENT_REPLIES_USAGE}");
-        return Ok(2);
-    };
-
-    super::print_response(&super::send_request(&Request {
-        id: "cli:agent:replies".into(),
-        method: Method::AgentReplies(AgentRepliesParams { target, after_seq }),
-    })?)
+    let target = target.ok_or_else(|| usage.to_string())?;
+    Ok((target, after_seq))
 }
 
 fn agent_requests(args: &[String]) -> std::io::Result<i32> {
@@ -1078,6 +1095,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
     eprintln!("  herdr agent replies <target> [--after SEQ]");
+    eprintln!("  herdr agent tool-calls <target> [--after SEQ]");
     eprintln!("  herdr agent requests <target>");
     eprintln!("  herdr agent answer <target> <request_id> --decision allow|allow_always|deny [--message TEXT]");
     eprintln!("  herdr agent answer <target> <request_id> --answers JSON");

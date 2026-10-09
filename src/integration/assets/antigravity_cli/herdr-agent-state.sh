@@ -7,11 +7,13 @@
 
 # `session` runs on PreInvocation and reports the Antigravity conversation so
 # Herdr can resume the pane. `reply` runs on Stop and reports the conversation
-# again, then the turn's final reply. Lifecycle state comes from Herdr's screen
-# detection.
+# again, then the turn's final reply. `tool-start` and `tool-end` run on
+# PreToolUse and PostToolUse and report the start or end of a tool call, keyed
+# by its step index; the payloads do not name their event, so the action does.
+# Lifecycle state comes from Herdr's screen detection.
 #
 # Subagents run inside the same Antigravity process and fire the same hooks
-# with their own conversation. Both actions therefore report only the main
+# with their own conversation. Every action therefore reports only the main
 # conversation: the one whose transcript exists and starts with the user's
 # input. A subagent's transcript starts with its parent's message and does not
 # exist yet at its first PreInvocation.
@@ -26,7 +28,7 @@ emit_and_exit() {
 }
 
 case "${1:-}" in
-  session|reply) ;;
+  session|reply|tool-start|tool-end) ;;
   *) emit_and_exit ;;
 esac
 [ "${HERDR_ENV:-}" = "1" ] || emit_and_exit
@@ -44,6 +46,11 @@ import time
 source = "herdr:antigravity_cli"
 max_reply_bytes = 64 * 1024
 tail_chunk_bytes = 64 * 1024
+max_title_chars = 120
+tool_phases = {"tool-start": "start", "tool-end": "end"}
+# A tool title is the first of these arguments the call has.
+title_args = ("toolSummary", "CommandLine", "TargetFile", "File", "AbsolutePath", "Url", "Query")
+path_args = {"TargetFile", "File", "AbsolutePath"}
 action = sys.argv[1]
 
 try:
@@ -109,9 +116,59 @@ def final_reply(path):
         return content
     return None
 
+def one_line(value):
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if len(text) > max_title_chars:
+        text = text[: max_title_chars - 1].rstrip() + "\u2026"
+    return text or None
+
+def display_path(path, args):
+    # Paths inside the working directory are shown relative to it.
+    cwd = args.get("Cwd")
+    if not isinstance(cwd, str) or not cwd:
+        workspaces = payload.get("workspacePaths")
+        cwd = workspaces[0] if isinstance(workspaces, list) and workspaces else None
+    root = cwd.rstrip("/") if isinstance(cwd, str) else ""
+    if root and path.startswith(root + "/"):
+        return path[len(root) + 1:]
+    return path
+
+def tool_call_params(session_id):
+    tool_call = payload.get("toolCall")
+    tool_call = tool_call if isinstance(tool_call, dict) else {}
+    name = tool_call.get("name")
+    # protojson writes 64-bit integers as strings.
+    step = payload.get("stepIdx")
+    if isinstance(step, bool) or not isinstance(step, (int, str)) or not str(step).isdigit():
+        return None
+    if not isinstance(name, str) or not name:
+        return None
+    params = {
+        "pane_id": os.environ["HERDR_PANE_ID"],
+        "source": source,
+        "agent": "agy",
+        "agent_session_id": session_id,
+        "tool_call_id": str(step),
+        "phase": tool_phases[action],
+        "tool_name": name,
+    }
+    args = tool_call.get("args")
+    args = args if isinstance(args, dict) else {}
+    for arg in title_args:
+        value = args.get(arg)
+        if isinstance(value, str) and value.strip():
+            params["title"] = one_line(display_path(value, args) if arg in path_args else value)
+            break
+    error = payload.get("error")
+    if action == "tool-end" and isinstance(error, str) and error:
+        params["failed"] = True
+    return params
+
 def send(method, params, timeout):
     request = {
-        "id": source + ":" + str(params["seq"]),
+        "id": source + ":" + str(time.time_ns()),
         "method": method,
         "params": params,
     }
@@ -129,6 +186,12 @@ transcript_path = text("transcriptPath")
 if session_id is None or transcript_path is None:
     raise SystemExit(0)
 if not is_main_conversation(transcript_path):
+    raise SystemExit(0)
+
+if action in tool_phases:
+    params = tool_call_params(session_id)
+    if params is not None:
+        send("pane.report_agent_tool_call", params, 0.5)
     raise SystemExit(0)
 
 # Reporting the conversation on Stop too guarantees Herdr has it by the end of

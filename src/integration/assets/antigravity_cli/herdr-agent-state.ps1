@@ -6,8 +6,9 @@
 
 # `session` runs on PreInvocation and reports the Antigravity conversation so
 # Herdr can resume the pane. Lifecycle state comes from Herdr's screen
-# detection. Windows does not report replies yet: Stop runs this hook with
-# `reply`, which only emits the empty object.
+# detection. Windows does not report replies or tool calls yet: Stop and the
+# tool events run this hook with `reply`, `tool-start` and `tool-end`, which
+# only emit the empty object.
 
 param([string]$Action = "")
 

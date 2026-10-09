@@ -2077,3 +2077,603 @@ fn codex_permission_hook_truncates_the_preview_at_a_character_boundary() {
     assert_eq!(preview.len(), MAX_PREVIEW_BYTES / 3 * 3);
     assert!(command.starts_with(&preview));
 }
+
+const MAX_TITLE_CHARS: usize = 120;
+
+fn tool_input(event: &str, fields: serde_json::Value) -> String {
+    let mut input = serde_json::json!({
+        "hook_event_name": event,
+        "session_id": "agent-session",
+        "cwd": "/repo",
+    });
+    input
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    input.to_string()
+}
+
+fn bash_call(event: &str, tool_use_id: &str) -> String {
+    tool_input(
+        event,
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "cargo test --all", "description": "运行测试" },
+            "tool_use_id": tool_use_id,
+        }),
+    )
+}
+
+/// The title a hook reports for one call of `tool_name` with `tool_input`.
+fn reported_title(
+    hook: &str,
+    tool_name: &str,
+    tool_input_fields: serde_json::Value,
+) -> Option<String> {
+    let request = run_shell_hook(
+        hook,
+        &["tool"],
+        &tool_input(
+            "PreToolUse",
+            serde_json::json!({
+                "tool_name": tool_name,
+                "tool_input": tool_input_fields,
+                "tool_use_id": "call-1",
+            }),
+        ),
+    )
+    .unwrap_or_else(|| panic!("{tool_name} should report a tool call"));
+    request["params"]["title"].as_str().map(str::to_string)
+}
+
+#[test]
+fn claude_tool_hook_reports_the_start_and_end_of_a_call() {
+    let raw = run_shell_hook_raw_with_env(
+        CLAUDE_HOOK_ASSET,
+        &["tool"],
+        &bash_call("PreToolUse", "toolu_1"),
+        &[],
+    )
+    .expect("PreToolUse should report the start");
+    assert!(!raw.contains("\\u"), "raw request: {raw}");
+    let start: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(start["method"], "pane.report_agent_tool_call");
+    assert_eq!(
+        start["params"],
+        serde_json::json!({
+            "pane_id": "p_test",
+            "source": "herdr:claude",
+            "agent": "claude",
+            "agent_session_id": "agent-session",
+            "tool_call_id": "toolu_1",
+            "phase": "start",
+            "tool_name": "Bash",
+            "title": "运行测试",
+        })
+    );
+
+    let end = run_claude_hook("tool", &bash_call("PostToolUse", "toolu_1"))
+        .expect("PostToolUse should report the end");
+    assert_eq!(end["params"]["phase"], "end");
+    assert_eq!(end["params"]["tool_call_id"], "toolu_1");
+    assert!(end["params"].get("failed").is_none());
+
+    let failed = run_claude_hook(
+        "tool",
+        &tool_input(
+            "PostToolUseFailure",
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "exit 3" },
+                "tool_use_id": "toolu_2",
+                "error": "Exit code 3",
+                "is_interrupt": false,
+            }),
+        ),
+    )
+    .expect("PostToolUseFailure should report a failed end");
+    assert_eq!(failed["params"]["phase"], "end");
+    assert_eq!(failed["params"]["failed"], true);
+    assert_eq!(failed["params"]["title"], "exit 3");
+}
+
+#[test]
+fn claude_tool_hook_titles_each_tool_with_what_it_works_on() {
+    let title = |tool_name: &str, fields: serde_json::Value| {
+        reported_title(CLAUDE_HOOK_ASSET, tool_name, fields)
+    };
+
+    assert_eq!(
+        title(
+            "Bash",
+            serde_json::json!({ "command": "cargo build \\\n    --release" })
+        )
+        .as_deref(),
+        Some("cargo build \\ --release")
+    );
+    for tool_name in ["Read", "Edit", "Write", "MultiEdit"] {
+        assert_eq!(
+            title(
+                tool_name,
+                serde_json::json!({ "file_path": "/repo/src/main.rs" })
+            )
+            .as_deref(),
+            Some("src/main.rs"),
+            "{tool_name}"
+        );
+    }
+    assert_eq!(
+        title("Read", serde_json::json!({ "file_path": "/etc/hosts" })).as_deref(),
+        Some("/etc/hosts")
+    );
+    assert_eq!(
+        title(
+            "Read",
+            serde_json::json!({ "file_path": "/repository/x.rs" })
+        )
+        .as_deref(),
+        Some("/repository/x.rs")
+    );
+    assert_eq!(
+        title(
+            "NotebookEdit",
+            serde_json::json!({ "notebook_path": "/repo/a.ipynb" })
+        )
+        .as_deref(),
+        Some("a.ipynb")
+    );
+    assert_eq!(
+        title(
+            "Grep",
+            serde_json::json!({ "pattern": "fn main", "path": "/repo/src" })
+        )
+        .as_deref(),
+        Some("fn main")
+    );
+    assert_eq!(
+        title("Glob", serde_json::json!({ "pattern": "**/*.rs" })).as_deref(),
+        Some("**/*.rs")
+    );
+    assert_eq!(
+        title(
+            "WebFetch",
+            serde_json::json!({ "url": "https://example.com/a", "prompt": "summarize" })
+        )
+        .as_deref(),
+        Some("https://example.com/a")
+    );
+    assert_eq!(
+        title("WebSearch", serde_json::json!({ "query": "herdr agent" })).as_deref(),
+        Some("herdr agent")
+    );
+    for tool_name in ["Agent", "Task"] {
+        assert_eq!(
+            title(
+                tool_name,
+                serde_json::json!({
+                    "description": "Find callers",
+                    "prompt": "Search the repo",
+                    "subagent_type": "Explore",
+                })
+            )
+            .as_deref(),
+            Some("Find callers"),
+            "{tool_name}"
+        );
+    }
+    assert_eq!(
+        title(
+            "AskUserQuestion",
+            serde_json::json!({
+                "questions": [{"question": "Which color?", "header": "Color", "options": []}],
+            })
+        )
+        .as_deref(),
+        Some("Which color?")
+    );
+    assert_eq!(
+        title(
+            "mcp__feishu-tool__create-doc",
+            serde_json::json!({ "title": "x" })
+        )
+        .as_deref(),
+        Some("feishu-tool/create-doc")
+    );
+    assert_eq!(
+        title("Skill", serde_json::json!({ "skill": "pdf" })).as_deref(),
+        Some("pdf")
+    );
+    assert_eq!(title("ExitPlanMode", serde_json::json!({})), None);
+    assert_eq!(title("Bash", serde_json::json!("not an object")), None);
+
+    let long = title(
+        "Bash",
+        serde_json::json!({ "description": "界".repeat(MAX_TITLE_CHARS * 2) }),
+    )
+    .unwrap();
+    assert_eq!(long.chars().count(), MAX_TITLE_CHARS);
+    assert!(long.ends_with('…'), "{long}");
+}
+
+#[test]
+fn claude_tool_hook_ignores_subagents_bookkeeping_and_incomplete_calls() {
+    let subagent = tool_input(
+        "PreToolUse",
+        serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "echo sub" },
+            "tool_use_id": "toolu_sub",
+            "agent_id": "ae56e3df2792c35aa",
+            "agent_type": "general-purpose",
+        }),
+    );
+    assert!(run_claude_hook("tool", &subagent).is_none());
+
+    for tool_name in [
+        "TodoWrite",
+        "TaskCreate",
+        "TaskUpdate",
+        "TaskList",
+        "TaskGet",
+        "ToolSearch",
+    ] {
+        let input = tool_input(
+            "PreToolUse",
+            serde_json::json!({ "tool_name": tool_name, "tool_input": {}, "tool_use_id": "toolu_1" }),
+        );
+        assert!(
+            run_claude_hook("tool", &input).is_none(),
+            "{tool_name} is bookkeeping"
+        );
+    }
+
+    for input in [
+        tool_input(
+            "PreToolUse",
+            serde_json::json!({ "tool_name": "Bash", "tool_input": {} }),
+        ),
+        tool_input(
+            "PreToolUse",
+            serde_json::json!({ "tool_input": {}, "tool_use_id": "toolu_1" }),
+        ),
+        tool_input(
+            "Stop",
+            serde_json::json!({ "tool_name": "Bash", "tool_use_id": "toolu_1" }),
+        ),
+        "not json".to_string(),
+    ] {
+        assert!(
+            run_claude_hook("tool", &input).is_none(),
+            "tool action should ignore {input}"
+        );
+    }
+    assert!(
+        run_claude_hook("session", &bash_call("PreToolUse", "toolu_1")).is_none(),
+        "other actions ignore tool events"
+    );
+
+    for env in [("GROK_SESSION_ID", "grok"), ("CURSOR_VERSION", "1.0")] {
+        assert!(run_shell_hook_with_env(
+            CLAUDE_HOOK_ASSET,
+            &["tool"],
+            &bash_call("PreToolUse", "toolu_1"),
+            &[env],
+        )
+        .is_none());
+    }
+}
+
+#[test]
+fn codex_tool_hook_reports_the_start_and_end_of_a_call() {
+    let start = run_codex_hook(
+        "tool",
+        &tool_input(
+            "PreToolUse",
+            serde_json::json!({
+                "turn_id": "turn-1",
+                "tool_name": "Bash",
+                "tool_input": { "command": "rg -n \"fn main\" src" },
+                "tool_use_id": "call_1",
+            }),
+        ),
+    )
+    .expect("PreToolUse should report the start");
+    assert_eq!(start["method"], "pane.report_agent_tool_call");
+    assert_eq!(
+        start["params"],
+        serde_json::json!({
+            "pane_id": "p_test",
+            "source": "herdr:codex",
+            "agent": "codex",
+            "agent_session_id": "agent-session",
+            "tool_call_id": "call_1",
+            "phase": "start",
+            "tool_name": "Bash",
+            "title": "rg -n \"fn main\" src",
+        })
+    );
+
+    let end = run_shell_hook_with_env(
+        CODEX_HOOK_ASSET,
+        &["tool"],
+        &tool_input(
+            "PostToolUse",
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": { "command": "false" },
+                "tool_response": "",
+                "tool_use_id": "call_1",
+            }),
+        ),
+        &[("CODEX_THREAD_ID", "agent-session")],
+    )
+    .expect("PostToolUse of the root thread should report the end");
+    assert_eq!(end["params"]["phase"], "end");
+    assert!(end["params"].get("failed").is_none());
+}
+
+#[test]
+fn codex_tool_hook_titles_patches_with_their_files() {
+    let title = |tool_name: &str, fields: serde_json::Value| {
+        reported_title(CODEX_HOOK_ASSET, tool_name, fields)
+    };
+    let patch = concat!(
+        "*** Begin Patch\n",
+        "*** Update File: /repo/src/lib.rs\n",
+        "@@\n-old\n+new\n",
+        "*** Add File: docs/new.md\n",
+        "+hello\n",
+        "*** Update File: src/old.rs\n",
+        "*** Move to: src/new.rs\n",
+        "*** Delete File: /tmp/gone.txt\n",
+        "*** Update File: /repo/src/lib.rs\n",
+        "*** End Patch\n",
+    );
+
+    assert_eq!(
+        title("apply_patch", serde_json::json!({ "command": patch })).as_deref(),
+        Some("src/lib.rs, docs/new.md, src/old.rs, src/new.rs, /tmp/gone.txt")
+    );
+    assert_eq!(
+        title(
+            "apply_patch",
+            serde_json::json!({ "command": "not a patch" })
+        ),
+        None
+    );
+    assert_eq!(
+        title("mcp__docs__search", serde_json::json!({ "query": "x" })).as_deref(),
+        Some("docs/search")
+    );
+    assert_eq!(
+        title(
+            "spawn_agent",
+            serde_json::json!({ "message": "Review the diff" })
+        )
+        .as_deref(),
+        Some("Review the diff")
+    );
+}
+
+#[test]
+fn codex_tool_hook_ignores_subagents_nested_sessions_and_bookkeeping() {
+    let call = |fields: serde_json::Value| {
+        let mut fields_with_call = serde_json::json!({
+            "tool_name": "Bash",
+            "tool_input": { "command": "ls" },
+            "tool_use_id": "call_1",
+        });
+        fields_with_call
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        tool_input("PreToolUse", fields_with_call)
+    };
+
+    assert!(run_codex_hook(
+        "tool",
+        &call(serde_json::json!({ "agent_id": "sub-thread", "agent_type": "worker" }))
+    )
+    .is_none());
+    assert!(run_shell_hook_with_env(
+        CODEX_HOOK_ASSET,
+        &["tool"],
+        &call(serde_json::json!({})),
+        &[("CODEX_THREAD_ID", "parent-session")],
+    )
+    .is_none());
+    assert!(run_codex_hook(
+        "tool",
+        &call(serde_json::json!({ "tool_name": "update_plan", "tool_input": { "plan": [] } }))
+    )
+    .is_none());
+    assert!(run_codex_hook("tool", &call(serde_json::json!({ "tool_use_id": "" }))).is_none());
+    assert!(run_codex_hook(
+        "tool",
+        &tool_input(
+            "Stop",
+            serde_json::json!({ "tool_name": "Bash", "tool_use_id": "call_1" })
+        )
+    )
+    .is_none());
+}
+
+fn agy_tool_call_payload(
+    conversation_id: &str,
+    transcript_path: &Path,
+    fields: serde_json::Value,
+) -> serde_json::Value {
+    let mut payload = serde_json::json!({
+        "conversationId": conversation_id,
+        "transcriptPath": transcript_path,
+        "artifactDirectoryPath": transcript_path.parent().unwrap(),
+        "modelName": "auto",
+        "workspacePaths": ["/tmp/project"],
+    });
+    payload
+        .as_object_mut()
+        .unwrap()
+        .extend(fields.as_object().unwrap().clone());
+    payload
+}
+
+fn agy_run_command(step: u64) -> serde_json::Value {
+    serde_json::json!({
+        "stepIdx": step,
+        "toolCall": {
+            "name": "run_command",
+            "args": { "CommandLine": "cargo test", "Cwd": "/tmp/project", "toolSummary": "运行测试" },
+        },
+    })
+}
+
+#[test]
+fn antigravity_tool_hooks_report_the_start_and_end_of_a_main_conversation_call() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_tool_call(2)),
+    );
+
+    let start = AntigravityHook::new(
+        "tool-start",
+        agy_tool_call_payload(AGY_MAIN_CONVERSATION, &transcript, agy_run_command(2)),
+    )
+    .run();
+    assert_eq!(start.methods(), ["pane.report_agent_tool_call"]);
+    assert_eq!(
+        start.params("pane.report_agent_tool_call"),
+        serde_json::json!({
+            "pane_id": "p_test",
+            "source": "herdr:antigravity_cli",
+            "agent": "agy",
+            "agent_session_id": AGY_MAIN_CONVERSATION,
+            "tool_call_id": "2",
+            "phase": "start",
+            "tool_name": "run_command",
+            "title": "运行测试",
+        })
+    );
+
+    let mut post = agy_run_command(2);
+    post["result"] = serde_json::json!("ok");
+    let end = AntigravityHook::new(
+        "tool-end",
+        agy_tool_call_payload(AGY_MAIN_CONVERSATION, &transcript, post.clone()),
+    )
+    .run();
+    let params = end.params("pane.report_agent_tool_call");
+    assert_eq!(params["phase"], "end");
+    assert_eq!(params["tool_call_id"], "2");
+    assert!(params.get("failed").is_none());
+
+    post["error"] = serde_json::json!("exit status 1");
+    let failed = AntigravityHook::new(
+        "tool-end",
+        agy_tool_call_payload(AGY_MAIN_CONVERSATION, &transcript, post),
+    )
+    .run();
+    assert_eq!(failed.params("pane.report_agent_tool_call")["failed"], true);
+}
+
+#[test]
+fn antigravity_tool_hook_titles_fall_back_from_the_summary() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_tool_call(2)),
+    );
+    let title = |name: &str, args: serde_json::Value| {
+        let run = AntigravityHook::new(
+            "tool-start",
+            agy_tool_call_payload(
+                AGY_MAIN_CONVERSATION,
+                &transcript,
+                serde_json::json!({ "stepIdx": "4", "toolCall": { "name": name, "args": args } }),
+            ),
+        )
+        .run();
+        let params = run.params("pane.report_agent_tool_call");
+        assert_eq!(
+            params["tool_call_id"], "4",
+            "int64 step indexes arrive as strings"
+        );
+        params["title"].as_str().map(str::to_string)
+    };
+
+    assert_eq!(
+        title(
+            "run_command",
+            serde_json::json!({ "CommandLine": "ls  -la\n" })
+        )
+        .as_deref(),
+        Some("ls -la")
+    );
+    assert_eq!(
+        title(
+            "view_file",
+            serde_json::json!({ "TargetFile": "/tmp/project/src/main.rs" })
+        )
+        .as_deref(),
+        Some("src/main.rs")
+    );
+    assert_eq!(
+        title(
+            "read_url_content",
+            serde_json::json!({ "Url": "https://example.com" })
+        )
+        .as_deref(),
+        Some("https://example.com")
+    );
+    assert_eq!(title("list_dir", serde_json::json!({})), None);
+}
+
+#[test]
+fn antigravity_tool_hooks_ignore_subagents_and_incomplete_calls() {
+    let brain = AgyBrain::new();
+    let main = brain.write(
+        AGY_MAIN_CONVERSATION,
+        &agy_main_transcript(agy_tool_call(2)),
+    );
+    let subagent = brain.write(AGY_SUBAGENT_CONVERSATION, &agy_subagent_transcript());
+
+    for (case, action, payload) in [
+        (
+            "subagent conversation",
+            "tool-start",
+            agy_tool_call_payload(AGY_SUBAGENT_CONVERSATION, &subagent, agy_run_command(1)),
+        ),
+        (
+            "no step index",
+            "tool-start",
+            agy_tool_call_payload(
+                AGY_MAIN_CONVERSATION,
+                &main,
+                serde_json::json!({ "toolCall": { "name": "run_command", "args": {} } }),
+            ),
+        ),
+        (
+            "no tool name",
+            "tool-end",
+            agy_tool_call_payload(
+                AGY_MAIN_CONVERSATION,
+                &main,
+                serde_json::json!({ "stepIdx": 3 }),
+            ),
+        ),
+        (
+            "other action",
+            "session",
+            agy_tool_call_payload(AGY_MAIN_CONVERSATION, &main, agy_run_command(2)),
+        ),
+    ] {
+        let run = AntigravityHook::new(action, payload).run();
+        assert!(
+            run.methods()
+                .iter()
+                .all(|method| method != "pane.report_agent_tool_call"),
+            "{case}: reported {:?}",
+            run.raw_requests
+        );
+    }
+}

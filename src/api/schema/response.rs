@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::agents::{
     AgentInfo, AgentReplyInfo, AgentRequestAnswer, AgentRequestEndReason, AgentRequestInfo,
+    AgentToolCallInfo,
 };
 use super::common::{ClientWindowTitleReason, NotificationShowReason};
 use super::events::EventEnvelope;
@@ -112,6 +113,10 @@ pub enum ResponseResult {
     AgentReplies {
         agent: AgentInfo,
         replies: Vec<AgentReplyInfo>,
+    },
+    AgentToolCalls {
+        agent: AgentInfo,
+        tool_calls: Vec<AgentToolCallInfo>,
     },
     AgentRequests {
         agent: AgentInfo,

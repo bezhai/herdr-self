@@ -834,6 +834,8 @@ pub struct AppState {
     pub next_agent_reply_seq: u64,
     /// Last id handed out to an agent request; shared by every terminal.
     pub next_agent_request_id: u64,
+    /// Last seq handed out to an agent tool call event; shared by every terminal.
+    pub next_agent_tool_call_seq: u64,
     pub confirm_close: bool,
     pub pane_borders: crate::config::PaneBordersConfig,
     pub pane_outer_borders: bool,
@@ -1106,6 +1108,7 @@ impl AppState {
             next_agent_state_change_seq: 0,
             next_agent_reply_seq: 0,
             next_agent_request_id: 0,
+            next_agent_tool_call_seq: 0,
             confirm_close: true,
             pane_borders: crate::config::PaneBordersConfig::Auto,
             pane_outer_borders: true,

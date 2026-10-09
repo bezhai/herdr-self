@@ -32,6 +32,38 @@ pub struct AgentReplyInfo {
     pub truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentToolCallsParams {
+    pub target: String,
+    /// Return only tool call events with a greater seq.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_seq: Option<u64>,
+}
+
+/// Whether a tool call event marks the start or the end of the call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentToolCallPhase {
+    Start,
+    End,
+}
+
+/// A tool call event retained for an agent, in memory only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentToolCallInfo {
+    pub seq: u64,
+    /// Pairs the start and end events of one call.
+    pub tool_call_id: String,
+    pub phase: AgentToolCallPhase,
+    pub tool_name: String,
+    /// Short human-readable label built by the integration hook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The call failed; only end events fail.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub failed: bool,
+}
+
 /// What an agent asks the user through an integration hook.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -336,6 +368,9 @@ pub struct AgentInfo {
     /// Seq of the latest retained reply; read the text with `agent.replies`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_seq: Option<u64>,
+    /// Seq of the latest retained tool call event; read the events with `agent.tool_calls`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_seq: Option<u64>,
     /// Ids of pending requests in ascending order; read them with `agent.requests`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_ids: Vec<u64>,

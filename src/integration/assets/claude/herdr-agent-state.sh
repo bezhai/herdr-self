@@ -13,9 +13,11 @@ trap 'rm -f "$hook_input_file"' EXIT HUP INT TERM
 cat >"$hook_input_file" 2>/dev/null || true
 
 # Herdr decides whether a permission request waits: it ends the report at once
-# unless a client turned remote answers on for the pane's agent.
+# unless a client turned remote answers on for the pane's agent. `tool` runs in
+# the background on PreToolUse, PostToolUse and PostToolUseFailure and reports
+# the start or end of the call; it never reports agent state.
 case "$action" in
-  session|reply|permission) ;;
+  session|reply|permission|tool) ;;
   *) exit 0 ;;
 esac
 
@@ -43,6 +45,16 @@ max_preview_bytes = 8 * 1024
 permission_timeout_ms = 24 * 60 * 60 * 1000
 permission_socket_timeout = permission_timeout_ms / 1000 + 30
 default_deny_message = "The user denied this permission request."
+max_title_chars = 120
+tool_phases = {"PreToolUse": "start", "PostToolUse": "end", "PostToolUseFailure": "end"}
+# Task list and tool loading bookkeeping is not work worth showing as a step.
+bookkeeping_tools = {"TodoWrite", "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "ToolSearch"}
+# A tool's title is the first of these input fields it has.
+title_fields = (
+    "description", "command", "file_path", "notebook_path", "pattern",
+    "url", "query", "skill", "path", "prompt", "message",
+)
+path_fields = {"file_path", "notebook_path", "path"}
 action = os.environ.get("HERDR_ACTION", "")
 pane_id = os.environ.get("HERDR_PANE_ID")
 socket_path = os.environ.get("HERDR_SOCKET_PATH")
@@ -110,6 +122,67 @@ def question_params(tool_input):
         question["multi_select"] = item.get("multiSelect") is True
         mapped.append(question)
     return mapped
+
+
+def one_line(value):
+    """Collapses whitespace and shortens text to a title, or returns None."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if len(text) > max_title_chars:
+        text = text[: max_title_chars - 1].rstrip() + "\u2026"
+    return text or None
+
+
+def display_path(path):
+    """Shows a path inside the working directory relative to it."""
+    cwd = hook_input.get("cwd")
+    root = cwd.rstrip("/") if isinstance(cwd, str) else ""
+    if root and path.startswith(root + "/"):
+        return path[len(root) + 1:]
+    return path
+
+
+def tool_title(tool_name, tool_input):
+    if tool_name.startswith("mcp__"):
+        return one_line("/".join(tool_name[len("mcp__"):].split("__", 1)))
+    if not isinstance(tool_input, dict):
+        return None
+    if tool_name == "AskUserQuestion":
+        questions = tool_input.get("questions")
+        first = questions[0] if isinstance(questions, list) and questions else None
+        return one_line(first.get("question")) if isinstance(first, dict) else None
+    for field in title_fields:
+        value = tool_input.get(field)
+        if isinstance(value, str) and value.strip():
+            return one_line(display_path(value) if field in path_fields else value)
+    return None
+
+
+def tool_call_params():
+    """Maps a tool event to tool call report params, or None to skip it."""
+    tool_name = hook_input.get("tool_name")
+    tool_use_id = hook_input.get("tool_use_id")
+    if not isinstance(tool_name, str) or not tool_name or tool_name in bookkeeping_tools:
+        return None
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        return None
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "claude",
+    }
+    if agent_session_id:
+        params["agent_session_id"] = agent_session_id
+    params["tool_call_id"] = tool_use_id
+    params["phase"] = tool_phases[hook_event_name]
+    params["tool_name"] = tool_name
+    title = tool_title(tool_name, hook_input.get("tool_input"))
+    if title:
+        params["title"] = title
+    if hook_event_name == "PostToolUseFailure":
+        params["failed"] = True
+    return params
 
 
 def wait_for_answer(request, timeout):
@@ -224,7 +297,10 @@ if "CURSOR_VERSION" in os.environ or "cursor_version" in hook_input:
     raise SystemExit(0)
 hook_event_name = str(hook_input.get("hook_event_name") or "")
 expected_event_names = {"reply": "Stop", "permission": "PermissionRequest"}
-if hook_event_name != expected_event_names.get(action, "SessionStart"):
+if action == "tool":
+    if hook_event_name not in tool_phases:
+        raise SystemExit(0)
+elif hook_event_name != expected_event_names.get(action, "SessionStart"):
     raise SystemExit(0)
 # A subagent's permission request blocks the turn like the parent's own, so it
 # is reported; other subagent events are not.
@@ -232,7 +308,7 @@ is_subagent = bool(hook_input.get("agent_id"))
 if is_subagent and action != "permission":
     raise SystemExit(0)
 # Grok imports Claude hooks and sets GROK_SESSION_ID in every hook process.
-if action in ("reply", "permission") and "GROK_SESSION_ID" in os.environ:
+if action in ("reply", "permission", "tool") and "GROK_SESSION_ID" in os.environ:
     raise SystemExit(0)
 request_id = f"{source}:{int(time.time() * 1000)}:{random.randrange(1_000_000):06d}"
 report_seq = time.time_ns()
@@ -276,6 +352,15 @@ elif action == "reply":
         "params": params,
     }
     socket_timeout = 2.0
+elif action == "tool":
+    params = tool_call_params()
+    if params is None:
+        raise SystemExit(0)
+    request = {
+        "id": request_id,
+        "method": "pane.report_agent_tool_call",
+        "params": params,
+    }
 elif agent_session_id:
     transcript_path = hook_input.get("transcript_path")
     agent_session_path = transcript_path if isinstance(transcript_path, str) and transcript_path else None

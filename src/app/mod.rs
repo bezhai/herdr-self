@@ -492,6 +492,7 @@ impl App {
             next_agent_state_change_seq: 0,
             next_agent_reply_seq: 0,
             next_agent_request_id: 0,
+            next_agent_tool_call_seq: 0,
             confirm_close: config.ui.confirm_close,
             pane_borders: config.ui.pane_borders,
             pane_outer_borders: config.ui.pane_outer_borders,

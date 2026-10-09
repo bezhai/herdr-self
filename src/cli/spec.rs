@@ -330,6 +330,16 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("tool-calls")
+                .about("Show the start and end events of an agent's recent tool calls")
+                .override_usage("herdr agent tool-calls <TARGET> [OPTIONS]")
+                .arg(required("target", "TARGET"))
+                .arg(option("after", "SEQ").help("Only show events with a greater seq"))
+                .after_help(
+                    "Events come from the Claude Code, Codex, and Antigravity CLI tool hooks. Herdr keeps the last 256 events per agent in memory.",
+                ),
+        )
+        .subcommand(
             Command::new("requests")
                 .about("Show the permission requests and questions an agent is waiting on")
                 .arg(required("target", "TARGET"))
@@ -1367,6 +1377,24 @@ mod tests {
             output.contains("Usage: herdr pane remote-answers"),
             "{output}"
         );
+    }
+
+    #[test]
+    fn spec_describes_agent_tool_calls() {
+        let cmd = super::command();
+        let tool_calls = command_path(&cmd, &["agent", "tool-calls"]);
+        assert!(tool_calls.get_about().is_some());
+        assert!(has_option(tool_calls, "after"));
+        assert!(tool_calls
+            .get_arguments()
+            .any(|arg| arg.get_id() == "target" && arg.is_required_set()));
+
+        let args = ["herdr", "agent", "tool-calls", "--help"].map(String::from);
+        let mut output = Vec::new();
+        assert!(super::write_requested_help(&args, &mut output, || {}).unwrap());
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("Usage: herdr agent tool-calls"), "{output}");
+        assert!(output.contains("--after"), "{output}");
     }
 
     #[test]

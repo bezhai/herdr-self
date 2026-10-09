@@ -45,14 +45,15 @@ use super::types::{
 };
 use super::{
     ANTIGRAVITY_CLI_HOOK_ASSET, ANTIGRAVITY_CLI_HOOK_BLOCK_NAME, ANTIGRAVITY_CLI_HOOK_EVENTS,
-    ANTIGRAVITY_CLI_HOOK_INSTALL_NAME, ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC, CLAUDE_HOOK_ASSET,
-    CLAUDE_HOOK_INSTALL_NAME, CODEX_HOOK_ASSET, CODEX_HOOK_INSTALL_NAME, COPILOT_HOOK_ASSET,
-    COPILOT_HOOK_EVENTS, COPILOT_HOOK_INSTALL_NAME, COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS,
-    CURSOR_HOOK_ASSET, CURSOR_HOOK_INSTALL_NAME, DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS,
-    DEVIN_HOOK_INSTALL_NAME, DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS, DROID_HOOK_ASSET,
-    DROID_HOOK_EVENTS, DROID_HOOK_INSTALL_NAME, DROID_REMOVED_LIFECYCLE_HOOK_EVENTS,
-    GROK_HOOK_ASSET, GROK_HOOK_CONFIG_INSTALL_NAME, GROK_HOOK_INSTALL_NAME,
-    HERMES_PLUGIN_INIT_ASSET, HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
+    ANTIGRAVITY_CLI_HOOK_INSTALL_NAME, ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
+    ANTIGRAVITY_CLI_TOOL_HOOK_EVENTS, CLAUDE_HOOK_ASSET, CLAUDE_HOOK_INSTALL_NAME,
+    CODEX_HOOK_ASSET, CODEX_HOOK_INSTALL_NAME, COPILOT_HOOK_ASSET, COPILOT_HOOK_EVENTS,
+    COPILOT_HOOK_INSTALL_NAME, COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS, CURSOR_HOOK_ASSET,
+    CURSOR_HOOK_INSTALL_NAME, DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS, DEVIN_HOOK_INSTALL_NAME,
+    DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS, DROID_HOOK_ASSET, DROID_HOOK_EVENTS,
+    DROID_HOOK_INSTALL_NAME, DROID_REMOVED_LIFECYCLE_HOOK_EVENTS, GROK_HOOK_ASSET,
+    GROK_HOOK_CONFIG_INSTALL_NAME, GROK_HOOK_INSTALL_NAME, HERMES_PLUGIN_INIT_ASSET,
+    HERMES_PLUGIN_INIT_INSTALL_NAME, HERMES_PLUGIN_MANIFEST_ASSET,
     HERMES_PLUGIN_MANIFEST_INSTALL_NAME, KILO_PLUGIN_ASSET, KILO_PLUGIN_INSTALL_NAME,
     KIMI_HOOK_ASSET, KIMI_HOOK_INSTALL_NAME, LETTA_HOOK_ASSET, LETTA_HOOK_INSTALL_NAME,
     LETTA_HOOK_TIMEOUT_MS, MASTRACODE_HOOK_ASSET, MASTRACODE_HOOK_EVENTS,
@@ -64,6 +65,11 @@ use super::{
     QWEN_HOOK_ASSET, QWEN_HOOK_EVENTS, QWEN_HOOK_INSTALL_NAME,
 };
 
+/// Codex events that report every tool call's start and end with the `tool`
+/// action. Unlike the removed `PreToolUse`/`working` hook, they report no
+/// agent state. Codex has no failure event: it skips `PostToolUse` when
+/// `apply_patch` or an MCP call fails.
+const CODEX_TOOL_HOOK_EVENTS: [&str; 2] = ["PreToolUse", "PostToolUse"];
 /// The Codex permission hook waits up to 10 minutes for an answer, then Codex
 /// shows its own approval prompt; Codex must not kill the hook before that.
 const CODEX_PERMISSION_HOOK_TIMEOUT_SECONDS: u64 = 10 * 60 + 60;
@@ -198,6 +204,9 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
     remove_hook_commands(hooks, "SessionStart", &hook_path, Some("session"))?;
     remove_hook_commands(hooks, "Stop", &hook_path, Some("reply"))?;
     remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("permission"))?;
+    for event in CODEX_TOOL_HOOK_EVENTS {
+        remove_hook_commands(hooks, event, &hook_path, Some("tool"))?;
+    }
     ensure_command_hook(
         hooks,
         "SessionStart",
@@ -219,6 +228,15 @@ pub(crate) fn install_codex() -> io::Result<CodexInstallPaths> {
         CODEX_PERMISSION_HOOK_TIMEOUT_SECONDS,
         None,
     )?;
+    for event in CODEX_TOOL_HOOK_EVENTS {
+        ensure_command_hook(
+            hooks,
+            event,
+            hook_command(&hook_path, Some("tool")),
+            10,
+            None,
+        )?;
+    }
     remove_legacy_bash_hook_file(&hook_path)?;
 
     write_config(&hooks_path, serde_json::to_string_pretty(&hooks_file)?)?;
@@ -652,6 +670,9 @@ pub(crate) fn uninstall_codex() -> io::Result<CodexUninstallResult> {
             updated_hooks |= remove_hook_commands(hooks, "Stop", &hook_path, Some("reply"))?;
             updated_hooks |=
                 remove_hook_commands(hooks, "PermissionRequest", &hook_path, Some("permission"))?;
+            for event in CODEX_TOOL_HOOK_EVENTS {
+                updated_hooks |= remove_hook_commands(hooks, event, &hook_path, Some("tool"))?;
+            }
         }
 
         if updated_hooks {
@@ -1664,17 +1685,25 @@ pub(crate) fn antigravity_cli_hook_command(hook_path: &Path, action: &str) -> St
 
 /// Builds the Herdr-owned `hooks.json` block for Antigravity CLI.
 ///
-/// Every event Herdr registers takes a flat handler list; the `matcher`/`hooks`
-/// group is only valid for the tool events, which Herdr does not use.
+/// The lifecycle events take a flat handler list; the `matcher`/`hooks` group
+/// is only valid for the tool events, where it is required.
 fn antigravity_cli_hook_block(hook_path: &Path) -> Value {
-    let mut block = Map::new();
-    for (event, action) in ANTIGRAVITY_CLI_HOOK_EVENTS {
-        let handler = json!({
+    let handler = |action: &str| {
+        json!({
             "type": "command",
             "command": antigravity_cli_hook_command(hook_path, action),
             "timeout": ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
-        });
-        block.insert(event.to_string(), json!([handler]));
+        })
+    };
+    let mut block = Map::new();
+    for (event, action) in ANTIGRAVITY_CLI_HOOK_EVENTS {
+        block.insert(event.to_string(), json!([handler(action)]));
+    }
+    for (event, action) in ANTIGRAVITY_CLI_TOOL_HOOK_EVENTS {
+        block.insert(
+            event.to_string(),
+            json!([{"matcher": "*", "hooks": [handler(action)]}]),
+        );
     }
     Value::Object(block)
 }

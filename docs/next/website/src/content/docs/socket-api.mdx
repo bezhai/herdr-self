@@ -103,10 +103,10 @@ Raw socket method names use dot notation:
 | Workspace | `workspace.create`, `workspace.list`, `workspace.get`, `workspace.focus`, `workspace.rename`, `workspace.move`, `workspace.move_block`, `workspace.report_metadata`, `workspace.close` |
 | Worktree | `worktree.list`, `worktree.create`, `worktree.open`, `worktree.remove` |
 | Tab | `tab.create`, `tab.list`, `tab.get`, `tab.focus`, `tab.rename`, `tab.move`, `tab.close` |
-| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_reply`, `pane.report_agent_request`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.set_remote_answers`, `pane.close`, `pane.wait_for_output` |
+| Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_reply`, `pane.report_agent_tool_call`, `pane.report_agent_request`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.set_remote_answers`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.replies`, `agent.requests`, `agent.answer`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.replies`, `agent.tool_calls`, `agent.requests`, `agent.answer`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
@@ -800,6 +800,52 @@ Herdr keeps the 8 most recent replies per agent. Each reply gets a `seq` from on
 ```
 
 `replies` is an empty array when nothing matches. Target errors match `agent.get`, for example `agent_not_found`.
+
+The same integrations report each tool call the agent makes with `pane.report_agent_tool_call`, once when the call starts and once when it ends. These hooks only report: they never change the call and never report agent state. Subagent and nested-session tool calls are not reported.
+
+```json
+{
+  "id": "req_5",
+  "method": "pane.report_agent_tool_call",
+  "params": {
+    "pane_id": "w1:p1",
+    "source": "herdr:claude",
+    "agent": "claude",
+    "agent_session_id": "...",
+    "tool_call_id": "toolu_01Hk6HdCJ9dJrpcFSqAv4R2Q",
+    "phase": "end",
+    "tool_name": "Bash",
+    "title": "Run the test suite",
+    "failed": true
+  }
+}
+```
+
+`phase` is `start` or `end`, and `tool_call_id` pairs the two events of one call. `title` is an optional short label that the hook builds from the tool input, such as a command, a file path, or a search pattern. Herdr keeps at most 256 characters of `title`, `tool_call_id`, and `tool_name`, cut at a character boundary. `failed: true` marks the end of a call that failed and is ignored on a start. Herdr records an event under the same conditions as a reply, except that tool call reports carry no `seq` and are not ordered against other reports: parallel tool calls report independently. Herdr also ignores reports without a `tool_call_id` or `tool_name`. Hooks that run in the background can deliver the end of a quick call before its start. When an end arrives and Herdr retains no event of the same call, Herdr first records a start with the end's `tool_name` and `title`, then the end, and ignores the late start. Every retained end therefore follows a start of the same call. An end whose start has already dropped out of the retained events gets a new start too, so a reader can see two starts for one call. As with replies, ignored reports return `ok`.
+
+Herdr keeps the 256 most recent events per agent. Each event gets a `seq` from one server-wide counter that starts at 1, separate from the reply counter. Like replies, events live in server memory only, are empty after a server restart or live handoff, and are cleared when the pane's native session changes, when the agent changes, is released, or exits, and when the pane respawns. Tool call reports do not affect agent state, waits, notifications, or events.
+
+`agent.get` and `agent.list` expose `tool_call_seq`, the seq of the latest retained event, and omit it when none is retained. Read the events with `agent.tool_calls`, which resolves `target` like `agent.get` and returns events in ascending `seq` order, only those after `after_seq` when it is given:
+
+```json
+{"id":"req_6","method":"agent.tool_calls","params":{"target":"w1:p1","after_seq":4}}
+```
+
+```json
+{
+  "id": "req_6",
+  "result": {
+    "type": "agent_tool_calls",
+    "agent": { "pane_id": "w1:p1", "agent": "claude", "tool_call_seq": 6, "...": "..." },
+    "tool_calls": [
+      { "seq": 5, "tool_call_id": "toolu_01B4", "phase": "start", "tool_name": "Read", "title": "src/auth.rs" },
+      { "seq": 6, "tool_call_id": "toolu_01B4", "phase": "end", "tool_name": "Read", "title": "src/auth.rs" }
+    ]
+  }
+}
+```
+
+`tool_calls` is an empty array when nothing matches, `title` is omitted when the hook built none, and `failed` is omitted unless the call failed. Target errors match `agent.get`. Because the counter starts again at 1 after a server restart or live handoff, a reader that sees `tool_call_seq` fall below the last seq it read should read again from the beginning. A call may have no end event: Codex reports no end for a failed `apply_patch` or MCP call, and an agent that is interrupted or exits may never report one.
 
 Integration hooks report the permission requests and questions an agent is waiting on with `pane.report_agent_request`. Herdr holds such a request for an answer only while remote answers are on for the pane's agent; otherwise the report ends at once and the agent falls back to its own prompt. A client that answers on the user's behalf, such as a chat relay, turns remote answers on with `pane.set_remote_answers`:
 

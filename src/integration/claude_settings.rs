@@ -5,13 +5,12 @@ use std::path::Path;
 use jsonc_parser::ast::{Array as AstArray, Object as AstObject, Value as AstValue};
 use jsonc_parser::common::Ranged;
 use jsonc_parser::cst::{CstInputValue, CstNode, CstObject, CstRootNode};
-use jsonc_parser::{json, parse_to_ast, CollectOptions, ParseOptions};
+use jsonc_parser::{parse_to_ast, CollectOptions, ParseOptions};
 use serde_json::{json as serde_json_value, Map, Value};
 
 use super::command::hook_command;
 use super::config_edit::{
-    ensure_command_hook, ensure_hooks_object, hook_command_variants, hooks_object_if_present,
-    is_matching_command_hook,
+    ensure_hooks_object, hook_command_variants, hooks_object_if_present, is_matching_command_hook,
 };
 
 // Claude's documented SessionStart sources. Grok imports Claude hooks but uses
@@ -28,6 +27,8 @@ struct HookInstall {
     action: &'static str,
     matcher: Option<&'static str>,
     timeout: u64,
+    /// Claude Code runs the hook without waiting for it (`"async": true`).
+    background: bool,
 }
 
 const HOOK_INSTALLS: &[HookInstall] = &[
@@ -36,6 +37,7 @@ const HOOK_INSTALLS: &[HookInstall] = &[
         action: "session",
         matcher: Some(SESSION_START_MATCHER),
         timeout: HOOK_TIMEOUT_SECONDS,
+        background: false,
     },
     // `Stop`/`idle` is a removed legacy hook, so the reply report uses its own action.
     HookInstall {
@@ -43,6 +45,7 @@ const HOOK_INSTALLS: &[HookInstall] = &[
         action: "reply",
         matcher: None,
         timeout: HOOK_TIMEOUT_SECONDS,
+        background: false,
     },
     // `PermissionRequest`/`blocked` is a removed legacy hook as well.
     HookInstall {
@@ -50,6 +53,31 @@ const HOOK_INSTALLS: &[HookInstall] = &[
         action: "permission",
         matcher: None,
         timeout: PERMISSION_HOOK_TIMEOUT_SECONDS,
+        background: false,
+    },
+    // The tool events report every tool call's start and end. They report no
+    // agent state, unlike the removed `working` hooks on the same events, and
+    // run in the background so that reporting never delays a tool.
+    HookInstall {
+        event: "PreToolUse",
+        action: "tool",
+        matcher: None,
+        timeout: HOOK_TIMEOUT_SECONDS,
+        background: true,
+    },
+    HookInstall {
+        event: "PostToolUse",
+        action: "tool",
+        matcher: None,
+        timeout: HOOK_TIMEOUT_SECONDS,
+        background: true,
+    },
+    HookInstall {
+        event: "PostToolUseFailure",
+        action: "tool",
+        matcher: None,
+        timeout: HOOK_TIMEOUT_SECONDS,
+        background: true,
     },
 ];
 
@@ -63,24 +91,40 @@ impl HookInstall {
     }
 
     fn canonical_value(&self, hook_path: &Path) -> Value {
+        let mut handler = serde_json_value!({
+            "type": "command",
+            "command": self.command(hook_path),
+            "timeout": self.timeout,
+        });
+        if self.background {
+            handler["async"] = Value::Bool(true);
+        }
         let mut entry = Map::new();
         if let Some(matcher) = self.matcher {
             entry.insert("matcher".to_string(), Value::String(matcher.to_string()));
         }
-        entry.insert(
-            "hooks".to_string(),
-            serde_json_value!([{
-                "type": "command",
-                "command": self.command(hook_path),
-                "timeout": self.timeout,
-            }]),
-        );
+        entry.insert("hooks".to_string(), Value::Array(vec![handler]));
         Value::Object(entry)
     }
 
     fn canonical_input(&self, hook_path: &Path) -> CstInputValue {
-        let command = self.command(hook_path);
-        let timeout = self.timeout;
+        let mut handler = vec![
+            (
+                "type".to_string(),
+                CstInputValue::String("command".to_string()),
+            ),
+            (
+                "command".to_string(),
+                CstInputValue::String(self.command(hook_path)),
+            ),
+            (
+                "timeout".to_string(),
+                CstInputValue::Number(self.timeout.to_string()),
+            ),
+        ];
+        if self.background {
+            handler.push(("async".to_string(), CstInputValue::Bool(true)));
+        }
         let mut properties = Vec::new();
         if let Some(matcher) = self.matcher {
             properties.push((
@@ -90,19 +134,20 @@ impl HookInstall {
         }
         properties.push((
             "hooks".to_string(),
-            json!([{
-                "type": "command",
-                command: command,
-                timeout: timeout,
-            }]),
+            CstInputValue::Array(vec![CstInputValue::Object(handler)]),
         ));
         CstInputValue::Object(properties)
     }
 
     fn canonical_json(&self, hook_path: &Path) -> io::Result<String> {
         let command = serde_json::to_string(&self.command(hook_path))?;
+        let background = if self.background {
+            ",\"async\":true"
+        } else {
+            ""
+        };
         let hooks = format!(
-            "[{{\"type\":\"command\",\"command\":{command},\"timeout\":{}}}]",
+            "[{{\"type\":\"command\",\"command\":{command},\"timeout\":{}{background}}}]",
             self.timeout
         );
         Ok(match self.matcher {
@@ -123,11 +168,11 @@ struct HookRemoval {
 const HOOK_REMOVALS: &[HookRemoval] = &[
     HookRemoval {
         event: "PostToolUse",
-        actions: &["working"],
+        actions: &["working", "tool"],
     },
     HookRemoval {
         event: "PostToolUseFailure",
-        actions: &["working"],
+        actions: &["working", "tool"],
     },
     HookRemoval {
         event: "SubagentStop",
@@ -147,7 +192,7 @@ const HOOK_REMOVALS: &[HookRemoval] = &[
     },
     HookRemoval {
         event: "PreToolUse",
-        actions: &["working"],
+        actions: &["working", "tool"],
     },
     HookRemoval {
         event: "Stop",
@@ -170,13 +215,7 @@ pub(crate) fn install(content: &str, settings_path: &Path, hook_path: &Path) -> 
     )?;
     apply_value_removals(hooks, hook_path, EditKind::Install)?;
     for hook in HOOK_INSTALLS {
-        ensure_command_hook(
-            hooks,
-            hook.event,
-            hook.command(hook_path),
-            hook.timeout,
-            hook.matcher,
-        )?;
+        ensure_canonical_hook(hooks, hook, hook_path)?;
     }
 
     if desired == original {
@@ -221,6 +260,26 @@ pub(crate) fn uninstall(
         EditKind::Uninstall,
         &desired,
     )
+}
+
+/// Appends the canonical entry of `hook` unless the removals preserved it.
+fn ensure_canonical_hook(
+    hooks: &mut Map<String, Value>,
+    hook: &HookInstall,
+    hook_path: &Path,
+) -> io::Result<()> {
+    let canonical = hook.canonical_value(hook_path);
+    let entries = hooks
+        .entry(hook.event.to_string())
+        .or_insert_with(|| Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| {
+            io::Error::other(format!("hook entries for {} must be an array", hook.event))
+        })?;
+    if !entries.contains(&canonical) {
+        entries.push(canonical);
+    }
+    Ok(())
 }
 
 fn apply_value_removals(
@@ -690,6 +749,19 @@ mod tests {
         )
     }
 
+    fn tool_json(hook_path: &Path) -> String {
+        format!(
+            "{{\"hooks\":[{{\"type\":\"command\",\"command\":{},\"timeout\":10,\"async\":true}}]}}",
+            command_json(hook_path, "tool")
+        )
+    }
+
+    /// The compact tool hook events that install appends after the others.
+    fn tool_events_json(hook_path: &Path) -> String {
+        let tool = tool_json(hook_path);
+        format!(",\"PreToolUse\":[{tool}],\"PostToolUse\":[{tool}],\"PostToolUseFailure\":[{tool}]")
+    }
+
     #[test]
     fn install_preserves_untouched_formatting_and_complete_trailing_suffix() {
         let (settings_path, hook_path) = paths();
@@ -735,41 +807,42 @@ mod tests {
         let canonical = session_start_json(hook_path);
         let stop = stop_json(hook_path);
         let permission = permission_json(hook_path);
+        let tools = tool_events_json(hook_path);
         let cases = [
             (
                 "{\"zeta\":{\"escaped\":\"\\u0061\",\"n\":1e+02},\"alpha\":1}\r\n".to_string(),
                 format!(
-                    "{{\"zeta\":{{\"escaped\":\"\\u0061\",\"n\":1e+02}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}\r\n"
+                    "{{\"zeta\":{{\"escaped\":\"\\u0061\",\"n\":1e+02}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]{tools}}}}}\r\n"
                 ),
             ),
             (
                 "{\"hooks\":{\"Notification\":[{\"matcher\":\"keep\",\"hooks\":[]}]}, \"alpha\":1}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}, \"alpha\":1}}"
+                    "{{\"hooks\":{{\"Notification\":[{{\"matcher\":\"keep\",\"hooks\":[]}}],\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]{tools}}}, \"alpha\":1}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"SessionStart\":[{\"matcher\":\"keep\",\"hooks\":[{\"type\":\"command\",\"command\":\"echo keep\"}]}]}}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"keep\",\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{{\"matcher\":\"keep\",\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]{tools}}}}}"
                 ),
             ),
             (
                 "{\"zeta\":{\n  \"x\":1\n},\"alpha\":1}".to_string(),
                 format!(
-                    "{{\"zeta\":{{\n  \"x\":1\n}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}"
+                    "{{\"zeta\":{{\n  \"x\":1\n}},\"alpha\":1,\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]{tools}}}}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"Notification\":[\n  {\"matcher\":\"keep\",\"hooks\":[]}\n]},\"alpha\":1}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"Notification\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}},\"alpha\":1}}"
+                    "{{\"hooks\":{{\"Notification\":[\n  {{\"matcher\":\"keep\",\"hooks\":[]}}\n],\"SessionStart\":[{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]{tools}}},\"alpha\":1}}"
                 ),
             ),
             (
                 "{\"hooks\":{\"SessionStart\":[{\n  \"matcher\":\"keep\",\n  \"hooks\":[{\"type\":\"command\",\"command\":\"echo keep\"}]\n}]}}".to_string(),
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{{\n  \"matcher\":\"keep\",\n  \"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]\n}},{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{{\n  \"matcher\":\"keep\",\n  \"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]\n}},{canonical}],\"Stop\":[{stop}],\"PermissionRequest\":[{permission}]{tools}}}}}"
                 ),
             ),
             (
@@ -777,7 +850,7 @@ mod tests {
                     "{{\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}}]}}}}"
                 ),
                 format!(
-                    "{{\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{stop}],\"PermissionRequest\":[{permission}]}}}}"
+                    "{{\"hooks\":{{\"SessionStart\":[{canonical}],\"Stop\":[{{\"hooks\":[{{\"type\":\"command\",\"command\":\"echo keep\"}}]}},{stop}],\"PermissionRequest\":[{permission}]{tools}}}}}"
                 ),
             ),
         ];
@@ -811,8 +884,9 @@ mod tests {
         let command = command_json(hook_path, "session");
         let reply = command_json(hook_path, "reply");
         let permission = command_json(hook_path, "permission");
+        let tool = command_json(hook_path, "tool");
         let input = format!(
-            "{{\"hooks\":{{\"PermissionRequest\": [{{\"hooks\":[{{\"command\":{permission},\"timeout\":86460,\"type\":\"command\"}}]}}],\"Stop\" : [ {{ \"hooks\" : [{{\"timeout\":10,\"type\":\"command\",\"command\":{reply}}}] }} ],\"SessionStart\":[{{\"hooks\":[{{\"timeout\":10,\"command\":{command},\"type\":\"command\"}}],\"matcher\":\"{SESSION_START_MATCHER}\"}}]}},\"escaped\":\"\\u0061\"}}  \r\n\r\n"
+            "{{\"hooks\":{{\"PostToolUseFailure\":[{{\"hooks\":[{{\"async\":true,\"timeout\":10,\"type\":\"command\",\"command\":{tool}}}]}}],\"PermissionRequest\": [{{\"hooks\":[{{\"command\":{permission},\"timeout\":86460,\"type\":\"command\"}}]}}],\"PreToolUse\":[{{\"hooks\":[{{\"command\":{tool},\"async\":true,\"type\":\"command\",\"timeout\":10}}]}}],\"Stop\" : [ {{ \"hooks\" : [{{\"timeout\":10,\"type\":\"command\",\"command\":{reply}}}] }} ],\"PostToolUse\":[{{\"hooks\":[{{\"type\":\"command\",\"timeout\":10,\"async\":true,\"command\":{tool}}}]}}],\"SessionStart\":[{{\"hooks\":[{{\"timeout\":10,\"command\":{command},\"type\":\"command\"}}],\"matcher\":\"{SESSION_START_MATCHER}\"}}]}},\"escaped\":\"\\u0061\"}}  \r\n\r\n"
         );
 
         let updated = install(&input, settings_path, hook_path).unwrap();
@@ -871,15 +945,23 @@ mod tests {
         ]
         .concat();
         let input = ["{\"hooks\":{", &session_start, ",", &old_event, "}}"].concat();
+        let tool = tool_json(hook_path);
+        // The legacy `working` entry leaves its event in place for the tool hook.
+        let post_tool_use = format!("\"PostToolUse\":[{tool}]");
         let stop = format!("\"Stop\":[{}]", stop_json(hook_path));
         let permission = format!("\"PermissionRequest\":[{}]", permission_json(hook_path));
+        let other_tool_events = format!("\"PreToolUse\":[{tool}],\"PostToolUseFailure\":[{tool}]");
         let expected = [
             "{\"hooks\":{",
             &session_start,
             ",",
+            &post_tool_use,
+            ",",
             &stop,
             ",",
             &permission,
+            ",",
+            &other_tool_events,
             "}}",
         ]
         .concat();
@@ -922,6 +1004,10 @@ mod tests {
         assert_eq!(
             parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
             "echo keep"
+        );
+        assert_eq!(
+            parsed["hooks"]["PostToolUse"][1],
+            serde_json::from_str::<Value>(&tool_json(hook_path)).unwrap()
         );
         assert_eq!(parsed["hooks"]["SessionStart"].as_array().unwrap().len(), 1);
     }
@@ -1026,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn install_appends_only_the_permission_hook_to_v11_canonical_settings() {
+    fn install_appends_the_permission_and_tool_hooks_to_earlier_v11_settings() {
         let (settings_path, hook_path) = paths();
         let session_start = session_start_json(hook_path);
         let stop = stop_json(hook_path);
@@ -1060,6 +1146,13 @@ mod tests {
                 [serde_json::from_str::<Value>(&permission_json(hook_path)).unwrap()]
             )
         );
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+            assert_eq!(
+                settings["hooks"][event],
+                serde_json_value!([serde_json::from_str::<Value>(&tool_json(hook_path)).unwrap()]),
+                "{event}"
+            );
+        }
         assert_eq!(
             install(&updated, settings_path, hook_path).unwrap(),
             updated
@@ -1197,6 +1290,83 @@ mod tests {
         assert!(!removed.contains(&reply), "{removed}");
         let settings: Value = serde_json::from_str(&removed).unwrap();
         assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn install_adds_background_tool_hooks_for_every_tool() {
+        let (settings_path, hook_path) = paths();
+        let installed = install("{}", settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&installed).unwrap();
+
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+            assert_eq!(
+                settings["hooks"][event],
+                serde_json_value!([{
+                    "hooks": [{
+                        "type": "command",
+                        "command": hook_command(hook_path, Some("tool")),
+                        "timeout": 10,
+                        "async": true,
+                    }],
+                }]),
+                "{event}"
+            );
+        }
+        assert_eq!(
+            install(&installed, settings_path, hook_path).unwrap(),
+            installed
+        );
+
+        let removed = uninstall(&installed, settings_path, hook_path).unwrap();
+        let settings: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(settings["hooks"], serde_json_value!({}));
+    }
+
+    #[test]
+    fn install_replaces_legacy_working_and_stale_tool_hooks_and_keeps_user_tool_hooks() {
+        let (settings_path, hook_path) = paths();
+        let working = command_json(hook_path, "working");
+        let tool = command_json(hook_path, "tool");
+        let user_hook = r#"{ "type" : "command", "command" : "echo keep", "timeout" : 3 }"#;
+        let input = format!(
+            concat!(
+                "{{\n",
+                "  \"hooks\": {{\n",
+                "    \"PreToolUse\": [\n",
+                "      {{\"matcher\":\"Bash\",\"hooks\":[{{\"type\":\"command\",\"command\":{working},\"timeout\":10}},{user_hook}]}},\n",
+                "      {{\"hooks\":[{{\"type\":\"command\",\"command\":{tool},\"timeout\":10}}]}}\n",
+                "    ]\n",
+                "  }}\n",
+                "}}\n",
+            ),
+            working = working,
+            tool = tool,
+            user_hook = user_hook,
+        );
+
+        let installed = install(&input, settings_path, hook_path).unwrap();
+
+        assert!(installed.contains(user_hook), "{installed}");
+        assert!(!installed.contains(&working), "{installed}");
+        let settings: Value = serde_json::from_str(&installed).unwrap();
+        assert_eq!(
+            settings["hooks"]["PreToolUse"],
+            serde_json_value!([
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo keep", "timeout": 3}]},
+                serde_json::from_str::<Value>(&tool_json(hook_path)).unwrap(),
+            ]),
+            "{installed}"
+        );
+        assert_eq!(
+            install(&installed, settings_path, hook_path).unwrap(),
+            installed
+        );
+
+        let removed = uninstall(&installed, settings_path, hook_path).unwrap();
+        assert!(removed.contains(user_hook), "{removed}");
+        assert!(!removed.contains(&tool), "{removed}");
+        let settings: Value = serde_json::from_str(&removed).unwrap();
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
     }
 
     #[test]

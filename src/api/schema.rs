@@ -127,6 +127,8 @@ pub enum Method {
     AgentExplain(AgentTarget),
     #[serde(rename = "agent.replies")]
     AgentReplies(AgentRepliesParams),
+    #[serde(rename = "agent.tool_calls")]
+    AgentToolCalls(AgentToolCallsParams),
     #[serde(rename = "agent.requests")]
     AgentRequests(AgentTarget),
     #[serde(rename = "agent.answer")]
@@ -236,6 +238,8 @@ pub enum Method {
     PaneReportAgentSession(PaneReportAgentSessionParams),
     #[serde(rename = "pane.report_agent_reply")]
     PaneReportAgentReply(PaneReportAgentReplyParams),
+    #[serde(rename = "pane.report_agent_tool_call")]
+    PaneReportAgentToolCall(PaneReportAgentToolCallParams),
     #[serde(rename = "pane.report_agent_request")]
     PaneReportAgentRequest(PaneReportAgentRequestParams),
     #[serde(rename = "pane.report_metadata")]

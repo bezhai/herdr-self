@@ -1538,6 +1538,34 @@
           ],
           "type": "object"
         },
+        "AgentToolCallPhase": {
+          "description": "Whether a tool call event marks the start or the end of the call.",
+          "enum": [
+            "start",
+            "end"
+          ],
+          "type": "string"
+        },
+        "AgentToolCallsParams": {
+          "properties": {
+            "after_seq": {
+              "description": "Return only tool call events with a greater seq.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "target": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "type": "object"
+        },
         "AgentViewBuiltinField": {
           "enum": [
             "status",
@@ -3406,6 +3434,56 @@
             "pane_id",
             "source",
             "agent"
+          ],
+          "type": "object"
+        },
+        "PaneReportAgentToolCallParams": {
+          "description": "The start or end of a tool call reported by an agent integration hook.",
+          "properties": {
+            "agent": {
+              "type": "string"
+            },
+            "agent_session_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "failed": {
+              "description": "The call failed; only meaningful for `end`.",
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "phase": {
+              "$ref": "#/schemas/request/$defs/AgentToolCallPhase"
+            },
+            "source": {
+              "type": "string"
+            },
+            "title": {
+              "description": "Short human-readable label; Herdr keeps at most 256 characters.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool_call_id": {
+              "description": "Pairs the start and end events of one call.",
+              "type": "string"
+            },
+            "tool_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "pane_id",
+            "source",
+            "agent",
+            "tool_call_id",
+            "phase",
+            "tool_name"
           ],
           "type": "object"
         },
@@ -5768,6 +5846,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.tool_calls",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentToolCallsParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.requests",
               "type": "string"
             },
@@ -6509,6 +6603,22 @@
             },
             "params": {
               "$ref": "#/schemas/request/$defs/PaneReportAgentReplyParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "const": "pane.report_agent_tool_call",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/PaneReportAgentToolCallParams"
             }
           },
           "required": [
@@ -7270,6 +7380,15 @@
               },
               "type": "object"
             },
+            "tool_call_seq": {
+              "description": "Seq of the latest retained tool call event; read the events with `agent.tool_calls`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
             "workspace_id": {
               "type": "string"
             }
@@ -7547,6 +7666,52 @@
             "blocked",
             "done",
             "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentToolCallInfo": {
+          "description": "A tool call event retained for an agent, in memory only.",
+          "properties": {
+            "failed": {
+              "description": "The call failed; only end events fail.",
+              "type": "boolean"
+            },
+            "phase": {
+              "$ref": "#/schemas/success_response/$defs/AgentToolCallPhase"
+            },
+            "seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": {
+              "description": "Short human-readable label built by the integration hook.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "tool_call_id": {
+              "description": "Pairs the start and end events of one call.",
+              "type": "string"
+            },
+            "tool_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "seq",
+            "tool_call_id",
+            "phase",
+            "tool_name"
+          ],
+          "type": "object"
+        },
+        "AgentToolCallPhase": {
+          "description": "Whether a tool call event marks the start or the end of the call.",
+          "enum": [
+            "start",
+            "end"
           ],
           "type": "string"
         },
@@ -10309,6 +10474,29 @@
                 "type",
                 "agent",
                 "replies"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "tool_calls": {
+                  "items": {
+                    "$ref": "#/schemas/success_response/$defs/AgentToolCallInfo"
+                  },
+                  "type": "array"
+                },
+                "type": {
+                  "const": "agent_tool_calls",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "agent",
+                "tool_calls"
               ],
               "type": "object"
             },

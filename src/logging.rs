@@ -113,6 +113,7 @@ fn is_routine_api_method(method: &str) -> bool {
             | "pane.report_agent"
             | "pane.report_agent_session"
             | "pane.report_agent_reply"
+            | "pane.report_agent_tool_call"
             | "pane.report_metadata"
     )
 }
@@ -567,6 +568,7 @@ mod tests {
             "pane.report_agent",
             "pane.report_agent_session",
             "pane.report_agent_reply",
+            "pane.report_agent_tool_call",
         ] {
             assert!(is_routine_api_method(method), "{method}");
         }

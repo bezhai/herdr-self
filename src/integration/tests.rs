@@ -987,10 +987,23 @@ fn install_claude_writes_hook_and_updates_settings() {
             }],
         }])
     );
+    // Tool hooks only report tool calls, in the background so that they do
+    // not delay the tool; they never report agent state.
+    for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+        assert_eq!(
+            settings["hooks"][event],
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command(&installed.hook_path, Some("tool")),
+                    "timeout": 10,
+                    "async": true,
+                }],
+            }]),
+            "{event}"
+        );
+    }
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
-    assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("PostToolUse").is_none());
-    assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
@@ -1046,10 +1059,10 @@ fn install_claude_is_idempotent_for_hook_entries() {
             .len(),
         1
     );
+    for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+        assert_eq!(settings["hooks"][event].as_array().unwrap().len(), 1);
+    }
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
-    assert!(settings["hooks"].get("PreToolUse").is_none());
-    assert!(settings["hooks"].get("PostToolUse").is_none());
-    assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
     assert!(settings["hooks"].get("SessionEnd").is_none());
 
@@ -1117,13 +1130,32 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
     let settings: Value =
         serde_json::from_str(&fs::read_to_string(claude_dir.join("settings.json")).unwrap())
             .unwrap();
+    let tool_hook = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": hook_command(&hook_path, Some("tool")),
+            "timeout": 10,
+            "async": true,
+        }],
+    });
+    // The legacy `working` reports are gone; the tool call reports replace them.
     assert_eq!(
-        settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
-        "echo keep-post"
+        settings["hooks"]["PostToolUse"],
+        serde_json::json!([
+            {"matcher": "*", "hooks": [{"type": "command", "command": "echo keep-post", "timeout": 10}]},
+            tool_hook,
+        ])
     );
     assert_eq!(
-        settings["hooks"]["PostToolUseFailure"][0]["hooks"][0]["command"],
-        "echo keep-failure"
+        settings["hooks"]["PostToolUseFailure"],
+        serde_json::json!([
+            {"matcher": "*", "hooks": [{"type": "command", "command": "echo keep-failure", "timeout": 10}]},
+            tool_hook,
+        ])
+    );
+    assert_eq!(
+        settings["hooks"]["PreToolUse"],
+        serde_json::json!([tool_hook])
     );
     assert_eq!(
         settings["hooks"]["SubagentStop"][0]["hooks"][0]["command"],
@@ -1142,7 +1174,6 @@ fn install_claude_removes_deprecated_completion_hooks_and_preserves_user_hooks()
         hook_command(&hook_path, Some("reply"))
     );
     assert!(settings["hooks"].get("UserPromptSubmit").is_none());
-    assert!(settings["hooks"].get("PreToolUse").is_none());
 
     std::env::remove_var("HOME");
     let _ = fs::remove_dir_all(base);
@@ -1246,13 +1277,23 @@ fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
             }, {
                 "hooks": [{"type": "command", "command": format!("bash '{}' permission", hook_path.display()), "timeout": 86460}]
             }],
+            "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": "echo keep-pre", "timeout": 10}]
+            }, {
+                "hooks": [{"type": "command", "command": format!("bash '{}' tool", hook_path.display()), "timeout": 10, "async": true}]
+            }],
             "PostToolUse": [{
                 "matcher": "*",
                 "hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]
+            }, {
+                "hooks": [{"type": "command", "command": format!("bash '{}' tool", hook_path.display()), "timeout": 10, "async": true}]
             }],
             "PostToolUseFailure": [{
                 "matcher": "*",
                 "hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]
+            }, {
+                "hooks": [{"type": "command", "command": format!("bash '{}' tool", hook_path.display()), "timeout": 10, "async": true}]
             }],
             "SubagentStop": [{
                 "matcher": "*",
@@ -1301,6 +1342,13 @@ fn uninstall_claude_removes_herdr_hooks_and_preserves_others() {
     );
     assert!(settings["hooks"].get("PermissionRequest").is_none());
     assert!(settings["hooks"].get("SessionStart").is_none());
+    assert_eq!(
+        settings["hooks"]["PreToolUse"],
+        serde_json::json!([{
+            "matcher": "Bash",
+            "hooks": [{"type": "command", "command": "echo keep-pre", "timeout": 10}]
+        }])
+    );
     assert!(settings["hooks"].get("PostToolUse").is_none());
     assert!(settings["hooks"].get("PostToolUseFailure").is_none());
     assert!(settings["hooks"].get("SubagentStop").is_none());
@@ -1445,8 +1493,21 @@ fn install_codex_writes_hook_and_updates_hooks_and_config() {
             }],
         }])
     );
+    // Tool hooks only report tool calls; they never report agent state.
+    for event in ["PreToolUse", "PostToolUse"] {
+        assert_eq!(
+            hooks["hooks"][event],
+            serde_json::json!([{
+                "hooks": [{
+                    "type": "command",
+                    "command": hook_command(&installed.hook_path, Some("tool")),
+                    "timeout": 10,
+                }],
+            }]),
+            "{event}"
+        );
+    }
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
-    assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert!(config.contains("model = \"gpt-5.4\""));
     assert!(config.contains("[features]"));
     assert!(config.contains("hooks = true"));
@@ -1515,8 +1576,9 @@ fn install_codex_is_idempotent_for_hook_entries_and_feature_flag() {
             .len(),
         1
     );
+    assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 1);
+    assert_eq!(hooks["hooks"]["PostToolUse"].as_array().unwrap().len(), 1);
     assert!(hooks["hooks"].get("UserPromptSubmit").is_none());
-    assert!(hooks["hooks"].get("PreToolUse").is_none());
     assert_eq!(config.matches("hooks = true").count(), 1);
     assert!(!config.contains("codex_hooks"));
     assert!(config.contains("other = true"));
@@ -1566,7 +1628,14 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
                 {"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10},
                 {"type": "command", "command": "echo keep", "timeout": 10}
             ]}],
-            "PreToolUse": [{"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}],
+            "PreToolUse": [
+                {"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]},
+                {"hooks": [{"type": "command", "command": format!("bash '{}' tool", hook_path.display()), "timeout": 10}]}
+            ],
+            "PostToolUse": [
+                {"matcher": "apply_patch", "hooks": [{"type": "command", "command": "echo keep-post", "timeout": 10}]},
+                {"hooks": [{"type": "command", "command": format!("bash '{}' tool", hook_path.display()), "timeout": 10}]}
+            ],
             "PermissionRequest": [
                 {"hooks": [{"type": "command", "command": format!("bash '{}' blocked", hook_path.display()), "timeout": 10}]},
                 {"hooks": [{"type": "command", "command": format!("bash '{}' permission", hook_path.display()), "timeout": 660}]}
@@ -1602,6 +1671,12 @@ fn uninstall_codex_removes_herdr_hooks_and_leaves_config_alone() {
     assert!(!result.hook_path.exists());
     assert!(hooks["hooks"].get("SessionStart").is_none());
     assert!(hooks["hooks"].get("PreToolUse").is_none());
+    assert_eq!(
+        hooks["hooks"]["PostToolUse"],
+        serde_json::json!([
+            {"matcher": "apply_patch", "hooks": [{"type": "command", "command": "echo keep-post", "timeout": 10}]}
+        ])
+    );
     assert!(hooks["hooks"].get("PermissionRequest").is_none());
     assert_eq!(
         hooks["hooks"]["Stop"],
@@ -1723,6 +1798,74 @@ fn install_codex_replaces_stale_permission_hooks_and_keeps_user_permission_hooks
         serde_json::json!([
             {"matcher": "^Bash$", "hooks": [{"type": "command", "command": "echo keep-permission", "timeout": 10}]}
         ])
+    );
+
+    std::env::remove_var("HOME");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn install_codex_keeps_third_party_tool_hooks_and_replaces_the_legacy_working_hook() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let home = base.join("home");
+    let codex_dir = home.join(".codex");
+    fs::create_dir_all(&codex_dir).unwrap();
+    let hook_path = codex_dir.join(CODEX_HOOK_INSTALL_NAME);
+    let third_party_pre = serde_json::json!({"matcher": "apply_patch", "hooks": [{"type": "command", "command": "python3 /opt/guard.py pre", "timeout": 30}]});
+    let third_party_post = serde_json::json!({"matcher": "apply_patch", "hooks": [{"type": "command", "command": "python3 /opt/guard.py post", "timeout": 30}]});
+    let hooks = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [
+                third_party_pre,
+                {"hooks": [{"type": "command", "command": format!("bash '{}' working", hook_path.display()), "timeout": 10}]}
+            ],
+            "PostToolUse": [third_party_post]
+        }
+    });
+    fs::write(
+        codex_dir.join("hooks.json"),
+        serde_json::to_string(&hooks).unwrap(),
+    )
+    .unwrap();
+    std::env::set_var("HOME", &home);
+
+    install_codex().unwrap();
+    let installed = fs::read_to_string(codex_dir.join("hooks.json")).unwrap();
+    install_codex().unwrap();
+    assert_eq!(
+        fs::read_to_string(codex_dir.join("hooks.json")).unwrap(),
+        installed,
+        "reinstalling must keep the new tool hooks, not treat them as legacy ones"
+    );
+
+    let hooks: Value = serde_json::from_str(&installed).unwrap();
+    let tool_hook = serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": hook_command(&hook_path, Some("tool")),
+            "timeout": 10,
+        }],
+    });
+    assert_eq!(
+        hooks["hooks"]["PreToolUse"],
+        serde_json::json!([third_party_pre, tool_hook])
+    );
+    assert_eq!(
+        hooks["hooks"]["PostToolUse"],
+        serde_json::json!([third_party_post, tool_hook])
+    );
+
+    uninstall_codex().unwrap();
+    let hooks: Value =
+        serde_json::from_str(&fs::read_to_string(codex_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        hooks["hooks"]["PreToolUse"],
+        serde_json::json!([third_party_pre])
+    );
+    assert_eq!(
+        hooks["hooks"]["PostToolUse"],
+        serde_json::json!([third_party_post])
     );
 
     std::env::remove_var("HOME");
@@ -4695,13 +4838,29 @@ fn install_antigravity_cli_writes_hook_and_updates_hooks_json() {
         );
     }
 
-    // PreInvocation reports the conversation and Stop reports the turn's final
-    // reply. Neither reports state: Antigravity CLI cannot express blocked
-    // state and skips PostInvocation on interruption, so screen detection owns
-    // agent state.
+    // Tool events take the matcher/hooks wrapper; `*` matches every tool.
+    for (event, action) in [("PreToolUse", "tool-start"), ("PostToolUse", "tool-end")] {
+        assert_eq!(
+            block.get(event),
+            Some(&serde_json::json!([{
+                "matcher": "*",
+                "hooks": [{
+                    "type": "command",
+                    "command": antigravity_cli_hook_command(&installed.hook_path, action),
+                    "timeout": ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
+                }],
+            }])),
+            "{event}"
+        );
+    }
+
+    // PreInvocation reports the conversation, Stop reports the turn's final
+    // reply, and the tool events report tool calls. None reports state:
+    // Antigravity CLI cannot express blocked state and skips PostInvocation on
+    // interruption, so screen detection owns agent state.
     assert_eq!(
         block.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["PreInvocation", "Stop"]
+        vec!["PostToolUse", "PreInvocation", "PreToolUse", "Stop"]
     );
     assert_eq!(
         block
@@ -4791,7 +4950,7 @@ fn install_antigravity_cli_rewrites_stale_herdr_block() {
     // install is migrated to the current events rather than merged with.
     assert_eq!(
         block.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["PreInvocation", "Stop"],
+        vec!["PostToolUse", "PreInvocation", "PreToolUse", "Stop"],
         "stale lifecycle events should be gone"
     );
     let hook_path = agy_dir

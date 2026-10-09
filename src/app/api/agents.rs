@@ -4,7 +4,8 @@ use bytes::Bytes;
 
 use crate::api::schema::{
     AgentInfo, AgentPromptParams, AgentRenameParams, AgentRepliesParams, AgentReplyInfo,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, ErrorBody, PaneReadResult, ResponseResult,
+    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentToolCallInfo, AgentToolCallsParams,
+    ErrorBody, PaneReadResult, ResponseResult,
 };
 use crate::app::App;
 
@@ -116,6 +117,44 @@ impl App {
             ResponseResult::AgentReplies {
                 agent: resolved.agent,
                 replies,
+            },
+        )
+    }
+
+    pub(super) fn handle_agent_tool_calls(
+        &mut self,
+        id: String,
+        params: AgentToolCallsParams,
+    ) -> String {
+        let resolved = match self.resolve_agent(&params.target) {
+            Ok(resolved) => resolved,
+            Err(err) => return encode_error_body(id, err),
+        };
+        let tool_calls = self
+            .state
+            .terminals
+            .get(&resolved.terminal_id)
+            .map(|terminal| {
+                terminal
+                    .agent_tool_calls()
+                    .after(params.after_seq)
+                    .map(|event| AgentToolCallInfo {
+                        seq: event.seq,
+                        tool_call_id: event.tool_call_id.clone(),
+                        phase: event.phase,
+                        tool_name: event.tool_name.clone(),
+                        title: event.title.clone(),
+                        failed: event.failed,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        encode_success(
+            id,
+            ResponseResult::AgentToolCalls {
+                agent: resolved.agent,
+                tool_calls,
             },
         )
     }
@@ -983,6 +1022,175 @@ mod tests {
                 },
             ),
             crate::api::schema::Method::AgentReplies(crate::api::schema::AgentRepliesParams {
+                target: "w1:p1".into(),
+                after_seq: None,
+            }),
+        ] {
+            assert!(!crate::api::request_changes_ui(
+                &crate::api::schema::Request {
+                    id: "req".into(),
+                    method,
+                }
+            ));
+        }
+    }
+
+    fn tool_call_report(
+        pane_id: &str,
+        source: &str,
+        agent: &str,
+        tool_call_id: &str,
+        phase: crate::api::schema::AgentToolCallPhase,
+    ) -> crate::api::schema::PaneReportAgentToolCallParams {
+        crate::api::schema::PaneReportAgentToolCallParams {
+            pane_id: pane_id.into(),
+            source: source.into(),
+            agent: agent.into(),
+            agent_session_id: None,
+            tool_call_id: tool_call_id.into(),
+            phase,
+            tool_name: "Bash".into(),
+            title: None,
+            failed: false,
+        }
+    }
+
+    fn report_tool_call(
+        app: &mut App,
+        params: crate::api::schema::PaneReportAgentToolCallParams,
+    ) -> serde_json::Value {
+        api_request(
+            app,
+            crate::api::schema::Method::PaneReportAgentToolCall(params),
+        )
+    }
+
+    fn agent_tool_calls(app: &mut App, target: &str, after_seq: Option<u64>) -> serde_json::Value {
+        api_request(
+            app,
+            crate::api::schema::Method::AgentToolCalls(crate::api::schema::AgentToolCallsParams {
+                target: target.into(),
+                after_seq,
+            }),
+        )
+    }
+
+    #[test]
+    fn agent_tool_calls_returns_reported_events_after_a_seq() {
+        use crate::api::schema::AgentToolCallPhase::{End, Start};
+        let (mut app, pane_id) = claude_app();
+        let titled = crate::api::schema::PaneReportAgentToolCallParams {
+            title: Some("运行 cargo test".into()),
+            ..tool_call_report(&pane_id, "herdr:claude", "claude", "toolu_1", Start)
+        };
+        let parallel = tool_call_report(&pane_id, "herdr:claude", "claude", "toolu_2", Start);
+        let failed = crate::api::schema::PaneReportAgentToolCallParams {
+            failed: true,
+            ..tool_call_report(&pane_id, "herdr:claude", "claude", "toolu_2", End)
+        };
+        let done = tool_call_report(&pane_id, "herdr:claude", "claude", "toolu_1", End);
+        for params in [titled, parallel, failed, done] {
+            let response = report_tool_call(&mut app, params);
+            assert_eq!(response["result"]["type"], "ok", "{response}");
+        }
+
+        let all = agent_tool_calls(&mut app, &pane_id, None);
+        assert_eq!(all["result"]["type"], "agent_tool_calls", "{all}");
+        assert_eq!(all["result"]["agent"]["pane_id"], pane_id.as_str());
+        assert_eq!(all["result"]["agent"]["tool_call_seq"], 4);
+        assert_eq!(
+            all["result"]["tool_calls"],
+            serde_json::json!([
+                {"seq": 1, "tool_call_id": "toolu_1", "phase": "start", "tool_name": "Bash", "title": "运行 cargo test"},
+                {"seq": 2, "tool_call_id": "toolu_2", "phase": "start", "tool_name": "Bash"},
+                {"seq": 3, "tool_call_id": "toolu_2", "phase": "end", "tool_name": "Bash", "failed": true},
+                {"seq": 4, "tool_call_id": "toolu_1", "phase": "end", "tool_name": "Bash"},
+            ])
+        );
+
+        let after = agent_tool_calls(&mut app, &pane_id, Some(2));
+        let seqs: Vec<u64> = after["result"]["tool_calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["seq"].as_u64().unwrap())
+            .collect();
+        assert_eq!(seqs, [3, 4]);
+        assert_eq!(
+            agent_tool_calls(&mut app, &pane_id, Some(4))["result"]["tool_calls"],
+            serde_json::json!([])
+        );
+
+        let agent = api_request(
+            &mut app,
+            crate::api::schema::Method::AgentGet(AgentTarget {
+                target: pane_id.clone(),
+            }),
+        );
+        assert_eq!(agent["result"]["agent"]["tool_call_seq"], 4);
+    }
+
+    #[test]
+    fn agent_tool_calls_is_empty_without_events_and_rejects_unknown_targets() {
+        let (mut app, pane_id) = claude_app();
+
+        let empty = agent_tool_calls(&mut app, &pane_id, None);
+        assert_eq!(
+            empty["result"]["tool_calls"],
+            serde_json::json!([]),
+            "{empty}"
+        );
+        assert!(empty["result"]["agent"].get("tool_call_seq").is_none());
+
+        let missing = agent_tool_calls(&mut app, "no-such-agent", None);
+        assert_eq!(missing["error"]["code"], "agent_not_found", "{missing}");
+    }
+
+    #[test]
+    fn pane_report_agent_tool_call_acknowledges_ignored_reports() {
+        use crate::api::schema::AgentToolCallPhase::Start;
+        let (mut app, pane_id) = claude_app();
+
+        for params in [
+            tool_call_report(&pane_id, "custom:claude", "claude", "a", Start),
+            tool_call_report(&pane_id, "herdr:codex", "codex", "b", Start),
+            tool_call_report(&pane_id, "herdr:claude", "claude", "", Start),
+        ] {
+            let response = report_tool_call(&mut app, params);
+            assert_eq!(response["result"]["type"], "ok", "{response}");
+        }
+        let kept = tool_call_report(&pane_id, "herdr:claude", "claude", "d", Start);
+        assert_eq!(report_tool_call(&mut app, kept)["result"]["type"], "ok");
+
+        let tool_calls = agent_tool_calls(&mut app, &pane_id, None);
+        assert_eq!(
+            tool_calls["result"]["tool_calls"],
+            serde_json::json!([{"seq": 1, "tool_call_id": "d", "phase": "start", "tool_name": "Bash"}])
+        );
+
+        let invalid = report_tool_call(
+            &mut app,
+            tool_call_report(&pane_id, "herdr:claude", " ", "e", Start),
+        );
+        assert_eq!(invalid["error"]["code"], "invalid_agent", "{invalid}");
+        let missing = report_tool_call(
+            &mut app,
+            tool_call_report("w9:p9", "herdr:claude", "claude", "f", Start),
+        );
+        assert_eq!(missing["error"]["code"], "pane_not_found", "{missing}");
+    }
+
+    #[test]
+    fn agent_tool_call_methods_do_not_change_the_ui() {
+        for method in [
+            crate::api::schema::Method::PaneReportAgentToolCall(tool_call_report(
+                "w1:p1",
+                "herdr:claude",
+                "claude",
+                "a",
+                crate::api::schema::AgentToolCallPhase::Start,
+            )),
+            crate::api::schema::Method::AgentToolCalls(crate::api::schema::AgentToolCallsParams {
                 target: "w1:p1".into(),
                 after_seq: None,
             }),

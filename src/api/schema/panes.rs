@@ -491,6 +491,26 @@ pub struct PaneReportAgentReplyParams {
     pub truncated: bool,
 }
 
+/// The start or end of a tool call reported by an agent integration hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct PaneReportAgentToolCallParams {
+    pub pane_id: String,
+    pub source: String,
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session_id: Option<String>,
+    /// Pairs the start and end events of one call.
+    pub tool_call_id: String,
+    pub phase: super::agents::AgentToolCallPhase,
+    pub tool_name: String,
+    /// Short human-readable label; Herdr keeps at most 256 characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The call failed; only meaningful for `end`.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub failed: bool,
+}
+
 /// A permission request or question reported by an agent integration hook.
 /// The connection stays open until the request is answered or ends.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use crate::detect::{Agent, AgentState};
 use crate::terminal::agent_replies::{AgentReplies, AgentReplyReport};
 use crate::terminal::agent_requests::{AgentRequest, AgentRequestReport, AgentRequests};
+use crate::terminal::agent_tool_calls::{AgentToolCallReport, AgentToolCalls};
 use crate::terminal::TerminalId;
 
 #[path = "metadata.rs"]
@@ -160,6 +161,7 @@ pub struct TerminalState {
     pub last_agent_completion_seq: Option<u64>,
     agent_replies: AgentReplies,
     agent_requests: AgentRequests,
+    agent_tool_calls: AgentToolCalls,
     /// Requests of the current agent wait for an answer from outside the
     /// terminal; see [`TerminalState::enable_remote_answers`].
     remote_answers: bool,
@@ -202,6 +204,7 @@ impl TerminalState {
             last_agent_completion_seq: None,
             agent_replies: AgentReplies::default(),
             agent_requests: AgentRequests::default(),
+            agent_tool_calls: AgentToolCalls::default(),
             remote_answers: false,
             revision: 0,
             launch_argv: None,
@@ -2194,6 +2197,26 @@ impl TerminalState {
         Some(*next_request_id)
     }
 
+    /// Records a tool call event from an official integration and returns its seq.
+    ///
+    /// Reports that cannot belong to the pane's current agent are ignored.
+    /// Concurrent tool calls report independently, so the hook sequence is
+    /// neither checked nor consumed.
+    pub fn record_agent_tool_call(
+        &mut self,
+        report: AgentToolCallReport,
+        next_tool_call_seq: &mut u64,
+    ) -> Option<u64> {
+        if !self.hook_report_matches_current_agent(
+            &report.source,
+            &report.agent_label,
+            report.agent_session_id.as_deref(),
+        ) {
+            return None;
+        }
+        self.agent_tool_calls.record(report, next_tool_call_seq)
+    }
+
     /// Whether a hook report can come from the agent currently in this terminal.
     fn hook_report_matches_current_agent(
         &self,
@@ -2217,6 +2240,10 @@ impl TerminalState {
 
     pub fn agent_replies(&self) -> &AgentReplies {
         &self.agent_replies
+    }
+
+    pub fn agent_tool_calls(&self) -> &AgentToolCalls {
+        &self.agent_tool_calls
     }
 
     pub fn agent_requests(&self) -> &AgentRequests {
@@ -2258,10 +2285,11 @@ impl TerminalState {
         self.remote_answers = true;
     }
 
-    /// Drops the replies and pending requests that belong to the agent's
-    /// current conversation.
+    /// Drops the replies, tool calls, and pending requests that belong to the
+    /// agent's current conversation.
     pub fn clear_agent_conversation(&mut self) {
         self.agent_replies.clear();
+        self.agent_tool_calls.clear();
         self.agent_requests.clear();
     }
 
@@ -2582,6 +2610,160 @@ mod tests {
         terminal.clear_agent_runtime_identity_after_respawn();
 
         assert_eq!(terminal.agent_replies().latest_seq(), None);
+    }
+
+    fn agent_tool_call(
+        source: &str,
+        agent: &str,
+        tool_call_id: &str,
+        phase: crate::api::schema::AgentToolCallPhase,
+    ) -> AgentToolCallReport {
+        AgentToolCallReport {
+            source: source.into(),
+            agent_label: agent.into(),
+            agent_session_id: None,
+            tool_call_id: tool_call_id.into(),
+            phase,
+            tool_name: "Bash".into(),
+            title: None,
+            failed: false,
+        }
+    }
+
+    fn claude_tool_start(tool_call_id: &str) -> AgentToolCallReport {
+        agent_tool_call(
+            "herdr:claude",
+            "claude",
+            tool_call_id,
+            crate::api::schema::AgentToolCallPhase::Start,
+        )
+    }
+
+    fn tool_call_seqs(terminal: &TerminalState) -> Vec<u64> {
+        terminal
+            .agent_tool_calls()
+            .after(None)
+            .map(|event| event.seq)
+            .collect()
+    }
+
+    #[test]
+    fn agent_tool_calls_are_recorded_without_hook_sequence_ordering() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_agent_session_ref_for_session_start(
+            "herdr:claude".into(),
+            "claude".into(),
+            crate::agent_resume::AgentSessionRef::id("claude-session"),
+            Some(50),
+            Some("startup".into()),
+        );
+        let mut next_tool_call_seq = 0;
+
+        // Parallel calls report independently, so neither an older hook seq
+        // nor the lack of one rejects a report, and none consumes one.
+        for (tool_call_id, expected) in [("a", 1), ("b", 2), ("c", 3)] {
+            assert_eq!(
+                terminal.record_agent_tool_call(
+                    claude_tool_start(tool_call_id),
+                    &mut next_tool_call_seq
+                ),
+                Some(expected)
+            );
+        }
+        assert_eq!(next_tool_call_seq, 3);
+        assert_eq!(terminal.agent_tool_calls().latest_seq(), Some(3));
+        assert_eq!(
+            terminal.record_agent_reply(claude_reply(51, "after tool calls"), &mut 0),
+            Some(1),
+            "tool calls leave the hook sequence to other reports"
+        );
+    }
+
+    #[test]
+    fn agent_tool_calls_are_ignored_without_a_matching_official_agent() {
+        use crate::api::schema::AgentToolCallPhase::Start;
+        let mut next_tool_call_seq = 0;
+
+        let mut shell = test_terminal();
+        assert_eq!(
+            shell.record_agent_tool_call(claude_tool_start("a"), &mut next_tool_call_seq),
+            None
+        );
+
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        for report in [
+            agent_tool_call("custom:claude", "claude", "a", Start),
+            agent_tool_call("herdr:codex", "claude", "b", Start),
+            agent_tool_call("herdr:codex", "codex", "c", Start),
+        ] {
+            assert_eq!(
+                terminal.record_agent_tool_call(report.clone(), &mut next_tool_call_seq),
+                None,
+                "{report:?}"
+            );
+        }
+
+        assert_eq!(next_tool_call_seq, 0);
+        assert_eq!(terminal.agent_tool_calls().latest_seq(), None);
+    }
+
+    #[test]
+    fn agent_tool_call_session_id_must_match_the_current_session() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        terminal.set_persisted_agent_session(crate::agent_resume::PersistedAgentSession {
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            session_ref: crate::agent_resume::AgentSessionRef::id("current").unwrap(),
+        });
+        let mut next_tool_call_seq = 0;
+        let with_session = |tool_call_id: &str, session: &str| AgentToolCallReport {
+            agent_session_id: Some(session.into()),
+            ..claude_tool_start(tool_call_id)
+        };
+
+        assert_eq!(
+            terminal.record_agent_tool_call(with_session("a", "previous"), &mut next_tool_call_seq),
+            None
+        );
+        assert_eq!(
+            terminal.record_agent_tool_call(with_session("b", "current"), &mut next_tool_call_seq),
+            Some(1)
+        );
+        assert_eq!(
+            terminal.record_agent_tool_call(claude_tool_start("c"), &mut next_tool_call_seq),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn agent_tool_calls_are_cleared_with_the_conversation_and_after_respawn() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_tool_call_seq = 0;
+        terminal.record_agent_tool_call(claude_tool_start("a"), &mut next_tool_call_seq);
+
+        terminal.clear_agent_conversation();
+        assert!(tool_call_seqs(&terminal).is_empty());
+
+        terminal.record_agent_tool_call(claude_tool_start("b"), &mut next_tool_call_seq);
+        assert_eq!(tool_call_seqs(&terminal), [2]);
+        terminal.clear_agent_runtime_identity_after_respawn();
+        assert!(tool_call_seqs(&terminal).is_empty());
+    }
+
+    #[test]
+    fn agent_tool_calls_survive_the_end_of_a_turn() {
+        let mut terminal = test_terminal();
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Working);
+        let mut next_tool_call_seq = 0;
+        terminal.record_agent_tool_call(claude_tool_start("a"), &mut next_tool_call_seq);
+
+        terminal.set_detected_state(Some(Agent::Claude), AgentState::Idle);
+
+        assert_eq!(tool_call_seqs(&terminal), [1]);
     }
 
     fn agent_request(source: &str, agent: &str, tool_name: &str) -> AgentRequestReport {

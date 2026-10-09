@@ -14,9 +14,11 @@ cat >"$hook_input_file" 2>/dev/null || true
 
 # Herdr decides whether a permission request waits: it ends the report at once
 # unless a client turned remote answers on for the pane's agent, since Codex
-# shows no approval prompt of its own while the hook waits.
+# shows no approval prompt of its own while the hook waits. `tool` runs on
+# PreToolUse and PostToolUse and reports the start or end of the call; it never
+# reports agent state and prints nothing, so it cannot change the call.
 case "$action" in
-  session|reply|permission) ;;
+  session|reply|permission|tool) ;;
   *) exit 0 ;;
 esac
 
@@ -45,6 +47,18 @@ max_preview_bytes = 8 * 1024
 permission_timeout_ms = 10 * 60 * 1000
 permission_socket_timeout = permission_timeout_ms / 1000 + 30
 default_deny_message = "The user denied this permission request."
+max_title_chars = 120
+# Codex has no failure event: a failed apply_patch or MCP call has no end.
+tool_phases = {"PreToolUse": "start", "PostToolUse": "end"}
+# Plan updates are bookkeeping, not work worth showing as a step.
+bookkeeping_tools = {"update_plan"}
+# A tool's title is the first of these input fields it has.
+title_fields = (
+    "description", "command", "file_path", "notebook_path", "pattern",
+    "url", "query", "skill", "path", "prompt", "message",
+)
+path_fields = {"file_path", "notebook_path", "path"}
+patch_file_markers = ("*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: ")
 action = os.environ.get("HERDR_ACTION", "")
 pane_id = os.environ.get("HERDR_PANE_ID")
 socket_path = os.environ.get("HERDR_SOCKET_PATH")
@@ -80,6 +94,76 @@ def input_preview(tool_input):
     if isinstance(command, str):
         return utf8_prefix(command, max_preview_bytes)
     return utf8_prefix(json.dumps(tool_input, ensure_ascii=False, indent=2), max_preview_bytes)
+
+
+def one_line(value):
+    """Collapses whitespace and shortens text to a title, or returns None."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join(value.split())
+    if len(text) > max_title_chars:
+        text = text[: max_title_chars - 1].rstrip() + "\u2026"
+    return text or None
+
+
+def display_path(path):
+    """Shows a path inside the working directory relative to it."""
+    cwd = hook_input.get("cwd")
+    root = cwd.rstrip("/") if isinstance(cwd, str) else ""
+    if root and path.startswith(root + "/"):
+        return path[len(root) + 1:]
+    return path
+
+
+def patch_files(patch):
+    """Lists the files an apply_patch input touches, in patch order."""
+    files = []
+    for line in patch.splitlines() if isinstance(patch, str) else []:
+        for marker in patch_file_markers:
+            if line.startswith(marker):
+                path = display_path(line[len(marker):].strip())
+                if path and path not in files:
+                    files.append(path)
+    return ", ".join(files)
+
+
+def tool_title(tool_name, tool_input):
+    if tool_name.startswith("mcp__"):
+        return one_line("/".join(tool_name[len("mcp__"):].split("__", 1)))
+    if not isinstance(tool_input, dict):
+        return None
+    # The patch text is the command; the files it touches name the change.
+    if tool_name == "apply_patch":
+        return one_line(patch_files(tool_input.get("command")))
+    for field in title_fields:
+        value = tool_input.get(field)
+        if isinstance(value, str) and value.strip():
+            return one_line(display_path(value) if field in path_fields else value)
+    return None
+
+
+def tool_call_params():
+    """Maps a tool event to tool call report params, or None to skip it."""
+    tool_name = hook_input.get("tool_name")
+    tool_use_id = hook_input.get("tool_use_id")
+    if not isinstance(tool_name, str) or not tool_name or tool_name in bookkeeping_tools:
+        return None
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        return None
+    params = {
+        "pane_id": pane_id,
+        "source": source,
+        "agent": "codex",
+    }
+    if agent_session_id:
+        params["agent_session_id"] = agent_session_id
+    params["tool_call_id"] = tool_use_id
+    params["phase"] = tool_phases[hook_event_name]
+    params["tool_name"] = tool_name
+    title = tool_title(tool_name, hook_input.get("tool_input"))
+    if title:
+        params["title"] = title
+    return params
 
 
 def wait_for_answer(request, timeout):
@@ -163,6 +247,10 @@ if action == "reply":
 elif action == "permission":
     if hook_event_name != "PermissionRequest":
         raise SystemExit(0)
+elif action == "tool":
+    # Subagents share the parent's session id and add their own agent id.
+    if hook_event_name not in tool_phases or hook_input.get("agent_id"):
+        raise SystemExit(0)
 elif hook_event_name and hook_event_name != "SessionStart":
     raise SystemExit(0)
 
@@ -211,6 +299,15 @@ elif action == "reply":
         "params": params,
     }
     socket_timeout = 2.0
+elif action == "tool":
+    params = tool_call_params()
+    if params is None:
+        raise SystemExit(0)
+    request = {
+        "id": request_id,
+        "method": "pane.report_agent_tool_call",
+        "params": params,
+    }
 elif agent_session_id:
     transcript_path = hook_input.get("transcript_path")
     if not isinstance(transcript_path, str) or not transcript_path.strip():

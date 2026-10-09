@@ -356,6 +356,7 @@ fn agent_reply_requests_and_response_round_trip() {
                 state_change_seq: 3,
                 completion_seq: None,
                 reply_seq: Some(2),
+                tool_call_seq: None,
                 request_ids: Vec::new(),
                 remote_answers: false,
                 cwd: None,
@@ -391,6 +392,126 @@ fn agent_reply_requests_and_response_round_trip() {
     let json = serde_json::to_value(&agent).unwrap();
     assert!(json.get("reply_seq").is_none());
     assert!(json.get("request_ids").is_none());
+}
+
+#[test]
+fn agent_tool_call_requests_and_response_round_trip() {
+    let report = Request {
+        id: "req_tool_call".into(),
+        method: Method::PaneReportAgentToolCall(PaneReportAgentToolCallParams {
+            pane_id: "w1:p1".into(),
+            source: "herdr:claude".into(),
+            agent: "claude".into(),
+            agent_session_id: Some("claude-session".into()),
+            tool_call_id: "toolu_1".into(),
+            phase: AgentToolCallPhase::End,
+            tool_name: "Bash".into(),
+            title: Some("运行测试".into()),
+            failed: true,
+        }),
+    };
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "id": "req_tool_call",
+            "method": "pane.report_agent_tool_call",
+            "params": {
+                "pane_id": "w1:p1",
+                "source": "herdr:claude",
+                "agent": "claude",
+                "agent_session_id": "claude-session",
+                "tool_call_id": "toolu_1",
+                "phase": "end",
+                "tool_name": "Bash",
+                "title": "运行测试",
+                "failed": true,
+            },
+        })
+    );
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), report);
+
+    let minimal: Request = serde_json::from_value(serde_json::json!({
+        "id": "req_min",
+        "method": "pane.report_agent_tool_call",
+        "params": {
+            "pane_id": "w1:p1",
+            "source": "herdr:codex",
+            "agent": "codex",
+            "tool_call_id": "call_1",
+            "phase": "start",
+            "tool_name": "apply_patch",
+        },
+    }))
+    .unwrap();
+    let Method::PaneReportAgentToolCall(params) = minimal.method else {
+        panic!("expected a tool call report");
+    };
+    assert_eq!(params.phase, AgentToolCallPhase::Start);
+    assert_eq!(params.agent_session_id, None);
+    assert_eq!(params.title, None);
+    assert!(!params.failed);
+    assert!(serde_json::from_value::<Request>(serde_json::json!({
+        "id": "req_bad_phase",
+        "method": "pane.report_agent_tool_call",
+        "params": {
+            "pane_id": "w1:p1",
+            "source": "herdr:codex",
+            "agent": "codex",
+            "tool_call_id": "call_1",
+            "phase": "running",
+            "tool_name": "Bash",
+        },
+    }))
+    .is_err());
+
+    for after_seq in [None, Some(7)] {
+        let tool_calls = Request {
+            id: "req_tool_calls".into(),
+            method: Method::AgentToolCalls(AgentToolCallsParams {
+                target: "reviewer".into(),
+                after_seq,
+            }),
+        };
+        let json = serde_json::to_value(&tool_calls).unwrap();
+        assert_eq!(json["method"], "agent.tool_calls");
+        assert_eq!(
+            json["params"].get("after_seq").is_some(),
+            after_seq.is_some()
+        );
+        assert_eq!(serde_json::from_value::<Request>(json).unwrap(), tool_calls);
+    }
+
+    let events = vec![
+        AgentToolCallInfo {
+            seq: 1,
+            tool_call_id: "toolu_1".into(),
+            phase: AgentToolCallPhase::Start,
+            tool_name: "Read".into(),
+            title: Some("src/main.rs".into()),
+            failed: false,
+        },
+        AgentToolCallInfo {
+            seq: 2,
+            tool_call_id: "toolu_1".into(),
+            phase: AgentToolCallPhase::End,
+            tool_name: "Read".into(),
+            title: None,
+            failed: true,
+        },
+    ];
+    let json = serde_json::to_value(&events).unwrap();
+    assert_eq!(
+        json,
+        serde_json::json!([
+            {"seq": 1, "tool_call_id": "toolu_1", "phase": "start", "tool_name": "Read", "title": "src/main.rs"},
+            {"seq": 2, "tool_call_id": "toolu_1", "phase": "end", "tool_name": "Read", "failed": true},
+        ])
+    );
+    assert_eq!(
+        serde_json::from_value::<Vec<AgentToolCallInfo>>(json).unwrap(),
+        events
+    );
 }
 
 #[test]
@@ -664,6 +785,7 @@ fn agent_request_results_round_trip() {
                 state_change_seq: 3,
                 completion_seq: None,
                 reply_seq: None,
+                tool_call_seq: None,
                 request_ids: vec![4],
                 remote_answers: false,
                 cwd: None,
