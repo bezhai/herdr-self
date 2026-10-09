@@ -28,7 +28,7 @@ function registrationFixture(register,options={}){
 const ready=o=>o.onQRCodeReady({url:'https://open.feishu.cn/page/launcher?user_code=test',expireIn:600});
 test('registration stores credentials server-side, uses minimal bot scopes and allows only the creator',async()=>{
  const f=registrationFixture(async o=>{assert.equal(o.createOnly,false);assert.equal(o.addons.preset,false);assert.equal(o.addons.scopes.user,undefined);assert.deepEqual(o.addons.events.items.tenant,['im.message.receive_v1']);
-  assert.deepEqual(o.addons.scopes.tenant,['im:message:send_as_bot','im:message.p2p_msg:readonly','im:message.group_at_msg:readonly','application:bot.basic_info:read','im:message.reactions:write_only']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
+  assert.deepEqual(o.addons.scopes.tenant,['im:message:send_as_bot','im:message.p2p_msg:readonly','im:message.group_at_msg:readonly','application:bot.basic_info:read','im:message.reactions:write_only','application:app_slash_command:read','application:app_slash_command:write']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
  try{f.registrations.start({name:'test'});await f.registrations.current.done;assert.equal(f.registrations.status().status,'completed');const a=new Store(f.store.dir).data.apps[0];assert.equal(a.appSecret,'private-test-secret');assert.deepEqual(a.allowedUsers,['ou_owner']);assert.equal(a.enabled,false);assert.equal(a.domain,'feishu');assert.ok(!JSON.stringify(f.registrations.status()).includes('private-test-secret'));assert.equal(f.registrations.status().url,undefined);assert.equal(fs.statSync(path.join(f.store.dir,'state.json')).mode&0o777,0o600);}finally{f.close();}
 });
 test('duplicate starts reuse pending flow; cancellation fences a late SDK result and stale cancel',async()=>{
@@ -202,9 +202,10 @@ const coded=(code,message)=>Object.assign(Error(message),{code});
 // `pane remote-answers <pane> on|off` sets or clears remote_answers on the agent of that pane; turning it on for a pane without an agent fails.
 // `api snapshot` returns the agents with h.workspaces, h.tabs and h.panes, the entries that only carry what Bridge reads (ids and labels).
 // h.hosts[machine id], when present, is another machine with its own agents, retained replies and requests; every call to a host with
-// down fails with that message.
+// down fails with that message. h.toolCalls[paneId] holds the tool call records Herdr keeps for the agent of that pane; `agent send-keys`
+// only succeeds.
 function fakeHerdr(){
- const h={calls:[],timeouts:[],machines:[],workspaces:[],tabs:[],panes:[],agents:[],retained:{},requests:{},hosts:{},made:[],created:0,opened:0,on:{}};
+ const h={calls:[],timeouts:[],machines:[],workspaces:[],tabs:[],panes:[],agents:[],retained:{},requests:{},toolCalls:{},hosts:{},made:[],created:0,opened:0,on:{}};
  const run=(args,host=h)=>{
   const [group,verb]=args;
   if(group==='workspace'&&verb==='list')return {type:'workspace_list',workspaces:h.workspaces};
@@ -217,6 +218,8 @@ function fakeHerdr(){
   if(group==='agent'&&verb==='prompt')return {type:'agent_prompted',agent:host.agents.find(a=>a.pane_id===args[2])};
   if(group==='agent'&&verb==='replies'){const after=args[3]==='--after'?Number(args[4]):0;return {type:'agent_replies',agent:host.agents.find(a=>a.pane_id===args[2]),replies:(host.retained[args[2]]||[]).filter(r=>r.seq>after)};}
   if(group==='agent'&&verb==='requests')return {type:'agent_requests',agent:host.agents.find(a=>a.pane_id===args[2]),requests:host.requests[args[2]]||[]};
+  if(group==='agent'&&verb==='tool-calls'){const after=args[3]==='--after'?Number(args[4]):0;return {type:'agent_tool_calls',agent:host.agents.find(a=>a.pane_id===args[2]),tool_calls:(host.toolCalls?.[args[2]]||[]).filter(c=>c.seq>after)};}
+  if(group==='agent'&&verb==='send-keys')return {type:'ok'};
   if(group==='agent'&&verb==='answer'){
    const waiting=host.requests[args[2]]||[],r=waiting.find(x=>String(x.id)===args[3]);if(!r)throw coded('request_not_found','request not found');
    host.requests[args[2]]=waiting.filter(x=>x!==r);return {type:'agent_answered',agent:host.agents.find(a=>a.pane_id===args[2])};
@@ -236,18 +239,31 @@ function fakeHerdr(){
 }
 // Calls as [machine id, ...args].
 const callsOn=f=>f.h.calls.map((c,i)=>[f.h.machines[i],...c]);
-// The binding's machine m is cpu2; machines are further machines of the store.
-function topicFixture({binding,machine,machines=[]}={}){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],reacted=[],unreacted=[],updated=[],m={id:'m',name:'cpu2',enabled:true,...machine};
- store.data.machines=[m,...machines];store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];let sent=0;
+const cotPath='/open-apis/im/v1/message_cot';
+// The binding's machine m is cpu2; machines are further machines of the store. f.api records the Feishu OpenAPI requests of the topics,
+// the COT calls: a COT is created as c<n> in message om_cot_<n>. With cot false Feishu refuses every request, like for an app without the
+// scope. restart() reads the state file into a new Topics with the same fakes, as after a Bridge restart.
+function topicFixture({binding,machine,machines=[],cot=true}={}){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],reacted=[],unreacted=[],updated=[],api=[],m={id:'m',name:'cpu2',enabled:true,...machine};
+ store.data.machines=[m,...machines];store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];let sent=0,cots=0;
  // Every reply resolves to the next message id om_bot_<n>.
- const topics=new Topics(store,{herdr:h.herdr,makeDirectory:h.makeDirectory,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
+ const deps={herdr:h.herdr,makeDirectory:h.makeDirectory,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
   reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);return 'om_bot_'+ ++sent;},
   react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);},
-  updateCard:async(a,messageId,card)=>{updated.push([a.id,messageId,card]);}});
+  updateCard:async(a,messageId,card)=>{updated.push([a.id,messageId,card]);},
+  request:async(a,o)=>{api.push(o);await null;if(!cot)throw Object.assign(Error('飞书接口错误 99991672：Access denied'),{code:99991672});return o.method==='POST'&&o.url===cotPath?{cot_id:'c'+ ++cots,message_id:'om_cot_'+cots}:{};}};
+ const topics=new Topics(store,deps);
  const send=msg=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg});
- return {dir,store,h,m,topics,replies,reacted,unreacted,updated,b,send,close(){fs.rmSync(dir,{recursive:true});}};
+ const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
+ return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
 }
+// The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
+// id, reason].
+const cotLog=f=>f.api.map(o=>o.method==='PUT'?['update',o.data.cot_id,...o.data.events.map(e=>[e.event_type,JSON.parse(e.content)])]
+ :o.url.startsWith(cotPath+'/complete/')?['complete',o.url.slice(cotPath.length+'/complete/'.length),o.params.reason]:['create',o.data.origin_message_id]);
+const cotLogs=f=>f.store.data.logs.filter(l=>l.kind==='执行过程').map(l=>[l.level,l.message]);
+// An agent list with the agents of fixture f as they are, changed by fields.
+const list=(f,fields)=>f.h.agents.map(a=>({...a,...fields}));
 const later=ms=>new Promise(r=>setTimeout(r,ms));
 test('a new topic creates the binding workspace, names its root tab after the topic, starts the agent there with a longer timeout, turns on remote answers for its pane and prompts it',async()=>{
  const f=topicFixture(),text='请帮我修复登录页在移动端点击提交按钮后没有任何反应的问题',title=text.slice(0,24);try{
@@ -256,7 +272,8 @@ test('a new topic creates the binding workspace, names its root tab after the to
   assert.equal(agentName,'feishu-'+id.slice(0,8));assert.match(agentName,/^feishu-[0-9a-f]{8}$/);assert.ok(createdAt>0);
   assert.deepEqual(f.h.calls,[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w1:t1',title],['agent','start',agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],['pane','remote-answers','w1:p1','on'],['agent','prompt','w1:p1',text]]);
   assert.deepEqual(f.h.timeouts,[undefined,undefined,undefined,70000,undefined,undefined]);assert.deepEqual([...new Set(f.h.machines)],['m']);assert.equal(f.h.agents[0].remote_answers,true);
-  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[{messageId:'om_1',reactionId:'r_om_1',stateSeq:1}],cards:[]});
+  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[],cards:[],
+   cot:{cotId:'c1',messageId:'om_cot_1',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false}});
   assert.equal(new Store(f.dir).data.bindings[0].workspaceId,'w1');assert.equal(new Store(f.dir).data.topics[0].state,'ready');
   assert.deepEqual(f.replies,[]);assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['话题会话','info',`个人助手：已在 cpu2 启动 ${agentName}`],['消息投递','info',`bot → 个人助手：已发送到 ${agentName}`]]);
  }finally{f.close();}
@@ -270,7 +287,8 @@ test('another topic opens a tab in the same workspace and turns on remote answer
   f.h.calls.length=0;await f.send({messageId:'om_3',rootId:'om_1',content:'继续第一个'});
   assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','继续第一个']]);
   assert.equal(f.store.data.topics.length,2);assert.deepEqual(f.store.data.topics[0].messageIds,['om_1','om_3']);assert.deepEqual(f.replies,[]);
-  assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>t.reactions.map(r=>r.messageId)),[['om_1','om_3'],['om_2']]);
+  // The first prompted message of each topic has its COT instead of a reaction.
+  assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>[t.cot.origin,t.reactions.map(r=>r.messageId)]),[['om_1',['om_3']],['om_2',[]]]);
  }finally{f.close();}
 });
 test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding starts its agent with -- --no-daemon; an Antigravity binding passes nothing on',async()=>{
@@ -413,9 +431,10 @@ test('topics still starting when Bridge restarts are marked failed',()=>{
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 
-// A ready topic whose agent runs in w1:p1; snapshot(seq) is an agent list in which that agent reports reply_seq seq.
-async function readyTopic(){
- const f=topicFixture();await f.send({messageId:'om_1',content:'one'});f.h.calls.length=0;f.replies.length=0;
+// A ready topic whose agent runs in w1:p1, with the COT c1 of its first message om_1 open unless the fixture options refuse it;
+// snapshot(seq) is an agent list in which that agent reports reply_seq seq.
+async function readyTopic(options){
+ const f=topicFixture(options);await f.send({messageId:'om_1',content:'one'});f.h.calls.length=0;f.replies.length=0;f.api.length=0;
  return {...f,t:f.store.data.topics[0],snapshot:reply_seq=>f.h.agents.map(a=>({...a,reply_seq}))};
 }
 const forwarded=f=>f.store.data.logs.filter(l=>l.kind==='回复转发').map(l=>[l.level,l.message]);
@@ -550,24 +569,25 @@ test('a queued reply fetch whose binding was removed meanwhile sends nothing',as
 });
 
 const onDisk=f=>new Store(f.dir).data.topics[0].reactions;
-test('every message a topic accepts gets a OneSecond reaction at once, even while an earlier message is still starting the agent; no start notice is sent',async()=>{
+test('every message a topic accepts gets a OneSecond reaction at once, even while an earlier message is still starting the agent; the first one prompted trades it for its COT; no start notice is sent',async()=>{
  const f=topicFixture();try{
   let during;f.h.on['agent start']=async(args,run)=>{await later(20);during=f.reacted.map(r=>r[1]);return run(args);};
   await Promise.all([f.send({messageId:'om_1',content:'one'}),f.send({messageId:'om_2',rootId:'om_1',content:'two'})]);
   assert.deepEqual(during,['om_1','om_2']);assert.deepEqual(f.reacted,[['a','om_1','OneSecond'],['a','om_2','OneSecond']]);
-  assert.deepEqual(f.replies,[]);assert.deepEqual(f.unreacted,[]);assert.deepEqual(onDisk(f).map(r=>r.messageId),['om_1','om_2']);
+  assert.deepEqual(f.replies,[]);assert.deepEqual(f.unreacted,[['a','om_1','r_om_1']]);assert.deepEqual(onDisk(f).map(r=>r.messageId),['om_2']);
+  assert.deepEqual(cotLog(f).filter(c=>c[0]==='create'),[['create','om_1']]);
   await f.send({messageId:'om_1',content:'one'});assert.equal(f.reacted.length,2);
  }finally{f.close();}
 });
 test('a reaction is recorded on disk without a state seq, which becomes the state_change_seq that the prompt returned',async()=>{
- const f=topicFixture();try{
+ const f=topicFixture({cot:false});try{
   let before;f.h.on['agent prompt']=(args,run)=>{before=onDisk(f);const r=run(args);return {...r,agent:{...r.agent,state_change_seq:7}};};
   await f.send({messageId:'om_1',content:'one'});
   assert.deepEqual(before,[{messageId:'om_1',reactionId:'r_om_1',stateSeq:null}]);assert.deepEqual(onDisk(f),[{messageId:'om_1',reactionId:'r_om_1',stateSeq:7}]);assert.deepEqual(f.unreacted,[]);
  }finally{f.close();}
 });
 test('sync removes the reaction of a turn that has ended: the agent is idle or done and has changed state since the prompt',async()=>{
- const f=await readyTopic();try{
+ const f=await readyTopic({cot:false});try{
   const agent=(agent_status,state_change_seq)=>[{...f.h.agents[0],agent_status,state_change_seq}];
   // A message still waiting for its prompt keeps its reaction whatever the agent does.
   f.t.reactions.push({messageId:'om_waiting',reactionId:'r_waiting',stateSeq:null});
@@ -581,7 +601,7 @@ test('sync removes the reaction of a turn that has ended: the agent is idle or d
  }finally{f.close();}
 });
 test('when a snapshot has new replies and ends a turn, the replies are sent before the reaction is removed',async()=>{
- const f=await readyTopic();try{
+ const f=await readyTopic({cot:false});try{
   const events=[];f.topics.reply=async(a,chatId,rootId,{card})=>{events.push('reply '+markdownIn(card));};f.topics.unreact=async(a,messageId)=>{events.push('unreact '+messageId);};
   f.h.retained['w1:p1']=[{seq:1,text:'a'},{seq:2,text:'b'}];
   await f.topics.sync(f.m,f.h.agents.map(a=>({...a,agent_status:'done',state_change_seq:3,reply_seq:2})));
@@ -600,7 +620,7 @@ test('a message that is not prompted loses its reaction: failed start, blocked a
  }finally{f.close();}
 });
 test('a topic closed because its agent is gone loses every reaction',async()=>{
- const f=await readyTopic();try{
+ const f=await readyTopic({cot:false});try{
   await f.send({messageId:'om_2',rootId:'om_1',content:'two'});f.t.reactions.push({messageId:'om_waiting',reactionId:'r_waiting',stateSeq:null});
   f.h.agents.length=0;await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
   assert.equal(f.t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，请发起新话题')]);
@@ -623,7 +643,7 @@ test('a message still settles without rejecting when its turn seq cannot be save
  }finally{f.close();}
 });
 test('a removal Feishu refuses is logged once and its record is dropped anyway',async()=>{
- const f=await readyTopic();try{
+ const f=await readyTopic({cot:false});try{
   let calls=0;f.topics.unreact=async()=>{calls++;throw Error('飞书未连接');};const done=f.h.agents.map(a=>({...a,agent_status:'done',state_change_seq:2}));
   await f.topics.sync(f.m,done);await f.topics.sync(f.m,done);
   assert.equal(calls,1);assert.deepEqual(onDisk(f),[]);assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='消息表情').map(l=>[l.level,l.message]),[['error',`${f.t.agentName}：未能取消表情，飞书未连接`]]);
@@ -852,10 +872,188 @@ test('a prompt that meets a blocked agent posts its own notice for that episode,
  }finally{f.close();}
 });
 
-// Adoption. On cpu2 (machine m), besides the ready bridge topic in w1:p1, workspace w2 (herdr) holds: in tab 1, a Claude with the Herdr
-// name review, a session and two retained replies in the pane labelled 赤尾重构; in tab 出题, a Codex attached to its background app-server
-// without a session or replies in a pane without a label; and a pane without an agent. cpu1 cannot be reached, gpu1 runs no agent and the
-// disconnected gpu2 is left out.
+// COT. The events of the run of the ready topic om_1 that its first message started, as cotLog shows them: a step per tool call that
+// opens with its title or tool name and an icon and closes as done or failed, and a line of text for the status.
+const run={threadId:'om_1',runId:'om_1'};
+const opened=(id,name,title,icon)=>[['TOOL_CALL_START',{toolCallId:id,toolCallName:name,title,icon}],['TOOL_CALL_END',{toolCallId:id}]];
+const closed=(id,failed=false)=>['TOOL_CALL_RESULT',{messageId:'result-'+id,toolCallId:id,role:'tool',content:failed?'失败':'完成',isError:failed}];
+const said=(id,text)=>[['TEXT_MESSAGE_START',{messageId:id,role:'assistant'}],['TEXT_MESSAGE_CONTENT',{messageId:id,delta:text}],['TEXT_MESSAGE_END',{messageId:id}]];
+const stopped=f=>f.store.data.logs.filter(l=>l.kind==='话题停止').map(l=>[l.level,l.message]);
+test('a prompted message gets a COT in the topic thread, created after the prompt, which takes the place of its reaction and is kept in the topic record; the COT shows its run started',async()=>{
+ const f=topicFixture();try{
+  let prompted;const request=f.topics.request;f.topics.request=async(a,o)=>{prompted??=f.h.calls.some(c=>c[1]==='prompt');return request(a,o);};
+  await f.send({messageId:'om_1',content:'one'});
+  assert.equal(prompted,true);
+  assert.deepEqual(f.api[0],{method:'POST',url:cotPath,params:{receive_id_type:'chat_id'},data:{receive_id:'oc_1',origin_message_id:'om_1',reply_in_thread:true}});
+  const update=f.api[1];assert.deepEqual([update.method,update.url,update.data.message_id,update.data.cot_id],['PUT',cotPath,'om_cot_1','c1']);
+  // Every event carries its AG-UI event as JSON and a timestamp in ms.
+  assert.ok(update.data.events.every(e=>Object.keys(e).join()==='event_type,content,timestamp'&&typeof e.content==='string'&&Math.abs(e.timestamp-Date.now())<60000));
+  assert.deepEqual(cotLog(f),[['create','om_1'],['update','c1',['RUN_STARTED',run]]]);
+  assert.deepEqual(new Store(f.dir).data.topics[0].cot,{cotId:'c1',messageId:'om_cot_1',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false});
+  // The reaction marked the message at once; the COT takes its place.
+  assert.deepEqual(f.reacted.map(r=>r[1]),['om_1']);assert.deepEqual(f.unreacted.map(r=>r[1]),['om_1']);assert.deepEqual(onDisk(f),[]);assert.deepEqual(cotLogs(f),[]);
+ }finally{f.close();}
+});
+test('the COT starts after the tool calls that the agent made before the prompt',async()=>{
+ const f=topicFixture();try{
+  f.h.on['agent prompt']=(args,run)=>{const r=run(args);return {...r,agent:{...r.agent,tool_call_seq:12}};};
+  await f.send({messageId:'om_1',content:'one'});assert.equal(f.store.data.topics[0].cot.toolSeq,12);
+ }finally{f.close();}
+});
+test('a message prompted while the COT of an earlier one is open keeps its reaction until its turn ends; a message that is not prompted gets no COT',async()=>{
+ const f=await readyTopic();try{
+  await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
+  assert.deepEqual(f.api,[]);assert.deepEqual(onDisk(f),[{messageId:'om_2',reactionId:'r_om_2',stateSeq:1}]);assert.equal(f.t.cot.origin,'om_1');
+  delete f.t.cot;f.h.on['agent prompt']=()=>{throw coded('agent_blocked','agent w1:p1 is blocked');};
+  await f.send({messageId:'om_3',rootId:'om_1',content:'three'});assert.deepEqual(f.api,[]);assert.equal(f.t.cot,undefined);
+ }finally{f.close();}
+});
+test('a COT that Feishu refuses is logged and leaves the message its reaction until its turn ends, while delivery and replies go on; the next prompted message tries again',async()=>{
+ const f=topicFixture({cot:false});try{
+  await f.send({messageId:'om_1',content:'one'});const t=f.store.data.topics[0];
+  assert.deepEqual(cotLog(f),[['create','om_1']]);assert.equal(t.cot,undefined);assert.deepEqual(onDisk(f),[{messageId:'om_1',reactionId:'r_om_1',stateSeq:1}]);
+  assert.deepEqual(cotLogs(f),[['error',`${t.agentName}：未能创建 COT，飞书接口错误 99991672：Access denied`]]);assert.equal(f.h.calls.filter(c=>c[1]==='prompt').length,1);
+  f.h.retained['w1:p1']=[{seq:1,text:'done'}];await f.topics.sync(f.m,list(f,{agent_status:'done',state_change_seq:2,reply_seq:1}));
+  assert.deepEqual(f.replies.map(r=>r[3]),[replyOf('done')]);assert.deepEqual(f.unreacted.map(r=>r[1]),['om_1']);assert.equal(f.api.length,1);
+  await f.send({messageId:'om_2',rootId:'om_1',content:'two'});assert.deepEqual(cotLog(f),[['create','om_1'],['create','om_2']]);
+ }finally{f.close();}
+});
+test('the tool calls of the agent become steps of the COT in seq order across lists: a start opens a step with its title or else its tool name and an icon, an end closes it as done or failed; the seq is on disk',async()=>{
+ const f=await readyTopic();try{
+  const calls=f.h.toolCalls['w1:p1']=[{seq:3,tool_call_id:'t1',phase:'start',tool_name:'Bash',title:'npm test'},{seq:4,tool_call_id:'t2',phase:'start',tool_name:'Read',title:'src/a.rs'},{seq:6,tool_call_id:'t1',phase:'end',tool_name:'Bash'}];
+  const working=seq=>list(f,{agent_status:'working',state_change_seq:2,tool_call_seq:seq});
+  await f.topics.sync(f.m,working(6));
+  assert.deepEqual(f.h.calls,[['agent','tool-calls','w1:p1','--after','0']]);
+  assert.deepEqual(cotLog(f),[['update','c1',...opened('t1','Bash','npm test','bash'),...opened('t2','Read','src/a.rs','read'),closed('t1')]]);assert.equal(new Store(f.dir).data.topics[0].cot.toolSeq,6);
+  // The same list again shows nothing new.
+  await f.topics.sync(f.m,working(6));assert.equal(f.h.calls.length,1);assert.equal(f.api.length,1);
+  calls.push({seq:9,tool_call_id:'t2',phase:'end',tool_name:'Read',failed:true},{seq:10,tool_call_id:'t3',phase:'start',tool_name:'Grep'},{seq:11,tool_call_id:'t4',phase:'start',tool_name:'apply_patch',title:'a.rs'},
+   {seq:12,tool_call_id:'t5',phase:'start',tool_name:'shell',title:'ls'},{seq:13,tool_call_id:'t6',phase:'start',tool_name:'Task',title:'审查改动'},{seq:14,tool_call_id:'t7',phase:'start',tool_name:'Edit',title:'很'.repeat(300)});
+  f.h.calls.length=0;f.api.length=0;await f.topics.sync(f.m,working(14));
+  assert.deepEqual(f.h.calls,[['agent','tool-calls','w1:p1','--after','6']]);
+  assert.deepEqual(cotLog(f),[['update','c1',closed('t2',true),...opened('t3','Grep','Grep','search'),...opened('t4','apply_patch','a.rs','write'),...opened('t5','shell','ls','bash'),...opened('t6','Task','审查改动','default'),...opened('t7','Edit','很'.repeat(199)+'…','write')]]);
+  assert.equal(f.t.cot.toolSeq,14);assert.deepEqual(cotLogs(f),[]);
+ }finally{f.close();}
+});
+test('a tool call seq below the stored one, after Herdr restarted or handed off and counts from 1 again, fetches all tool calls and shows those up to the list; more than 50 events go out in updates of at most 50, in order',async()=>{
+ const f=await readyTopic();try{
+  f.t.cot.toolSeq=40;f.h.toolCalls['w1:p1']=Array.from({length:31},(_,i)=>({seq:i+1,tool_call_id:'t'+(i+1),phase:'start',tool_name:'Bash',title:'step '+(i+1)}));
+  await f.topics.sync(f.m,list(f,{agent_status:'working',state_change_seq:2,tool_call_seq:30}));
+  assert.deepEqual(f.h.calls,[['agent','tool-calls','w1:p1']]);
+  const batches=f.api.map(o=>o.data.events);assert.deepEqual(batches.map(b=>b.length),[50,10]);
+  assert.deepEqual(cotLog(f).flatMap(u=>u.slice(2)),Array.from({length:30},(_,i)=>opened('t'+(i+1),'Bash','step '+(i+1),'bash')).flat());
+  const stamps=batches.flat().map(e=>e.timestamp);assert.ok(stamps.every((s,i)=>!i||s>stamps[i-1]));assert.equal(f.t.cot.toolSeq,30);
+  f.h.calls.length=0;f.api.length=0;await f.topics.sync(f.m,list(f,{agent_status:'working',state_change_seq:2,tool_call_seq:31}));
+  assert.deepEqual(f.h.calls,[['agent','tool-calls','w1:p1','--after','30']]);assert.deepEqual(cotLog(f),[['update','c1',...opened('t31','Bash','step 31','bash')]]);
+ }finally{f.close();}
+});
+test('tool calls that cannot be fetched are fetched again with the next list; an update Feishu refuses is logged once and not repeated',async()=>{
+ const f=await readyTopic();try{
+  f.h.toolCalls['w1:p1']=[{seq:3,tool_call_id:'t1',phase:'start',tool_name:'Bash',title:'ls'}];const working=list(f,{agent_status:'working',state_change_seq:2,tool_call_seq:3});
+  f.h.on['agent tool-calls']=()=>{throw Error('连接超时，请检查 SSH 与 Herdr 状态');};await f.topics.sync(f.m,working);
+  assert.deepEqual(f.api,[]);assert.equal(f.t.cot.toolSeq,0);assert.deepEqual(cotLogs(f),[['error',`${f.t.agentName}：未能读取工具调用，连接超时，请检查 SSH 与 Herdr 状态`]]);
+  const request=f.topics.request;f.topics.request=async(a,o)=>{f.api.push(o);throw Error('飞书未连接');};
+  await f.topics.sync(f.m,working);await f.topics.sync(f.m,working);
+  assert.deepEqual(cotLog(f),[['update','c1',...opened('t1','Bash','ls','bash')]]);assert.equal(f.t.cot.toolSeq,3);assert.deepEqual(cotLogs(f).at(-1),['error',`${f.t.agentName}：COT 未能更新，飞书未连接`]);
+  f.topics.request=request;
+ }finally{f.close();}
+});
+test('while the agent waits for a confirmation, on a request card or blocked without one, the COT status says so after the steps that led there; once it runs again the COT says that before the steps that follow, each change once',async()=>{
+ const f=await requestTopic(bash);try{
+  f.h.toolCalls['w1:p1']=[{seq:2,tool_call_id:'t1',phase:'start',tool_name:'Bash',title:'ls -la'}];
+  const waiting=f.pending([1],{agent_status:'blocked',state_change_seq:3,tool_call_seq:2});
+  await f.topics.sync(f.m,waiting);
+  assert.deepEqual(cotLog(f),[['update','c1',...opened('t1','Bash','ls -la','bash'),...said('status-3','等待确认')]]);assert.equal(new Store(f.dir).data.topics[0].cot.waiting,true);
+  assert.equal(f.cards().length,1);await f.topics.sync(f.m,waiting);assert.equal(f.api.length,1);
+  f.h.toolCalls['w1:p1'].push({seq:5,tool_call_id:'t1',phase:'end',tool_name:'Bash'});f.api.length=0;
+  await f.topics.sync(f.m,f.pending([],{agent_status:'working',state_change_seq:4,tool_call_seq:5}));
+  assert.deepEqual(cotLog(f),[['update','c1',...said('status-4','继续运行'),closed('t1')]]);assert.equal(f.t.cot.waiting,false);
+  // Blocked without a request, such as on a question that Feishu cannot answer.
+  f.api.length=0;await f.topics.sync(f.m,f.pending([],{agent_status:'blocked',state_change_seq:6,tool_call_seq:5}));
+  assert.deepEqual(cotLog(f),[['update','c1',...said('status-6','等待确认')]]);
+ }finally{f.close();}
+});
+test('once its turn ends the COT shows its last steps, finishes as done and is completed, after the replies went out as cards; the next prompted message gets a new COT',async()=>{
+ const f=await readyTopic();try{
+  const order=[],reply=f.topics.reply,request=f.topics.request;f.topics.reply=async(...args)=>{order.push('reply');return reply(...args);};f.topics.request=async(a,o)=>{order.push(o.method);return request(a,o);};
+  f.h.retained['w1:p1']=[{seq:1,text:'改好了'}];f.h.toolCalls['w1:p1']=[{seq:4,tool_call_id:'t1',phase:'end',tool_name:'Edit'}];
+  // A turn has not ended while the agent works, or is idle without a state change since the prompt.
+  for(const fields of [{agent_status:'working',state_change_seq:2},{agent_status:'idle',state_change_seq:1}])await f.topics.sync(f.m,list(f,fields));
+  assert.deepEqual(f.api,[]);
+  const done=list(f,{agent_status:'done',state_change_seq:2,reply_seq:1,tool_call_seq:4});await f.topics.sync(f.m,done);
+  assert.deepEqual(f.replies.map(r=>r[3]),[replyOf('改好了')]);
+  assert.deepEqual(cotLog(f),[['update','c1',closed('t1'),['RUN_FINISHED',{...run,status:'done'}]],['complete','c1','done']]);
+  assert.deepEqual(f.api.at(-1),{method:'POST',url:cotPath+'/complete/c1',params:{message_id:'om_cot_1',reason:'done'}});
+  assert.deepEqual(order,['reply','PUT','POST']);assert.equal(new Store(f.dir).data.topics[0].cot,undefined);
+  await f.topics.sync(f.m,done);assert.equal(f.api.length,2);
+  await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
+  assert.deepEqual(cotLog(f).slice(2),[['create','om_2'],['update','c2',['RUN_STARTED',{threadId:'om_1',runId:'om_2'}]]]);
+ }finally{f.close();}
+});
+test('a topic that ends while its COT is open shows the COT failed and completes it, also when the update fails',async()=>{
+ const f=await readyTopic();try{
+  f.h.agents.length=0;await f.topics.sync(f.m,[]);
+  assert.equal(f.t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[endedNotice]);
+  assert.deepEqual(cotLog(f),[['update','c1',['RUN_ERROR',{message:'话题已结束'}]],['complete','c1','error']]);assert.equal(new Store(f.dir).data.topics[0].cot,undefined);
+ }finally{f.close();}
+ const g=await readyTopic();try{
+  const request=g.topics.request;g.topics.request=async(a,o)=>{if(o.method!=='PUT')return request(a,o);g.api.push(o);throw Error('飞书未连接');};
+  g.h.agents.length=0;await g.topics.sync(g.m,[]);
+  assert.deepEqual(cotLog(g),[['update','c1',['RUN_ERROR',{message:'话题已结束'}]],['complete','c1','error']]);assert.deepEqual(cotLogs(g),[['error',`${g.t.agentName}：COT 未能更新，飞书未连接`]]);
+ }finally{g.close();}
+});
+test('an open COT is kept on disk with its topic and completed by the first sync after a restart when its turn ended meanwhile',async()=>{
+ const f=await readyTopic();try{
+  f.h.toolCalls['w1:p1']=[{seq:3,tool_call_id:'t1',phase:'start',tool_name:'Bash',title:'ls'},{seq:4,tool_call_id:'t1',phase:'end',tool_name:'Bash'}];
+  const {store,topics}=f.restart();assert.deepEqual(store.data.topics[0].cot,{cotId:'c1',messageId:'om_cot_1',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false});
+  await topics.sync(f.m,list(f,{agent_status:'idle',state_change_seq:2,tool_call_seq:4}));
+  assert.deepEqual(f.h.calls,[['agent','tool-calls','w1:p1','--after','0']]);
+  assert.deepEqual(cotLog(f),[['update','c1',...opened('t1','Bash','ls','bash'),closed('t1'),['RUN_FINISHED',{...run,status:'done'}]],['complete','c1','done']]);
+  assert.equal(new Store(f.dir).data.topics[0].cot,undefined);
+ }finally{f.close();}
+});
+test('/stop in a ready topic sends Esc to its working or blocked agent and shows the open COT interrupted; without a COT a notice says so; the command is not prompted and gets no reaction',async()=>{
+ const f=await readyTopic();try{
+  f.h.agents[0].agent_status='working';f.reacted.length=0;
+  await f.send({messageId:'om_2',rootId:'om_1',content:' /stop '});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','send-keys','w1:p1','esc']]);assert.deepEqual(f.replies,[]);assert.deepEqual(f.reacted,[]);
+  assert.deepEqual(cotLog(f),[['update','c1',['RUN_FINISHED',{...run,status:'interrupted'}]],['complete','c1','error']]);assert.equal(new Store(f.dir).data.topics[0].cot,undefined);
+  assert.deepEqual(stopped(f),[['info',`${f.t.agentName}：已发送停止`]]);assert.deepEqual(f.t.messageIds,['om_1','om_2']);
+  f.h.agents[0].agent_status='blocked';f.h.calls.length=0;f.api.length=0;
+  await f.send({messageId:'om_3',rootId:'om_1',content:'/stop'});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','send-keys','w1:p1','esc']]);assert.deepEqual(f.api,[]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('已停止 Agent 当前这一轮')]);
+ }finally{f.close();}
+});
+test('/stop without a running turn sends no key and replies a notice; a /stop that cannot reach the agent is logged with a notice',async()=>{
+ const f=await readyTopic();try{
+  for(const status of ['idle','done','unknown']){f.h.agents[0].agent_status=status;await f.send({messageId:'om_'+status,rootId:'om_1',content:'/stop'});}
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','list'],['agent','list']]);assert.deepEqual(f.api,[]);assert.equal(f.t.cot.cotId,'c1');
+  assert.deepEqual(f.replies.map(r=>r[3]),Array(3).fill(notice('Agent 当前没有在运行的一轮')));
+  f.h.agents[0].agent_status='working';f.replies.length=0;f.h.on['agent send-keys']=()=>{throw coded('agent_not_ready','agent w1:p1 is not ready');};
+  await f.send({messageId:'om_4',rootId:'om_1',content:'/stop'});
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能停止 Agent，请稍后重试')]);assert.deepEqual(stopped(f),[['error',`${f.t.agentName}：未能停止，agent w1:p1 is not ready`]]);assert.equal(f.t.cot.cotId,'c1');
+ }finally{f.close();}
+});
+test('a root /stop, such as the stop button of a COT sends in a direct chat, stops the one topic of the chat whose COT is open; with none or several it asks for /stop in the topic; it never opens a topic',async()=>{
+ const f=await readyTopic();try{
+  await f.send({messageId:'om_2',content:'two'});const [one,two]=f.store.data.topics;
+  // A topic of another binding with an open COT does not count.
+  f.store.data.topics.push({...structuredClone(two),id:'other',bindingId:'other',rootId:'om_other'});
+  for(const a of f.h.agents)a.agent_status='working';f.h.calls.length=0;f.api.length=0;f.replies.length=0;
+  await f.send({messageId:'om_stop1',content:' /stop '});
+  const ask=['a','oc_1','om_stop1',notice('请在要停止的话题里发送 /stop')];assert.deepEqual(f.replies,[ask]);assert.deepEqual([f.h.calls,f.api],[[],[]]);
+  delete one.cot;await f.send({messageId:'om_stop2',content:'/stop',mentionedBot:true});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','send-keys','w1:p2','esc']]);assert.deepEqual(cotLog(f),[['update','c2',['RUN_FINISHED',{threadId:'om_2',runId:'om_2',status:'interrupted'}]],['complete','c2','error']]);
+  assert.equal(f.replies.length,1);f.h.calls.length=0;
+  await f.send({messageId:'om_stop3',content:'/stop'});assert.deepEqual(f.replies.at(-1),['a','oc_1','om_stop3',notice('请在要停止的话题里发送 /stop')]);assert.deepEqual(f.h.calls,[]);
+  assert.deepEqual(f.store.data.topics.map(t=>t.rootId),['om_1','om_2','om_other']);assert.deepEqual(f.reacted.map(r=>r[1]).filter(id=>id.startsWith('om_stop')),[]);
+ }finally{f.close();}
+});
+
+// Adoption. On cpu2 (machine m), besides the ready bridge topic om_1 in w1:p1 with its open COT c1, workspace w2 (herdr) holds: in tab 1, a
+// Claude with the Herdr name review, a session and two retained replies in the pane labelled 赤尾重构; in tab 出题, a Codex attached to its
+// background app-server without a session or replies in a pane without a label; and a pane without an agent. cpu1 cannot be reached, gpu1
+// runs no agent and the disconnected gpu2 is left out.
 const claudePane={agent:'claude',name:'review',pane_id:'w2:p1',workspace_id:'w2',tab_id:'w2:t1',cwd:'/home/someone/code/herdr',agent_status:'idle',state_change_seq:4,reply_seq:2,agent_session:{source:'herdr:claude',agent:'claude',kind:'id',value:'s-claude'}};
 const codexPane={agent:'codex',pane_id:'w2:p2',workspace_id:'w2',tab_id:'w2:t2',cwd:'/srv/app',agent_status:'working',state_change_seq:7};
 const claudeChoice={machine:'m',pane:'w2:p1',kind:'claude',name:'review',session:'s-claude'},codexChoice={machine:'m',pane:'w2:p2',kind:'codex'};
@@ -867,7 +1065,7 @@ const pickerForm=(render,...options)=>({tag:'form',name:'picker',elements:[{tag:
 const claudeOption=option('cpu2 · 赤尾重构 · Claude · 空闲',claudeChoice),codexOption=option('cpu2 · 出题 · Codex · 运行中',codexChoice),cpu1Down=plainText('cpu1 · 连接失败');
 // The picker of the agents above with its render number; a notice comes first.
 const pickerCard=(render,notice)=>cardOf('接管 Agent','blue',[...notice?[plainText(notice)]:[],pickerForm(render,claudeOption,codexOption),cpu1Down]);
-const introLines=['话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /结束接管 结束接管，Agent 会继续在终端的 pane 里运行。'];
+const introLines=['话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /release 结束接管，Agent 会继续在终端的 pane 里运行。'];
 const adoptLogs=f=>f.store.data.logs.filter(l=>l.kind==='话题接管').map(l=>[l.level,l.message]);
 // What a submission of the picker form holds: the value of the chosen option, a raw string as is, or nothing when no option was chosen.
 const formValue=adopt=>adopt===undefined?{}:{agent:typeof adopt==='string'?adopt:JSON.stringify(adopt)};
@@ -880,7 +1078,7 @@ async function adoptFixture(binding){
  f.h.panes.push({pane_id:'w2:p1',workspace_id:'w2',tab_id:'w2:t1',label:'赤尾重构'},{pane_id:'w2:p2',workspace_id:'w2',tab_id:'w2:t2'},{pane_id:'w2:p3',workspace_id:'w2',tab_id:'w2:t1'});
  f.h.retained['w2:p1']=[{seq:1,text:'旧回复'},{seq:2,text:'\n改好了。\n\n- 修复了登录'}];
  f.h.hosts.m2={down:'ssh: connect to host cpu1 port 22: Connection timed out'};f.h.hosts.m3={agents:[],retained:{},requests:{}};
- f.h.calls.length=0;f.h.machines.length=0;f.reacted.length=0;
+ f.h.calls.length=0;f.h.machines.length=0;f.reacted.length=0;f.unreacted.length=0;f.api.length=0;
  return {...f,
   // The topic whose thread starts at message id.
   topic:id=>f.store.data.topics.find(t=>t.rootId===id),
@@ -888,8 +1086,8 @@ async function adoptFixture(binding){
   // A submission of picker messageId by an allowed person with agent adopt chosen (see formValue).
   pick:(messageId,adopt,render=1,openId='ou_user')=>f.topics.click(allowed,{messageId,chatId:'oc_1',operator:{openId},action:{tag:'button',name:'submit',value:{adopt:true,render},formValue:formValue(adopt)}}),
   settled:()=>Promise.all(f.topics.answering.values()),
-  // Sends /接管 and submits agent adopt on its picker, which is reply om_bot_<n>.
-  async adopt(rootId,adopt,n=1){await f.send({messageId:rootId,content:'/接管'});f.topics.click(allowed,{messageId:'om_bot_'+n,chatId:'oc_1',operator:{openId:'ou_user'},action:{tag:'button',name:'submit',value:{adopt:true,render:n},formValue:formValue(adopt)}});await Promise.all(f.topics.answering.values());return f.store.data.topics.find(t=>t.rootId===rootId);},
+  // Sends /adopt and submits agent adopt on its picker, which is reply om_bot_<n>.
+  async adopt(rootId,adopt,n=1){await f.send({messageId:rootId,content:'/adopt'});f.topics.click(allowed,{messageId:'om_bot_'+n,chatId:'oc_1',operator:{openId:'ou_user'},action:{tag:'button',name:'submit',value:{adopt:true,render:n},formValue:formValue(adopt)}});await Promise.all(f.topics.answering.values());return f.store.data.topics.find(t=>t.rootId===rootId);},
  };
 }
 test('an agent is named by the label of its pane, else the label given to its tab, else the label of its workspace, else its pane; agents that would share a name are told apart by their panes',()=>{
@@ -906,13 +1104,13 @@ test('an agent is named by the label of its pane, else the label given to its ta
  const s=snapshot([x,y,z],{panes:[{pane_id:'w1:p1'},{pane_id:'w1:p2'},{pane_id:'w1:p3',label:'出题'}],tabs:[{tab_id:'w1:t1',label:'重构'},{tab_id:'w1:t2',label:'2'}],workspaces});
  assert.deepEqual([x,y,z].map(a=>nameOf(s,a)),['重构 (w1:p1)','重构 (w1:p2)','出题']);
 });
-test('/接管 as a root message replies in its thread with a picker whose dropdown names each agent on every connected machine by machine, the pane name the person gave in Herdr, kind and status, leaving out panes that topics of any binding hold; an unreachable machine shows 连接失败 outside it; each machine is read with one Herdr call',async()=>{
+test('/adopt as a root message replies in its thread with a picker whose dropdown names each agent on every connected machine by machine, the pane name the person gave in Herdr, kind and status, leaving out panes that topics of any binding hold; an unreachable machine shows 连接失败 outside it; each machine is read with one Herdr call',async()=>{
  const f=await adoptFixture();try{
   // A ready topic of another binding holds w2:p4, which shares the 出题 tab with the Codex: only the agents offered are told apart by their
   // panes. A closed topic no longer holds the Codex pane.
   f.h.agents.push({agent:'claude',name:'other',pane_id:'w2:p4',workspace_id:'w2',tab_id:'w2:t2',agent_status:'idle',state_change_seq:1,remote_answers:true});
   f.store.data.topics.push({...f.topic('om_1'),id:'other',bindingId:'other',rootId:'om_other',paneId:'w2:p4'},{...f.topic('om_1'),id:'old',rootId:'om_old',paneId:'w2:p2',state:'closed'});
-  await f.send({messageId:'om_cmd',content:' /接管 '});
+  await f.send({messageId:'om_cmd',content:' /adopt '});
   assert.deepEqual(f.replies,[['a','oc_1','om_cmd',{card:pickerCard(1)}]]);
   assert.deepEqual(callsOn(f).map(c=>JSON.stringify(c)).sort(),[['m','api','snapshot'],['m2','api','snapshot'],['m3','api','snapshot']].map(c=>JSON.stringify(c)).sort());
   const {id,createdAt,...rest}=f.topic('om_cmd');assert.ok(createdAt>0);
@@ -922,19 +1120,28 @@ test('/接管 as a root message replies in its thread with a picker whose dropdo
   assert.deepEqual(adoptLogs(f),[['error','cpu1：ssh: connect to host cpu1 port 22: Connection timed out'],['info','个人助手：已发送可接管的 Agent 列表']]);
  }finally{f.close();}
 });
-test('/接管 is a command only on a root message: in a thread it is a message to the agent, a mention-only group needs the @, and a repeated delivery sends one picker',async()=>{
+test('/adopt is a command only on a root message: in a thread it is a message to the agent, a mention-only group needs the @, and a repeated delivery sends one picker',async()=>{
  const f=await adoptFixture({requireMention:true});try{
-  await f.send({messageId:'om_2',rootId:'om_1',content:'/接管'});
-  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','/接管']]);assert.deepEqual(f.replies,[]);
-  f.h.calls.length=0;await f.send({messageId:'om_cmd',content:'/接管'});
+  await f.send({messageId:'om_2',rootId:'om_1',content:'/adopt'});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','/adopt']]);assert.deepEqual(f.replies,[]);
+  f.h.calls.length=0;await f.send({messageId:'om_cmd',content:'/adopt'});
   assert.deepEqual([f.h.calls,f.replies,f.topic('om_cmd')],[[],[],undefined]);
-  await f.send({messageId:'om_cmd2',content:'/接管',mentionedBot:true});await f.send({messageId:'om_cmd2',content:'/接管',mentionedBot:true});
+  await f.send({messageId:'om_cmd2',content:'/adopt',mentionedBot:true});await f.send({messageId:'om_cmd2',content:'/adopt',mentionedBot:true});
   assert.deepEqual(f.replies.map(r=>r[2]),['om_cmd2']);assert.equal(f.pickers().length,1);
+ }finally{f.close();}
+});
+test('the Chinese commands of earlier versions are messages like any other: /接管 opens a topic and /结束接管 is prompted to the adopted agent',async()=>{
+ const f=await adoptFixture();try{
+  await f.send({messageId:'om_old',content:'/接管'});
+  assert.equal(f.topic('om_old').adopted,undefined);assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['/接管']);assert.equal(f.pickers().length,0);
+  const t=await f.adopt('om_cmd',claudeChoice,1);f.h.calls.length=0;
+  await f.send({messageId:'om_2',rootId:'om_cmd',content:'/结束接管'});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w2:p1','/结束接管']]);assert.equal(t.state,'ready');
  }finally{f.close();}
 });
 test('a message in the thread of a picker before any selection gets a notice, is not prompted and opens no tab',async()=>{
  const f=await adoptFixture();try{
-  await f.send({messageId:'om_cmd',content:'/接管'});f.h.calls.length=0;f.replies.length=0;
+  await f.send({messageId:'om_cmd',content:'/adopt'});f.h.calls.length=0;f.replies.length=0;
   await f.send({messageId:'om_2',rootId:'om_cmd',content:'先说一句'});
   assert.deepEqual(f.h.calls,[]);assert.deepEqual(f.replies,[['a','oc_1','om_cmd',notice('请先在上面的卡片中选择要接管的 Agent')]]);
   assert.deepEqual(f.unreacted,[['a','om_2','r_om_2']]);assert.deepEqual([f.topic('om_cmd').state,f.topic('om_cmd').messageIds],['choosing',['om_cmd','om_2']]);
@@ -942,13 +1149,13 @@ test('a message in the thread of a picker before any selection gets a notice, is
 });
 test('a picker that Feishu refuses is logged and its topic closed',async()=>{
  const f=await adoptFixture();try{
-  f.topics.reply=async()=>{throw Error('飞书未连接');};await f.send({messageId:'om_cmd',content:'/接管'});
+  f.topics.reply=async()=>{throw Error('飞书未连接');};await f.send({messageId:'om_cmd',content:'/adopt'});
   assert.equal(f.topic('om_cmd').state,'closed');assert.deepEqual(adoptLogs(f).at(-1),['error','个人助手：可接管的 Agent 列表未发出，飞书未连接']);
  }finally{f.close();}
 });
 test('submitting an agent turns on its remote answers, links the topic to its machine and pane under its pane name, posts the intro with its full latest reply and marks the picker adopted',async()=>{
  const f=await adoptFixture();try{
-  await f.send({messageId:'om_cmd',content:'/接管'});f.h.calls.length=0;f.h.machines.length=0;f.replies.length=0;
+  await f.send({messageId:'om_cmd',content:'/adopt'});f.h.calls.length=0;f.h.machines.length=0;f.replies.length=0;
   assert.deepEqual(f.pick('om_bot_1',claudeChoice),{toast:{type:'info',content:'正在接管'}});
   await f.settled();
   assert.deepEqual(callsOn(f),[['m','api','snapshot'],['m','pane','remote-answers','w2:p1','on'],['m','agent','replies','w2:p1','--after','1']]);
@@ -956,7 +1163,7 @@ test('submitting an agent turns on its remote answers, links the topic to its ma
   assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_cmd',machineId:'m',workspaceId:'w2',tabId:'w2:t1',paneId:'w2:p1',agentName:'赤尾重构',title:'接管 · 赤尾重构',state:'ready',error:'',replySeq:2,reactions:[],cards:[],adopted:{picker:'om_bot_1',kind:'claude',session:'s-claude'}});
   assert.equal(new Store(f.dir).data.topics.find(x=>x.id===id).state,'ready');assert.equal(f.h.agents.find(a=>a.pane_id==='w2:p1').remote_answers,true);
   assert.deepEqual(f.replies,[['a','oc_1','om_cmd',notice(['已接管 cpu2 上的 Claude · 赤尾重构','工作目录：~/code/herdr',...introLines,'最近一条回复：'].join('\n'),
-   '已接管 cpu2 上的 Claude · 赤尾重构 工作目录：~/code/herdr 话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /结束接管 结束接管，Agent 会继续在终端的…')],['a','oc_1','om_cmd',replyOf('\n改好了。\n\n- 修复了登录','改好了。 - 修复了登录')]]);
+   '已接管 cpu2 上的 Claude · 赤尾重构 工作目录：~/code/herdr 话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /release 结束接管，Agent 会继续在…')],['a','oc_1','om_cmd',replyOf('\n改好了。\n\n- 修复了登录','改好了。 - 修复了登录')]]);
   assert.deepEqual(f.updated,[['a','om_bot_1',cardOf('接管 Agent','green',[plainText('cpu2 · 赤尾重构 · Claude · 空闲'),{tag:'markdown',content:'已接管 · <at id=ou_user></at>'}])]]);
   assert.deepEqual(adoptLogs(f).at(-1),['info','个人助手：已接管 cpu2 上的 赤尾重构']);
   // The picker takes no further selection.
@@ -965,17 +1172,17 @@ test('submitting an agent turns on its remote answers, links the topic to its ma
 });
 test('an agent without a reported session gets a warning in the intro; an agent without replies gets no reply; a pane without a label is named after its tab',async()=>{
  const f=await adoptFixture();try{
-  await f.send({messageId:'om_cmd',content:'/接管'});f.h.calls.length=0;f.replies.length=0;
+  await f.send({messageId:'om_cmd',content:'/adopt'});f.h.calls.length=0;f.replies.length=0;
   f.pick('om_bot_1',codexChoice);await f.settled();
   assert.deepEqual(f.h.calls,[['api','snapshot'],['pane','remote-answers','w2:p2','on']]);
   assert.deepEqual(f.replies.map(r=>r[3]),[notice(['已接管 cpu2 上的 Codex · 出题','工作目录：/srv/app',...introLines,'这个 Agent 没有向 Herdr 上报会话（例如连着后台 app-server 的 Codex），它的回复可能无法转回飞书。'].join('\n'),
-   '已接管 cpu2 上的 Codex · 出题 工作目录：/srv/app 话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /结束接管 结束接管，Agent 会继续在终端的 pane 里…')]);
+   '已接管 cpu2 上的 Codex · 出题 工作目录：/srv/app 话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /release 结束接管，Agent 会继续在终端的 pan…')]);
   const t=f.topic('om_cmd');assert.deepEqual([t.paneId,t.agentName,t.title,t.replySeq,t.adopted],['w2:p2','出题','接管 · 出题',0,{picker:'om_bot_1',kind:'codex'}]);
  }finally{f.close();}
 });
 test('a selection whose agent exited or changed meanwhile, whose remote answers cannot be turned on or whose machine was disconnected links nothing and redraws the picker with the reason and the agents left',async()=>{
  const f=await adoptFixture();try{
-  await f.send({messageId:'om_cmd',content:'/接管'});const t=f.topic('om_cmd');
+  await f.send({messageId:'om_cmd',content:'/adopt'});const t=f.topic('om_cmd');
   f.h.agents=f.h.agents.filter(a=>a.pane_id!=='w2:p1');f.h.calls.length=0;
   assert.deepEqual(f.pick('om_bot_1',claudeChoice),{toast:{type:'info',content:'正在接管'}});await f.settled();
   assert.deepEqual(f.updated,[['a','om_bot_1',cardOf('接管 Agent','blue',[plainText('所选的 Agent 已退出或已变化，请重新选择'),pickerForm(2,codexOption),cpu1Down])]]);
@@ -998,7 +1205,7 @@ test('a selection whose agent exited or changed meanwhile, whose remote answers 
 });
 test('two pickers selecting the same agent at once link it to one topic only; the other picker says it was adopted meanwhile and no longer lists it',async()=>{
  const f=await adoptFixture();try{
-  await f.send({messageId:'om_a',content:'/接管'});await f.send({messageId:'om_b',content:'/接管'});
+  await f.send({messageId:'om_a',content:'/adopt'});await f.send({messageId:'om_b',content:'/adopt'});
   f.h.calls.length=0;f.pick('om_bot_1',codexChoice);f.pick('om_bot_2',codexChoice,2);await f.settled();
   assert.deepEqual([f.topic('om_a').state,f.topic('om_b').state],['ready','choosing']);assert.equal(f.h.calls.filter(c=>c[0]==='pane').length,1);
   const [,,card]=f.updated.find(u=>u[1]==='om_bot_2');
@@ -1012,12 +1219,12 @@ test('agents offered under the same name on one machine are told apart by their 
   f.h.panes.push({pane_id:'w2:p4',workspace_id:'w2',tab_id:'w2:t2'},{pane_id:'w2:p5',workspace_id:'w2',tab_id:'w2:t2'});
   f.store.data.topics.push({...f.topic('om_1'),id:'other',bindingId:'other',rootId:'om_other',paneId:'w2:p4'});
   const offered=card=>find(card,'select_static')[0].options.map(o=>o.text.content);
-  await f.send({messageId:'om_a',content:'/接管'});
+  await f.send({messageId:'om_a',content:'/adopt'});
   assert.deepEqual(offered(f.pickers()[0]),['cpu2 · 赤尾重构 · Claude · 空闲','cpu2 · 出题 (w2:p2) · Codex · 运行中','cpu2 · 出题 (w2:p5) · Codex · 空闲']);
   f.pick('om_bot_1',{machine:'m',pane:'w2:p5',kind:'codex'});await f.settled();
   assert.deepEqual([f.topic('om_a').agentName,f.topic('om_a').title],['出题 (w2:p5)','接管 · 出题 (w2:p5)']);
   // Once a topic holds w2:p5, the Codex left goes by the tab's name alone.
-  await f.send({messageId:'om_b',content:'/接管'});
+  await f.send({messageId:'om_b',content:'/adopt'});
   assert.deepEqual(offered(f.pickers()[1]),['cpu2 · 赤尾重构 · Claude · 空闲','cpu2 · 出题 · Codex · 运行中']);
   f.pick('om_bot_3',codexChoice,2);await f.settled();
   assert.deepEqual([f.topic('om_b').agentName,f.topic('om_b').title],['出题','接管 · 出题']);
@@ -1025,7 +1232,7 @@ test('agents offered under the same name on one machine are told apart by their 
 });
 test('a submission without a chosen agent, or with a value that is no choice of the picker, gets a warning, adopts nothing and draws the picker again so that it can be submitted again',async()=>{
  const f=await adoptFixture();try{
-  await f.send({messageId:'om_cmd',content:'/接管'});const t=f.topic('om_cmd');f.h.calls.length=0;
+  await f.send({messageId:'om_cmd',content:'/adopt'});const t=f.topic('om_cmd');f.h.calls.length=0;
   assert.deepEqual(f.pick('om_bot_1',undefined),{toast:{type:'warning',content:'请选择要接管的 Agent'}});await f.settled();
   assert.deepEqual(f.updated,[['a','om_bot_1',pickerCard(2,'请选择要接管的 Agent')]]);
   for(const [i,value] of ['not json','null','{"machine":"m"}'].entries()){
@@ -1039,54 +1246,56 @@ test('a submission without a chosen agent, or with a value that is no choice of 
 });
 test('a click on a picker without a topic gets a toast that the card has expired; a second click while one is being adopted waits for it',async()=>{
  const f=await adoptFixture();try{
-  assert.deepEqual(f.pick('om_unknown',claudeChoice),{toast:{type:'info',content:'这张卡片已失效，请重新发送 /接管'}});
-  await f.send({messageId:'om_cmd',content:'/接管'});
+  assert.deepEqual(f.pick('om_unknown',claudeChoice),{toast:{type:'info',content:'这张卡片已失效，请重新发送 /adopt'}});
+  await f.send({messageId:'om_cmd',content:'/adopt'});
   let release;f.h.on['pane remote-answers']=(args,run)=>new Promise(r=>{release=()=>r(run(args));});
   f.pick('om_bot_1',claudeChoice);await later(5);
   assert.deepEqual(f.pick('om_bot_1',codexChoice,1,'ou_owner'),{toast:{type:'info',content:'正在接管，请稍候'}});
   release();await f.settled();assert.equal(f.topic('om_cmd').paneId,'w2:p1');assert.equal(f.h.calls.filter(c=>c[0]==='pane').length,1);
  }finally{f.close();}
 });
-test('an adopted topic prompts its pane, forwards only the replies after the one in the intro, sends request cards, removes reactions of ended turns and never opens a tab',async()=>{
+test('an adopted topic prompts its pane, forwards only the replies after the one in the intro, sends request cards, opens a COT for a prompted message and completes it when the turn ends, and never opens a tab',async()=>{
  const f=await adoptFixture();try{
-  const t=await f.adopt('om_cmd',claudeChoice);f.h.calls.length=0;f.h.machines.length=0;f.replies.length=0;
+  const t=await f.adopt('om_cmd',claudeChoice);f.h.calls.length=0;f.h.machines.length=0;f.replies.length=0;f.api.length=0;
   await f.send({messageId:'om_2',rootId:'om_cmd',content:'继续'});
-  assert.deepEqual(callsOn(f),[['m','agent','list'],['m','agent','prompt','w2:p1','继续']]);assert.deepEqual(t.reactions.map(r=>[r.messageId,r.stateSeq]),[['om_2',4]]);
+  assert.deepEqual(callsOn(f),[['m','agent','list'],['m','agent','prompt','w2:p1','继续']]);assert.deepEqual([t.reactions,t.cot.origin,t.cot.stateSeq],[[],'om_2',4]);
+  assert.deepEqual(cotLog(f),[['create','om_2'],['update','c2',['RUN_STARTED',{threadId:'om_cmd',runId:'om_2'}]]]);
   const agent=f.h.agents.find(a=>a.pane_id==='w2:p1');f.h.retained['w2:p1'].push({seq:3,text:'新回复'});f.h.requests['w2:p1']=[bash];f.h.calls.length=0;
   await f.topics.sync(f.m,f.h.agents.map(a=>a===agent?{...a,reply_seq:3,request_ids:[1],agent_status:'done',state_change_seq:9}:a));
   assert.deepEqual(f.replies.map(r=>r[2]),['om_cmd','om_cmd']);assert.deepEqual(f.replies[0][3],replyOf('新回复'));assert.equal(f.replies[1][3].card.header.title.content,'权限确认 · Bash');
-  assert.deepEqual(f.h.calls,[['agent','replies','w2:p1','--after','2'],['agent','requests','w2:p1']]);assert.deepEqual(f.unreacted.map(r=>r[1]),['om_2']);
+  assert.deepEqual(f.h.calls,[['agent','replies','w2:p1','--after','2'],['agent','requests','w2:p1']]);
+  assert.deepEqual(cotLog(f).slice(2),[['update','c2',['RUN_FINISHED',{threadId:'om_cmd',runId:'om_2',status:'done'}]],['complete','c2','done']]);assert.equal(t.cot,undefined);
   assert.deepEqual(t.cards,[{requestId:1,messageId:'om_bot_5',title:'权限确认 · Bash'}]);
  }finally{f.close();}
 });
-test('/结束接管 in an adopted topic turns off its remote answers and ends the topic without touching the pane, which keeps running; later messages are not prompted',async()=>{
+test('/release in an adopted topic turns off its remote answers and ends the topic without touching the pane, which keeps running; later messages are not prompted',async()=>{
  const f=await adoptFixture();try{
   const t=await f.adopt('om_cmd',claudeChoice);await f.send({messageId:'om_2',rootId:'om_cmd',content:'继续'});
-  f.h.calls.length=0;f.replies.length=0;f.reacted.length=0;f.unreacted.length=0;
-  await f.send({messageId:'om_3',rootId:'om_cmd',content:' /结束接管 '});
+  f.h.calls.length=0;f.replies.length=0;f.reacted.length=0;f.unreacted.length=0;f.api.length=0;
+  await f.send({messageId:'om_3',rootId:'om_cmd',content:' /release '});
   assert.deepEqual(f.h.calls,[['pane','remote-answers','w2:p1','off']]);assert.equal(t.state,'closed');assert.equal(new Store(f.dir).data.topics.find(x=>x.id===t.id).state,'closed');
   assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_cmd',notice('已结束接管。Agent 仍在终端的 pane 里运行，话题里的消息不再发给它')]]);
   assert.equal(f.h.agents.find(a=>a.pane_id==='w2:p1').remote_answers,undefined);assert.deepEqual(adoptLogs(f).at(-1),['info','个人助手：已结束接管 cpu2 上的 赤尾重构']);
-  // The command gets no reaction; the reaction of the turn still running goes with the topic.
-  assert.deepEqual(f.reacted,[]);assert.deepEqual(f.unreacted.map(r=>r[1]),['om_2']);
-  f.h.calls.length=0;await f.send({messageId:'om_4',rootId:'om_cmd',content:'还在吗'});await f.send({messageId:'om_5',rootId:'om_cmd',content:'/结束接管'});
+  // The command gets no reaction; the COT of the turn still running ends as failed with the topic.
+  assert.deepEqual(f.reacted,[]);assert.deepEqual(f.unreacted,[]);assert.deepEqual(cotLog(f),[['update','c2',['RUN_ERROR',{message:'话题已结束'}]],['complete','c2','error']]);
+  f.h.calls.length=0;await f.send({messageId:'om_4',rootId:'om_cmd',content:'还在吗'});await f.send({messageId:'om_5',rootId:'om_cmd',content:'/release'});
   assert.deepEqual(f.h.calls,[]);assert.equal(f.replies.length,1);
  }finally{f.close();}
 });
-test('/结束接管 anywhere but an adopted topic is an ordinary message: a bridge topic prompts it to its agent',async()=>{
+test('/release anywhere but an adopted topic is an ordinary message: a bridge topic prompts it to its agent',async()=>{
  const f=await adoptFixture();try{
-  await f.send({messageId:'om_2',rootId:'om_1',content:'/结束接管'});
-  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','/结束接管']]);assert.equal(f.topic('om_1').state,'ready');
+  await f.send({messageId:'om_2',rootId:'om_1',content:'/release'});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','/release']]);assert.equal(f.topic('om_1').state,'ready');
  }finally{f.close();}
 });
-test('when /结束接管 cannot turn off remote answers the topic stays linked with a notice, unless its agent turns out to be gone, which ends the topic',async()=>{
+test('when /release cannot turn off remote answers the topic stays linked with a notice, unless its agent turns out to be gone, which ends the topic',async()=>{
  const f=await adoptFixture();try{
   const t=await f.adopt('om_cmd',claudeChoice);f.replies.length=0;
   f.h.on['pane remote-answers']=()=>{throw Error('连接超时，请检查 SSH 与 Herdr 状态');};
-  await f.send({messageId:'om_2',rootId:'om_cmd',content:'/结束接管'});
+  await f.send({messageId:'om_2',rootId:'om_cmd',content:'/release'});
   assert.equal(t.state,'ready');assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能结束接管，请稍后重试')]);assert.match(adoptLogs(f).at(-1)[1],/^个人助手：未能结束接管，连接超时/);
   f.h.agents=f.h.agents.filter(a=>a.pane_id!=='w2:p1');f.h.on['pane remote-answers']=()=>{throw coded('pane_not_found','pane w2:p1 not found');};f.replies.length=0;
-  await f.send({messageId:'om_3',rootId:'om_cmd',content:'/结束接管'});
+  await f.send({messageId:'om_3',rootId:'om_cmd',content:'/release'});
   assert.equal(t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[adoptedGone]);
  }finally{f.close();}
 });
@@ -1101,14 +1310,15 @@ test('an adopted topic ends with its own notice when its pane closes, its agent 
   }finally{f.close();}
  }
 });
-test('removing a binding drops its topics and turns off remote answers for those linked to an agent, bridge-opened or adopted; a failure is only logged',async()=>{
+test('removing a binding drops its topics, turns off remote answers for those linked to an agent, bridge-opened or adopted, and shows their open COT failed; a failure is only logged',async()=>{
  const f=await adoptFixture();try{
-  await f.adopt('om_cmd',claudeChoice);await f.send({messageId:'om_cmd2',content:'/接管'});
-  const other={...f.topic('om_1'),id:'other',bindingId:'other',rootId:'om_other',paneId:'w2:p2'};f.store.data.topics.push(other);
-  f.h.calls.length=0;f.h.machines.length=0;
+  await f.adopt('om_cmd',claudeChoice);await f.send({messageId:'om_cmd2',content:'/adopt'});
+  const {cot,...linked}=f.topic('om_1'),other={...linked,id:'other',bindingId:'other',rootId:'om_other',paneId:'w2:p2'};f.store.data.topics.push(other);
+  f.h.calls.length=0;f.h.machines.length=0;f.api.length=0;
   await f.topics.unbind('b');
   assert.deepEqual(f.store.data.topics,[other]);assert.deepEqual(new Store(f.dir).data.topics.map(t=>t.id),['other']);
   assert.deepEqual(callsOn(f),[['m','pane','remote-answers','w1:p1','off'],['m','pane','remote-answers','w2:p1','off']]);
+  assert.equal(cot.cotId,'c1');assert.deepEqual(cotLog(f),[['update','c1',['RUN_ERROR',{message:'话题已结束'}]],['complete','c1','error']]);
   f.h.on['pane remote-answers']=()=>{throw Error('连接超时，请检查 SSH 与 Herdr 状态');};await f.topics.unbind('other');
   assert.deepEqual(f.store.data.topics,[]);assert.match(f.store.data.logs.at(-1).message,/未能关闭.*连接超时/);
  }finally{f.close();}
@@ -1182,10 +1392,14 @@ test('a group binding keeps the mention choice and the permission mode chosen; a
 });
 
 const png=Buffer.from('89504e470d0a1a0a0000','hex');
-// A connected channel whose bot info comes from info(); every avatar download is answered by avatar(url).
-function botFixture({info,avatar}={}){
+// The app's slash commands as Feishu lists them, by default the bridge's own with their descriptions.
+const slashPath='/open-apis/application/v7/app_slash_commands',described=text=>({default_value:text,i18n:{zh_cn:text}});
+const registered=[{command_id:'c-adopt',command:'adopt',description:described('接管正在运行的 Agent')},{command_id:'c-release',command:'release',description:described('结束接管')},{command_id:'c-stop',command:'stop',description:described('停止 Agent 当前这一轮')}];
+// A connected channel whose bot info comes from info() and whose slash command calls are answered by commands(request); every avatar
+// download is answered by avatar(url).
+function botFixture({info,avatar,commands=()=>({code:0,msg:'success',data:{items:registered}})}={}){
  const requests=[],downloads=[];
- const channel={on(){},connect:async()=>{},disconnect:async()=>{},getConnectionStatus:()=>({state:'connected'}),rawClient:{request:async o=>{requests.push(o);return info();}}};
+ const channel={on(){},connect:async()=>{},disconnect:async()=>{},getConnectionStatus:()=>({state:'connected'}),rawClient:{request:async o=>{requests.push(o);return o.url==='/open-apis/bot/v3/info'?info():commands(o);}}};
  const f=platformFixture({channelFactory:()=>channel,fetch:async(url,options)=>{downloads.push(String(url));assert.ok(options.signal);return avatar(String(url));}});
  const a={id:'app-1',name:'注册时的名称',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:['ou_user'],enabled:true};f.store.data.apps=[a];f.store.save();
  return {...f,a,requests,downloads,file:path.join(f.dir,'avatars','app-1')};
@@ -1194,7 +1408,7 @@ const botInfo=(bot={})=>()=>({code:0,bot:{app_name:'飞书机器人',open_id:'ou
 test('connecting and verifying take the name and open_id from Feishu and store the https avatar',async()=>{
  const f=botFixture({info:botInfo(),avatar:()=>new Response(png,{headers:{'content-type':'image/png'}})});try{
   await f.platforms.start(f.a);
-  assert.deepEqual(f.requests,[{url:'/open-apis/bot/v3/info',method:'GET'}]);assert.deepEqual(f.downloads,['https://cdn.example/avatar.png']);
+  assert.deepEqual(f.requests,[{url:'/open-apis/bot/v3/info',method:'GET'},{method:'GET',url:slashPath}]);assert.deepEqual(f.downloads,['https://cdn.example/avatar.png']);
   assert.equal(f.a.name,'飞书机器人');assert.equal(f.a.botOpenId,'ou_bot');assert.equal('botName' in f.a,false);assert.ok(f.a.verifiedAt>0);
   assert.deepEqual(fs.readFileSync(f.file),png);assert.equal(fs.statSync(f.file).mode&0o777,0o600);assert.equal(f.a.avatar.type,'image/png');assert.ok(f.a.avatar.updatedAt>0);
   assert.deepEqual(new Store(f.dir).data.apps[0].avatar,f.a.avatar);assert.equal(f.platforms.status(f.a).connection,'connected');
@@ -1238,6 +1452,41 @@ test('a failed bot info request is only logged after connecting but fails a cred
   await assert.rejects(f.platforms.verify(f.a),/应用凭证验证失败/);assert.equal(await f.platforms.avatar('app-1'),null);assert.equal(await f.platforms.avatar('../state.json'),null);
  }finally{f.close();}
 });
+test('connecting offers the commands in the slash command panel of the app: a missing one is created and one with another description updated; commands of the app are never deleted',async()=>{
+ const items=[registered[0],{...registered[1],description:described('旧的说明')},{command_id:'c-deploy',command:'deploy',description:described('部署')}];
+ const f=botFixture({info:botInfo({avatar_url:''}),avatar:()=>assert.fail('no download'),commands:o=>o.method==='GET'?{code:0,data:{items}}:{code:0,data:{command_id:'c-new'}}});try{
+  await f.platforms.start(f.a);
+  assert.deepEqual(f.requests.slice(1),[{method:'GET',url:slashPath},{method:'PATCH',url:slashPath+'/c-release',data:{command:'release',description:described('结束接管')}},{method:'POST',url:slashPath,data:{command:'stop',description:described('停止 Agent 当前这一轮')}}]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]),[['info','飞书机器人：已注册斜杠命令 /release、/stop']]);
+ }finally{f.close();}
+});
+test('without the slash command scopes, or when Feishu refuses a command, connecting logs one line and the app stays connected; every connection tries again',async()=>{
+ const denied=code=>()=>{throw Object.assign(Error('Request failed with status code 400'),{response:{status:400,data:{code,msg:'Access denied. One of the following scopes is required'}}});};
+ const scopes='飞书机器人：未能注册斜杠命令，应用缺少权限 application:app_slash_command:read / write；命令仍可手动输入';
+ for(const [commands,message,calls] of [[denied(99991672),scopes,1],[o=>o.method==='GET'?{code:0,data:{items:[]}}:denied(99991640)(),scopes,2],
+  [()=>({code:40000000,msg:'command already exists'}),'飞书机器人：未能注册斜杠命令，飞书接口错误 40000000：command already exists',1]]){
+  const f=botFixture({info:botInfo({avatar_url:''}),avatar:()=>assert.fail('no download'),commands});try{
+   const logs=()=>f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]);
+   await f.platforms.start(f.a);assert.equal(f.platforms.status(f.a).connection,'connected',message);
+   assert.deepEqual(logs(),[['error',message]]);assert.equal(f.requests.length-1,calls,message);
+   await f.platforms.stop(f.a.id);await f.platforms.start(f.a);assert.equal(logs().length,2,message);
+  }finally{f.close();}
+ }
+});
+test('an OpenAPI call through the connected channel resolves to the data of a response with code 0, or to a body without that envelope; it rejects with Feishu\'s code otherwise, also for an HTTP error status',async()=>{
+ const f=platformFixture(),answers=[],seen=[];try{
+  await assert.rejects(f.platforms.request(allowed,{method:'GET',url:'/x'}),/飞书未连接/);
+  f.platforms.runtime.set('a',{channel:{getConnectionStatus:()=>({state:'connected'}),rawClient:{request:async o=>{seen.push(o);return answers.shift()();}}}});
+  answers.push(()=>({code:0,msg:'success',data:{cot_id:'1'}}),()=>({cot_id:'2',message_id:'om_2'}),()=>({code:230001,msg:'bad request'}),
+   ()=>{throw Object.assign(Error('Request failed with status code 400'),{response:{status:400,data:{code:99991672,msg:'denied'}}});},()=>{throw Error('timeout of 10000ms exceeded');});
+  const call={method:'POST',url:'/open-apis/im/v1/message_cot',params:{receive_id_type:'chat_id'},data:{receive_id:'oc_1'}};
+  assert.deepEqual(await f.platforms.request(allowed,call),{cot_id:'1'});assert.deepEqual(seen,[call]);
+  assert.deepEqual(await f.platforms.request(allowed,call),{cot_id:'2',message_id:'om_2'});
+  await assert.rejects(f.platforms.request(allowed,call),e=>e.code===230001&&e.message==='飞书接口错误 230001：bad request');
+  await assert.rejects(f.platforms.request(allowed,call),e=>e.code===99991672&&e.message==='飞书接口错误 99991672：denied');
+  await assert.rejects(f.platforms.request(allowed,call),/^Error: timeout of 10000ms exceeded$/);
+ }finally{f.close();}
+});
 test('removing an app deletes its avatar',async()=>{
  const f=botFixture({info:botInfo(),avatar:()=>new Response(png,{headers:{'content-type':'image/png'}})});try{
   await f.platforms.start(f.a);assert.ok(fs.existsSync(f.file));
@@ -1267,10 +1516,10 @@ test('channel startup and shutdown do not revive a cancelled connection',async()
  const store=new Store(dir),messages=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}}),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true};
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety.batch.text.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions or request cards',async()=>{
+test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions, request cards or COT',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
  fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'initialized'),'1');fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
- const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],createdAt:1};
+ const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},createdAt:1};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
  const claude={id:'b-claude',name:'助手',appId:'x',machineId:'m',chatId:'oc_8',cwd:'~/work',kind:'claude',requireMention:false,enabled:true},codex={...claude,id:'b-codex',chatId:'oc_7',kind:'codex'},agy={...claude,id:'b-agy',chatId:'oc_6',kind:'agy'};
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({apps:[{...app,id:'app-avatar',avatar:{type:'image/png',updatedAt:5}},{...app,id:'app-plain',appId:'cli_plain'},{...app,id:'app-gone',appId:'cli_gone',avatar:{type:'image/png',updatedAt:5}}],
@@ -1287,7 +1536,7 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
   const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
   assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old','b-claude','b-codex','b-agy']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
-  const {messageIds,reactions,cards,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards'])assert.equal(key in s.topics[1],false,key);
+  const {messageIds,reactions,cards,cot,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards','cot'])assert.equal(key in s.topics[1],false,key);
   // Other fields sent along are ignored; a refused change keeps the saved bindings as they are.
   assert.deepEqual(await api('bindings/permission-mode',{id:'b-claude',permissionMode:'auto',name:'改名',cwd:'/etc',kind:'codex'}),{status:200,body:{ok:true}});
   for(const [body,error] of [[{id:'b-claude',permissionMode:'bypassPermissions'},'权限模式无效'],[{id:'b-codex',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'b-agy',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'unknown',permissionMode:'auto'},'会话绑定不存在']])assert.deepEqual(await api('bindings/permission-mode',body),{status:400,body:{error}},body.id);

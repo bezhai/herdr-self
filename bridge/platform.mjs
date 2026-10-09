@@ -1,7 +1,18 @@
 import fs from 'node:fs';import path from 'node:path';
 import {createLarkChannel} from '@larksuite/channel';
 import {text,uuid,hostPath} from './core.mjs';
+import {registerCommands} from './commands.mjs';
 const domains={feishu:'https://open.feishu.cn',lark:'https://open.larksuite.com',bytedance:'https://fsopen.bytedance.net'},avatarLimit=1024*1024;
+// Feishu codes of a call that the app has no scope for.
+const missingScope=[99991672,99991640];
+// An OpenAPI call that the SDK does not cover, through the raw client of channel. Resolves to the data of a response with code 0, or to the
+// body of one without that envelope; rejects with Feishu's code otherwise, also for an HTTP error status, which the client throws with the
+// body attached.
+export async function openApi(channel,options){
+ let d;try{d=await channel.rawClient.request(options);}catch(e){if(e.response?.data?.code==null)throw e;d=e.response.data;}
+ if(d?.code!=null&&d.code!==0)throw Object.assign(Error(`飞书接口错误 ${d.code}：${d.msg||''}`),{code:d.code});
+ return d?.data??d;
+}
 // Raster types only: an SVG can carry script and avatars are served from the console's own origin.
 const avatarTypes=new Set(['image/png','image/jpeg','image/gif','image/webp']);
 // SDK event IDs can be identical when a message mentions two apps. Keep their caches separate.
@@ -110,7 +121,14 @@ export class Platforms{
   }finally{rt.connecting=null;}
   // The connection stands even when the bot profile cannot be read.
   await this.syncBot(a,channel).catch(e=>this.store.log('应用信息',`${a.name}：未能读取机器人信息，${e.message}`,'error'));
+  await this.syncCommands(a,channel);
   })();return rt.connecting;
+ }
+ // Offers the bridge's commands in the slash command panel of the app on every connection. Never rejects: without the scopes, or when
+ // Feishu refuses, one line is logged and the commands still work when typed.
+ async syncCommands(a,channel){
+  try{const changed=await registerCommands(o=>openApi(channel,o));if(changed.length)this.store.log('斜杠命令',`${a.name}：已注册斜杠命令 ${changed.map(c=>'/'+c).join('、')}`);}
+  catch(e){this.store.log('斜杠命令',`${a.name}：未能注册斜杠命令，${missingScope.includes(e.code)?'应用缺少权限 application:app_slash_command:read / write；命令仍可手动输入':e.message}`,'error');}
  }
  receive(a,msg){if(!a.enabled||!a.allowedUsers.includes(msg.senderId)||!routable(msg))return;
   const content=msg.content?.trim();if(!content||content.length>16000)return;
@@ -129,5 +147,7 @@ export class Platforms{
  // The bot's emoji reaction on a message. Resolves to the reaction id, which is the only way to remove it again.
  async react(a,messageId,emojiType){return this.connected(a).addReaction(messageId,emojiType);}
  async unreact(a,messageId,reactionId){await this.connected(a).removeReaction(messageId,reactionId);}
+ // An OpenAPI call that the SDK does not cover, such as the COT calls (see openApi).
+ async request(a,options){return openApi(this.connected(a),options);}
  connected(a){const channel=this.runtime.get(a.id)?.channel;if(!channel||channel.getConnectionStatus()?.state!=='connected')throw Error('飞书未连接');return channel;}
 }

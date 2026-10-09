@@ -1,4 +1,5 @@
 import {card,plain,clip,by,option,select,submitForm} from './request-cards.mjs';
+import {slash} from './commands.mjs';
 // What Feishu shows when a topic adopts an agent that already runs in a Herdr pane (see Topics.offer and Topics.adopt): the picker card,
 // the picker once an agent was adopted, and the intro of the adopted topic. An agent is an entry of the agents of `herdr api snapshot`,
 // which are those of `herdr agent list`; text from Herdr and the agent is shown as plain text, never as markdown.
@@ -45,7 +46,7 @@ export const adoptedPicker=(machine,x,name,openId)=>card('接管 Agent','green',
 // The first message of a topic that adopted agent x of machine, called name. latest tells whether the agent's latest reply follows it.
 export function intro(machine,x,name,latest){
  return [`已接管 ${machine.name} 上的 ${kind(x)} · ${name}`,`工作目录：${x.cwd?home(x.cwd):'未知'}`,
-  '话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /结束接管 结束接管，Agent 会继续在终端的 pane 里运行。',
+  `话题里的消息会发给这个 Agent，它的回复会转到这里。发送 ${slash.release} 结束接管，Agent 会继续在终端的 pane 里运行。`,
   // Herdr keeps the replies of the session an agent reports; a Codex attached to its background app-server reports none in this pane.
   ...x.agent_session?[]:['这个 Agent 没有向 Herdr 上报会话（例如连着后台 app-server 的 Codex），它的回复可能无法转回飞书。'],
   ...latest?['最近一条回复：']:[]].join('\n');

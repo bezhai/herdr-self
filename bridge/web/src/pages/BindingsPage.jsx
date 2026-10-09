@@ -5,7 +5,7 @@ import { AppAvatar } from '../components/AppAvatar.jsx';
 import { Badge } from '../components/Badge.jsx';
 import { bindingStatus, formatDateTime, permissionModeOf, topicStatus } from '../model.js';
 
-// The topics of one binding, newest first: each is an agent session in its own Herdr tab, or one it adopted from any pane (/接管).
+// The topics of one binding, newest first: each is an agent session in its own Herdr tab, or one it adopted from any pane (/adopt).
 function TopicsRow({ topics, state }) {
   return (
     <tr className="topics-row">

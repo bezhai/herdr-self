@@ -9,6 +9,8 @@ export const registrationAddons={preset:false,scopes:{tenant:[
  'im:message.group_at_msg:readonly','application:bot.basic_info:read',
  // Topics mark a message with a reaction until its turn ends.
  'im:message.reactions:write_only',
+ // The slash command panel offers the bridge's commands (see commands.mjs).
+ 'application:app_slash_command:read','application:app_slash_command:write',
 ]},events:{items:{tenant:['im.message.receive_v1']}},callbacks:{items:['card.action.trigger']}};
 const active=s=>['starting','pending','connecting'].includes(s?.status);
 const errors={access_denied:'已在飞书拒绝创建，可重新发起。',expired_token:'创建链接已过期，请重新生成。',abort:'已停止等待。如已在飞书创建应用，可通过已有应用入口添加。'};
