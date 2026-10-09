@@ -347,7 +347,7 @@ Herdr はデフォルトで `~/.gemini/config/` を使い、`ANTIGRAVITY_CLI_CON
 
 フックは `PreInvocation` で実行されるため、最初のプロンプト送信後に Herdr が会話を認識します。それ以降、Herdr サーバーの再起動後に `agy --conversation <id>` でペインを resume できます。
 
-Antigravity CLI 統合 v4 は、すべてのツールに一致する `PreToolUse` と `PostToolUse` フックも登録し、メイン会話のツール呼び出しの開始と終了を報告します。報告は `herdr agent tool-calls` と `agent.tool_calls` ソケットメソッドで読み取れます。Antigravity CLI はツール呼び出しに ID を付けないため、会話内で一意なステップ番号（`stepIdx`）で開始と終了を対応付けます。タイトルは `toolSummary`、なければコマンドライン、ファイルパス、URL です。`error` を含む `PostToolUse` は失敗として記録されます。再インストール後、実行中の Antigravity CLI セッションを再起動してフックを読み込ませてください。Windows ではツール呼び出しを報告しません。
+Antigravity CLI 統合 v4 は、すべてのツールに一致する `PostToolUse` フックも登録し、メイン会話のツール呼び出しを終了時に報告します。報告は `herdr agent tool-calls` と `agent.tool_calls` ソケットメソッドで読み取れます。そのため呼び出しは終了してから表示され、Herdr は開始と終了を同時に記録します。`PreToolUse` フックは登録しません。Antigravity CLI は `PreToolUse` フックに呼び出しの可否（許可、拒否、承認の要求）を決めることを求め、空の応答を拒否として扱うため、どのような `PreToolUse` フックも Antigravity CLI 自身のツール承認を置き換えてしまうからです。Antigravity CLI はツール呼び出しに ID を付けないため、フックは会話内で一意なステップ番号（`stepIdx`）で呼び出しを識別します。タイトルは `toolSummary`、なければコマンドライン、ファイルパス、URL です。空でない `error` を含む `PostToolUse` は失敗として記録されます。再インストール後、実行中の Antigravity CLI セッションを再起動してフックを読み込ませてください。Windows ではツール呼び出しを報告しません。
 
 ## Grok CLI
 

@@ -1120,6 +1120,22 @@ fn antigravity_hook_prints_an_empty_object_without_reporting_outside_its_actions
             AntigravityHook::new("reply", stop.clone()).env("HERDR_PANE_ID", ""),
         ),
         ("unknown action", AntigravityHook::new("idle", stop.clone())),
+        // A PreToolUse hook would have to decide the call, so Herdr registers
+        // none and the hook has no action for a tool call's start.
+        (
+            "tool start",
+            AntigravityHook::new(
+                "tool-start",
+                agy_tool_call_payload(
+                    AGY_MAIN_CONVERSATION,
+                    &transcript,
+                    serde_json::json!({
+                        "stepIdx": 2,
+                        "toolCall": { "name": "run_command", "args": { "CommandLine": "ls" } },
+                    }),
+                ),
+            ),
+        ),
         ("invalid json", AntigravityHook::raw("reply", "not json")),
         ("non-object json", AntigravityHook::raw("reply", "[]")),
         (
@@ -2517,75 +2533,97 @@ fn agy_tool_call_payload(
     payload
 }
 
-fn agy_run_command(step: u64) -> serde_json::Value {
+/// The event fields of a `PostToolUse` payload as Antigravity CLI 1.3.2 sends
+/// them after a `run_command` call. `stepIdx` is the step of the tool's
+/// result, and `error` is empty unless the tool failed.
+fn agy_finished_run_command(step: u64) -> serde_json::Value {
     serde_json::json!({
         "stepIdx": step,
+        "error": "",
         "toolCall": {
             "name": "run_command",
-            "args": { "CommandLine": "cargo test", "Cwd": "/tmp/project", "toolSummary": "运行测试" },
+            "args": {
+                "CommandLine": "ls -1 | wc -l && ls -la",
+                "Cwd": "/tmp/project",
+                "WaitMsBeforeAsync": 5000,
+                "toolAction": "Listing directory contents",
+                "toolSummary": "List directory",
+            },
         },
     })
 }
 
-#[test]
-fn antigravity_tool_hooks_report_the_start_and_end_of_a_main_conversation_call() {
-    let brain = AgyBrain::new();
-    let transcript = brain.write(
-        AGY_MAIN_CONVERSATION,
-        &agy_main_transcript(agy_tool_call(2)),
-    );
+/// A main conversation at `PostToolUse` of its first call: the tool's result
+/// step is written to the transcript only after the hook.
+fn agy_transcript_at_first_tool_end() -> Vec<serde_json::Value> {
+    vec![
+        agy_user_input(
+            0,
+            "run the shell command ls and tell me how many entries there are",
+        ),
+        agy_tool_call(1),
+    ]
+}
 
-    let start = AntigravityHook::new(
-        "tool-start",
-        agy_tool_call_payload(AGY_MAIN_CONVERSATION, &transcript, agy_run_command(2)),
+#[test]
+fn antigravity_tool_end_hook_reports_a_finished_call_of_the_main_conversation() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(AGY_MAIN_CONVERSATION, &agy_transcript_at_first_tool_end());
+
+    let run = AntigravityHook::new(
+        "tool-end",
+        agy_tool_call_payload(
+            AGY_MAIN_CONVERSATION,
+            &transcript,
+            agy_finished_run_command(2),
+        ),
     )
     .run();
-    assert_eq!(start.methods(), ["pane.report_agent_tool_call"]);
+
+    // Herdr runs no hook before a call, so the end is the call's only report
+    // and Herdr records a start made from it.
+    assert_eq!(run.methods(), ["pane.report_agent_tool_call"]);
     assert_eq!(
-        start.params("pane.report_agent_tool_call"),
+        run.params("pane.report_agent_tool_call"),
         serde_json::json!({
             "pane_id": "p_test",
             "source": "herdr:antigravity_cli",
             "agent": "agy",
             "agent_session_id": AGY_MAIN_CONVERSATION,
             "tool_call_id": "2",
-            "phase": "start",
+            "phase": "end",
             "tool_name": "run_command",
-            "title": "运行测试",
+            "title": "List directory",
         })
     );
-
-    let mut post = agy_run_command(2);
-    post["result"] = serde_json::json!("ok");
-    let end = AntigravityHook::new(
-        "tool-end",
-        agy_tool_call_payload(AGY_MAIN_CONVERSATION, &transcript, post.clone()),
-    )
-    .run();
-    let params = end.params("pane.report_agent_tool_call");
-    assert_eq!(params["phase"], "end");
-    assert_eq!(params["tool_call_id"], "2");
-    assert!(params.get("failed").is_none());
-
-    post["error"] = serde_json::json!("exit status 1");
-    let failed = AntigravityHook::new(
-        "tool-end",
-        agy_tool_call_payload(AGY_MAIN_CONVERSATION, &transcript, post),
-    )
-    .run();
-    assert_eq!(failed.params("pane.report_agent_tool_call")["failed"], true);
 }
 
 #[test]
-fn antigravity_tool_hook_titles_fall_back_from_the_summary() {
+fn antigravity_tool_end_hook_marks_a_call_with_an_error_as_failed() {
     let brain = AgyBrain::new();
-    let transcript = brain.write(
-        AGY_MAIN_CONVERSATION,
-        &agy_main_transcript(agy_tool_call(2)),
-    );
+    let transcript = brain.write(AGY_MAIN_CONVERSATION, &agy_transcript_at_first_tool_end());
+    let mut failed = agy_finished_run_command(2);
+    failed["error"] = serde_json::json!("exit status 1");
+
+    let run = AntigravityHook::new(
+        "tool-end",
+        agy_tool_call_payload(AGY_MAIN_CONVERSATION, &transcript, failed),
+    )
+    .run();
+
+    let params = run.params("pane.report_agent_tool_call");
+    assert_eq!(params["phase"], "end");
+    assert_eq!(params["tool_call_id"], "2");
+    assert_eq!(params["failed"], true);
+}
+
+#[test]
+fn antigravity_tool_end_hook_titles_fall_back_from_the_summary() {
+    let brain = AgyBrain::new();
+    let transcript = brain.write(AGY_MAIN_CONVERSATION, &agy_transcript_at_first_tool_end());
     let title = |name: &str, args: serde_json::Value| {
         let run = AntigravityHook::new(
-            "tool-start",
+            "tool-end",
             agy_tool_call_payload(
                 AGY_MAIN_CONVERSATION,
                 &transcript,
@@ -2596,7 +2634,7 @@ fn antigravity_tool_hook_titles_fall_back_from_the_summary() {
         let params = run.params("pane.report_agent_tool_call");
         assert_eq!(
             params["tool_call_id"], "4",
-            "int64 step indexes arrive as strings"
+            "a step index sent as a string is accepted"
         );
         params["title"].as_str().map(str::to_string)
     };
@@ -2629,23 +2667,34 @@ fn antigravity_tool_hook_titles_fall_back_from_the_summary() {
 }
 
 #[test]
-fn antigravity_tool_hooks_ignore_subagents_and_incomplete_calls() {
+fn antigravity_tool_end_hook_ignores_subagents_and_incomplete_calls() {
     let brain = AgyBrain::new();
-    let main = brain.write(
-        AGY_MAIN_CONVERSATION,
-        &agy_main_transcript(agy_tool_call(2)),
-    );
+    let main = brain.write(AGY_MAIN_CONVERSATION, &agy_transcript_at_first_tool_end());
     let subagent = brain.write(AGY_SUBAGENT_CONVERSATION, &agy_subagent_transcript());
+    let missing = brain.transcript_path("missing-conversation");
 
     for (case, action, payload) in [
         (
             "subagent conversation",
-            "tool-start",
-            agy_tool_call_payload(AGY_SUBAGENT_CONVERSATION, &subagent, agy_run_command(1)),
+            "tool-end",
+            agy_tool_call_payload(
+                AGY_SUBAGENT_CONVERSATION,
+                &subagent,
+                agy_finished_run_command(2),
+            ),
+        ),
+        (
+            "missing transcript",
+            "tool-end",
+            agy_tool_call_payload(
+                "missing-conversation",
+                &missing,
+                agy_finished_run_command(2),
+            ),
         ),
         (
             "no step index",
-            "tool-start",
+            "tool-end",
             agy_tool_call_payload(
                 AGY_MAIN_CONVERSATION,
                 &main,
@@ -2664,7 +2713,7 @@ fn antigravity_tool_hooks_ignore_subagents_and_incomplete_calls() {
         (
             "other action",
             "session",
-            agy_tool_call_payload(AGY_MAIN_CONVERSATION, &main, agy_run_command(2)),
+            agy_tool_call_payload(AGY_MAIN_CONVERSATION, &main, agy_finished_run_command(2)),
         ),
     ] {
         let run = AntigravityHook::new(action, payload).run();

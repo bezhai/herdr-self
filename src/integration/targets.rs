@@ -46,10 +46,10 @@ use super::types::{
 use super::{
     ANTIGRAVITY_CLI_HOOK_ASSET, ANTIGRAVITY_CLI_HOOK_BLOCK_NAME, ANTIGRAVITY_CLI_HOOK_EVENTS,
     ANTIGRAVITY_CLI_HOOK_INSTALL_NAME, ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
-    ANTIGRAVITY_CLI_TOOL_HOOK_EVENTS, CLAUDE_HOOK_ASSET, CLAUDE_HOOK_INSTALL_NAME,
-    CODEX_HOOK_ASSET, CODEX_HOOK_INSTALL_NAME, COPILOT_HOOK_ASSET, COPILOT_HOOK_EVENTS,
-    COPILOT_HOOK_INSTALL_NAME, COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS, CURSOR_HOOK_ASSET,
-    CURSOR_HOOK_INSTALL_NAME, DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS, DEVIN_HOOK_INSTALL_NAME,
+    ANTIGRAVITY_CLI_TOOL_HOOK_EVENT, CLAUDE_HOOK_ASSET, CLAUDE_HOOK_INSTALL_NAME, CODEX_HOOK_ASSET,
+    CODEX_HOOK_INSTALL_NAME, COPILOT_HOOK_ASSET, COPILOT_HOOK_EVENTS, COPILOT_HOOK_INSTALL_NAME,
+    COPILOT_REMOVED_LIFECYCLE_HOOK_EVENTS, CURSOR_HOOK_ASSET, CURSOR_HOOK_INSTALL_NAME,
+    DEVIN_HOOK_ASSET, DEVIN_HOOK_EVENTS, DEVIN_HOOK_INSTALL_NAME,
     DEVIN_REMOVED_LIFECYCLE_HOOK_EVENTS, DROID_HOOK_ASSET, DROID_HOOK_EVENTS,
     DROID_HOOK_INSTALL_NAME, DROID_REMOVED_LIFECYCLE_HOOK_EVENTS, GROK_HOOK_ASSET,
     GROK_HOOK_CONFIG_INSTALL_NAME, GROK_HOOK_INSTALL_NAME, HERMES_PLUGIN_INIT_ASSET,
@@ -1686,7 +1686,8 @@ pub(crate) fn antigravity_cli_hook_command(hook_path: &Path, action: &str) -> St
 /// Builds the Herdr-owned `hooks.json` block for Antigravity CLI.
 ///
 /// The lifecycle events take a flat handler list; the `matcher`/`hooks` group
-/// is only valid for the tool events, where it is required.
+/// is only valid for the tool events, where it is required. Install replaces
+/// the whole block, so events an earlier install registered disappear.
 fn antigravity_cli_hook_block(hook_path: &Path) -> Value {
     let handler = |action: &str| {
         json!({
@@ -1699,12 +1700,11 @@ fn antigravity_cli_hook_block(hook_path: &Path) -> Value {
     for (event, action) in ANTIGRAVITY_CLI_HOOK_EVENTS {
         block.insert(event.to_string(), json!([handler(action)]));
     }
-    for (event, action) in ANTIGRAVITY_CLI_TOOL_HOOK_EVENTS {
-        block.insert(
-            event.to_string(),
-            json!([{"matcher": "*", "hooks": [handler(action)]}]),
-        );
-    }
+    let (tool_event, tool_action) = ANTIGRAVITY_CLI_TOOL_HOOK_EVENT;
+    block.insert(
+        tool_event.to_string(),
+        json!([{"matcher": "*", "hooks": [handler(tool_action)]}]),
+    );
     Value::Object(block)
 }
 

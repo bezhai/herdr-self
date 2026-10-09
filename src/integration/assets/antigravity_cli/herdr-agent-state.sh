@@ -7,9 +7,11 @@
 
 # `session` runs on PreInvocation and reports the Antigravity conversation so
 # Herdr can resume the pane. `reply` runs on Stop and reports the conversation
-# again, then the turn's final reply. `tool-start` and `tool-end` run on
-# PreToolUse and PostToolUse and report the start or end of a tool call, keyed
-# by its step index; the payloads do not name their event, so the action does.
+# again, then the turn's final reply. `tool-end` runs on PostToolUse and
+# reports the end of a tool call, keyed by its step index; the payload does not
+# name its event, so the action does. Herdr records a start made from the end:
+# there is no PreToolUse hook because Antigravity CLI requires that hook to
+# decide the call, and any decision would replace its own approval.
 # Lifecycle state comes from Herdr's screen detection.
 #
 # Subagents run inside the same Antigravity process and fire the same hooks
@@ -28,7 +30,7 @@ emit_and_exit() {
 }
 
 case "${1:-}" in
-  session|reply|tool-start|tool-end) ;;
+  session|reply|tool-end) ;;
   *) emit_and_exit ;;
 esac
 [ "${HERDR_ENV:-}" = "1" ] || emit_and_exit
@@ -47,7 +49,6 @@ source = "herdr:antigravity_cli"
 max_reply_bytes = 64 * 1024
 tail_chunk_bytes = 64 * 1024
 max_title_chars = 120
-tool_phases = {"tool-start": "start", "tool-end": "end"}
 # A tool title is the first of these arguments the call has.
 title_args = ("toolSummary", "CommandLine", "TargetFile", "File", "AbsolutePath", "Url", "Query")
 path_args = {"TargetFile", "File", "AbsolutePath"}
@@ -135,7 +136,7 @@ def display_path(path, args):
         return path[len(root) + 1:]
     return path
 
-def tool_call_params(session_id):
+def tool_end_params(session_id):
     tool_call = payload.get("toolCall")
     tool_call = tool_call if isinstance(tool_call, dict) else {}
     name = tool_call.get("name")
@@ -151,7 +152,7 @@ def tool_call_params(session_id):
         "agent": "agy",
         "agent_session_id": session_id,
         "tool_call_id": str(step),
-        "phase": tool_phases[action],
+        "phase": "end",
         "tool_name": name,
     }
     args = tool_call.get("args")
@@ -161,8 +162,9 @@ def tool_call_params(session_id):
         if isinstance(value, str) and value.strip():
             params["title"] = one_line(display_path(value, args) if arg in path_args else value)
             break
+    # A finished call carries an empty `error`; a failed one names the error.
     error = payload.get("error")
-    if action == "tool-end" and isinstance(error, str) and error:
+    if isinstance(error, str) and error:
         params["failed"] = True
     return params
 
@@ -188,8 +190,8 @@ if session_id is None or transcript_path is None:
 if not is_main_conversation(transcript_path):
     raise SystemExit(0)
 
-if action in tool_phases:
-    params = tool_call_params(session_id)
+if action == "tool-end":
+    params = tool_end_params(session_id)
     if params is not None:
         send("pane.report_agent_tool_call", params, 0.5)
     raise SystemExit(0)

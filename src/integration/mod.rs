@@ -280,11 +280,15 @@ const ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC: u64 = 10;
 /// invalidate the whole file.
 const ANTIGRAVITY_CLI_HOOK_EVENTS: [(&str, &str); 2] =
     [("PreInvocation", "session"), ("Stop", "reply")];
-/// `(event, reported action)` for the events that report each tool call's
-/// start and end. Their payloads do not name the event, so the action does.
-/// They require the `matcher`/`hooks` wrapper, where `*` selects every tool.
-const ANTIGRAVITY_CLI_TOOL_HOOK_EVENTS: [(&str, &str); 2] =
-    [("PreToolUse", "tool-start"), ("PostToolUse", "tool-end")];
+/// `(event, reported action)` for the event that reports each finished tool
+/// call. Its payload does not name the event, so the action does. It requires
+/// the `matcher`/`hooks` wrapper, where `*` selects every tool.
+///
+/// There is no `PreToolUse` hook: Antigravity CLI requires it to decide the
+/// call (`allow`, `deny`, `ask` or `force_ask`; an empty object denies it), so
+/// any answer would replace Antigravity CLI's own approval. Herdr records a
+/// start made from the end instead.
+const ANTIGRAVITY_CLI_TOOL_HOOK_EVENT: (&str, &str) = ("PostToolUse", "tool-end");
 const INTEGRATION_VERSION_MARKER: &str = "HERDR_INTEGRATION_VERSION=";
 const MASTRACODE_HOOK_INSTALL_NAME: &str = if cfg!(windows) {
     "herdr-agent-state.ps1"

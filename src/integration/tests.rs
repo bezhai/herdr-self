@@ -4839,28 +4839,27 @@ fn install_antigravity_cli_writes_hook_and_updates_hooks_json() {
     }
 
     // Tool events take the matcher/hooks wrapper; `*` matches every tool.
-    for (event, action) in [("PreToolUse", "tool-start"), ("PostToolUse", "tool-end")] {
-        assert_eq!(
-            block.get(event),
-            Some(&serde_json::json!([{
-                "matcher": "*",
-                "hooks": [{
-                    "type": "command",
-                    "command": antigravity_cli_hook_command(&installed.hook_path, action),
-                    "timeout": ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
-                }],
-            }])),
-            "{event}"
-        );
-    }
+    assert_eq!(
+        block.get("PostToolUse"),
+        Some(&serde_json::json!([{
+            "matcher": "*",
+            "hooks": [{
+                "type": "command",
+                "command": antigravity_cli_hook_command(&installed.hook_path, "tool-end"),
+                "timeout": ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
+            }],
+        }]))
+    );
 
     // PreInvocation reports the conversation, Stop reports the turn's final
-    // reply, and the tool events report tool calls. None reports state:
-    // Antigravity CLI cannot express blocked state and skips PostInvocation on
-    // interruption, so screen detection owns agent state.
+    // reply, and PostToolUse reports each finished tool call. None reports
+    // state: Antigravity CLI cannot express blocked state and skips
+    // PostInvocation on interruption, so screen detection owns agent state.
+    // There is no PreToolUse hook: Antigravity CLI requires it to decide the
+    // call, so any answer changes its own approval flow.
     assert_eq!(
         block.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["PostToolUse", "PreInvocation", "PreToolUse", "Stop"]
+        vec!["PostToolUse", "PreInvocation", "Stop"]
     );
     assert_eq!(
         block
@@ -4950,7 +4949,7 @@ fn install_antigravity_cli_rewrites_stale_herdr_block() {
     // install is migrated to the current events rather than merged with.
     assert_eq!(
         block.keys().map(String::as_str).collect::<Vec<_>>(),
-        vec!["PostToolUse", "PreInvocation", "PreToolUse", "Stop"],
+        vec!["PostToolUse", "PreInvocation", "Stop"],
         "stale lifecycle events should be gone"
     );
     let hook_path = agy_dir
@@ -4965,6 +4964,64 @@ fn install_antigravity_cli_rewrites_stale_herdr_block() {
             Some(antigravity_cli_hook_command(&hook_path, action).as_str())
         );
     }
+
+    std::env::remove_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR);
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn reinstalling_antigravity_cli_removes_the_pre_tool_use_hook() {
+    let _lock = integration_env_lock();
+    let base = unique_base();
+    let agy_dir = base.join(".gemini").join("config");
+    fs::create_dir_all(&agy_dir).unwrap();
+    let hook_path = agy_dir
+        .join("hooks")
+        .join(ANTIGRAVITY_CLI_HOOK_INSTALL_NAME);
+    let handler = |action: &str| {
+        serde_json::json!({
+            "type": "command",
+            "command": antigravity_cli_hook_command(&hook_path, action),
+            "timeout": ANTIGRAVITY_CLI_HOOK_TIMEOUT_SEC,
+        })
+    };
+    // An earlier v4 build also registered PreToolUse, whose empty-object
+    // output Antigravity CLI 1.3.2 treats as a denial of every tool call.
+    fs::write(
+        agy_dir.join("hooks.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "herdr": {
+                "PreInvocation": [handler("session")],
+                "Stop": [handler("reply")],
+                "PreToolUse": [{"matcher": "*", "hooks": [handler("tool-start")]}],
+                "PostToolUse": [{"matcher": "*", "hooks": [handler("tool-end")]}],
+            },
+            "safety-gate": {
+                "PreToolUse": [{"matcher": "run_command", "hooks": [{"command": "./gate.sh"}]}],
+            },
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::env::set_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR, &agy_dir);
+
+    install_antigravity_cli().unwrap();
+
+    let hooks_file: Value =
+        serde_json::from_str(&fs::read_to_string(agy_dir.join("hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        hooks_file["herdr"],
+        serde_json::json!({
+            "PreInvocation": [handler("session")],
+            "Stop": [handler("reply")],
+            "PostToolUse": [{"matcher": "*", "hooks": [handler("tool-end")]}],
+        })
+    );
+    // Another hook's PreToolUse is its own decision and stays.
+    assert_eq!(
+        hooks_file["safety-gate"]["PreToolUse"][0]["matcher"],
+        "run_command"
+    );
 
     std::env::remove_var(ANTIGRAVITY_CLI_CONFIG_DIR_ENV_VAR);
     let _ = fs::remove_dir_all(base);

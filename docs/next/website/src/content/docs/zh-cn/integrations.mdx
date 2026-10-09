@@ -347,7 +347,7 @@ Herdr 默认使用 `~/.gemini/config/`,设置了 `ANTIGRAVITY_CLI_CONFIG_DIR` �
 
 钩子在 `PreInvocation` 时运行,所以 Herdr 会在发送第一个提示词后获知对话。此后,Herdr 服务器重启时可以用 `agy --conversation <id>` 恢复窗格。
 
-Antigravity CLI 集成 v4 还注册了匹配所有工具的 `PreToolUse` 和 `PostToolUse` 钩子,上报主对话中每次工具调用的开始和结束,可以用 `herdr agent tool-calls` 和 socket 方法 `agent.tool_calls` 读取。Antigravity CLI 不给工具调用分配 ID,钩子用对话内唯一的步骤序号(`stepIdx`)配对开始和结束。标题取 `toolSummary`,没有时依次取命令行、文件路径或 URL。带 `error` 的 `PostToolUse` 记为失败。重新安装后需要重启正在运行的 Antigravity CLI 会话才会加载这些钩子。Windows 不上报工具调用。
+Antigravity CLI 集成 v4 还注册了匹配所有工具的 `PostToolUse` 钩子,在主对话中每次工具调用结束时上报该调用,可以用 `herdr agent tool-calls` 和 socket 方法 `agent.tool_calls` 读取。因此工具调用在结束后才会出现,Herdr 同时记录它的开始和结束。集成不注册 `PreToolUse` 钩子:Antigravity CLI 要求 `PreToolUse` 钩子决定是否执行调用(允许、拒绝或请求批准),并把空的返回当作拒绝,所以任何 `PreToolUse` 钩子都会取代 Antigravity CLI 自己的工具调用审批。Antigravity CLI 不给工具调用分配 ID,钩子用对话内唯一的步骤序号(`stepIdx`)标识调用。标题取 `toolSummary`,没有时依次取命令行、文件路径或 URL。`error` 非空的 `PostToolUse` 记为失败。重新安装后需要重启正在运行的 Antigravity CLI 会话才会加载这个钩子。Windows 不上报工具调用。
 
 ## Grok CLI
 
