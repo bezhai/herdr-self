@@ -69,7 +69,7 @@ function BindingRow({ binding: b, state, refresh, toast, openPermissionMode }) {
 export function BindingsPage({ state, refresh, toast, openPermissionMode }) {
   return (
     <section className="page">
-      <div className="section-heading"><h2>消息路由<span>routes</span></h2><p>每个飞书话题在 Herdr 中新开一个 tab</p></div>
+      <div className="section-heading"><h2>消息路由</h2></div>
       <div className="table-wrap">
         <table>
           <thead>
@@ -86,7 +86,7 @@ export function BindingsPage({ state, refresh, toast, openPermissionMode }) {
                   </Fragment>
                 );
               })
-              : <tr><td colSpan={5} className="table-empty">暂无会话绑定。在飞书里给机器人发一条消息，按机器人回复的链接完成绑定。</td></tr>}
+              : <tr><td colSpan={5} className="table-empty">暂无会话绑定</td></tr>}
           </tbody>
         </table>
       </div>

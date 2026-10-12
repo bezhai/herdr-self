@@ -30,7 +30,7 @@ export function BindingDialog({ state, chat, onClose, onSaved }) {
   }
 
   return (
-    <FormDialog eyebrow="ROUTE" title="连接聊天与会话" submitLabel="保存绑定" onSubmit={save} onClose={onClose}>
+    <FormDialog title="连接聊天与会话" submitLabel="保存绑定" onSubmit={save} onClose={onClose}>
       <label>绑定名称<input required placeholder="例如：个人开发助手" {...field('name')} /></label>
       <fieldset>
         <legend>来源 · 飞书</legend>
@@ -59,7 +59,6 @@ export function BindingDialog({ state, chat, onClose, onSaved }) {
           </label>
         </div>
         {values.kind === 'claude' && <PermissionModeField {...field('permissionMode')} />}
-        <p className="fine">每个飞书话题会在 Herdr 中新开一个 tab，在该目录启动所选 Agent；这些 tab 都放在工作区「飞书 · 绑定名称」中。</p>
       </fieldset>
       {group && <label className="checkbox"><input type="checkbox" {...checkbox('requireMention')} /><span>仅 @机器人时触发</span></label>}
     </FormDialog>

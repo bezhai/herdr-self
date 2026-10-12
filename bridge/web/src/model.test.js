@@ -75,7 +75,7 @@ const view = (registration, local = {}) => registrationView(registration, apps, 
 
 test('registration view: starting shows the spinner and the manual entry', () => {
   expect(view(null)).toEqual({
-    opening: false, title: '在飞书中添加应用', subtitle: '新建或选择已有应用', spinner: true, result: null, qr: null,
+    opening: false, title: '在飞书中添加应用', subtitle: '', spinner: true, result: null, qr: null,
     message: '正在打开飞书…', link: null, scan: false, scanLabel: '手机扫码', retry: false, done: false, configure: false, manual: true,
   });
   expect(view({ id: 'r1', status: 'connecting', appId: 'app-2' })).toMatchObject({ spinner: true, message: '正在连接…', done: false });

@@ -66,11 +66,11 @@ function MachineCard({ machine: m, refresh, toast, openMachine }) {
 export function MachinesPage({ state, refresh, toast, openMachine }) {
   return (
     <section className="page">
-      <div className="section-heading"><h2>Herdr 实例<span>hosts</span></h2></div>
+      <div className="section-heading"><h2>Herdr 实例</h2></div>
       <div className="stack">
         {state.machines.length
           ? state.machines.map((m) => <MachineCard key={m.id} machine={m} refresh={refresh} toast={toast} openMachine={openMachine} />)
-          : <EmptyState icon="server" title="接入第一台机器">使用上方的「添加机器」，连接 Bridge 本机或 SSH 上的 Herdr。</EmptyState>}
+          : <EmptyState icon="server" title="暂无机器" />}
       </div>
     </section>
   );

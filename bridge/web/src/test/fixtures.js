@@ -1,4 +1,8 @@
 import { vi } from 'vitest';
+import themeScript from '../../public/theme.js?raw';
+
+// Runs public/theme.js the way the pages' <head> does: as a classic script, before the app renders.
+export const runThemeScript = () => new Function(themeScript)();
 
 // Like a real response, every json() call yields a freshly parsed object.
 export function reply(body, status = 200) {

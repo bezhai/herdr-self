@@ -19,7 +19,7 @@ export function MachineDialog({ machine, onClose, onSaved }) {
   }
 
   return (
-    <FormDialog id="machine-form" eyebrow="MACHINE" title="添加 Herdr 连接" submitLabel="保存并连接" onSubmit={save} onClose={onClose}>
+    <FormDialog id="machine-form" title="添加 Herdr 连接" submitLabel="保存并连接" onSubmit={save} onClose={onClose}>
       <label>连接名称<input required placeholder="例如：cpu2" {...field('name')} /></label>
       <div className="form-grid">
         <label>连接方式
@@ -27,12 +27,9 @@ export function MachineDialog({ machine, onClose, onSaved }) {
         </label>
         <label>Herdr Session<input required {...field('session')} /></label>
       </div>
-      <div className="ssh-only">
-        <div className="form-grid wide-first">
-          <label>SSH 地址 / 别名<input placeholder="user@host 或 SSH config 别名" {...field('host')} /></label>
-          <label>端口<input type="number" min="1" max="65535" {...field('port')} /></label>
-        </div>
-        <p className="fine">使用 Bridge 主机的 SSH 配置、密钥和 known_hosts。</p>
+      <div className="form-grid wide-first ssh-only">
+        <label>SSH 地址 / 别名<input placeholder="user@host 或 SSH config 别名" {...field('host')} /></label>
+        <label>端口<input type="number" min="1" max="65535" {...field('port')} /></label>
       </div>
       <label>Herdr 可执行文件<input required {...field('binary')} /></label>
     </FormDialog>

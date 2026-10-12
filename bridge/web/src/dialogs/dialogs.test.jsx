@@ -9,6 +9,27 @@ import { RegistrationDialog } from './RegistrationDialog.jsx';
 import { bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.js';
 
 const optionLabels = (label) => [...screen.getByLabelText(label).options].map((option) => option.textContent);
+// Paragraphs in the open dialog other than the error line: forms carry no captions or explanations.
+const prose = () => [...document.querySelectorAll('dialog p')].filter((p) => p.getAttribute('role') !== 'alert').map((p) => p.textContent);
+
+test('form dialogs head with their title next to the close button and hold no explanatory text', () => {
+  const state = sampleState();
+  const forms = [
+    [<AppDialog onClose={vi.fn()} onSaved={vi.fn()} />, '应用配置'],
+    [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加 Herdr 连接'],
+    [<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '连接聊天与会话'],
+    [<PermissionModeDialog binding={state.bindings[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '修改权限模式'],
+  ];
+  for (const [element, title] of forms) {
+    const view = render(element);
+    const head = document.querySelector('.dialog-head');
+    expect(head.textContent).toBe(title);
+    expect(within(head).getByRole('heading', { name: title })).toBeTruthy();
+    expect(within(head).getByRole('button', { name: '关闭' })).toBeTruthy();
+    expect(prose()).toEqual([]);
+    view.unmount();
+  }
+});
 
 test('machine form starts from defaults and saves with enabled:true; a failed save shows the error in the dialog and re-enables the button', async () => {
   const save = deferred();
@@ -58,7 +79,7 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
 
   render(<AppDialog app={sampleState().apps[1]} onClose={vi.fn()} onSaved={vi.fn()} />);
   expect(screen.getByLabelText('应用名称').value).toBe('备用应用');
-  expect(screen.getByText('连接后以飞书机器人名称为准。')).toBeTruthy();
+  expect(prose()).toEqual([]);
   expect(screen.getByLabelText('App ID').value).toBe('cli_spare');
   expect(screen.getByLabelText('API 环境').value).toBe('lark');
   await user.type(screen.getByLabelText('App Secret'), 'new-secret');
@@ -91,7 +112,7 @@ test('binding form shows its chat read-only, lists only connected machines and s
   expect(document.querySelectorAll('select')).toHaveLength(3);
   expect(screen.getByLabelText('仅 @机器人时触发').checked).toBe(true);
   expect(screen.queryByText(/私聊请取消/)).toBeNull();
-  expect(screen.getByText(/^每个飞书话题会在 Herdr 中新开一个 tab/)).toBeTruthy();
+  expect(prose()).toEqual([]);
 
   await user.clear(screen.getByLabelText('绑定名称'));
   await user.type(screen.getByLabelText('绑定名称'), '团队群');
@@ -162,7 +183,7 @@ test('binding form for Antigravity hides the permission mode and saves kind agy 
   expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-group', name: '飞书群聊', machineId: 'm-1', cwd: '~/code/agy', kind: 'agy', requireMention: true });
 });
 
-test('permission mode form starts from the mode of the binding, default without one, says that only new topics use it and saves only the mode', async () => {
+test('permission mode form starts from the mode of the binding, default without one, and saves only the mode', async () => {
   const save = deferred();
   const fetch = stubFetch({ '/api/bindings/permission-mode': () => save.promise });
   const onSaved = vi.fn();
@@ -176,7 +197,7 @@ test('permission mode form starts from the mode of the binding, default without 
   expect(screen.getByRole('heading', { name: '修改权限模式' })).toBeTruthy();
   expect(screen.getByLabelText('权限模式').value).toBe('default');
   expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
-  expect(screen.getByText('只影响「个人助手」之后新开的话题；已在运行的话题保持原来的模式。')).toBeTruthy();
+  expect(prose()).toEqual([]);
 
   await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
   await user.click(screen.getByRole('button', { name: '保存' }));
@@ -213,6 +234,7 @@ test('registration dialog links to Feishu and switches to the QR code for phones
   const user = userEvent.setup();
   const registration = { id: 'r1', status: 'pending', url: 'https://open.feishu.cn/page/x', qr: 'data:image/png;base64,qr' };
   render(<RegistrationDialog registration={registration} {...props} />);
+  expect(prose()).toEqual(['等待飞书确认']);
   const link = screen.getByRole('link', { name: '前往飞书 ↗' });
   expect(link.getAttribute('href')).toBe(registration.url);
   expect(link.getAttribute('target')).toBe('_blank');

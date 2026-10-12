@@ -1,11 +1,11 @@
 import { Icon } from './Icon.jsx';
 
-export function EmptyState({ icon, title, children }) {
+// An empty list: an icon and a short status such as 暂无机器.
+export function EmptyState({ icon, title }) {
   return (
     <div className="empty-state">
       <span className="empty-icon"><Icon name={icon} /></span>
-      <h3>{title}</h3>
-      <p>{children}</p>
+      <p>{title}</p>
     </div>
   );
 }

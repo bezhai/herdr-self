@@ -98,7 +98,7 @@ export function registrationView(registration, apps, { opening, previousId, scan
   return {
     opening: stillOpening,
     title: completed ? '飞书已连接' : '在飞书中添加应用',
-    subtitle: completed ? app?.name || '' : '新建或选择已有应用',
+    subtitle: (completed && app?.name) || '',
     spinner: !(completed || problem || setup || (scanning && Boolean(r?.qr))),
     result: completed ? 'success' : problem || setup ? 'problem' : null,
     qr: scanning && pending && r?.qr ? r.qr : null,

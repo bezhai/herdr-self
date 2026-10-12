@@ -25,9 +25,7 @@ export function LoginPage({ onLogin }) {
       <div className="login-panel">
         <Brand />
         <div className="login-body">
-          <p className="eyebrow">ADMIN CONSOLE</p>
           <h1>登录管理台</h1>
-          <p className="muted">访问密钥保存在 Bridge 状态目录的 <code>access-key</code> 文件中。</p>
           <form id="login-form" onSubmit={submit}>
             <label htmlFor="key">访问密钥</label>
             <div className="input-icon">
@@ -57,7 +55,6 @@ export function LoginPage({ onLogin }) {
             <p className="mono agent-line"><span className="pulse" />claude<em>working</em></p>
           </div>
         </div>
-        <p className="tagline">熟悉的终端。<br />更多的连接方式。</p>
       </div>
     </section>
   );

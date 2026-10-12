@@ -45,11 +45,11 @@ function AppCard({ app, bindings, refresh, toast, openApp }) {
 export function PlatformsPage({ state, refresh, toast, openApp }) {
   return (
     <section className="page">
-      <div className="section-heading"><h2>平台应用<span>feishu</span></h2></div>
+      <div className="section-heading"><h2>平台应用</h2></div>
       <div className="stack">
         {state.apps.length
           ? state.apps.map((app) => <AppCard key={app.id} app={app} bindings={state.bindings} refresh={refresh} toast={toast} openApp={openApp} />)
-          : <EmptyState icon="chat" title="连接飞书">使用上方的「添加飞书」，在飞书中新建或选择已有应用，确认后自动建立长连接。</EmptyState>}
+          : <EmptyState icon="chat" title="暂无飞书应用" />}
       </div>
     </section>
   );

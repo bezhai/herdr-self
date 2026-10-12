@@ -1591,9 +1591,10 @@ test('the server refuses to start with a BRIDGE_URL that is not an http(s) origi
 
 test('SDK cache isolates apps and honors namespaces and absolute expiry',async()=>{const a=channelCache(),b=channelCache();await a.set('same','seen',Date.now()+60000,{namespace:'dedup'});assert.equal(await a.get('same',{namespace:'dedup'}),'seen');assert.equal(await b.get('same',{namespace:'dedup'}),undefined);assert.equal(await a.get('same',{namespace:'token'}),undefined);await a.set('expired','old',Date.now()-1);assert.equal(await a.get('expired'),undefined);});
 
-test('static files map the two pages and hashed assets and reject every other path',()=>{
+test('static files map the two pages, the theme script and hashed assets and reject every other path',()=>{
  const dist=path.join(path.dirname(fileURLToPath(import.meta.url)),'web','dist'),html='text/html; charset=utf-8';
  assert.deepEqual(staticFile('/'),{file:path.join(dist,'index.html'),type:html,immutable:false});assert.deepEqual(staticFile('/connect'),{file:path.join(dist,'connect.html'),type:html,immutable:false});
+ assert.deepEqual(staticFile('/theme.js'),{file:path.join(dist,'theme.js'),type:'text/javascript; charset=utf-8',immutable:false});
  for(const [name,type] of [['index-AbC_1.js','text/javascript; charset=utf-8'],['index-x.css','text/css; charset=utf-8'],['mark.svg','image/svg+xml'],['qr.png','image/png'],['font.woff2','font/woff2']])assert.deepEqual(staticFile('/assets/'+name),{file:path.join(dist,'assets',name),type,immutable:true});
  for(const p of ['/index.html','/connect.html','/connect/','/app.js','/style.css','/assets/','/assets/x.map','/assets/x.html','/assets/x.json','/assets/x.JS','/assets/..','/assets/.js','/assets/../server.mjs','/assets/..%2Fserver.mjs','/assets/sub/x.js','/assets/x.js/','/api/state','/health'])assert.equal(staticFile(p),null,p);
 });
@@ -1607,6 +1608,8 @@ test('static responses: pages return 503 before the build, missing assets 404, h
   const page=await send('/');assert.equal(page.code,200);assert.equal(page.body,'<!doctype html>');assert.equal(page.headers['Content-Type'],'text/html; charset=utf-8');assert.equal(page.headers['Cache-Control'],'no-cache');
   const asset=await send('/assets/index-a.js');assert.equal(asset.code,200);assert.equal(asset.body,'export{}');assert.equal(asset.headers['Cache-Control'],'public, max-age=31536000, immutable');
   assert.equal((await send('/assets/index-b.js')).code,404);assert.equal((await send('/connect')).code,404);
+  assert.equal((await send('/theme.js')).code,404);fs.writeFileSync(path.join(dist,'theme.js'),'(()=>{})();');
+  const theme=await send('/theme.js');assert.equal(theme.code,200);assert.equal(theme.body,'(()=>{})();');assert.equal(theme.headers['Content-Type'],'text/javascript; charset=utf-8');assert.equal(theme.headers['Cache-Control'],'no-cache');
  }finally{fs.rmSync(root,{recursive:true});}
 });
 test('built admin pages load only files the server serves and stay within the CSP',()=>{
@@ -1616,7 +1619,12 @@ test('built admin pages load only files the server serves and stay within the CS
   const page=read(html);assert.doesNotMatch(page,/\sstyle=|<style|<script(?![^>]*\ssrc=)|<[a-z][^>]*\son[a-z]+=/i,html+' has an inline style, script or event handler');
   const urls=[...page.matchAll(/\s(?:href|src)="([^"]*)"/g)].map(m=>m[1]).filter(u=>!u.startsWith('#')&&!u.startsWith('data:image/'));assert.ok(urls.some(u=>u.endsWith('.js'))&&urls.some(u=>u.endsWith('.css')),html+' loads no script or stylesheet');
   for(const url of urls){const asset=staticFile(url);assert.ok(asset&&fs.existsSync(asset.file),`${html} loads ${url}, which the server does not serve`);}
+  // The theme script runs as a classic, blocking script ahead of the stylesheet and the app, so a stored theme is applied before first paint.
+  const head=page.slice(0,page.indexOf('</head>')),theme=head.indexOf('<script src="/theme.js"></script>');
+  assert.ok(theme>=0&&theme<head.search(/<link rel="stylesheet"|<script type="module"/),html+' does not run /theme.js before its stylesheet and app');
+  assert.match(head,/<meta name="color-scheme" content="light dark">/,html+' does not offer both color schemes');
  }
+ assert.doesNotMatch(read('theme.js'),/^\s*(?:import|export)\b/m,'theme.js must stay a classic script');
  for(const name of assets.filter(n=>n.endsWith('.css'))){const css=read('assets/'+name);assert.doesNotMatch(css,/@import/,name);for(const [,url] of css.matchAll(/url\(\s*['"]?([^'")\s]+)/g))assert.match(url,/^(?:data:image\/svg\+xml|\/assets\/)/,`${name} loads ${url}`);}
  for(const name of assets.filter(n=>n.endsWith('.js'))){const js=read('assets/'+name);for(const [,from,dynamic] of js.matchAll(/\bfrom\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']/g)){const spec=from??dynamic,file=spec.replace(/^\.\//,'');assert.ok(/^[\w.-]+\.js$/.test(file)&&assets.includes(file),`${name} imports ${spec}`);}}
 });

@@ -8,8 +8,7 @@ export function PendingChatsDialog({ state, onPick, onClose }) {
   return (
     <Dialog open onClose={onClose}>
       <div className="dialog-body">
-        <div className="dialog-head"><span className="eyebrow">ROUTE</span><CloseButton onClick={onClose} /></div>
-        <h2>选择要绑定的飞书聊天</h2>
+        <div className="dialog-head"><h2>选择要绑定的飞书聊天</h2><CloseButton onClick={onClose} /></div>
         {state.pendingChats.length ? (
           <ul className="pending-chats">
             {state.pendingChats.map((chat) => {
@@ -32,7 +31,7 @@ export function PendingChatsDialog({ state, onPick, onClose }) {
             })}
           </ul>
         ) : (
-          <p className="dialog-note">在飞书里给机器人发一条消息（群聊需 @机器人），机器人会回复绑定链接。</p>
+          <p className="dialog-empty">暂无待绑定的聊天</p>
         )}
       </div>
     </Dialog>

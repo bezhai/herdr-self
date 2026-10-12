@@ -23,9 +23,8 @@ export function PermissionModeDialog({ binding, onClose, onSaved }) {
   }
 
   return (
-    <FormDialog eyebrow="ROUTE" title="修改权限模式" submitLabel="保存" onSubmit={save} onClose={onClose}>
+    <FormDialog title="修改权限模式" submitLabel="保存" onSubmit={save} onClose={onClose}>
       <PermissionModeField {...field('permissionMode')} />
-      <p className="fine">{`只影响「${binding.name}」之后新开的话题；已在运行的话题保持原来的模式。`}</p>
     </FormDialog>
   );
 }

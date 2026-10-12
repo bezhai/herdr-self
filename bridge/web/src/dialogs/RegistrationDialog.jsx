@@ -20,7 +20,7 @@ export function RegistrationDialog({ registration, apps, previousId, onRetry, on
         <CloseButton className="icon dialog-close" onClick={onClose} />
         <div className="feishu-mark" aria-hidden="true"><svg><use href="#i-feishu" /></svg></div>
         <h2>{view.title}</h2>
-        <p className="connect-subtitle">{view.subtitle}</p>
+        {view.subtitle && <p className="connect-subtitle">{view.subtitle}</p>}
         <div className="connect-visual">
           {view.spinner && <span className="spinner" />}
           {view.result && <span className={view.result === 'success' ? 'result-icon success' : 'result-icon'}>{view.result === 'success' ? '✓' : '!'}</span>}

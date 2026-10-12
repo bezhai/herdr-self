@@ -59,6 +59,9 @@ test('an unauthenticated session shows the login page; a wrong key shows the err
   const user = userEvent.setup();
   render(<App />);
   expect(await screen.findByRole('heading', { name: '登录管理台' })).toBeTruthy();
+  // The panel holds the title and the form; the illustration holds only the route.
+  expect([...document.querySelector('.login-body').children].map((el) => el.tagName)).toEqual(['H1', 'FORM']);
+  expect([...document.querySelector('.login-visual').children].map((el) => el.className)).toEqual(['route']);
 
   await user.type(screen.getByLabelText('访问密钥'), 'wrong');
   await user.click(screen.getByRole('button', { name: '进入管理台' }));
@@ -114,7 +117,6 @@ test('navigation switches the title, breadcrumb and page action, and closes the 
   expect(document.querySelector('.sidebar').classList.contains('open')).toBe(false);
   expect(pageTitle()).toBe('机器连接');
   expect(document.querySelector('.crumbs strong').textContent).toBe('机器连接');
-  expect(screen.getByText('MACHINES')).toBeTruthy();
   expect(screen.getByRole('button', { name: '+ 添加机器' })).toBeTruthy();
 
   await user.click(nav('会话绑定'));
@@ -125,6 +127,48 @@ test('navigation switches the title, breadcrumb and page action, and closes the 
   expect(pageTitle()).toBe('连接日志');
   expect(document.querySelector('.heading button')).toBeNull();
   expect(screen.getByText('cpu2 已连接')).toBeTruthy();
+});
+
+test('the topbar ends with the theme button', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole('button', { name: '+ 添加飞书' });
+  const topbar = document.querySelector('.topbar');
+  expect(topbar.lastElementChild).toBe(within(topbar).getByRole('button', { name: '主题：跟随系统' }));
+  expect(topbar.textContent).toBe('连接管理/平台连接');
+  await user.click(topbar.lastElementChild);
+  expect(document.documentElement.getAttribute('data-theme')).toBe('light');
+});
+
+test('page and section headings hold only their titles and the page action', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole('button', { name: '+ 添加飞书' });
+  const headings = () => [document.querySelector('.heading').textContent, document.querySelector('.section-heading').textContent];
+  expect(headings()).toEqual(['平台连接+ 添加飞书', '平台应用']);
+  await user.click(nav('机器连接'));
+  expect(headings()).toEqual(['机器连接+ 添加机器', 'Herdr 实例']);
+  await user.click(nav('会话绑定'));
+  expect(headings()).toEqual(['会话绑定+ 新建绑定', '消息路由']);
+  await user.click(nav('连接日志'));
+  expect(headings()).toEqual(['连接日志', '连接与消息事件']);
+});
+
+test('empty pages show only a short status', async () => {
+  const state = { ...sampleState(), apps: [], machines: [], bindings: [], topics: [], logs: [] };
+  stubFetch({ '/api/state': state });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole('button', { name: '+ 添加飞书' });
+  expect(document.querySelector('.empty-state').textContent).toBe('暂无飞书应用');
+  await user.click(nav('机器连接'));
+  expect(document.querySelector('.empty-state').textContent).toBe('暂无机器');
+  await user.click(nav('会话绑定'));
+  expect(document.querySelector('.table-empty').textContent).toBe('暂无会话绑定');
+  await user.click(nav('连接日志'));
+  expect(document.querySelector('.stream-empty').textContent).toBe('暂无事件');
 });
 
 test('machine cards list Herdr agents with their status, mark agents without a session identity and offer no session actions', async () => {
@@ -408,7 +452,7 @@ test('新建绑定 lists the chats waiting for a binding and opens the form for 
   expect(screen.getByLabelText('绑定名称').value).toBe('飞书私聊');
 });
 
-test('新建绑定 without waiting chats explains how to get a binding link', async () => {
+test('新建绑定 without waiting chats says there are none', async () => {
   const state = sampleState();
   state.pendingChats = [];
   stubFetch({ '/api/state': state });
@@ -416,7 +460,8 @@ test('新建绑定 without waiting chats explains how to get a binding link', as
   render(<App />);
   await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
   await user.click(screen.getByRole('button', { name: '+ 新建绑定' }));
-  expect(within(dialog()).getByText('在飞书里给机器人发一条消息（群聊需 @机器人），机器人会回复绑定链接。')).toBeTruthy();
+  expect(dialog().querySelector('.dialog-head').textContent).toBe('选择要绑定的飞书聊天');
+  expect([...dialog().querySelectorAll('p')].map((p) => p.textContent)).toEqual(['暂无待绑定的聊天']);
   expect(dialog().querySelector('.pending-chat')).toBeNull();
   await user.click(within(dialog()).getByRole('button', { name: '关闭' }));
   expect(dialog()).toBeNull();
