@@ -60,11 +60,12 @@ export class Topics{
  }
  // A routed message. Never rejects: failures end up as topic states, notices in the thread or error logs.
  async handle(a,b,msg){
+  // A binding that requires the mention drops every message without it, in a topic thread and its commands too, as if it never came.
+  if(b.requireMention&&!msg.mentionedBot)return;
   const rootId=msg.rootId||msg.messageId;let t=this.store.data.topics.find(x=>x.bindingId===b.id&&x.rootId===rootId);
   if(!msg.messageId||t?.messageIds.includes(msg.messageId))return;
   const text=msg.content.trim();
   if(!t){
-   if(b.requireMention&&!msg.mentionedBot)return;
    // A root message has no root id; in a thread the command is a message to the agent like any other.
    if(!msg.rootId&&text===slash.adopt)return this.offer(a,b,msg);
    if(!msg.rootId&&text===slash.stop)return this.stopChat(a,b,msg);

@@ -416,11 +416,24 @@ test('remote answers are turned on while the topic is still starting, after its 
   assert.equal(f.h.calls.filter(c=>c[1]==='prompt').length,1);assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')]);
  }finally{f.close();}
 });
-test('requireMention applies only to the message that opens a topic',async()=>{
+test('a binding that requires the mention ignores every message without it, a follow-up in a topic thread too: it is not recorded and gets no reaction, prompt, notice or COT',async()=>{
  const f=topicFixture({binding:{requireMention:true}});try{
   await f.send({messageId:'om_1',content:'no mention'});assert.deepEqual([f.store.data.topics.length,f.h.calls.length],[0,0]);
-  await f.send({messageId:'om_2',content:'with mention',mentionedBot:true});await f.send({messageId:'om_3',rootId:'om_2',content:'follow-up'});
-  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['with mention','follow-up']);
+  await f.send({messageId:'om_2',content:'with mention',mentionedBot:true});const t=f.store.data.topics[0];
+  f.h.calls.length=0;f.reacted.length=0;f.api.length=0;delete t.cot;
+  await f.send({messageId:'om_3',rootId:'om_2',content:'follow-up'});
+  assert.deepEqual([f.h.calls,f.reacted,f.replies,f.api,t.messageIds,new Store(f.dir).data.topics[0].messageIds],[[],[],[],[],['om_2'],['om_2']]);
+  await f.send({messageId:'om_4',rootId:'om_2',content:'mentioned follow-up',mentionedBot:true});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','mentioned follow-up']]);assert.deepEqual(t.messageIds,['om_2','om_4']);
+  assert.deepEqual(f.reacted.map(r=>r[1]),['om_4']);assert.deepEqual(cotLog(f)[0],['create','om_4']);
+ }finally{f.close();}
+});
+test('a binding without the mention requirement, which every direct chat has, handles messages without the mention: a root message, a follow-up in its thread and /stop',async()=>{
+ const f=topicFixture({binding:{requireMention:false}});try{
+  await f.send({messageId:'om_1',content:'one'});await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
+  f.h.agents[0].agent_status='working';await f.send({messageId:'om_3',rootId:'om_1',content:'/stop'});
+  assert.deepEqual(f.h.calls.filter(c=>['prompt','send-keys'].includes(c[1])),[['agent','prompt','w1:p1','one'],['agent','prompt','w1:p1','two'],['agent','send-keys','w1:p1','esc']]);
+  assert.deepEqual(f.store.data.topics[0].messageIds,['om_1','om_2','om_3']);
  }finally{f.close();}
 });
 test('topics still starting when Bridge restarts are marked failed',()=>{
@@ -432,9 +445,9 @@ test('topics still starting when Bridge restarts are marked failed',()=>{
 });
 
 // A ready topic whose agent runs in w1:p1, with the COT c1 of its first message om_1 open unless the fixture options refuse it;
-// snapshot(seq) is an agent list in which that agent reports reply_seq seq.
+// snapshot(seq) is an agent list in which that agent reports reply_seq seq. om_1 mentions the bot, as a binding that requires it needs.
 async function readyTopic(options){
- const f=topicFixture(options);await f.send({messageId:'om_1',content:'one'});f.h.calls.length=0;f.replies.length=0;f.api.length=0;
+ const f=topicFixture(options);await f.send({messageId:'om_1',content:'one',mentionedBot:true});f.h.calls.length=0;f.replies.length=0;f.api.length=0;
  return {...f,t:f.store.data.topics[0],snapshot:reply_seq=>f.h.agents.map(a=>({...a,reply_seq}))};
 }
 const forwarded=f=>f.store.data.logs.filter(l=>l.kind==='回复转发').map(l=>[l.level,l.message]);
@@ -1034,6 +1047,16 @@ test('/stop without a running turn sends no key and replies a notice; a /stop th
   assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能停止 Agent，请稍后重试')]);assert.deepEqual(stopped(f),[['error',`${f.t.agentName}：未能停止，agent w1:p1 is not ready`]]);assert.equal(f.t.cot.cotId,'c1');
  }finally{f.close();}
 });
+test('in a binding that requires the mention, /stop in a topic thread needs it too: without it no key is sent and nothing is recorded or replied',async()=>{
+ const f=await readyTopic({binding:{requireMention:true}});try{
+  f.h.agents[0].agent_status='working';f.reacted.length=0;
+  await f.send({messageId:'om_2',rootId:'om_1',content:'/stop'});
+  assert.deepEqual([f.h.calls,f.replies,f.reacted,f.api,f.t.messageIds],[[],[],[],[],['om_1']]);assert.equal(f.t.cot.cotId,'c1');
+  await f.send({messageId:'om_3',rootId:'om_1',content:'/stop',mentionedBot:true});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','send-keys','w1:p1','esc']]);assert.deepEqual(cotLog(f),[['update','c1',['RUN_FINISHED',{...run,status:'interrupted'}]],['complete','c1','error']]);
+  assert.deepEqual([f.t.messageIds,f.reacted],[['om_1','om_3'],[]]);
+ }finally{f.close();}
+});
 test('a root /stop, such as the stop button of a COT sends in a direct chat, stops the one topic of the chat whose COT is open; with none or several it asks for /stop in the topic; it never opens a topic',async()=>{
  const f=await readyTopic();try{
   await f.send({messageId:'om_2',content:'two'});const [one,two]=f.store.data.topics;
@@ -1086,8 +1109,8 @@ async function adoptFixture(binding){
   // A submission of picker messageId by an allowed person with agent adopt chosen (see formValue).
   pick:(messageId,adopt,render=1,openId='ou_user')=>f.topics.click(allowed,{messageId,chatId:'oc_1',operator:{openId},action:{tag:'button',name:'submit',value:{adopt:true,render},formValue:formValue(adopt)}}),
   settled:()=>Promise.all(f.topics.answering.values()),
-  // Sends /adopt and submits agent adopt on its picker, which is reply om_bot_<n>.
-  async adopt(rootId,adopt,n=1){await f.send({messageId:rootId,content:'/adopt'});f.topics.click(allowed,{messageId:'om_bot_'+n,chatId:'oc_1',operator:{openId:'ou_user'},action:{tag:'button',name:'submit',value:{adopt:true,render:n},formValue:formValue(adopt)}});await Promise.all(f.topics.answering.values());return f.store.data.topics.find(t=>t.rootId===rootId);},
+  // Sends /adopt, which mentions the bot, and submits agent adopt on its picker, which is reply om_bot_<n>.
+  async adopt(rootId,adopt,n=1){await f.send({messageId:rootId,content:'/adopt',mentionedBot:true});f.topics.click(allowed,{messageId:'om_bot_'+n,chatId:'oc_1',operator:{openId:'ou_user'},action:{tag:'button',name:'submit',value:{adopt:true,render:n},formValue:formValue(adopt)}});await Promise.all(f.topics.answering.values());return f.store.data.topics.find(t=>t.rootId===rootId);},
  };
 }
 test('an agent is named by the label of its pane, else the label given to its tab, else the label of its workspace, else its pane; agents that would share a name are told apart by their panes',()=>{
@@ -1122,7 +1145,7 @@ test('/adopt as a root message replies in its thread with a picker whose dropdow
 });
 test('/adopt is a command only on a root message: in a thread it is a message to the agent, a mention-only group needs the @, and a repeated delivery sends one picker',async()=>{
  const f=await adoptFixture({requireMention:true});try{
-  await f.send({messageId:'om_2',rootId:'om_1',content:'/adopt'});
+  await f.send({messageId:'om_2',rootId:'om_1',content:'/adopt',mentionedBot:true});
   assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1','/adopt']]);assert.deepEqual(f.replies,[]);
   f.h.calls.length=0;await f.send({messageId:'om_cmd',content:'/adopt'});
   assert.deepEqual([f.h.calls,f.replies,f.topic('om_cmd')],[[],[],undefined]);
@@ -1297,6 +1320,26 @@ test('when /release cannot turn off remote answers the topic stays linked with a
   f.h.agents=f.h.agents.filter(a=>a.pane_id!=='w2:p1');f.h.on['pane remote-answers']=()=>{throw coded('pane_not_found','pane w2:p1 not found');};f.replies.length=0;
   await f.send({messageId:'om_3',rootId:'om_cmd',content:'/release'});
   assert.equal(t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[adoptedGone]);
+ }finally{f.close();}
+});
+test('in a binding that requires the mention, a topic that waits for a choice ignores messages without it; with it they get the notice to choose',async()=>{
+ const f=await adoptFixture({requireMention:true});try{
+  await f.send({messageId:'om_cmd',content:'/adopt',mentionedBot:true});const t=f.topic('om_cmd');f.h.calls.length=0;f.replies.length=0;
+  await f.send({messageId:'om_2',rootId:'om_cmd',content:'选好了吗'});
+  assert.deepEqual([f.h.calls,f.replies,f.reacted,t.messageIds],[[],[],[],['om_cmd']]);
+  await f.send({messageId:'om_3',rootId:'om_cmd',content:'选好了吗',mentionedBot:true});
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('请先在上面的卡片中选择要接管的 Agent')]);assert.deepEqual(t.messageIds,['om_cmd','om_3']);
+ }finally{f.close();}
+});
+test('in a binding that requires the mention, messages in an adopted topic need it too, /release included: without it the topic stays linked and nothing is prompted',async()=>{
+ const f=await adoptFixture({requireMention:true});try{
+  const t=await f.adopt('om_cmd',claudeChoice);assert.equal(t.state,'ready');f.h.calls.length=0;f.replies.length=0;f.reacted.length=0;
+  await f.send({messageId:'om_2',rootId:'om_cmd',content:'继续'});await f.send({messageId:'om_3',rootId:'om_cmd',content:'/release'});
+  assert.deepEqual([f.h.calls,f.replies,f.reacted,t.state,t.messageIds],[[],[],[],'ready',['om_cmd']]);
+  await f.send({messageId:'om_4',rootId:'om_cmd',content:'继续',mentionedBot:true});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w2:p1','继续']]);f.h.calls.length=0;
+  await f.send({messageId:'om_5',rootId:'om_cmd',content:'/release',mentionedBot:true});
+  assert.deepEqual(f.h.calls,[['pane','remote-answers','w2:p1','off']]);assert.equal(t.state,'closed');
  }finally{f.close();}
 });
 test('an adopted topic ends with its own notice when its pane closes, its agent exits or another agent takes the pane; no pane is closed',async()=>{
