@@ -41,6 +41,7 @@ The socket API can:
 - create, list, focus, rename, and close tabs
 - list, inspect, split, swap, focus, resize, rename, read, close, and send input to panes
 - list, inspect, read, prompt, wait on, rename, focus, start, and attach agents through CLI helpers
+- let one agent hand a task to another and notify the calling agent of the outcome
 - report custom agent state from hooks and plugins
 - subscribe to events and wait for output or state changes
 - install and uninstall built-in integrations
@@ -106,12 +107,12 @@ Raw socket method names use dot notation:
 | Pane | `pane.split`, `pane.swap`, `pane.move`, `pane.zoom`, `pane.layout`, `pane.process_info`, `pane.neighbor`, `pane.edges`, `pane.focus_direction`, `pane.resize`, `pane.list`, `pane.current`, `pane.get`, `pane.rename`, `pane.send_text`, `pane.send_keys`, `pane.send_input`, `pane.read`, `pane.graphics.info`, `pane.graphics.set`, `pane.graphics.clear`, `pane.graphics.stream`, `pane.report_agent`, `pane.report_agent_session`, `pane.report_agent_reply`, `pane.report_agent_tool_call`, `pane.report_agent_request`, `pane.report_metadata`, `pane.clear_agent_authority`, `pane.release_agent`, `pane.set_remote_answers`, `pane.close`, `pane.wait_for_output` |
 | Popup | `popup.close` |
 | Layout | `layout.export`, `layout.apply`, `layout.set_split_ratio` |
-| Agent | `agent.list`, `agent.get`, `agent.replies`, `agent.tool_calls`, `agent.requests`, `agent.answer`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
+| Agent | `agent.list`, `agent.get`, `agent.replies`, `agent.tool_calls`, `agent.requests`, `agent.answer`, `agent.read`, `agent.explain`, `agent.send_keys`, `agent.prompt`, `agent.call`, `agent.wait`, `agent.rename`, `agent.focus`, `agent.start`, `agent.view.set`, `agent.view.clear` |
 | Events | `events.subscribe`, `events.wait` |
 | Integrations | `integration.install`, `integration.uninstall` |
 | Plugins | `plugin.link`, `plugin.list`, `plugin.unlink`, `plugin.enable`, `plugin.disable`, `plugin.action.list`, `plugin.action.invoke`, `plugin.log.list`, `plugin.pane.open`, `plugin.pane.focus`, `plugin.pane.close` |
 
-`agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait.
+`agent.wait` is server-owned and event-driven. It pins the resolved pane occupant so a replacement cannot satisfy the wait. `agent.prompt` accepts an optional `wait` object with `until` and `timeout_ms`; this submits the prompt and starts the wait in one request, avoiding a race between separate calls. If the resolved agent is already `blocked`, `agent.prompt` returns `agent_blocked` without sending input or starting the wait. `agent.call` is a separate method: it submits a task the way `agent.prompt` without `wait` does and later notifies the calling agent, as described under [Agent calls](#agent-calls). It does not change `agent.prompt` or `agent.wait`.
 
 `workspace.move_block` atomically moves the ordered `workspace_ids` before `before_workspace_id`; omit the anchor to move the block to the end. The ids must be unique and the anchor cannot be part of the block. The response contains the authoritative ordered workspace list.
 
@@ -972,6 +973,52 @@ Presentation text is normalized before storage. Herdr trims surrounding whitespa
 Use `ttl_ms` for short-lived metadata. It must be between `1` and `86400000` milliseconds. Omit `ttl_ms` for metadata that should stay until replaced, cleared, or the pane/workspace closes. Presentation fields retain their existing source-scoped expiry behavior; each token updated by the call receives its own deadline. Token metadata is not restored after a server restart.
 
 Use `seq` when a hook may send updates out of order. For the same `source`, reports with a sequence number less than or equal to the last accepted sequence are accepted by the API but ignored by the pane state. A pane or workspace accepts sequenced token reports from at most 32 distinct sources during its lifetime; clearing or expiry does not release those source slots.
+
+## Agent calls
+
+`agent.call` lets one agent hand a task to another and go on with its own work. Herdr submits the task to the target and registers a call between the two agents. Instead of keeping a wait open, the calling agent receives a notice when the target's turn ends, each time the target waits for input, and when the target goes away. The CLI wrapper is `herdr agent call`; see [Agent calls](/docs/agent-automation/#agent-calls) for the workflow.
+
+```json
+{"id":"req_call","method":"agent.call","params":{"target":"reviewer","text":"Review the current diff","caller_pane_id":"w1:p1","answer_requests":true}}
+```
+
+`target` is the agent that does the task, written like an `agent.prompt` target: a unique live agent name or the pane ID that currently hosts the agent. `text` is the task and must not be empty. `caller_pane_id` is the pane of the calling agent, which receives the notices. A retired pane alias is accepted there, such as the launch-time `HERDR_PANE_ID` of an agent whose pane moved to another workspace. `answer_requests` is optional, defaults to `false`, and is described below.
+
+Herdr checks a call in this order and returns the first error that applies, without writing anything: `empty_agent_prompt` when `text` is empty; `pane_not_found` when `caller_pane_id` does not resolve; `caller_not_agent` when the caller pane does not run a recognized agent; `agent_not_found` or `agent_target_ambiguous` when `target` does not resolve to one agent; `caller_is_target` when the target runs in the caller pane; `agent_working` when the target is working on a turn or already has a call in progress, because a target takes one call at a time; and `agent_blocked` or `agent_not_ready` when the target is not `idle` or `done`, for example because it is blocked, its status is `unknown`, it is still starting, or it no longer owns the pane's foreground. Herdr then submits the text exactly as `agent.prompt` does and responds once the text and Enter reached the target's terminal, like `agent.prompt` without `wait`:
+
+```json
+{
+  "id": "req_call",
+  "result": {
+    "type": "agent_called",
+    "call_id": 3,
+    "agent": { "name": "reviewer", "agent": "codex", "pane_id": "w1:p2", "agent_status": "idle", "...": "..." }
+  }
+}
+```
+
+`call_id` comes from one server-wide counter and is not reused. `agent` is the target as it was when the task was submitted. If the text cannot be written to the terminal, the response is `agent_prompt_failed` or `timeout`, and the call is cancelled without a notice.
+
+The call then follows the target's status and reply reports. The target is expected to go `working` or `blocked` and then back to `idle` or `done`; a reply reported before it starts working belongs to the previous turn and does not count. When the turn ends and a reply for it was reported through `pane.report_agent_reply`, the call ends as `finished`. When the turn ends without a reply, Herdr waits up to 10 seconds for one: if the reply arrives, the call ends as `finished`; if the target starts working again, the call continues; otherwise it ends as `finished without reply`. Agents whose integration does not report replies therefore always end as `finished without reply`. The target exiting, being released or replaced, or its pane closing ends the call as `gone`. Each time the target starts waiting for input, the calling agent gets one `blocked` notice and the call stays open. The same wait is not reported twice; the next `blocked` notice comes only after the target stopped waiting and waits again.
+
+Every outcome becomes a notice: one line of English text that begins with `[herdr] call <call_id> <status>:`, where the status is `finished`, `finished without reply`, `blocked`, or `gone`. A notice names the target by kind, name, and pane, and gives the command to run next. It never carries the reply or request content. In those commands, the target is written as its name, or as its pane ID when it has no name. The six forms are:
+
+```text
+[herdr] call 3 finished: codex agent reviewer (pane w1:p2) ended its turn with a reply. Read it with: herdr agent replies reviewer --after 12
+[herdr] call 3 finished without reply: codex agent reviewer (pane w1:p2) ended its turn without reporting a reply. See its screen with: herdr agent read reviewer
+[herdr] call 3 blocked: codex agent reviewer (pane w1:p2) waits for input that a person has to give in its terminal. The call stays open.
+[herdr] call 3 blocked: codex agent reviewer (pane w1:p2) waits on 1 pending request. List it with: herdr agent requests reviewer. Answer with: herdr agent answer reviewer <REQUEST_ID> --decision <DECISION>, or --answers <JSON> for a question. The call stays open.
+[herdr] call 3 gone: codex agent reviewer (pane w1:p2) exited or was replaced. The call has ended.
+[herdr] call 3 gone: codex agent reviewer (pane w1:p2) is gone because its pane was closed. The call has ended.
+```
+
+The `--after` value in a `finished` notice is the reply `seq` that was current when the task was submitted, so `agent.replies` with that `after_seq` returns exactly the target's replies since then. With more than one pending request, the request notice reads `waits on 2 pending requests. List them with: ...`.
+
+Herdr delivers notices only to the calling agent that made the call and follows its pane if the pane moves. A notice waits while the calling agent is working, blocked, or still starting. Once that agent is `idle` or `done`, Herdr submits the notice the same way `agent.prompt` submits text, so the notice starts a new turn in the calling agent. Several notices for one caller are delivered in order, one per idle period: the next one waits until the caller has worked on the previous notice and is idle again. If the calling agent exits or is replaced, or its pane closes, its open calls end without notices and its queued notices are dropped.
+
+`answer_requests: true` turns remote answers on for the target for the duration of the call, as `pane.set_remote_answers` does, so the permission requests and questions that the target's integration hooks report wait for the calling agent to answer them with `agent.answer`. Claude Code reports permission requests and questions, and Codex reports approvals. When the target has pending requests, the `blocked` notice states how many and gives the `herdr agent requests` and `herdr agent answer` commands. When the target blocks without reporting a request, for example at a trust-folder dialog or a Codex question, Herdr waits 2 seconds for one and then sends the notice that a person has to answer in the target's terminal. Without `answer_requests`, the call ignores requests, and a `blocked` notice always says that a person has to answer. When the call ends, remote answers return to their previous setting. The call turns them off only if it turned them on, which also ends the target's pending requests as `closed`. They stay on if they were already on when the call started, for example for a chat bridge, and the call leaves them alone if a client set them with `pane.set_remote_answers` during the call. Each change emits `pane.updated`.
+
+Calls and queued notices live in server memory. A live handoff carries them to the next server, which continues them; calls and notices whose panes did not survive the handoff are dropped, and queued notices wait until Herdr detects the calling agent again. Replies do not cross a handoff, so the next server counts a carried call's reply from its own reply counter, and a call whose turn had already ended waits the full 10 seconds for its reply again. A `finished` notice queued before the handoff can therefore point at a reply that is no longer retained; read the target with `agent.read` in that case. A cold server restart drops all calls and notices.
 
 ## Event subscriptions
 

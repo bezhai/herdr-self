@@ -66,6 +66,7 @@ herdr agent rename w1:p2 reviewer
 | 文字列や正規表現を待つ | `pane wait-output` |
 | 既存のペインで対応済みエージェントを起動する | `agent start` |
 | プロンプトを送信し、必要なら完了を待つ | `agent prompt` |
+| 別のエージェントにタスクを渡し、終わったら通知を受ける | `agent call` |
 | エージェントの対話 UI にキーを送る | `agent send-keys` |
 | エージェントのライフサイクル状態を待つ | `agent wait` |
 
@@ -95,6 +96,57 @@ Claude Code や OpenCode などの全画面エージェントは、トランス�
 
 wait コマンドにはデフォルトのタイムアウトがなく、無期限に待機できます。タイムアウトやサーバーエラーでは JSON エラーを stderr に出して終了コード 1、CLI 構文エラーでは終了コード 2 を返します。
 
+## エージェント呼び出し
+
+`agent call` を使うと、あるエージェントが別のエージェントにタスクを渡し、自分の作業を続けられます。Herdr は `agent prompt` と同じようにタスクを送信し、タスクのターンが終わったとき、ターゲットが入力を待つとき、ターゲットがいなくなったときに、1 行の通知を呼び出し元のエージェントへ送信します。呼び出し元は待機を開いたままにする必要がなく、通知が届くと呼び出し元で新しいターンが始まります。
+
+```bash
+herdr agent call reviewer "Review the current diff and list risky changes"
+```
+
+呼び出し元のエージェントは、コマンドを実行したペイン（`HERDR_PANE_ID`）にいるエージェントです。別のペインを呼び出し元にするには `--to PANE` を指定します。`--machine` では `HERDR_PANE_ID` を使わないため、`--to` が必須です。どちらもない場合は使用法のエラーになります。コマンドはタスクがターゲットのターミナルに届いた時点で返り、呼び出し ID を `.result.call_id`、ターゲットを `.result.agent` に出力します。ターゲットは `idle` または `done` でなければなりません。ターゲットが受けられる呼び出しは同時に 1 つだけなので、ターンまたは別の呼び出しの作業中のターゲットは `agent_working` を返します。呼び出し元は自分のペインのエージェントを呼び出せず（`caller_is_target`）、認識済みエージェントのいない呼び出し元ペインでは `caller_not_agent` が返ります。
+
+呼び出しのために補助エージェントを起動するには、ターゲットの代わりに `--kind` を指定します:
+
+```bash
+herdr agent call --kind codex "Write tests for src/auth.rs" -- -m gpt-5.4
+```
+
+これは呼び出し元のペインをフォーカスを移さずに右へ分割し、`agent start` とまったく同じように（30 秒の準備待機を含めて）新しいペインでエージェントを起動してから、そのエージェントを呼び出します。新しいペインは `--cwd PATH` で始まり、指定がなければ呼び出し元ペインの作業ディレクトリで始まります。`--name` を省略すると、エージェントには空いている最小の番号を使った `<kind>-<n>`（`codex-1`、`codex-2` など）という名前が付きます。kind、名前、テキスト、呼び出し元のエージェント、その名前がほかのライブエージェントに使われていないか（`agent_name_taken`）は、すべてレイアウトを変更する前に確認されます。新しいペインは呼び出しの後も開いたままなので、呼び出し元は `herdr agent call codex-1 "Also cover the logout path"` のように 1 つ目の形式で続きのタスクを送れます。作業が終わったら `herdr pane close <pane_id>` で閉じてください。
+
+分割の後でエージェントの起動または呼び出しに失敗した場合、コマンドは終了コード 1 で終了し、新しいペインを残します。stderr の JSON エラーには、新しいペインの `pane_id` と `agent_name` も含まれます。たとえば、Codex が "Trust this folder?" ダイアログで止まった場合は次のようになります:
+
+```json
+{"id":"cli:agent:start","error":{"code":"agent_not_ready","message":"agent codex-1 is blocked during startup and is not ready for prompts; the new pane w1:p2 (agent codex-1) stays open","pane_id":"w1:p2","agent_name":"codex-1"}}
+```
+
+そのペインで、または `herdr agent send-keys` でダイアログに答えてから、1 つ目の形式 `herdr agent call codex-1 "<task>"` で再試行してください。やめる場合は `herdr pane close w1:p2` でペインを閉じます。
+
+各通知は `[herdr] call <id> <status>:` で始まる 1 行です。通知にはターゲット、そのペイン、次に実行するコマンドが書かれます。返信やリクエストの内容は含まれないため、呼び出し元が自分で取得します:
+
+| 状態 | 意味 | 通知にあるコマンド |
+| --- | --- | --- |
+| `finished` | ターンが返信付きで終わった。呼び出しは終了している。 | `herdr agent replies <target> --after <seq>`。タスク送信後の返信だけを返す |
+| `finished without reply` | ターンが終わり、10 秒以内に返信が報告されなかった。たとえばエージェントのインテグレーションが返信を報告しない場合。呼び出しは終了している。 | `herdr agent read <target>` |
+| `blocked` | ターゲットが入力を待っている。呼び出しは続き、新しい待機ごとに通知が届く。 | 保留中のリクエストがあれば `herdr agent requests` と `herdr agent answer`。なければ人がターゲットのターミナルで回答する必要がある |
+| `gone` | ターゲットが終了、解放、置換されたか、そのペインが閉じられた。呼び出しは終了している。 | なし |
+
+6 つの通知形式の正確なテキストは、ソケット API リファレンスの [エージェント呼び出し](/ja/docs/socket-api/#エージェント呼び出し) にあります。
+
+通知は呼び出しを行ったエージェントにだけ届き、そのペインが移動すればそれに従います。Herdr はそのエージェントが `idle` または `done` になるまで待ち、`agent prompt` がテキストを送信するのと同じ方法で通知を送信します。複数の通知は、idle 期間ごとに 1 つずつ順番に届きます。呼び出し元のエージェントが終了または置換されるか、そのペインが閉じられると、その呼び出しは終わり、通知は破棄されます。
+
+デフォルトでは、`blocked` 通知は人がターゲットのターミナルで回答する必要があると伝えます。`--answer-requests` を付けると呼び出しの間ターゲットのリモート回答（remote answers）が有効になり、インテグレーションフックが報告する権限リクエストと質問（Claude Code の権限リクエストと質問、Codex の承認）は呼び出し元からの回答を待ちます。このとき通知は保留中のリクエストの数を示し、呼び出し元はそれらを一覧して回答します:
+
+```bash
+herdr agent requests reviewer
+herdr agent answer reviewer 7 --decision allow
+herdr agent answer reviewer 8 --answers '{"Which database?":["sqlite"]}'
+```
+
+フックが報告しないダイアログ（フォルダーの信頼確認ダイアログや Codex の質問など）には引き続き人の操作が必要で、リクエストを 2 秒待った後、通知がそのことを伝えます。呼び出しが終わると、リモート回答は以前の設定に戻ります。呼び出しが無効にするのは自分で有効にした場合だけで、すでに有効だった場合（たとえばチャットブリッジのため）や、呼び出しの間に誰かが明示的に設定した場合は変更しません。
+
+呼び出しとキューにある通知は、`herdr update --handoff` などのライブハンドオフをまたいで保持されます。返信は保持されないため、ハンドオフ前の `finished` 通知が、もう存在しない返信を指すことがあります。その場合は `herdr agent read` でターゲットを読み取ってください。サーバーのコールドリスタートでは、返信と同じく呼び出しと通知も失われます。
+
 ## レシピ
 
 補助エージェントを起動して作業を渡し、その作業が落ち着くまで待ちます:
@@ -113,6 +165,20 @@ herdr agent read reviewer --source recent-unwrapped --lines 120
 herdr agent wait reviewer --until blocked --timeout 120000
 herdr agent read reviewer --source recent-unwrapped --lines 80
 herdr agent send-keys reviewer esc
+```
+
+エージェントの中から新しい補助エージェントにレビューを渡し、自分の作業を続け、通知が届いたら対応します:
+
+```bash
+call=$(herdr agent call --kind codex --name reviewer --answer-requests "Review the current diff" -- -m gpt-5.4)
+review_pane=$(printf '%s\n' "$call" | jq -r '.result.agent.pane_id')
+```
+
+`[herdr] call 1 finished: codex agent reviewer (pane w1:p2) ended its turn with a reply. Read it with: herdr agent replies reviewer --after 12` という通知が届いたら、返信を読み、`herdr agent call reviewer "<task>"` で続きのタスクを送るか、補助エージェントを閉じます:
+
+```bash
+herdr agent replies reviewer --after 12
+herdr pane close "$review_pane"
 ```
 
 通常のプロセスを実行し、エージェントとして扱わずに出力を待ちます:

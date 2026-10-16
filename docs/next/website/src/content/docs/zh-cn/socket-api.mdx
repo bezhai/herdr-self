@@ -37,6 +37,7 @@ socket API 可以:
 - 创建、列出、聚焦、重命名和关闭标签页
 - 列出、检查、分割、交换、聚焦、调整、重命名、读取、关闭窗格并向其发送输入
 - 通过 CLI 辅助命令列出、检查、读取、提示、等待、重命名、聚焦、启动和附加智能体
+- 让一个智能体把任务交给另一个智能体，并把结果通知调用方智能体
 - 从钩子和插件上报自定义智能体状态
 - 订阅事件并等待输出或状态变化
 - 安装和卸载内置集成
@@ -102,12 +103,12 @@ herdr pane read w1:p2 --source recent --lines 50
 | 窗格 | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_reply`、`pane.report_agent_tool_call`、`pane.report_agent_request`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.set_remote_answers`、`pane.close`、`pane.wait_for_output` |
 | 弹窗 | `popup.close` |
 | 布局 | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
-| 智能体 | `agent.list`、`agent.get`、`agent.replies`、`agent.tool_calls`、`agent.requests`、`agent.answer`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
+| 智能体 | `agent.list`、`agent.get`、`agent.replies`、`agent.tool_calls`、`agent.requests`、`agent.answer`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.call`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
 | 事件 | `events.subscribe`、`events.wait` |
 | 集成 | `integration.install`、`integration.uninstall` |
 | 插件 | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
 
-`agent.wait` 由服务器拥有并由事件驱动。它会固定到已解析的窗格占用者,因此替换后的智能体不能满足该等待。`agent.prompt` 接受可选的 `wait` 对象,其中包含 `until` 和 `timeout_ms`;这样可在一个请求中提交提示并开始等待,避免两个独立调用之间的竞态。如果解析出的智能体已经是 `blocked`,`agent.prompt` 不会发送输入或开始等待,而是返回 `agent_blocked`。
+`agent.wait` 由服务器拥有并由事件驱动。它会固定到已解析的窗格占用者,因此替换后的智能体不能满足该等待。`agent.prompt` 接受可选的 `wait` 对象,其中包含 `until` 和 `timeout_ms`;这样可在一个请求中提交提示并开始等待,避免两个独立调用之间的竞态。如果解析出的智能体已经是 `blocked`,`agent.prompt` 不会发送输入或开始等待,而是返回 `agent_blocked`。`agent.call` 是一个独立的方法：它以不带 `wait` 的 `agent.prompt` 的方式提交任务，之后再通知调用方智能体，详见[智能体调用](#智能体调用)。它不会改变 `agent.prompt` 或 `agent.wait` 的行为。
 
 `workspace.move_block` 会将有序的 `workspace_ids` 原子地移动到 `before_workspace_id` 之前;省略锚点则将该块移动到末尾。id 必须唯一,且锚点不能属于被移动的块。响应包含服务器确认的有序工作区列表。
 
@@ -624,6 +625,52 @@ workspace 的 get/list 响应会公开生成的 `tokens` 映射,空间侧边栏�
 短期元数据用 `ttl_ms`。取值必须在 `1` 到 `86400000` 毫秒之间。想让元数据保留到被替换、清除或窗格或工作区关闭时,省略 `ttl_ms`。展示字段继续按来源过期;该次调用更新的每个令牌都有独立期限。令牌元数据不会在服务器重启后恢复。
 
 钩子可能乱序发送更新时,使用 `seq`。对同一 `source`,序号小于等于最后接受序号的上报会被 API 接受,但被窗格状态忽略。每个窗格或工作区在其生命周期内最多接受来自 32 个不同来源的带序号令牌上报;清除或过期不会释放这些来源名额。
+
+## 智能体调用
+
+`agent.call` 让一个智能体把任务交给另一个智能体，自己继续工作。Herdr 把任务提交给目标，并在两个智能体之间登记一个调用。调用方智能体不必一直保持等待，而是在目标的轮次结束时、目标每次等待输入时以及目标离开时收到通知。对应的 CLI 封装是 `herdr agent call`；使用流程见[智能体调用](/zh-cn/docs/agent-automation/#智能体调用)。
+
+```json
+{"id":"req_call","method":"agent.call","params":{"target":"reviewer","text":"Review the current diff","caller_pane_id":"w1:p1","answer_requests":true}}
+```
+
+`target` 是执行任务的智能体，写法与 `agent.prompt` 的目标相同：唯一的实时智能体名称，或当前承载该智能体的窗格 ID。`text` 是任务内容，不能为空。`caller_pane_id` 是调用方智能体的窗格，由它接收通知。这里也接受窗格的旧别名，例如窗格被移动到另一个工作区后，智能体在启动时得到的 `HERDR_PANE_ID`。`answer_requests` 可选，默认为 `false`，见下文。
+
+Herdr 按以下顺序检查调用，返回第一个适用的错误，且不会写入任何内容：`text` 为空时返回 `empty_agent_prompt`；`caller_pane_id` 无法解析时返回 `pane_not_found`；调用方窗格没有运行已识别的智能体时返回 `caller_not_agent`；`target` 无法解析为唯一智能体时返回 `agent_not_found` 或 `agent_target_ambiguous`；目标运行在调用方窗格中时返回 `caller_is_target`；目标正在处理某个轮次，或已有一个进行中的调用时返回 `agent_working`，因为每个目标同一时间只接受一个调用；目标既不是 `idle` 也不是 `done` 时返回 `agent_blocked` 或 `agent_not_ready`，例如目标处于 blocked、状态为 `unknown`、仍在启动，或已不再占用窗格前台。随后，Herdr 完全按照 `agent.prompt` 的方式提交文本，并在文本和 Enter 到达目标终端后响应，与不带 `wait` 的 `agent.prompt` 相同：
+
+```json
+{
+  "id": "req_call",
+  "result": {
+    "type": "agent_called",
+    "call_id": 3,
+    "agent": { "name": "reviewer", "agent": "codex", "pane_id": "w1:p2", "agent_status": "idle", "...": "..." }
+  }
+}
+```
+
+`call_id` 来自一个服务器级计数器，不会被重复使用。`agent` 是提交任务时的目标。如果文本无法写入终端，响应为 `agent_prompt_failed` 或 `timeout`，该调用会被取消且不产生通知。
+
+之后，调用会跟踪目标的状态和回复上报。目标预期先进入 `working` 或 `blocked`，再回到 `idle` 或 `done`；目标开始工作之前上报的回复属于上一个轮次，不计入。轮次结束且该轮次的回复已通过 `pane.report_agent_reply` 上报时，调用以 `finished` 结束。轮次结束时还没有回复，Herdr 最多再等 10 秒：回复到达则以 `finished` 结束；目标再次开始工作则调用继续；否则以 `finished without reply` 结束。因此，集成不上报回复的智能体总是以 `finished without reply` 结束。目标退出、被释放或被替换，或者其窗格关闭，调用都以 `gone` 结束。目标每次开始等待输入，调用方智能体都会收到一条 `blocked` 通知，调用保持进行。同一次等待不会重复上报；只有在目标结束等待并再次等待时，才会收到下一条 `blocked` 通知。
+
+每个结果都会成为一条通知：一行英文文本，以 `[herdr] call <call_id> <status>:` 开头，其中状态为 `finished`、`finished without reply`、`blocked` 或 `gone`。通知用 kind、名称和窗格标明目标，并给出下一步要运行的命令。它从不携带回复或请求的内容。在这些命令中，目标写为它的名称；没有名称时写为窗格 ID。六种形式如下：
+
+```text
+[herdr] call 3 finished: codex agent reviewer (pane w1:p2) ended its turn with a reply. Read it with: herdr agent replies reviewer --after 12
+[herdr] call 3 finished without reply: codex agent reviewer (pane w1:p2) ended its turn without reporting a reply. See its screen with: herdr agent read reviewer
+[herdr] call 3 blocked: codex agent reviewer (pane w1:p2) waits for input that a person has to give in its terminal. The call stays open.
+[herdr] call 3 blocked: codex agent reviewer (pane w1:p2) waits on 1 pending request. List it with: herdr agent requests reviewer. Answer with: herdr agent answer reviewer <REQUEST_ID> --decision <DECISION>, or --answers <JSON> for a question. The call stays open.
+[herdr] call 3 gone: codex agent reviewer (pane w1:p2) exited or was replaced. The call has ended.
+[herdr] call 3 gone: codex agent reviewer (pane w1:p2) is gone because its pane was closed. The call has ended.
+```
+
+`finished` 通知中的 `--after` 值是提交任务时的回复 `seq`，因此用该值作为 `after_seq` 调用 `agent.replies`，返回的恰好是此后目标的回复。有多个待处理请求时，请求通知写作 `waits on 2 pending requests. List them with: ...`。
+
+Herdr 只把通知投递给发起调用的智能体，并在其窗格移动时跟随窗格。调用方智能体处于 working、blocked 或仍在启动时，通知会等待。该智能体变为 `idle` 或 `done` 后，Herdr 以 `agent.prompt` 提交文本的方式提交通知，因此通知会在调用方智能体中开始一个新轮次。同一个调用方的多条通知按顺序投递，每个 idle 期间一条：下一条会等到调用方处理完上一条通知并再次变为 idle。如果调用方智能体退出或被替换，或者其窗格关闭，它进行中的调用会结束且不产生通知，排队中的通知会被丢弃。
+
+`answer_requests: true` 会在调用期间为目标打开远程应答（remote answers），效果与 `pane.set_remote_answers` 相同，这样目标的集成钩子上报的权限请求和提问会等待调用方智能体用 `agent.answer` 回答。Claude Code 上报权限请求和提问，Codex 上报审批。目标有待处理请求时，`blocked` 通知会写明数量，并给出 `herdr agent requests` 和 `herdr agent answer` 命令。目标在没有上报请求的情况下进入 blocked 时，例如停在信任文件夹对话框或 Codex 的提问上，Herdr 会等待 2 秒看是否有请求上报，然后发送需要有人在目标终端中回答的通知。不带 `answer_requests` 时，调用不关注请求，`blocked` 通知总是说明需要有人回答。调用结束时，远程应答恢复为之前的设置。只有当调用自己打开了远程应答时，它才会关闭远程应答，此时目标的待处理请求以 `closed` 结束。如果调用开始时远程应答已经打开（例如为聊天桥接打开），它们会保持打开；如果有客户端在调用期间用 `pane.set_remote_answers` 设置过它们，调用也不会改动该设置。每次变化都会发出 `pane.updated`。
+
+调用和排队中的通知保存在服务器内存中。实时交接会把它们带到下一个服务器，由它继续处理；所在窗格未能在交接后保留的调用和通知会被丢弃，排队中的通知会等到 Herdr 重新检测到调用方智能体。回复不会跨越交接，因此下一个服务器用自己的回复计数器计算被带过来的调用的回复，已经结束轮次的调用会重新等待完整的 10 秒。因此，交接前排队的 `finished` 通知可能指向一条已不再保留的回复；这时请用 `agent.read` 读取目标。服务器冷重启会丢弃所有调用和通知。
 
 ## 事件订阅
 

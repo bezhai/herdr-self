@@ -321,6 +321,8 @@ herdr pane remote-answers <pane_id> on|off
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
 herdr agent send-keys <target> <key> [key ...]
 herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
+herdr agent call <target> <text> [--to PANE] [--answer-requests]
+herdr agent call --kind KIND [--name NAME] [--cwd PATH] [--to PANE] [--answer-requests] <text> [-- <agent-args...>]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> [--until STATUS]... [--timeout MS]
@@ -339,6 +341,10 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 `agent prompt` は現在の bracketed paste モードを尊重し、working 中でもテキストと遅延した Enter を順序付きの 1 回の送信として書き込みます。`--wait` なしの成功は書き込みの完了を示し、ターンの開始を保証しません。Windows の Codex では Enter の前にペースト境界が送られるため、送信はプロンプトのサイズに依存しません。呼び出し側のタイムアウトには送信時間も含まれます。エージェントがすでに `blocked` の場合は、入力を送信せずに `agent_blocked` を返します。`--wait` を使う場合、別の non-working 状態から受け付けたプロンプトでは、送信後の最大 5 秒間に `working` または `blocked` が観測される必要があります。観測できなければ Herdr は `agent_prompt_stalled` を返し、呼び出し側のタイムアウトが先に切れた場合は通常の `timeout` エラーを返します。これにより、無関係な `idle`、`done`、またはセッションの変化によって待機が誤って完了することを防ぎます。活動を観測した後、要求された最初の安定状態を待ちます。個々のターンは追跡しません。すでに working の場合、進行中ターンの完了が待機を満たすことがあります。`--until` は一致状態を絞り込み、`--wait` なしでは拒否されます。単独の `agent wait` は現在の状態が一致すれば即座に返ります。どちらもデフォルトは `idle`、`done`、`blocked` です。
 
 `idle` と `done` はどちらも入力可能な状態です。CLI/API はサーバーの既読状態を使い、未確認の idle を `done` とします。明示的な `pane focus` / `agent focus` は対象を既読にしますが、読み取りでは変わりません。各 TUI クライアントは表示済みの完了を独立して管理するため、Done バッジが CLI やほかのクライアントと異なる場合があります。`blocked` は承認または質問 UI を Herdr が認識した状態です。`unknown` はエージェントが存在するものの確実に分類できない状態で、作業の成功を意味しません。
+
+`agent call` は別のエージェントにタスクを渡し、その結果を後で Herdr が呼び出し元のエージェントに知らせます。呼び出し元のエージェントは `--to PANE` のペインにいるエージェントで、指定がなければコマンドを実行したペイン（`HERDR_PANE_ID`）にいるエージェントです。どちらもなければ使用法のエラーになります。`--machine` では `HERDR_PANE_ID` を使わないため、`--to` を指定してください。ターゲットは `idle` または `done` で、呼び出し元のペインで動いていてはいけません。また、ターゲットが受けられる呼び出しは同時に 1 つだけで、ターンまたは別の呼び出しの作業中であれば `agent_working` を返します。Herdr は `agent prompt` と同じ方法でテキストを送信し、テキストがターゲットのターミナルに届いた時点でコマンドが返ります。出力は `agent.call` のレスポンスで、呼び出し ID は `.result.call_id`、ターゲットは `.result.agent` にあります。ターゲットのターンが終わったとき、ターゲットが入力を待つとき、ターゲットがいなくなったときに、サーバーは `[herdr] call <id>` で始まる 1 行の通知を、呼び出し元のエージェントが idle になってから送信します。通知にはターゲット、状態、次に実行するコマンド（返信なら `herdr agent replies <target> --after <seq>` など）が書かれますが、返信やリクエストの内容は含まれません。`--answer-requests` を付けると呼び出しの間ターゲットのリモート回答（remote answers）が有効になり、呼び出し元はターゲットの権限リクエストや質問に `agent requests` と `agent answer` で回答できます。CLI は呼び出しを開始するだけで、通知はサーバーが届けます。通知の状態と動作の詳細は [エージェント呼び出し](/ja/docs/agent-automation/#エージェント呼び出し) を参照してください。
+
+`--kind` を付けると、`agent call` はまず呼び出し元の隣で新しいエージェントを起動します。レイアウトを変更する前に、kind、名前、テキストが空でないことを確認し（使用法のエラー、終了コード 2）、続いて呼び出し元のペインで認識済みエージェントが動いていること（`caller_not_agent`）と、`--name` がほかのライブエージェントに使われていないこと（`agent_name_taken`）を確認します。そのうえで呼び出し元のペインをフォーカスを移さずに右へ分割し、`agent start <name> --kind KIND --pane <new pane> -- <agent-args...>` とまったく同じように新しいペインでエージェントを起動して（同じ 30 秒の準備待機を含みます）、そのエージェントを呼び出します。新しいペインは `--cwd PATH` で始まり、指定がなければ呼び出し元ペインの作業ディレクトリで始まります。これはフォアグラウンドプロセスのディレクトリ（`pane get` の `foreground_cwd`）で、それが不明な場合はペインの `cwd` です。`--name` を省略すると、エージェントには空いている最小の番号を使った `<kind>-<n>`（`codex-1` など）という名前が付きます。ペインは呼び出しの後も開いたままなので、呼び出し元は 1 つ目の形式で続きのタスクを送れます。作業が終わったら `pane close <pane_id>` で閉じてください。分割の後でエージェントの起動または呼び出しに失敗した場合、コマンドは終了コード 1 で終了し、新しいペインを残したまま、stderr の JSON の `error` オブジェクトにそのペインの `pane_id` と `agent_name` を加えます。
 
 `agent send-keys` は `enter`、`up`、`esc`、`ctrl+c` などの論理キーを送ります。Herdr は 1 バイトも書き込む前に全キーを検証します。`agent read` は解決されたターミナルストリームを読み、`agent rename` は検出済みエージェントに名前を付けます。
 

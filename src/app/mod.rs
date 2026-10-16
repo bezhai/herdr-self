@@ -8,7 +8,9 @@ pub(crate) mod agent_calls;
 mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
-pub(crate) use agents::{AGENT_START_SETTLE_DELAY, MAX_AGENT_START_TIMEOUT};
+pub(crate) use agents::{
+    valid_agent_name, AGENT_START_SETTLE_DELAY, INVALID_AGENT_NAME_MESSAGE, MAX_AGENT_START_TIMEOUT,
+};
 mod api;
 #[cfg(test)]
 pub(crate) use api::test_support::exiting_test_command;

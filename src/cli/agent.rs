@@ -1,11 +1,11 @@
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentAnswerParams, AgentPromptParams, AgentPromptWaitOptions, AgentReadParams,
+    AgentAnswerParams, AgentCallParams, AgentPromptParams, AgentPromptWaitOptions, AgentReadParams,
     AgentRenameParams, AgentRepliesParams, AgentRequestAnswer, AgentRequestDecision,
     AgentSendKeysParams, AgentStartParams, AgentTarget, AgentToolCallsParams, AgentWaitParams,
-    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat,
-    ReadSource, Request,
+    EmptyParams, ErrorBody, ErrorResponse, Method, PaneProcessInfoParams, PaneRightClickTarget,
+    PaneSplitParams, PaneTarget, ReadFormat, ReadSource, Request, SplitDirection,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -27,6 +27,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
+        "call" => agent_call(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
         "wait" => agent_wait(&args[1..]),
@@ -293,9 +294,42 @@ fn matched_rule_region_preview<'a>(
 }
 
 fn agent_start(args: &[String]) -> std::io::Result<i32> {
+    let request = match parse_agent_start_args(args) {
+        Ok(request) => request,
+        Err(exit_code) => return Ok(exit_code),
+    };
+    match start_agent_in_pane(&request)? {
+        AgentStartEnd::Response(response) => super::print_response(&response),
+        AgentStartEnd::WaitFailed(err) => {
+            print_agent_transport_error(err, "cli:agent:start", "agent_start_transport_failed")
+        }
+    }
+}
+
+/// An agent to start in an existing shell pane.
+struct AgentStartRequest {
+    name: String,
+    /// Canonical agent kind label.
+    kind: String,
+    pane_id: String,
+    agent_args: Vec<String>,
+    timeout_ms: Option<u64>,
+}
+
+/// How starting an agent ended.
+enum AgentStartEnd {
+    /// The response to print: the started agent, or why it did not start.
+    Response(serde_json::Value),
+    /// The server stopped answering while the agent was starting.
+    WaitFailed(std::io::Error),
+}
+
+/// Parses `herdr agent start`; the error is the exit code of a usage error
+/// that was already printed.
+fn parse_agent_start_args(args: &[String]) -> Result<AgentStartRequest, i32> {
     let Some(name) = args.first() else {
         eprintln!("usage: herdr agent start <name> --kind KIND --pane ID [--timeout MS] [-- <agent-args...>]");
-        return Ok(2);
+        return Err(2);
     };
     let separator = args
         .iter()
@@ -310,7 +344,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             "--kind" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
                     eprintln!("missing value for --kind");
-                    return Ok(2);
+                    return Err(2);
                 };
                 kind = Some(value.clone());
                 index += 2;
@@ -318,7 +352,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             "--pane" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
                     eprintln!("missing value for --pane");
-                    return Ok(2);
+                    return Err(2);
                 };
                 pane_id = Some(super::normalize_pane_id(value));
                 index += 2;
@@ -326,52 +360,74 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
             "--timeout" => {
                 let Some(value) = args.get(index + 1).filter(|_| index + 1 < separator) else {
                     eprintln!("missing value for --timeout");
-                    return Ok(2);
+                    return Err(2);
                 };
-                timeout_ms = match parse_timeout(value) {
-                    Ok(timeout_ms) => Some(timeout_ms),
-                    Err(exit_code) => return Ok(exit_code),
-                };
+                timeout_ms = Some(parse_timeout(value)?);
                 index += 2;
             }
             other => {
                 eprintln!("unknown option: {other}");
-                return Ok(2);
+                return Err(2);
             }
         }
     }
     let Some(kind) = kind else {
         eprintln!("missing required --kind");
-        return Ok(2);
+        return Err(2);
     };
     let Some(pane_id) = pane_id else {
         eprintln!("missing required --pane");
-        return Ok(2);
+        return Err(2);
     };
-    let Some(expected_kind) = crate::detect::parse_agent_label(&kind) else {
-        eprintln!("unsupported interactive agent kind: {kind}");
-        return Ok(2);
-    };
-    let expected_kind = crate::detect::agent_label(expected_kind).to_string();
+    let kind = agent_kind_label(&kind).map_err(|message| {
+        eprintln!("{message}");
+        2
+    })?;
     let agent_args = if separator < args.len() {
         args[separator + 1..].to_vec()
     } else {
         Vec::new()
     };
+    Ok(AgentStartRequest {
+        name: name.clone(),
+        kind,
+        pane_id,
+        agent_args,
+        timeout_ms,
+    })
+}
+
+/// The canonical label of agent kind `kind`, or the usage error for a kind
+/// Herdr cannot start.
+fn agent_kind_label(kind: &str) -> Result<String, String> {
+    crate::detect::parse_agent_label(kind)
+        .map(|agent| crate::detect::agent_label(agent).to_string())
+        .ok_or_else(|| format!("unsupported interactive agent kind: {kind}"))
+}
+
+/// Starts the agent in its pane and waits until it is ready for prompts.
+fn start_agent_in_pane(request: &AgentStartRequest) -> std::io::Result<AgentStartEnd> {
+    let AgentStartRequest {
+        name,
+        kind,
+        pane_id,
+        agent_args,
+        timeout_ms,
+    } = request;
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
     let retryable_timeout = timeout > crate::app::AGENT_START_SETTLE_DELAY
         && timeout <= crate::app::MAX_AGENT_START_TIMEOUT;
-    let pinned_terminal_id = pane_terminal_id(&pane_id)?;
+    let pinned_terminal_id = pane_terminal_id(pane_id)?;
     let mut retry_deadline = None;
-    let mut previous_busy_response = None;
+    let mut previous_busy_response: Option<serde_json::Value> = None;
     let mut response = loop {
         if let Some(previous_busy_response) = previous_busy_response.as_ref() {
             let retry_expired = retry_deadline.is_some_and(|deadline| Instant::now() >= deadline);
             if retry_expired
-                || pane_terminal_id(&pane_id)? != pinned_terminal_id
-                || !pane_shell_is_initializing(&pane_id)?
+                || pane_terminal_id(pane_id)? != pinned_terminal_id
+                || !pane_shell_is_initializing(pane_id)?
             {
-                return super::print_response(previous_busy_response);
+                return Ok(AgentStartEnd::Response(previous_busy_response.clone()));
             }
         }
 
@@ -382,7 +438,7 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
                 kind: kind.clone(),
                 pane_id: pane_id.clone(),
                 args: agent_args.clone(),
-                timeout_ms,
+                timeout_ms: *timeout_ms,
             }),
         })?;
         if response.get("error").is_none() {
@@ -391,54 +447,47 @@ fn agent_start(args: &[String]) -> std::io::Result<i32> {
         if response["error"]["code"].as_str() != Some("agent_pane_busy")
             || !retryable_timeout
             || pinned_terminal_id.is_none()
-            || pane_terminal_id(&pane_id)? != pinned_terminal_id
-            || !pane_shell_is_initializing(&pane_id)?
+            || pane_terminal_id(pane_id)? != pinned_terminal_id
+            || !pane_shell_is_initializing(pane_id)?
         {
-            return super::print_response(&response);
+            return Ok(AgentStartEnd::Response(response));
         }
 
         let deadline = *retry_deadline
             .get_or_insert_with(|| Instant::now() + PANE_SHELL_READINESS_RETRY_TIMEOUT);
-        previous_busy_response = Some(response);
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            if let Some(previous_busy_response) = previous_busy_response.as_ref() {
-                return super::print_response(previous_busy_response);
-            }
+            return Ok(AgentStartEnd::Response(response));
         }
+        previous_busy_response = Some(response);
         std::thread::sleep(AGENT_START_POLL_INTERVAL.min(remaining));
     };
 
     let Some(expected_terminal_id) = response["result"]["agent"]["terminal_id"].as_str() else {
-        return super::print_response(&cli_agent_error(
+        return Ok(AgentStartEnd::Response(cli_agent_error(
             "cli:agent:start",
             "agent_start_failed",
             "agent start response did not include terminal_id",
-        ));
+        )));
     };
     if pinned_terminal_id
         .as_deref()
         .is_some_and(|pinned| pinned != expected_terminal_id)
     {
-        return super::print_response(&agent_name_lost_error("cli:agent:start", name));
+        return Ok(AgentStartEnd::Response(agent_name_lost_error(
+            "cli:agent:start",
+            name,
+        )));
     }
-    let waited = wait_for_named_agent(
-        name,
-        &pane_id,
-        timeout,
-        &expected_kind,
-        expected_terminal_id,
-    );
-    match waited {
+    let waited = wait_for_named_agent(name, pane_id, timeout, kind, expected_terminal_id);
+    Ok(match waited {
         Ok(Ok(agent)) => {
             response["result"]["agent"] = agent;
-            super::print_response(&response)
+            AgentStartEnd::Response(response)
         }
-        Ok(Err(error)) => super::print_response(&error),
-        Err(err) => {
-            print_agent_transport_error(err, "cli:agent:start", "agent_start_transport_failed")
-        }
-    }
+        Ok(Err(error)) => AgentStartEnd::Response(error),
+        Err(err) => AgentStartEnd::WaitFailed(err),
+    })
 }
 
 fn agent_list(args: &[String]) -> std::io::Result<i32> {
@@ -867,17 +916,31 @@ fn print_agent_transport_error(
     request_id: &str,
     code: &str,
 ) -> std::io::Result<i32> {
+    match agent_transport_error_response(err, request_id, code)? {
+        Some(response) => super::print_response(&response),
+        None => Ok(1),
+    }
+}
+
+/// The error response for a request that lost the server, or `None` when
+/// the failure was already reported.
+fn agent_transport_error_response(
+    err: std::io::Error,
+    request_id: &str,
+    code: &str,
+) -> std::io::Result<Option<serde_json::Value>> {
     if super::protocol_mismatch_was_reported(&err) {
-        return Ok(1);
+        return Ok(None);
     }
     // A dead-server marker reaches here from `send_request` in the agent
     // startup path; surface its deferred response exactly once instead of
     // printing a second, generic transport-error line.
     if let Some(response) = super::server_not_running_reported_response(&err) {
-        let value = serde_json::to_value(response).map_err(std::io::Error::other)?;
-        return super::print_response(&value);
+        return serde_json::to_value(response)
+            .map(Some)
+            .map_err(std::io::Error::other);
     }
-    super::print_response(&cli_agent_error(request_id, code, err.to_string()))
+    Ok(Some(cli_agent_error(request_id, code, err.to_string())))
 }
 
 fn agent_wait_timeout() -> serde_json::Value {
@@ -1011,6 +1074,365 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     super::print_response(&response)
 }
 
+const AGENT_CALL_USAGE: &str = "usage: herdr agent call <target> <text> [--to PANE] [--answer-requests]\n       herdr agent call --kind KIND [--name NAME] [--cwd PATH] [--to PANE] [--answer-requests] <text> [-- <agent-args...>]";
+
+const AGENT_CALL_NEEDS_CALLER: &str = "agent call needs the calling agent's pane: run it in a Herdr pane, which sets HERDR_PANE_ID, or pass --to PANE";
+
+/// How many generated names `agent call --kind` tries when agents starting
+/// at the same time take them first.
+const GENERATED_NAME_ATTEMPTS: usize = 3;
+
+/// A parsed `herdr agent call`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentCallArgs {
+    /// Pane of the calling agent, which receives the call's notices.
+    caller_pane_id: String,
+    text: String,
+    answer_requests: bool,
+    callee: CalleeArgs,
+}
+
+/// The agent that does the task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CalleeArgs {
+    /// A running agent, written like an `agent prompt` target.
+    Existing(String),
+    /// An agent to start in a new pane beside the caller.
+    New(NewCalleeArgs),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NewCalleeArgs {
+    /// Canonical agent kind label.
+    kind: String,
+    /// The agent's name; one is generated when absent.
+    name: Option<String>,
+    /// Working directory of the new pane; the caller's when absent.
+    cwd: Option<String>,
+    agent_args: Vec<String>,
+}
+
+fn agent_call(args: &[String]) -> std::io::Result<i32> {
+    let env_pane_id = super::target::caller_pane_id();
+    let call = match parse_agent_call_args(args, env_pane_id.as_deref()) {
+        Ok(call) => call,
+        Err(message) => {
+            eprintln!("{message}");
+            return Ok(2);
+        }
+    };
+    match &call.callee {
+        CalleeArgs::Existing(target) => {
+            super::print_response(&super::send_request(&agent_call_request(&call, target))?)
+        }
+        CalleeArgs::New(new) => call_new_agent(&call, new),
+    }
+}
+
+/// Parses `herdr agent call`; `env_pane_id` is the pane the command runs in.
+fn parse_agent_call_args(
+    args: &[String],
+    env_pane_id: Option<&str>,
+) -> Result<AgentCallArgs, String> {
+    let (options, agent_args) = match args.iter().position(|arg| arg == "--") {
+        Some(separator) => (&args[..separator], Some(args[separator + 1..].to_vec())),
+        None => (args, None),
+    };
+    let options = super::expand_equals_args(options, &["--to", "--kind", "--name", "--cwd"]);
+    let mut to = None;
+    let mut kind = None;
+    let mut name = None;
+    let mut cwd = None;
+    let mut answer_requests = false;
+    let mut positionals = Vec::new();
+    let mut index = 0;
+    while index < options.len() {
+        let arg = options[index].as_str();
+        match arg {
+            "--to" | "--kind" | "--name" | "--cwd" => {
+                let value = options
+                    .get(index + 1)
+                    .cloned()
+                    .ok_or_else(|| format!("missing value for {arg}"))?;
+                match arg {
+                    "--to" => to = Some(super::normalize_pane_id(&value)),
+                    "--kind" => kind = Some(value),
+                    "--name" => name = Some(value),
+                    _ => cwd = Some(value),
+                }
+                index += 2;
+            }
+            "--answer-requests" => {
+                answer_requests = true;
+                index += 1;
+            }
+            other if other.starts_with("--") => return Err(format!("unknown option: {other}")),
+            value => {
+                positionals.push(value.to_string());
+                index += 1;
+            }
+        }
+    }
+
+    let (callee, text) = match kind {
+        Some(kind) => {
+            let [text] =
+                <[String; 1]>::try_from(positionals).map_err(|_| AGENT_CALL_USAGE.to_string())?;
+            let kind = agent_kind_label(&kind)?;
+            if name
+                .as_deref()
+                .is_some_and(|name| !crate::app::valid_agent_name(name))
+            {
+                return Err(crate::app::INVALID_AGENT_NAME_MESSAGE.to_string());
+            }
+            let new = NewCalleeArgs {
+                kind,
+                name,
+                cwd,
+                agent_args: agent_args.unwrap_or_default(),
+            };
+            (CalleeArgs::New(new), text)
+        }
+        None => {
+            if name.is_some() {
+                return Err("--name requires --kind".into());
+            }
+            if cwd.is_some() {
+                return Err("--cwd requires --kind".into());
+            }
+            if agent_args.is_some() {
+                return Err("agent arguments after -- require --kind".into());
+            }
+            let [target, text] =
+                <[String; 2]>::try_from(positionals).map_err(|_| AGENT_CALL_USAGE.to_string())?;
+            (CalleeArgs::Existing(target), text)
+        }
+    };
+    if text.is_empty() {
+        return Err("agent call requires a non-empty task".into());
+    }
+    let caller_pane_id = to
+        .or_else(|| env_pane_id.map(super::normalize_pane_id))
+        .ok_or_else(|| AGENT_CALL_NEEDS_CALLER.to_string())?;
+    Ok(AgentCallArgs {
+        caller_pane_id,
+        text,
+        answer_requests,
+        callee,
+    })
+}
+
+fn agent_call_request(call: &AgentCallArgs, target: &str) -> Request {
+    Request {
+        id: "cli:agent:call".into(),
+        method: Method::AgentCall(AgentCallParams {
+            target: target.to_owned(),
+            text: call.text.clone(),
+            caller_pane_id: call.caller_pane_id.clone(),
+            answer_requests: call.answer_requests,
+        }),
+    }
+}
+
+/// Starts a new agent in a pane split off the caller's, then calls it.
+///
+/// Whatever can be checked before the split is checked first, so a refused
+/// call leaves the layout as it was. Once the pane exists it stays whatever
+/// fails next, and the error names it, so that a person can deal with the
+/// agent there and the caller can retry with it or close the pane.
+fn call_new_agent(call: &AgentCallArgs, new: &NewCalleeArgs) -> std::io::Result<i32> {
+    let caller = super::send_request(&Request {
+        id: "cli:agent:call:caller".into(),
+        method: Method::PaneGet(PaneTarget {
+            pane_id: call.caller_pane_id.clone(),
+        }),
+    })?;
+    if caller.get("error").is_some() {
+        return super::print_response(&caller);
+    }
+    let caller = &caller["result"]["pane"];
+    if !pane_runs_known_agent(caller) {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:call",
+            "caller_not_agent",
+            format!("caller pane {} does not run an agent", call.caller_pane_id),
+        ));
+    }
+    let agents = super::send_request(&Request {
+        id: "cli:agent:call:agents".into(),
+        method: Method::AgentList(EmptyParams::default()),
+    })?;
+    if agents.get("error").is_some() {
+        return super::print_response(&agents);
+    }
+    let mut taken = agent_names(&agents);
+    if let Some(name) = new.name.as_deref().filter(|name| taken.contains(*name)) {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:call",
+            "agent_name_taken",
+            format!("agent name {name} is already used"),
+        ));
+    }
+
+    let split = super::send_request(&Request {
+        id: "cli:agent:call:split".into(),
+        method: Method::PaneSplit(PaneSplitParams {
+            workspace_id: None,
+            target_pane_id: Some(call.caller_pane_id.clone()),
+            direction: SplitDirection::Right,
+            ratio: None,
+            cwd: new_agent_cwd(new, caller),
+            focus: false,
+            right_click: PaneRightClickTarget::Herdr,
+            env: std::collections::HashMap::new(),
+        }),
+    })?;
+    if split.get("error").is_some() {
+        return super::print_response(&split);
+    }
+    let Some(pane_id) = split["result"]["pane"]["pane_id"]
+        .as_str()
+        .map(str::to_owned)
+    else {
+        return super::print_response(&cli_agent_error(
+            "cli:agent:call:split",
+            "pane_split_failed",
+            "pane split response did not include pane_id",
+        ));
+    };
+
+    let mut attempts = 0;
+    let name = loop {
+        let name = new
+            .name
+            .clone()
+            .unwrap_or_else(|| generated_agent_name(&new.kind, &taken));
+        let started = start_agent_in_pane(&AgentStartRequest {
+            name: name.clone(),
+            kind: new.kind.clone(),
+            pane_id: pane_id.clone(),
+            agent_args: new.agent_args.clone(),
+            timeout_ms: None,
+        });
+        let response = match started {
+            Ok(AgentStartEnd::Response(response)) => response,
+            Ok(AgentStartEnd::WaitFailed(err)) | Err(err) => {
+                return print_kept_pane_transport_error(
+                    err,
+                    "cli:agent:start",
+                    "agent_start_transport_failed",
+                    &pane_id,
+                    &name,
+                );
+            }
+        };
+        if response.get("error").is_none() {
+            break name;
+        }
+        attempts += 1;
+        let generated_name_was_taken = new.name.is_none()
+            && response["error"]["code"].as_str() == Some("agent_name_taken")
+            && attempts < GENERATED_NAME_ATTEMPTS;
+        if !generated_name_was_taken {
+            return super::print_response(&kept_pane_error(response, &pane_id, &name));
+        }
+        taken.insert(name);
+    };
+
+    match super::send_request(&agent_call_request(call, &name)) {
+        Ok(response) if response.get("error").is_some() => {
+            super::print_response(&kept_pane_error(response, &pane_id, &name))
+        }
+        Ok(response) => super::print_response(&response),
+        Err(err) => print_kept_pane_transport_error(
+            err,
+            "cli:agent:call",
+            "agent_call_transport_failed",
+            &pane_id,
+            &name,
+        ),
+    }
+}
+
+/// Whether the pane described by a `pane get` result runs an agent that
+/// Herdr recognizes, which it must to call another agent.
+fn pane_runs_known_agent(pane: &serde_json::Value) -> bool {
+    pane["agent"]
+        .as_str()
+        .and_then(crate::detect::parse_agent_label)
+        .is_some()
+}
+
+/// The names of the agents in an `agent list` response.
+fn agent_names(list: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    list["result"]["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|agent| agent["name"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// `<kind>-<n>` with the smallest `n` that no name in `taken` uses.
+fn generated_agent_name(kind: &str, taken: &std::collections::BTreeSet<String>) -> String {
+    let mut number = 1_u64;
+    loop {
+        let name = format!("{kind}-{number}");
+        if !taken.contains(&name) {
+            return name;
+        }
+        number += 1;
+    }
+}
+
+/// Where the new agent's pane starts: `--cwd`, or where the calling agent
+/// runs, which the caller's `pane get` result reports as its foreground
+/// directory, or else its shell's. `None` leaves it to `pane.split`.
+fn new_agent_cwd(new: &NewCalleeArgs, caller: &serde_json::Value) -> Option<String> {
+    new.cwd.clone().or_else(|| {
+        caller["foreground_cwd"]
+            .as_str()
+            .or_else(|| caller["cwd"].as_str())
+            .map(str::to_owned)
+    })
+}
+
+/// Adds the pane that a failed `agent call --kind` created, and its agent,
+/// to the error `response`.
+fn kept_pane_error(
+    mut response: serde_json::Value,
+    pane_id: &str,
+    agent_name: &str,
+) -> serde_json::Value {
+    if let Some(error) = response
+        .get_mut("error")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        let message = error
+            .get("message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let message = format!("{message}; the new pane {pane_id} (agent {agent_name}) stays open");
+        error.insert("message".into(), message.into());
+        error.insert("pane_id".into(), pane_id.into());
+        error.insert("agent_name".into(), agent_name.into());
+    }
+    response
+}
+
+fn print_kept_pane_transport_error(
+    err: std::io::Error,
+    request_id: &str,
+    code: &str,
+    pane_id: &str,
+    agent_name: &str,
+) -> std::io::Result<i32> {
+    match agent_transport_error_response(err, request_id, code)? {
+        Some(response) => super::print_response(&kept_pane_error(response, pane_id, agent_name)),
+        None => Ok(1),
+    }
+}
+
 fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
         eprintln!("usage: herdr agent send-keys <target> <key> [key ...]");
@@ -1102,6 +1524,8 @@ fn print_agent_help() {
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
+    eprintln!("  herdr agent call <target> <text> [--to PANE] [--answer-requests]");
+    eprintln!("  herdr agent call --kind KIND [--name NAME] [--cwd PATH] [--to PANE] [--answer-requests] <text> [-- <agent-args...>]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
@@ -1122,4 +1546,214 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn names(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    #[test]
+    fn agent_call_args_default_the_caller_to_the_pane_the_command_runs_in() {
+        assert_eq!(
+            parse_agent_call_args(&args(&["reviewer", "Review this diff"]), Some("w1:p1")),
+            Ok(AgentCallArgs {
+                caller_pane_id: "w1:p1".into(),
+                text: "Review this diff".into(),
+                answer_requests: false,
+                callee: CalleeArgs::Existing("reviewer".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn agent_call_args_to_overrides_the_pane_the_command_runs_in() {
+        for values in [
+            &["reviewer", "Review", "--to", "w2:p3", "--answer-requests"][..],
+            &["--to=w2:p3", "--answer-requests", "reviewer", "Review"][..],
+        ] {
+            assert_eq!(
+                parse_agent_call_args(&args(values), Some("w1:p1")),
+                Ok(AgentCallArgs {
+                    caller_pane_id: "w2:p3".into(),
+                    text: "Review".into(),
+                    answer_requests: true,
+                    callee: CalleeArgs::Existing("reviewer".into()),
+                }),
+                "{values:?}"
+            );
+        }
+        assert_eq!(
+            parse_agent_call_args(&args(&["reviewer", "Review", "--to", "w2:p3"]), None)
+                .map(|call| call.caller_pane_id),
+            Ok("w2:p3".into())
+        );
+    }
+
+    #[test]
+    fn agent_call_args_require_a_caller() {
+        for values in [
+            &["reviewer", "Review"][..],
+            &["--kind", "codex", "Review"][..],
+        ] {
+            let error = parse_agent_call_args(&args(values), None).unwrap_err();
+            assert!(error.contains("--to"), "{error}");
+            assert!(error.contains("HERDR_PANE_ID"), "{error}");
+        }
+    }
+
+    #[test]
+    fn agent_call_args_describe_a_new_agent_with_kind() {
+        assert_eq!(
+            parse_agent_call_args(
+                &args(&[
+                    "--kind",
+                    "claude-code",
+                    "--name",
+                    "helper",
+                    "Write the tests",
+                    "--cwd=/work",
+                    "--",
+                    "--to",
+                    "x",
+                ]),
+                Some("w1:p1"),
+            ),
+            Ok(AgentCallArgs {
+                caller_pane_id: "w1:p1".into(),
+                text: "Write the tests".into(),
+                answer_requests: false,
+                callee: CalleeArgs::New(NewCalleeArgs {
+                    kind: "claude".into(),
+                    name: Some("helper".into()),
+                    cwd: Some("/work".into()),
+                    agent_args: args(&["--to", "x"]),
+                }),
+            })
+        );
+        assert_eq!(
+            parse_agent_call_args(&args(&["--kind", "codex", "Review"]), Some("w1:p1"))
+                .map(|call| call.callee),
+            Ok(CalleeArgs::New(NewCalleeArgs {
+                kind: "codex".into(),
+                name: None,
+                cwd: None,
+                agent_args: Vec::new(),
+            }))
+        );
+    }
+
+    #[test]
+    fn agent_call_args_reject_mistakes_before_anything_runs() {
+        for values in [
+            &[][..],
+            &["reviewer"][..],
+            &["reviewer", ""][..],
+            &["reviewer", "Review", "extra"][..],
+            &["reviewer", "Review", "--wait"][..],
+            &["reviewer", "Review", "--to"][..],
+            &["--name", "helper", "reviewer", "Review"][..],
+            &["--cwd", "/work", "reviewer", "Review"][..],
+            &["reviewer", "Review", "--", "--model"][..],
+            &["--kind", "nope", "Review"][..],
+            &["--kind", "codex"][..],
+            &["--kind", "codex", ""][..],
+            &["--kind", "codex", "reviewer", "Review"][..],
+            &["--kind", "codex", "--name", "Not-Valid", "Review"][..],
+            &["--kind", "codex", "--name"][..],
+        ] {
+            assert!(
+                parse_agent_call_args(&args(values), Some("w1:p1")).is_err(),
+                "{values:?} was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn generated_agent_names_take_the_lowest_free_number() {
+        assert_eq!(generated_agent_name("codex", &names(&[])), "codex-1");
+        assert_eq!(
+            generated_agent_name("codex", &names(&["codex-1", "codex-3", "claude-2"])),
+            "codex-2"
+        );
+        for kind in super::super::spec::agent_kind_values() {
+            let name = generated_agent_name(kind, &names(&[]));
+            assert!(crate::app::valid_agent_name(&name), "{name}");
+        }
+    }
+
+    #[test]
+    fn agent_names_lists_the_names_of_live_agents() {
+        let list = serde_json::json!({
+            "result": {
+                "agents": [{ "name": "reviewer" }, { "name": null }, {}, { "name": "codex-1" }]
+            }
+        });
+        assert_eq!(agent_names(&list), names(&["reviewer", "codex-1"]));
+    }
+
+    #[test]
+    fn new_agents_start_in_cwd_or_where_the_calling_agent_runs() {
+        let new = |cwd: Option<&str>| NewCalleeArgs {
+            kind: "codex".into(),
+            name: None,
+            cwd: cwd.map(str::to_string),
+            agent_args: Vec::new(),
+        };
+        let caller = serde_json::json!({ "cwd": "/shell", "foreground_cwd": "/agent" });
+        assert_eq!(
+            new_agent_cwd(&new(Some("/work")), &caller),
+            Some("/work".into())
+        );
+        assert_eq!(new_agent_cwd(&new(None), &caller), Some("/agent".into()));
+        assert_eq!(
+            new_agent_cwd(&new(None), &serde_json::json!({ "cwd": "/shell" })),
+            Some("/shell".into())
+        );
+        assert_eq!(new_agent_cwd(&new(None), &serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn only_panes_that_run_a_recognized_agent_can_call() {
+        assert!(pane_runs_known_agent(
+            &serde_json::json!({ "agent": "claude" })
+        ));
+        assert!(!pane_runs_known_agent(
+            &serde_json::json!({ "agent": "something-else" })
+        ));
+        assert!(!pane_runs_known_agent(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn errors_after_the_split_name_the_kept_pane_and_its_agent() {
+        let error = kept_pane_error(
+            serde_json::json!({
+                "id": "cli:agent:start",
+                "error": {
+                    "code": "agent_not_ready",
+                    "message": "agent codex-1 is blocked during startup and is not ready for prompts"
+                }
+            }),
+            "w1:p2",
+            "codex-1",
+        );
+
+        assert_eq!(error["id"], "cli:agent:start");
+        assert_eq!(error["error"]["code"], "agent_not_ready");
+        assert_eq!(error["error"]["pane_id"], "w1:p2");
+        assert_eq!(error["error"]["agent_name"], "codex-1");
+        assert_eq!(
+            error["error"]["message"],
+            "agent codex-1 is blocked during startup and is not ready for prompts; the new pane w1:p2 (agent codex-1) stays open"
+        );
+    }
 }

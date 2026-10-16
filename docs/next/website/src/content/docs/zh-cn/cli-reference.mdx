@@ -321,6 +321,8 @@ herdr pane remote-answers <pane_id> on|off
 herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]
 herdr agent send-keys <target> <key> [key ...]
 herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]
+herdr agent call <target> <text> [--to PANE] [--answer-requests]
+herdr agent call --kind KIND [--name NAME] [--cwd PATH] [--to PANE] [--answer-requests] <text> [-- <agent-args...>]
 herdr agent rename <target> <name>|--clear
 herdr agent focus <target>
 herdr agent wait <target> [--until STATUS]... [--timeout MS]
@@ -339,6 +341,10 @@ herdr agent explain --file PATH --agent LABEL [--json|--verbose]
 `agent prompt` 遵循当前的 bracketed paste 模式，即使智能体处于 working，也会将文本和延迟的 Enter 作为一次有序提交写入。不带 `--wait` 时，成功只确认写入完成，不代表轮次已经开始。在 Windows 上，Codex 在 Enter 前会收到粘贴边界，因此提交不依赖提示大小；调用方的超时包含提交时间。如果智能体已经是 `blocked`,它不会发送输入,而是返回 `agent_blocked`。使用 `--wait` 时,从其他非 working 状态接受的提示必须在提交后的最多五秒内产生可观察的 `working` 或 `blocked` 状态，否则 Herdr 返回 `agent_prompt_stalled`；如果调用方的超时先到期，则返回普通的 `timeout` 错误。这可防止无关的 `idle`、`done` 或会话变化错误地完成等待。观察到活动后，它会等待请求的第一个稳定状态。它不会跟踪单独的轮次。如果智能体已经处于 working，当前轮次的完成可能满足等待。`--until` 用于缩小匹配状态，不带 `--wait` 时会被拒绝。独立的 `agent wait` 在当前状态匹配时立即返回。两者默认匹配 `idle`、`done` 或 `blocked`；需要 `unknown` 时请明确使用 `--until unknown`。
 
 `idle` 和 `done` 都表示可以接受输入。CLI/API 使用服务器的已查看状态：`done` 表示尚未标记为已查看的 idle；显式 `pane focus` / `agent focus` 会标记目标，读取不会。每个 TUI 客户端独立记录它已显示的完成状态，因此其 Done 标记可能与 CLI 或其他客户端不同。`blocked` 表示 Herdr 识别到审批或提问界面。`unknown` 表示智能体存在但无法可靠分类,不代表工作成功。
+
+`agent call` 把一项任务交给另一个智能体，之后由 Herdr 告诉调用方智能体任务的结果。调用方智能体是 `--to PANE` 所指窗格中的智能体；未指定时，是运行该命令的窗格（`HERDR_PANE_ID`）中的智能体。两者都没有时，命令按用法错误处理。使用 `--machine` 时不会使用 `HERDR_PANE_ID`，因此请传入 `--to`。目标必须处于 `idle` 或 `done`，并且不能运行在调用方窗格中；每个目标同一时间只接受一个调用，正在处理某个轮次或另一个调用的目标会返回 `agent_working`。Herdr 以与 `agent prompt` 相同的方式提交文本，文本到达目标终端后命令即返回。输出是 `agent.call` 的响应，调用 ID 位于 `.result.call_id`，目标位于 `.result.agent`。当目标的轮次结束、目标等待输入以及目标离开时，服务器会在调用方智能体变为 idle 后，向它提交一行以 `[herdr] call <id>` 开头的通知。通知写明目标、状态和下一步要运行的命令，例如读取回复的 `herdr agent replies <target> --after <seq>`；它从不包含回复或请求的内容。`--answer-requests` 会在调用期间为目标打开远程应答（remote answers），调用方即可用 `agent requests` 和 `agent answer` 回答目标的权限请求和提问。CLI 只负责发起调用，通知由服务器投递。通知状态和完整行为见[智能体调用](/zh-cn/docs/agent-automation/#智能体调用)。
+
+使用 `--kind` 时，`agent call` 会先在调用方旁边启动一个新智能体。在改动布局之前，它会检查 kind、名称以及文本是否为空（用法错误，退出状态为 2），然后检查调用方窗格是否运行着已识别的智能体（`caller_not_agent`），以及 `--name` 是否已被某个实时智能体使用（`agent_name_taken`）。随后，它在不移动焦点的情况下向右拆分调用方窗格，在新窗格中完全按照 `agent start <name> --kind KIND --pane <new pane> -- <agent-args...>` 的方式启动智能体（包括同样的 30 秒就绪等待），再调用它。新窗格在 `--cwd PATH` 中启动；未指定时，在调用方窗格的工作目录中启动，即前台进程的目录（`pane get` 中的 `foreground_cwd`）；该目录未知时，使用窗格的 `cwd`。省略 `--name` 时，智能体会得到 `<kind>-<n>` 形式的名称，其中 n 是最小的空闲编号，例如 `codex-1`。调用结束后该窗格保持打开，调用方可以用第一种形式继续发送后续任务；工作完成后用 `pane close <pane_id>` 关闭它。如果拆分之后启动智能体或调用失败，命令以退出状态 1 结束并保留新窗格，同时在 stderr 上 JSON 的 `error` 对象中加入该窗格的 `pane_id` 和 `agent_name`。
 
 `agent send-keys` 发送 `enter`、`up`、`esc`、`ctrl+c` 等逻辑按键。Herdr 会在写入任何字节前验证所有按键。`agent read` 读取解析出的终端流,`agent rename` 为已检测到的智能体命名。
 

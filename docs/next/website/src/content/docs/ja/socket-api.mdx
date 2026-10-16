@@ -37,6 +37,7 @@ herdr api schema --output herdr-api.schema.json
 - タブの作成、一覧、フォーカス、名前変更、クローズ
 - ペインの一覧、調査、分割、入れ替え、フォーカス、リサイズ、名前変更、読み取り、クローズ、入力送信
 - CLI ヘルパーを通じたエージェントの一覧、調査、読み取り、プロンプト、待機、名前変更、フォーカス、起動、アタッチ
+- あるエージェントから別のエージェントへのタスクの受け渡しと、呼び出し元エージェントへの結果の通知
 - フックやプラグインからのカスタムエージェント状態の報告
 - イベントの購読と、出力や状態変化の待機
 - 組み込みインテグレーションのインストールとアンインストール
@@ -102,12 +103,12 @@ herdr pane read w1:p2 --source recent --lines 50
 | ペイン | `pane.split`、`pane.swap`、`pane.move`、`pane.zoom`、`pane.layout`、`pane.process_info`、`pane.neighbor`、`pane.edges`、`pane.focus_direction`、`pane.resize`、`pane.list`、`pane.current`、`pane.get`、`pane.rename`、`pane.send_text`、`pane.send_keys`、`pane.send_input`、`pane.read`、`pane.graphics.info`、`pane.graphics.set`、`pane.graphics.clear`、`pane.graphics.stream`、`pane.report_agent`、`pane.report_agent_session`、`pane.report_agent_reply`、`pane.report_agent_tool_call`、`pane.report_agent_request`、`pane.report_metadata`、`pane.clear_agent_authority`、`pane.release_agent`、`pane.set_remote_answers`、`pane.close`、`pane.wait_for_output` |
 | ポップアップ | `popup.close` |
 | レイアウト | `layout.export`、`layout.apply`、`layout.set_split_ratio` |
-| エージェント | `agent.list`、`agent.get`、`agent.replies`、`agent.tool_calls`、`agent.requests`、`agent.answer`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
+| エージェント | `agent.list`、`agent.get`、`agent.replies`、`agent.tool_calls`、`agent.requests`、`agent.answer`、`agent.read`、`agent.explain`、`agent.send_keys`、`agent.prompt`、`agent.call`、`agent.wait`、`agent.rename`、`agent.focus`、`agent.start` |
 | イベント | `events.subscribe`、`events.wait` |
 | インテグレーション | `integration.install`、`integration.uninstall` |
 | プラグイン | `plugin.link`、`plugin.list`、`plugin.unlink`、`plugin.enable`、`plugin.disable`、`plugin.action.list`、`plugin.action.invoke`、`plugin.log.list`、`plugin.pane.open`、`plugin.pane.focus`、`plugin.pane.close` |
 
-`agent.wait` はサーバー所有でイベント駆動です。解決したペイン占有者に固定されるため、置換されたエージェントが待機を満たすことはありません。`agent.prompt` は `until` と `timeout_ms` を持つ省略可能な `wait` オブジェクトを受け付けます。これにより、プロンプト送信と待機開始を 1 つのリクエストで行い、別々の呼び出し間の競合を避けられます。解決したエージェントがすでに `blocked` の場合、`agent.prompt` は入力を送信せず、待機も開始せずに `agent_blocked` を返します。
+`agent.wait` はサーバー所有でイベント駆動です。解決したペイン占有者に固定されるため、置換されたエージェントが待機を満たすことはありません。`agent.prompt` は `until` と `timeout_ms` を持つ省略可能な `wait` オブジェクトを受け付けます。これにより、プロンプト送信と待機開始を 1 つのリクエストで行い、別々の呼び出し間の競合を避けられます。解決したエージェントがすでに `blocked` の場合、`agent.prompt` は入力を送信せず、待機も開始せずに `agent_blocked` を返します。`agent.call` は別のメソッドです。`wait` なしの `agent.prompt` と同じ方法でタスクを送信し、後で呼び出し元のエージェントに通知します。詳しくは [エージェント呼び出し](#エージェント呼び出し) を参照してください。`agent.prompt` と `agent.wait` の動作は変わりません。
 
 `workspace.move_block` は、順序付きの `workspace_ids` を `before_workspace_id` の前へアトミックに移動します。アンカーを省略するとブロックを末尾へ移動します。id は一意である必要があり、アンカーをブロックに含めることはできません。レスポンスにはサーバーが確定した順序付きワークスペース一覧が含まれます。
 
@@ -628,6 +629,52 @@ workspace の get/list 応答は結果の `tokens` マップを公開し、ス�
 短寿命のメタデータには `ttl_ms` を使ってください。`1` から `86400000` ミリ秒の間でなければなりません。置き換え・クリア・ペインまたはワークスペースのクローズまで残るべきメタデータでは省略します。表示フィールドは従来どおりソース単位で失効し、呼び出しで更新した各トークンには個別の期限が設定されます。トークンメタデータはサーバー再起動後に復元されません。
 
 フックが順不同で更新を送る可能性がある場合は `seq` を使ってください。同じ `source` について、最後に受理されたシーケンス以下のシーケンス番号を持つ報告は、API には受理されますがペイン状態には無視されます。ペインまたはワークスペースが存続する間、シーケンス付きトークン報告を送れる異なるソースは最大 32 個です。クリアや失効でもそのソース枠は解放されません。
+
+## エージェント呼び出し
+
+`agent.call` を使うと、あるエージェントが別のエージェントにタスクを渡し、自分の作業を続けられます。Herdr はタスクをターゲットに送信し、2 つのエージェントの間に呼び出しを登録します。呼び出し元のエージェントは待機を開いたままにする代わりに、ターゲットのターンが終わったとき、ターゲットが入力を待つたび、ターゲットがいなくなったときに通知を受け取ります。CLI ラッパーは `herdr agent call` です。作業の流れは [エージェント呼び出し](/ja/docs/agent-automation/#エージェント呼び出し) を参照してください。
+
+```json
+{"id":"req_call","method":"agent.call","params":{"target":"reviewer","text":"Review the current diff","caller_pane_id":"w1:p1","answer_requests":true}}
+```
+
+`target` はタスクを行うエージェントで、`agent.prompt` のターゲットと同じく、一意なライブエージェント名、または現在そのエージェントをホストしているペイン ID で指定します。`text` はタスクで、空にはできません。`caller_pane_id` は呼び出し元エージェントのペインで、通知を受け取ります。ここではペインの古い別名も受け付けます。たとえば、ペインが別のワークスペースへ移動したエージェントが起動時に受け取った `HERDR_PANE_ID` です。`answer_requests` は省略可能で、デフォルトは `false` です。詳しくは後述します。
+
+Herdr は次の順に呼び出しを検査し、最初に当てはまったエラーを何も書き込まずに返します。`text` が空なら `empty_agent_prompt`、`caller_pane_id` を解決できなければ `pane_not_found`、呼び出し元のペインで認識済みエージェントが動いていなければ `caller_not_agent`、`target` が 1 つのエージェントに解決されなければ `agent_not_found` または `agent_target_ambiguous`、ターゲットが呼び出し元のペインで動いていれば `caller_is_target`、ターゲットがターンの作業中か、すでに進行中の呼び出しを持っていれば `agent_working`（ターゲットが受けられる呼び出しは同時に 1 つだけです）、ターゲットが `idle` でも `done` でもなければ `agent_blocked` または `agent_not_ready` です。最後のものは、たとえば blocked である、状態が `unknown` である、まだ起動中である、ペインのフォアグラウンドをもう所有していない、といった場合です。そのうえで Herdr は `agent.prompt` とまったく同じようにテキストを送信し、テキストと Enter がターゲットのターミナルに届いた時点で、`wait` なしの `agent.prompt` と同様に応答します:
+
+```json
+{
+  "id": "req_call",
+  "result": {
+    "type": "agent_called",
+    "call_id": 3,
+    "agent": { "name": "reviewer", "agent": "codex", "pane_id": "w1:p2", "agent_status": "idle", "...": "..." }
+  }
+}
+```
+
+`call_id` はサーバー全体で 1 つのカウンターから採番され、再利用されません。`agent` はタスクを送信した時点のターゲットです。テキストをターミナルに書き込めなかった場合、レスポンスは `agent_prompt_failed` または `timeout` になり、呼び出しは通知なしで取り消されます。
+
+その後、呼び出しはターゲットの状態と返信の報告を追跡します。ターゲットはまず `working` または `blocked` になり、その後 `idle` または `done` に戻ることが想定されています。作業を始める前に報告された返信は前のターンのものとして数えません。ターンが終わり、そのターンの返信が `pane.report_agent_reply` で報告されていれば、呼び出しは `finished` で終わります。返信がないままターンが終わった場合、Herdr は最大 10 秒間返信を待ちます。返信が届けば `finished` で終わり、ターゲットが再び作業を始めれば呼び出しは続き、どちらでもなければ `finished without reply` で終わります。そのため、返信を報告しないインテグレーションのエージェントは常に `finished without reply` で終わります。ターゲットの終了、解放、置換、またはそのペインのクローズで、呼び出しは `gone` で終わります。ターゲットが入力を待ち始めるたびに、呼び出し元のエージェントは `blocked` の通知を 1 つ受け取り、呼び出しは続きます。同じ待機が二度報告されることはなく、次の `blocked` 通知は、ターゲットが待機を終えて再び待ち始めたときにだけ届きます。
+
+すべての結果は通知になります。通知は `[herdr] call <call_id> <status>:` で始まる 1 行の英語テキストで、状態は `finished`、`finished without reply`、`blocked`、`gone` のいずれかです。通知はターゲットを kind、名前、ペインで示し、次に実行するコマンドを示します。返信やリクエストの内容は含みません。これらのコマンドでは、ターゲットは名前で書かれ、名前がなければペイン ID で書かれます。6 つの形式は次のとおりです:
+
+```text
+[herdr] call 3 finished: codex agent reviewer (pane w1:p2) ended its turn with a reply. Read it with: herdr agent replies reviewer --after 12
+[herdr] call 3 finished without reply: codex agent reviewer (pane w1:p2) ended its turn without reporting a reply. See its screen with: herdr agent read reviewer
+[herdr] call 3 blocked: codex agent reviewer (pane w1:p2) waits for input that a person has to give in its terminal. The call stays open.
+[herdr] call 3 blocked: codex agent reviewer (pane w1:p2) waits on 1 pending request. List it with: herdr agent requests reviewer. Answer with: herdr agent answer reviewer <REQUEST_ID> --decision <DECISION>, or --answers <JSON> for a question. The call stays open.
+[herdr] call 3 gone: codex agent reviewer (pane w1:p2) exited or was replaced. The call has ended.
+[herdr] call 3 gone: codex agent reviewer (pane w1:p2) is gone because its pane was closed. The call has ended.
+```
+
+`finished` 通知の `--after` の値はタスクを送信した時点の返信 `seq` なので、その値を `after_seq` に指定した `agent.replies` は、それ以降のターゲットの返信だけを返します。保留中のリクエストが 2 つ以上ある場合、リクエストの通知は `waits on 2 pending requests. List them with: ...` となります。
+
+Herdr は通知を、呼び出しを行ったエージェントにだけ届け、そのペインが移動すればそれに従います。通知は、呼び出し元のエージェントが working、blocked、または起動中の間は待機します。そのエージェントが `idle` または `done` になると、Herdr は `agent.prompt` がテキストを送信するのと同じ方法で通知を送信するため、通知は呼び出し元のエージェントで新しいターンを開始します。1 つの呼び出し元に複数の通知がある場合は、idle 期間ごとに 1 つずつ順番に届きます。次の通知は、呼び出し元が前の通知を処理して再び idle になるまで待ちます。呼び出し元のエージェントが終了または置換されるか、そのペインが閉じられると、その進行中の呼び出しは通知なしで終わり、キューにある通知は破棄されます。
+
+`answer_requests: true` は、`pane.set_remote_answers` と同じように、呼び出しの間ターゲットのリモート回答（remote answers）を有効にします。これにより、ターゲットのインテグレーションフックが報告する権限リクエストと質問は、呼び出し元のエージェントが `agent.answer` で回答するのを待ちます。Claude Code は権限リクエストと質問を、Codex は承認を報告します。ターゲットに保留中のリクエストがあると、`blocked` 通知はその数と、`herdr agent requests` および `herdr agent answer` のコマンドを示します。ターゲットがリクエストを報告せずに blocked になった場合（たとえばフォルダーの信頼確認ダイアログや Codex の質問）、Herdr は 2 秒間リクエストを待ち、その後、人がターゲットのターミナルで回答する必要があるという通知を送ります。`answer_requests` がない場合、呼び出しはリクエストを考慮せず、`blocked` 通知は常に人が回答する必要があると伝えます。呼び出しが終わると、リモート回答は以前の設定に戻ります。呼び出しがリモート回答を無効にするのは自分で有効にした場合だけで、そのときターゲットの保留中のリクエストは `closed` で終わります。呼び出しの開始時にすでに有効だった場合（たとえばチャットブリッジのため）は有効なままで、呼び出しの間にクライアントが `pane.set_remote_answers` で設定した場合も、呼び出しはその設定を変えません。変更のたびに `pane.updated` が発行されます。
+
+呼び出しとキューにある通知はサーバーのメモリにあります。ライブハンドオフはそれらを次のサーバーへ引き継ぎ、次のサーバーが続きを処理します。ハンドオフ後に残らなかったペインの呼び出しと通知は破棄され、キューにある通知は Herdr が呼び出し元のエージェントを再検出するまで待ちます。返信はハンドオフをまたがないため、次のサーバーは引き継いだ呼び出しの返信を自分の返信カウンターで数え、すでにターンが終わっていた呼び出しは再び 10 秒間返信を待ちます。そのため、ハンドオフ前にキューに入った `finished` 通知は、もう保持されていない返信を指すことがあります。その場合は `agent.read` でターゲットを読み取ってください。サーバーのコールドリスタートでは、すべての呼び出しと通知が失われます。
 
 ## イベント購読
 

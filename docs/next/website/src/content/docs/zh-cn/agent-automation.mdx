@@ -66,6 +66,7 @@ herdr agent rename w1:p2 reviewer
 | 等待文本或正则表达式 | `pane wait-output` |
 | 在现有窗格中启动受支持的智能体 | `agent start` |
 | 提交提示,并可选择等待 | `agent prompt` |
+| 把任务交给另一个智能体，并在结束时收到通知 | `agent call` |
 | 向智能体交互界面发送按键 | `agent send-keys` |
 | 等待智能体生命周期状态 | `agent wait` |
 
@@ -95,6 +96,57 @@ Claude Code 和 OpenCode 等全屏智能体会把对话历史绘制在终端的�
 
 等待命令没有默认超时,可能无限等待。超时或服务器错误会把 JSON 错误写到 stderr 并以状态 1 退出;CLI 语法错误以状态 2 退出。
 
+## 智能体调用
+
+`agent call` 让一个智能体把任务交给另一个智能体，自己继续工作。Herdr 像 `agent prompt` 一样提交任务，之后在任务的轮次结束、目标等待输入以及目标离开时，向调用方智能体提交一行通知。调用方不必一直保持等待；通知到达时会在调用方中开始一个新轮次。
+
+```bash
+herdr agent call reviewer "Review the current diff and list risky changes"
+```
+
+调用方智能体是运行该命令的窗格（`HERDR_PANE_ID`）中的智能体。要指定另一个调用方窗格，传入 `--to PANE`；使用 `--machine` 时不会使用 `HERDR_PANE_ID`，因此必须传入 `--to`。两者都没有时，命令按用法错误处理。任务到达目标终端后命令即返回，并输出位于 `.result.call_id` 的调用 ID 和位于 `.result.agent` 的目标。目标必须处于 `idle` 或 `done`。每个目标同一时间只接受一个调用，因此正在处理某个轮次或另一个调用的目标会返回 `agent_working`。调用方不能调用自己窗格中的智能体（`caller_is_target`）；调用方窗格中没有已识别的智能体时返回 `caller_not_agent`。
+
+要为这次调用启动一个辅助智能体，用 `--kind` 代替目标：
+
+```bash
+herdr agent call --kind codex "Write tests for src/auth.rs" -- -m gpt-5.4
+```
+
+这会在不移动焦点的情况下向右拆分调用方窗格，在新窗格中完全按照 `agent start` 的方式启动智能体（包括 30 秒的就绪等待），然后调用它。新窗格在 `--cwd PATH` 中启动；未指定时，在调用方窗格的工作目录中启动。省略 `--name` 时，智能体会得到 `<kind>-<n>` 形式的名称，其中 n 是最小的空闲编号，例如 `codex-1` 或 `codex-2`。kind、名称、文本、调用方智能体，以及该名称是否已被某个实时智能体使用（`agent_name_taken`），都会在改动布局之前检查。调用结束后新窗格保持打开，调用方可以用第一种形式继续发送后续任务，例如 `herdr agent call codex-1 "Also cover the logout path"`。工作完成后用 `herdr pane close <pane_id>` 关闭它。
+
+如果拆分之后启动智能体或调用失败，命令以退出状态 1 结束并保留新窗格。stderr 上的 JSON 错误还会带上新窗格的 `pane_id` 和 `agent_name`。例如，Codex 停在 "Trust this folder?" 对话框时会返回：
+
+```json
+{"id":"cli:agent:start","error":{"code":"agent_not_ready","message":"agent codex-1 is blocked during startup and is not ready for prompts; the new pane w1:p2 (agent codex-1) stays open","pane_id":"w1:p2","agent_name":"codex-1"}}
+```
+
+请在该窗格中回答对话框，或使用 `herdr agent send-keys` 回答，然后用第一种形式 `herdr agent call codex-1 "<task>"` 重试。如果要放弃，用 `herdr pane close w1:p2` 关闭该窗格。
+
+每条通知是一行以 `[herdr] call <id> <status>:` 开头的文本。它写明目标、目标所在窗格以及下一步要运行的命令。它从不包含回复或请求的内容，因此由调用方自己读取：
+
+| 状态 | 含义 | 通知中的命令 |
+| --- | --- | --- |
+| `finished` | 轮次结束并带有回复。调用已结束。 | `herdr agent replies <target> --after <seq>`，返回的恰好是任务提交之后的回复 |
+| `finished without reply` | 轮次结束，且 10 秒内没有上报回复，例如该智能体的集成不上报回复。调用已结束。 | `herdr agent read <target>` |
+| `blocked` | 目标在等待输入。调用保持进行，每次新的等待都会有一条通知。 | 有待处理请求时为 `herdr agent requests` 和 `herdr agent answer`；否则需要有人在目标终端中回答 |
+| `gone` | 目标退出、被释放或被替换，或者其窗格已关闭。调用已结束。 | 无 |
+
+全部六种通知形式的确切文本见 socket API 参考中的[智能体调用](/zh-cn/docs/socket-api/#智能体调用)。
+
+通知只投递给发起调用的智能体，并在其窗格移动时跟随窗格。Herdr 会等到该智能体处于 `idle` 或 `done`，再以 `agent prompt` 提交文本的方式提交通知。多条通知按顺序到达，每个 idle 期间一条。如果调用方智能体退出或被替换，或者其窗格关闭，它的调用会结束，相应通知会被丢弃。
+
+默认情况下，`blocked` 通知会说明需要有人在目标终端中回答。使用 `--answer-requests` 时，调用期间目标的远程应答（remote answers）处于打开状态，因此其集成钩子上报的权限请求和提问（Claude Code 的权限请求和提问，以及 Codex 的审批）会等待调用方回答。此时通知会写明待处理请求的数量，调用方列出并回答它们：
+
+```bash
+herdr agent requests reviewer
+herdr agent answer reviewer 7 --decision allow
+herdr agent answer reviewer 8 --answers '{"Which database?":["sqlite"]}'
+```
+
+钩子不上报的对话框，例如信任文件夹对话框或 Codex 的提问，仍然需要有人处理；等待 2 秒没有请求上报后，通知会说明这一点。调用结束时，远程应答恢复为之前的设置：只有当调用自己打开了远程应答时才会关闭它；如果远程应答原本就已打开（例如为聊天桥接打开），或有人在调用期间明确设置过，调用都不会改动。
+
+调用及其排队中的通知会在实时交接（例如 `herdr update --handoff`）后保留。回复不会保留，因此交接之后，交接前的 `finished` 通知可能指向一条已经不存在的回复；这时请改用 `herdr agent read` 读取目标。服务器冷重启会丢弃调用和通知，就像它会丢弃回复一样。
+
 ## 示例
 
 启动辅助智能体,分配工作,并等待该工作结束:
@@ -113,6 +165,20 @@ herdr agent read reviewer --source recent-unwrapped --lines 120
 herdr agent wait reviewer --until blocked --timeout 120000
 herdr agent read reviewer --source recent-unwrapped --lines 80
 herdr agent send-keys reviewer esc
+```
+
+在智能体内部把审查任务交给一个新的辅助智能体，自己继续工作，并在通知到达时处理：
+
+```bash
+call=$(herdr agent call --kind codex --name reviewer --answer-requests "Review the current diff" -- -m gpt-5.4)
+review_pane=$(printf '%s\n' "$call" | jq -r '.result.agent.pane_id')
+```
+
+当通知 `[herdr] call 1 finished: codex agent reviewer (pane w1:p2) ended its turn with a reply. Read it with: herdr agent replies reviewer --after 12` 到达后，读取回复，然后用 `herdr agent call reviewer "<task>"` 发送后续任务，或关闭辅助智能体：
+
+```bash
+herdr agent replies reviewer --after 12
+herdr pane close "$review_pane"
 ```
 
 运行普通进程并等待输出,而不把它当作智能体:

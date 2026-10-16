@@ -419,6 +419,49 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("call")
+                .about("Hand a task to an agent and get a notice when its turn ends")
+                .override_usage(
+                    "herdr agent call <TARGET> <TEXT> [OPTIONS]\n       herdr agent call --kind <KIND> [OPTIONS] <TEXT> [-- [AGENT_ARG]...]",
+                )
+                .arg(Arg::new("target").value_name("TARGET").help(
+                    "Running agent that does the task: a unique name or its pane id; omitted with --kind",
+                ))
+                .arg(Arg::new("text").value_name("TEXT").help("The task"))
+                .arg(option("to", "PANE").help(
+                    "Pane of the calling agent, which gets the notices (default: HERDR_PANE_ID)",
+                ))
+                .arg(flag("answer-requests").help(
+                    "Let the calling agent answer the target's requests during the call",
+                ))
+                .arg(
+                    option("kind", "KIND")
+                        .value_parser(agent_kind_values())
+                        .help("Start an agent of this kind beside the calling agent and call it"),
+                )
+                .arg(
+                    option("name", "NAME")
+                        .requires("kind")
+                        .help("Name of the started agent (default: <KIND>-<N>)"),
+                )
+                .arg(
+                    path_option("cwd", "PATH")
+                        .requires("kind")
+                        .help("Working directory of the started agent (default: the caller's)"),
+                )
+                .arg(
+                    Arg::new("agent_args")
+                        .value_name("AGENT_ARG")
+                        .num_args(0..)
+                        .last(true)
+                        .requires("kind")
+                        .help("Arguments for the agent that --kind starts"),
+                )
+                .after_help(
+                    "The target must be idle or done. The command returns once the task reached the target's terminal and prints the call id. When the target's turn ends, when it waits for input, and when it goes away, Herdr submits a one-line [herdr] notice to the calling agent once that agent is idle; the notice names the command that reads the reply, such as herdr agent replies <TARGET> --after <SEQ>, and never contains the reply. The calling agent is the one in --to PANE, or else in HERDR_PANE_ID.\n\nWith --kind, Herdr splits the calling agent's pane to the right without moving focus, starts the agent there like herdr agent start, and calls it. If that agent does not start or the call fails, the error names the new pane, which stays open. The pane also stays open after the call; close it with herdr pane close <PANE> when done.",
+                ),
+        )
+        .subcommand(
             Command::new("rename")
                 .about("Rename an agent")
                 .override_usage("herdr agent rename <TARGET> <NAME>|--clear")
@@ -1467,6 +1510,34 @@ mod tests {
         assert!(agent_start
             .get_arguments()
             .any(|arg| arg.get_id() == "agent_args"));
+    }
+
+    #[test]
+    fn spec_models_both_agent_call_forms() {
+        let cmd = super::command();
+        let agent_call = command_path(&cmd, &["agent", "call"]);
+        for option in ["to", "answer-requests", "kind", "name", "cwd"] {
+            assert!(has_option(agent_call, option), "missing --{option}");
+        }
+        assert_eq!(
+            option_values(agent_call, "kind"),
+            crate::detect::Agent::ALL
+                .map(crate::detect::agent_label)
+                .map(str::to_string)
+        );
+        assert_eq!(
+            option_arg(agent_call, "cwd").get_value_hint(),
+            clap::ValueHint::AnyPath
+        );
+        assert!(agent_call
+            .get_arguments()
+            .any(|arg| arg.get_id() == "agent_args" && arg.is_last_set()));
+
+        let help = long_help(&["agent", "call"]);
+        assert!(help.contains("herdr agent call <TARGET> <TEXT>"), "{help}");
+        assert!(help.contains("herdr agent call --kind <KIND>"), "{help}");
+        assert!(help.contains("HERDR_PANE_ID"), "{help}");
+        assert!(help.contains("herdr pane close"), "{help}");
     }
 
     fn long_help(path: &[&str]) -> String {

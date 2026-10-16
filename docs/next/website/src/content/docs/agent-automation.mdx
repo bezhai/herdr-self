@@ -66,6 +66,7 @@ herdr agent rename w1:p2 reviewer
 | Wait for text or a regular expression | `pane wait-output` |
 | Start a supported agent in an existing pane | `agent start` |
 | Submit a prompt, optionally waiting for it | `agent prompt` |
+| Hand a task to another agent and be notified when it ends | `agent call` |
 | Send keys to an agent's interactive UI | `agent send-keys` |
 | Wait for agent lifecycle state | `agent wait` |
 
@@ -97,6 +98,57 @@ Successful `agent start`, `agent prompt`, and `agent wait` commands return the c
 
 Wait commands have no default timeout and can wait indefinitely. On timeout or another server error, CLI commands print a JSON error to stderr and exit with status 1; invalid CLI syntax exits with status 2.
 
+## Agent calls
+
+`agent call` lets one agent hand a task to another and go on with its own work. Herdr submits the task like `agent prompt` and later submits a one-line notice to the calling agent when the task's turn ends, when the target waits for input, and when the target goes away. The caller does not keep a wait open, and the notice starts a new turn in the caller when it arrives.
+
+```bash
+herdr agent call reviewer "Review the current diff and list risky changes"
+```
+
+The calling agent is the one in the pane the command runs in (`HERDR_PANE_ID`). Pass `--to PANE` to name another caller pane; with `--machine`, `HERDR_PANE_ID` is not used, so `--to` is required. Without either, the command is a usage error. The command returns once the task reached the target's terminal and prints the call id at `.result.call_id` and the target at `.result.agent`. The target must be `idle` or `done`. Each target takes one call at a time, so a target that is working on a turn or on another call returns `agent_working`. The caller cannot call the agent in its own pane (`caller_is_target`), and a caller pane without a recognized agent returns `caller_not_agent`.
+
+To start a helper for the call, give `--kind` instead of a target:
+
+```bash
+herdr agent call --kind codex "Write tests for src/auth.rs" -- -m gpt-5.4
+```
+
+This splits the caller pane to the right without moving focus, starts the agent in the new pane exactly as `agent start` does, including the 30-second readiness wait, and then calls it. The new pane starts in `--cwd PATH`, or otherwise in the caller pane's working directory. Without `--name`, the agent is named `<kind>-<n>` with the smallest free number, such as `codex-1` or `codex-2`. The kind, the name, the text, the caller agent, and whether a live agent already uses the name (`agent_name_taken`) are all checked before the layout changes. The new pane stays open after the call, so the caller can send follow-up tasks with the first form, for example `herdr agent call codex-1 "Also cover the logout path"`. Close it with `herdr pane close <pane_id>` when the work is done.
+
+If starting the agent or the call fails after the split, the command exits with status 1 and keeps the new pane. The JSON error on stderr also carries the new pane's `pane_id` and `agent_name`. For example, Codex that stops at its "Trust this folder?" dialog returns:
+
+```json
+{"id":"cli:agent:start","error":{"code":"agent_not_ready","message":"agent codex-1 is blocked during startup and is not ready for prompts; the new pane w1:p2 (agent codex-1) stays open","pane_id":"w1:p2","agent_name":"codex-1"}}
+```
+
+Answer the dialog in that pane, or with `herdr agent send-keys`, then retry with the first form, `herdr agent call codex-1 "<task>"`. To give up instead, close the pane with `herdr pane close w1:p2`.
+
+Each notice is one line that begins with `[herdr] call <id> <status>:`. It names the target, its pane, and the command to run next. It never contains the reply or the request content, so the caller fetches those itself:
+
+| Status | Meaning | Command in the notice |
+| --- | --- | --- |
+| `finished` | The turn ended with a reply. The call has ended. | `herdr agent replies <target> --after <seq>`, which returns exactly the replies after the task was submitted |
+| `finished without reply` | The turn ended and no reply was reported within 10 seconds, for example because the agent's integration does not report replies. The call has ended. | `herdr agent read <target>` |
+| `blocked` | The target waits for input. The call stays open, and each new wait gets its own notice. | `herdr agent requests` and `herdr agent answer` when requests are pending; otherwise a person has to answer in the target's terminal |
+| `gone` | The target exited, was released or replaced, or its pane closed. The call has ended. | None |
+
+The exact text of all six notice forms is listed under [Agent calls](/docs/socket-api/#agent-calls) in the socket API reference.
+
+Notices go only to the agent that made the call, and they follow its pane if the pane moves. Herdr waits until that agent is `idle` or `done`, then submits the notice the way `agent prompt` submits text. Several notices arrive in order, one per idle period. If the calling agent exits or is replaced, or its pane closes, its calls end and their notices are dropped.
+
+By default, a `blocked` notice says that a person has to answer in the target's terminal. With `--answer-requests`, remote answers are on for the target during the call, so the permission requests and questions that its integration hooks report wait for the caller instead: Claude Code permission requests and questions, and Codex approvals. The notice then says how many requests are pending, and the caller lists and answers them:
+
+```bash
+herdr agent requests reviewer
+herdr agent answer reviewer 7 --decision allow
+herdr agent answer reviewer 8 --answers '{"Which database?":["sqlite"]}'
+```
+
+A dialog that the hooks do not report, such as a trust-folder dialog or a Codex question, still needs a person; after waiting 2 seconds for a request, the notice says so. When the call ends, remote answers return to their previous setting: the call turns them off only if it turned them on, and leaves them alone if they were already on, for example for a chat bridge, or if someone set them explicitly during the call.
+
+Calls and their queued notices survive a live handoff, such as `herdr update --handoff`. Replies do not, so after a handoff a `finished` notice from before it can point at a reply that is gone; read the target with `herdr agent read` instead. A cold server restart drops calls and notices, as it drops replies.
+
 ## Recipes
 
 Start a helper, give it work, and wait for that work to settle:
@@ -115,6 +167,20 @@ Wait for an agent to ask for input, inspect it, and interact with its UI:
 herdr agent wait reviewer --until blocked --timeout 120000
 herdr agent read reviewer --source recent-unwrapped --lines 80
 herdr agent send-keys reviewer esc
+```
+
+From inside an agent, hand a review to a new helper, keep working, and act on the notice when it arrives:
+
+```bash
+call=$(herdr agent call --kind codex --name reviewer --answer-requests "Review the current diff" -- -m gpt-5.4)
+review_pane=$(printf '%s\n' "$call" | jq -r '.result.agent.pane_id')
+```
+
+When the notice `[herdr] call 1 finished: codex agent reviewer (pane w1:p2) ended its turn with a reply. Read it with: herdr agent replies reviewer --after 12` arrives, read the reply, then send a follow-up with `herdr agent call reviewer "<task>"` or close the helper:
+
+```bash
+herdr agent replies reviewer --after 12
+herdr pane close "$review_pane"
 ```
 
 Run an ordinary process and wait for its output without treating it as an agent:
