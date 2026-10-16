@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+mod agent_calls;
 mod agent_requests;
 mod agent_view;
 mod agents;
@@ -1084,6 +1085,13 @@ impl App {
                     request.id,
                     "invalid_request",
                     "agent.prompt is handled asynchronously by the app runtime",
+                );
+            }
+            Method::AgentCall(_) => {
+                return responses::encode_error(
+                    request.id,
+                    "invalid_request",
+                    "agent.call is handled asynchronously by the app runtime",
                 );
             }
             Method::AgentWait(_) => {

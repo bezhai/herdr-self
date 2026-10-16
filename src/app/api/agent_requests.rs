@@ -201,6 +201,8 @@ impl App {
         let Some((ws_idx, pane_id)) = self.parse_pane_id(&params.pane_id) else {
             return pane_not_found(id, &params.pane_id);
         };
+        // The client now owns the setting; a call does not undo it.
+        self.state.keep_remote_answers_after_agent_call(pane_id);
         let Some(terminal) = self
             .state
             .workspaces

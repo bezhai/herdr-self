@@ -126,6 +126,8 @@ pub enum AppEvent {
         known_agent: Option<Agent>,
         seq: Option<u64>,
     },
+    /// The task of an agent call never reached its target's terminal.
+    AgentCallSubmissionFailed { call_id: u64 },
     /// A new version is available through the active installation manager.
     UpdateReady {
         version: String,

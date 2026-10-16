@@ -1681,6 +1681,164 @@ fn live_handoff_keeps_remote_answers_of_the_pane_agent() {
     cleanup_test_base(&base);
 }
 
+/// Starts a fake pi agent in `pane_id` and waits until Herdr detects it.
+fn start_fake_pi(api_socket: &Path, base: &Path, pane_id: &str, name: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let started_marker = base.join(format!("{name}-started"));
+    let fake_pi = base.join(format!("{name}-pi"));
+    fs::write(
+        &fake_pi,
+        format!(
+            "#!/bin/sh\nexport HERDR_AGENT=pi\necho started > {}\n/bin/sleep 30\n:\n",
+            started_marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&fake_pi, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_ok(request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:pane:start-agent",
+            "method": "pane.send_input",
+            "params": {"pane_id": pane_id, "text": fake_pi, "keys": ["Enter"]}
+        }),
+    ));
+    support::wait_for_file(&started_marker, Duration::from_secs(5));
+    wait_for_agent(
+        api_socket,
+        pane_id,
+        "agent process was not detected",
+        |response| response.get("result").is_some(),
+    );
+}
+
+/// Reports a state for the fake pi agent in `pane_id`. A custom source holds
+/// state authority without the session anchoring of pi's own integration.
+fn report_pi_state(api_socket: &Path, pane_id: &str, state: &str, seq: u64) {
+    assert_ok(request(
+        api_socket,
+        serde_json::json!({
+            "id": "test:agent:report",
+            "method": "pane.report_agent",
+            "params": {
+                "pane_id": pane_id,
+                "source": "test:pi",
+                "agent": "pi",
+                "state": state,
+                "seq": seq
+            }
+        }),
+    ));
+    wait_for_agent(
+        api_socket,
+        pane_id,
+        "reported state was not applied",
+        |response| response["result"]["agent"]["agent_status"] == state,
+    );
+}
+
+#[test]
+fn live_handoff_keeps_an_agent_call_and_delivers_its_notice() {
+    let _lock = test_lock();
+    let base = unique_test_dir();
+    let config_home = base.join("config");
+    let runtime_dir = base.join("runtime");
+    let api_socket = runtime_dir.join("herdr.sock");
+    fs::create_dir_all(&base).unwrap();
+
+    let spawned = spawn_server(&config_home, &runtime_dir, &api_socket);
+    wait_for_socket(&api_socket, Duration::from_secs(10));
+    register_runtime_dir(&runtime_dir);
+    let created = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:workspace:create",
+            "method": "workspace.create",
+            "params": {"cwd": "/tmp", "focus": true}
+        }),
+    );
+    let caller = created["result"]["root_pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let split = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:pane:split",
+            "method": "pane.split",
+            "params": {"target_pane_id": caller, "direction": "right"}
+        }),
+    );
+    assert_ok(split.clone());
+    let callee = split["result"]["pane"]["pane_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    start_fake_pi(&api_socket, &base, &caller, "caller");
+    start_fake_pi(&api_socket, &base, &callee, "callee");
+    report_pi_state(&api_socket, &caller, "working", 1);
+    report_pi_state(&api_socket, &callee, "idle", 1);
+
+    let called = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:call",
+            "method": "agent.call",
+            "params": {"target": callee, "text": "count to three", "caller_pane_id": caller}
+        }),
+    );
+    assert_eq!(called["result"]["type"], "agent_called", "{called}");
+    assert_eq!(called["result"]["call_id"], 1, "{called}");
+    report_pi_state(&api_socket, &callee, "working", 2);
+
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({"id":"test:handoff","method":"server.live_handoff","params":{}}),
+    ));
+    drop(spawned);
+    wait_for_api(&api_socket, Duration::from_secs(10));
+
+    // The replacement server learns the agents' states from their next reports.
+    report_pi_state(&api_socket, &callee, "working", 3);
+    report_pi_state(&api_socket, &callee, "idle", 4);
+    assert_ok(request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:reply",
+            "method": "pane.report_agent_reply",
+            "params": {
+                "pane_id": callee,
+                "source": "herdr:pi",
+                "agent": "pi",
+                "seq": 5,
+                "text": "one two three"
+            }
+        }),
+    ));
+    report_pi_state(&api_socket, &caller, "idle", 2);
+
+    wait_for_output(&api_socket, &caller, "[herdr] call 1 finished");
+    let replies = request(
+        &api_socket,
+        serde_json::json!({
+            "id": "test:agent:replies",
+            "method": "agent.replies",
+            "params": {"target": callee, "after_seq": 0}
+        }),
+    );
+    assert_eq!(
+        replies["result"]["replies"][0]["text"], "one two three",
+        "{replies}"
+    );
+
+    let _ = request(
+        &api_socket,
+        serde_json::json!({"id":"test:stop","method":"server.stop","params":{}}),
+    );
+    cleanup_test_base(&base);
+}
+
 #[test]
 fn live_handoff_keeps_agent_started_pane_after_agent_exits() {
     use std::os::unix::fs::PermissionsExt;

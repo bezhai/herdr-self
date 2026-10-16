@@ -53,6 +53,13 @@ pub(crate) struct HandoffManifest {
     /// resolving for as long as the pane lives. Absent from older manifests.
     #[serde(default)]
     pub public_pane_aliases: std::collections::HashMap<String, String>,
+    /// Agent calls in progress and the notices that wait for their calling
+    /// agents. Absent from older manifests and when there are none.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::app::agent_calls::AgentCallsHandoff::is_empty"
+    )]
+    pub agent_calls: crate::app::agent_calls::AgentCallsHandoff,
 }
 
 #[cfg(unix)]
@@ -314,6 +321,7 @@ pub(crate) fn manifest_for(
     expected_version: Option<String>,
     api_window_title: Option<String>,
     public_pane_aliases: std::collections::HashMap<String, String>,
+    agent_calls: crate::app::agent_calls::AgentCallsHandoff,
 ) -> HandoffManifest {
     HandoffManifest {
         version: HANDOFF_VERSION,
@@ -325,6 +333,7 @@ pub(crate) fn manifest_for(
         panes,
         api_window_title,
         public_pane_aliases,
+        agent_calls,
     }
 }
 
@@ -560,6 +569,7 @@ mod tests {
             None,
             Some("deploying".to_string()),
             HashMap::new(),
+            Default::default(),
         );
 
         assert_eq!(manifest.api_window_title.as_deref(), Some("deploying"));
@@ -574,6 +584,7 @@ mod tests {
             None,
             Some("deploying".to_string()),
             HashMap::new(),
+            Default::default(),
         );
         let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
         value
@@ -600,6 +611,7 @@ mod tests {
             None,
             None,
             aliases.clone(),
+            Default::default(),
         );
 
         let value = serde_json::to_value(&manifest).expect("manifest should serialize");
@@ -618,6 +630,7 @@ mod tests {
             None,
             None,
             HashMap::from([("w1:p4".to_string(), "w5:p3".to_string())]),
+            Default::default(),
         );
         let mut value = serde_json::to_value(&manifest).expect("manifest should serialize");
         value
@@ -629,5 +642,71 @@ mod tests {
             serde_json::from_value(value).expect("an older manifest should still load");
 
         assert!(older.public_pane_aliases.is_empty());
+    }
+
+    #[test]
+    fn a_handoff_carries_agent_calls() {
+        let calls = crate::app::agent_calls::AgentCallsHandoff {
+            last_call_id: 4,
+            calls: vec![crate::app::agent_calls::AgentCallHandoff {
+                id: 4,
+                caller_pane_id: "w1:p1".into(),
+                caller_agent: "claude".into(),
+                callee_pane_id: "w1:p2".into(),
+                callee_agent: "codex".into(),
+                callee_name: Some("reviewer".into()),
+                turn: crate::app::agent_calls::AgentCallTurnHandoff::Running,
+                reply_seen: false,
+                input_wait_reported: true,
+                answer_requests: true,
+                turns_remote_answers_off: true,
+            }],
+            notices: vec![crate::app::agent_calls::CallerNoticesHandoff {
+                caller_pane_id: "w1:p1".into(),
+                caller_agent: "claude".into(),
+                notices: vec![crate::app::agent_calls::CallNoticeHandoff {
+                    call_id: 3,
+                    text: "[herdr] call 3 finished: ...".into(),
+                }],
+            }],
+        };
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            HashMap::new(),
+            calls.clone(),
+        );
+
+        let value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        let received: HandoffManifest =
+            serde_json::from_value(value).expect("manifest should load");
+
+        assert_eq!(received.agent_calls, calls);
+    }
+
+    #[test]
+    fn a_manifest_written_before_agent_calls_still_loads() {
+        let manifest = manifest_for(
+            empty_snapshot(),
+            Vec::new(),
+            None,
+            None,
+            None,
+            HashMap::new(),
+            crate::app::agent_calls::AgentCallsHandoff::default(),
+        );
+        let value = serde_json::to_value(&manifest).expect("manifest should serialize");
+        assert!(
+            value.get("agent_calls").is_none(),
+            "a server without calls writes the manifest older servers wrote: {value}"
+        );
+
+        let older: HandoffManifest =
+            serde_json::from_value(value).expect("an older manifest should still load");
+
+        assert!(older.agent_calls.is_empty());
     }
 }

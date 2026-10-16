@@ -4,6 +4,7 @@
 //! - `actions.rs` — state mutations (testable without PTYs/async)
 
 pub(crate) mod actions;
+pub(crate) mod agent_calls;
 mod agent_resume;
 pub(crate) mod agent_view;
 mod agents;
@@ -493,6 +494,7 @@ impl App {
             next_agent_reply_seq: 0,
             next_agent_request_id: 0,
             next_agent_tool_call_seq: 0,
+            agent_calls: agent_calls::AgentCalls::default(),
             confirm_close: config.ui.confirm_close,
             pane_borders: config.ui.pane_borders,
             pane_outer_borders: config.ui.pane_outer_borders,
@@ -644,6 +646,7 @@ impl App {
         event_hub: crate::api::EventHub,
         snapshot: &crate::persist::SessionSnapshot,
         public_pane_aliases: &std::collections::HashMap<String, String>,
+        agent_calls: agent_calls::AgentCallsHandoff,
         imports: &mut std::collections::HashMap<
             u32,
             crate::handoff_runtime::ImportedHandoffRuntime,
@@ -673,6 +676,8 @@ impl App {
         app.state.terminals = terminals;
         app.terminal_runtimes = runtimes.into();
         app.restore_public_pane_aliases(public_pane_aliases);
+        app.state
+            .restore_agent_calls_after_handoff(agent_calls, Instant::now());
         app.seed_public_pane_aliases_from_launch_env(|child_pid| {
             crate::platform::process_environ_var(
                 child_pid,

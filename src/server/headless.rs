@@ -528,6 +528,7 @@ impl HeadlessServer {
             }
 
             self.poll_pending_alt_screen_reads(now);
+            self.app.advance_agent_calls(now);
             self.app.settle_agent_requests(now);
             if self.process_deferred_alt_screen_reads() {
                 needs_render = true;
@@ -3145,7 +3146,10 @@ impl HeadlessServer {
             return changed;
         }
         let alt_screen_read_spec = self.alt_screen_read_spec(&msg.request);
-        if matches!(&msg.request.method, api::schema::Method::AgentPrompt(_)) {
+        if matches!(
+            &msg.request.method,
+            api::schema::Method::AgentPrompt(_) | api::schema::Method::AgentCall(_)
+        ) {
             let deferred_changed = self
                 .app
                 .handle_deferred_agent_api_request(msg.request, msg.respond_to);

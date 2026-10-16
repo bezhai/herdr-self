@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 /// identity, and durable plugin/session metadata. It intentionally does not
 /// preserve transient coordination such as in-flight requests, waits,
 /// subscriptions, client sockets, or pane-to-pane messages; clients reconnect
-/// and retry those operations after replacement.
+/// and retry those operations after replacement. Agent calls are the
+/// exception: no client waits on them, so the handoff manifest carries them
+/// (see `HandoffManifest::agent_calls`).
 #[cfg(unix)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct HandoffRuntimeState {

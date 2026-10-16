@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "agent_calls.rs"]
+mod agent_call_tests;
 #[path = "agent_requests.rs"]
 mod agent_request_tests;
 #[path = "pane_graphics.rs"]

@@ -107,6 +107,10 @@ pub enum ResponseResult {
     AgentPrompted {
         agent: AgentInfo,
     },
+    AgentCalled {
+        call_id: u64,
+        agent: AgentInfo,
+    },
     AgentList {
         agents: Vec<AgentInfo>,
     },

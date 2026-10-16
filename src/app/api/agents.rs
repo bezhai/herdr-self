@@ -191,19 +191,20 @@ impl App {
         request: crate::api::schema::Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> bool {
-        let crate::api::schema::Method::AgentPrompt(params) = request.method else {
-            return false;
+        let params = match request.method {
+            crate::api::schema::Method::AgentPrompt(params) => params,
+            crate::api::schema::Method::AgentCall(params) => {
+                self.start_agent_call(request.id, params, respond_to);
+                return true;
+            }
+            _ => return false,
         };
         match self.queue_agent_prompt(request.id, params) {
             Ok((id, agent, completion)) => {
                 std::thread::spawn(move || {
-                    let response = match completion.recv() {
-                        Ok(Ok(())) => encode_success(id, ResponseResult::AgentPrompted { agent }),
-                        Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => {
-                            encode_error(id, "timeout", err.to_string())
-                        }
-                        Ok(Err(err)) => encode_error(id, "agent_prompt_failed", err.to_string()),
-                        Err(_) => encode_error(id, "agent_prompt_failed", "pty actor closed"),
+                    let response = match wait_for_submission(completion) {
+                        Ok(()) => encode_success(id, ResponseResult::AgentPrompted { agent }),
+                        Err(failure) => failure.encode(id),
                     };
                     let _ = respond_to.send(response);
                 });
@@ -238,47 +239,6 @@ impl App {
             Ok(resolved) => resolved,
             Err(err) => return Err(encode_error_body(id, self.agent_target_error_body(err))),
         };
-        let Some(terminal_id) = self
-            .state
-            .workspaces
-            .get(resolved.ws_idx)
-            .and_then(|workspace| workspace.terminal_id(resolved.pane_id))
-            .cloned()
-        else {
-            return Err(agent_not_found(id, &params.target));
-        };
-        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
-            return Err(agent_not_found(id, &params.target));
-        };
-        if terminal.state == crate::detect::AgentState::Blocked {
-            return Err(encode_error(
-                id,
-                "agent_blocked",
-                format!(
-                    "agent {} is blocked and requires interactive input",
-                    params.target
-                ),
-            ));
-        }
-        let Some(expected_agent) = terminal.effective_known_agent() else {
-            return Err(agent_not_ready(id, &params.target));
-        };
-        if terminal.managed_agent_launch_pending() {
-            return Err(agent_not_ready(id, &params.target));
-        }
-        let Some(runtime) = self.lookup_runtime_sender(resolved.ws_idx, resolved.pane_id) else {
-            return Err(agent_not_found(id, &params.target));
-        };
-        if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
-            return Err(encode_error(
-                id,
-                "agent_not_ready",
-                format!(
-                    "agent {} is no longer the pane foreground process",
-                    params.target
-                ),
-            ));
-        }
         #[cfg(windows)]
         let submit_deadline = params
             .wait
@@ -286,20 +246,66 @@ impl App {
             .and_then(|wait| wait.submission_deadline);
         #[cfg(not(windows))]
         let submit_deadline = None;
+        match self.submit_agent_prompt(
+            resolved.ws_idx,
+            resolved.pane_id,
+            &params.text,
+            submit_deadline,
+        ) {
+            Ok(submission) => Ok((id, submission.agent, submission.completion)),
+            Err(err) => Err(err.encode(id, &params.target)),
+        }
+    }
+
+    /// Types `text` into the agent in `pane_id` and submits it with Enter.
+    ///
+    /// This is the one submission path for `agent.prompt`, the task of
+    /// `agent.call`, and call notices. It refuses a blocked agent, an agent
+    /// that is still starting, and a pane whose foreground process is no
+    /// longer the agent. The returned agent is the one that received `text`.
+    pub(super) fn submit_agent_prompt(
+        &mut self,
+        ws_idx: usize,
+        pane_id: crate::layout::PaneId,
+        text: &str,
+        submit_deadline: Option<std::time::Instant>,
+    ) -> Result<AgentSubmission, AgentSubmitError> {
+        let Some(terminal_id) = self
+            .state
+            .workspaces
+            .get(ws_idx)
+            .and_then(|workspace| workspace.terminal_id(pane_id))
+            .cloned()
+        else {
+            return Err(AgentSubmitError::NotFound);
+        };
+        let Some(terminal) = self.state.terminals.get(&terminal_id) else {
+            return Err(AgentSubmitError::NotFound);
+        };
+        if terminal.state == crate::detect::AgentState::Blocked {
+            return Err(AgentSubmitError::Blocked);
+        }
+        let Some(expected_agent) = terminal.effective_known_agent() else {
+            return Err(AgentSubmitError::NotReady);
+        };
+        if terminal.managed_agent_launch_pending() {
+            return Err(AgentSubmitError::NotReady);
+        }
+        let Some(runtime) = self.lookup_runtime_sender(ws_idx, pane_id) else {
+            return Err(AgentSubmitError::NotFound);
+        };
+        if !super::super::agents::runtime_hosts_agent(runtime, expected_agent) {
+            return Err(AgentSubmitError::NotForeground);
+        }
         if expected_agent == crate::detect::Agent::GithubCopilot {
             // Copilot ignores synthetic Enter after focus loss until it receives focus gained.
-            let focus = match crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained) {
-                Ok(focus) => focus,
-                Err(err) => {
-                    return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
-                }
-            };
-            if let Err(err) = runtime.try_send_bytes(Bytes::from(focus)) {
-                return Err(encode_error(id, "agent_prompt_failed", err.to_string()));
-            }
+            let focus = crate::ghostty::encode_focus(crate::ghostty::FocusEvent::Gained)
+                .map_err(|err| AgentSubmitError::Failed(err.to_string()))?;
+            runtime
+                .try_send_bytes(Bytes::from(focus))
+                .map_err(|err| AgentSubmitError::Failed(err.to_string()))?;
         }
-        let (text, enter) =
-            crate::app::api_helpers::encode_api_submission_parts(runtime, &params.text);
+        let (text, enter) = crate::app::api_helpers::encode_api_submission_parts(runtime, text);
         #[cfg(windows)]
         let text = if expected_agent == crate::detect::Agent::Codex {
             let mut text = text;
@@ -308,8 +314,8 @@ impl App {
         } else {
             text
         };
-        let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
-            return Err(agent_not_found(id, &params.target));
+        let Some(agent) = self.agent_info(ws_idx, pane_id) else {
+            return Err(AgentSubmitError::NotFound);
         };
         let completion = runtime
             .queue_user_input_submission(
@@ -318,8 +324,8 @@ impl App {
                 AGENT_PROMPT_SUBMIT_DELAY,
                 submit_deadline,
             )
-            .map_err(|err| encode_error(id.clone(), "agent_prompt_failed", err.to_string()))?;
-        Ok((id, agent, completion))
+            .map_err(|err| AgentSubmitError::Failed(err.to_string()))?;
+        Ok(AgentSubmission { agent, completion })
     }
 
     pub(super) fn handle_agent_read(
@@ -477,6 +483,83 @@ impl App {
         }
 
         encode_success(id, ResponseResult::Ok {})
+    }
+}
+
+/// Text typed into an agent's terminal; `completion` reports when Enter was sent.
+pub(super) struct AgentSubmission {
+    pub(super) agent: AgentInfo,
+    pub(super) completion: std::sync::mpsc::Receiver<std::io::Result<()>>,
+}
+
+/// Why [`App::submit_agent_prompt`] typed nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum AgentSubmitError {
+    NotFound,
+    Blocked,
+    NotReady,
+    NotForeground,
+    Failed(String),
+}
+
+impl AgentSubmitError {
+    /// The `agent.prompt` error response for a prompt to `target`.
+    pub(super) fn encode(self, id: String, target: &str) -> String {
+        match self {
+            Self::NotFound => agent_not_found(id, target),
+            Self::Blocked => encode_error(
+                id,
+                "agent_blocked",
+                format!("agent {target} is blocked and requires interactive input"),
+            ),
+            Self::NotReady => agent_not_ready(id, target),
+            Self::NotForeground => encode_error(
+                id,
+                "agent_not_ready",
+                format!("agent {target} is no longer the pane foreground process"),
+            ),
+            Self::Failed(message) => encode_error(id, "agent_prompt_failed", message),
+        }
+    }
+}
+
+/// Why a queued submission did not reach the terminal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SubmissionFailure {
+    code: &'static str,
+    message: String,
+}
+
+impl SubmissionFailure {
+    pub(super) fn encode(self, id: String) -> String {
+        encode_error(id, self.code, self.message)
+    }
+}
+
+impl std::fmt::Display for SubmissionFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+/// Waits until a queued submission sent Enter to the terminal.
+pub(super) fn wait_for_submission(
+    completion: std::sync::mpsc::Receiver<std::io::Result<()>>,
+) -> Result<(), SubmissionFailure> {
+    match completion.recv() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::TimedOut => Err(SubmissionFailure {
+            code: "timeout",
+            message: err.to_string(),
+        }),
+        Ok(Err(err)) => Err(SubmissionFailure {
+            code: "agent_prompt_failed",
+            message: err.to_string(),
+        }),
+        Err(_) => Err(SubmissionFailure {
+            code: "agent_prompt_failed",
+            message: "pty actor closed".into(),
+        }),
     }
 }
 

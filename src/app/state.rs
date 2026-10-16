@@ -836,6 +836,8 @@ pub struct AppState {
     pub next_agent_request_id: u64,
     /// Last seq handed out to an agent tool call event; shared by every terminal.
     pub next_agent_tool_call_seq: u64,
+    /// Agent calls in progress and their notices for the calling agents.
+    pub(crate) agent_calls: crate::app::agent_calls::AgentCalls,
     pub confirm_close: bool,
     pub pane_borders: crate::config::PaneBordersConfig,
     pub pane_outer_borders: bool,
@@ -934,6 +936,16 @@ impl AppState {
         }
         self.public_pane_id_aliases.insert(public_id, pane_id);
         true
+    }
+
+    /// The current public id of `pane_id` in the workspace at `ws_idx`.
+    pub(crate) fn public_pane_id(&self, ws_idx: usize, pane_id: PaneId) -> Option<String> {
+        let ws = self.workspaces.get(ws_idx)?;
+        let pane_number = ws.public_pane_number(pane_id)?;
+        Some(crate::workspace::public_pane_id_for_number(
+            &ws.id,
+            pane_number,
+        ))
     }
 
     /// The live pane whose current public id is `public_id`, ignoring retired ids.
@@ -1109,6 +1121,7 @@ impl AppState {
             next_agent_reply_seq: 0,
             next_agent_request_id: 0,
             next_agent_tool_call_seq: 0,
+            agent_calls: crate::app::agent_calls::AgentCalls::default(),
             confirm_close: true,
             pane_borders: crate::config::PaneBordersConfig::Auto,
             pane_outer_borders: true,

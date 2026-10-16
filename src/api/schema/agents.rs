@@ -327,6 +327,23 @@ pub struct AgentPromptParams {
     pub wait: Option<AgentPromptWaitOptions>,
 }
 
+/// Hands a task to an idle agent; the calling agent gets a notice when the
+/// task's turn ends, when the target waits for input, and when it goes away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentCallParams {
+    /// The agent that does the task, written like an `agent.prompt` target.
+    pub target: String,
+    /// The task, submitted to the target like an `agent.prompt` text.
+    pub text: String,
+    /// Pane of the calling agent; it receives the notices.
+    pub caller_pane_id: String,
+    /// Turns remote answers on for the target during the call so that the
+    /// calling agent can answer its requests with `agent.answer`; the
+    /// previous setting returns when the call ends.
+    #[serde(default, skip_serializing_if = "super::is_false")]
+    pub answer_requests: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
     pub terminal_id: String,

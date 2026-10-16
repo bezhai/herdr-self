@@ -29,12 +29,7 @@ impl App {
         ws_idx: usize,
         pane_id: crate::layout::PaneId,
     ) -> Option<String> {
-        let ws = self.state.workspaces.get(ws_idx)?;
-        let pane_number = ws.public_pane_number(pane_id)?;
-        Some(crate::workspace::public_pane_id_for_number(
-            &ws.id,
-            pane_number,
-        ))
+        self.state.public_pane_id(ws_idx, pane_id)
     }
 
     pub(super) fn pane_launch_env(

@@ -1279,6 +1279,33 @@
           ],
           "type": "object"
         },
+        "AgentCallParams": {
+          "description": "Hands a task to an idle agent; the calling agent gets a notice when the\ntask's turn ends, when the target waits for input, and when it goes away.",
+          "properties": {
+            "answer_requests": {
+              "description": "Turns remote answers on for the target during the call so that the\ncalling agent can answer its requests with `agent.answer`; the\nprevious setting returns when the call ends.",
+              "type": "boolean"
+            },
+            "caller_pane_id": {
+              "description": "Pane of the calling agent; it receives the notices.",
+              "type": "string"
+            },
+            "target": {
+              "description": "The agent that does the task, written like an `agent.prompt` target.",
+              "type": "string"
+            },
+            "text": {
+              "description": "The task, submitted to the target like an `agent.prompt` text.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "target",
+            "text",
+            "caller_pane_id"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -6006,6 +6033,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.call",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentCallParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.wait",
               "type": "string"
             },
@@ -10431,6 +10474,28 @@
               },
               "required": [
                 "type",
+                "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "agent": {
+                  "$ref": "#/schemas/success_response/$defs/AgentInfo"
+                },
+                "call_id": {
+                  "format": "uint64",
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "type": {
+                  "const": "agent_called",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "call_id",
                 "agent"
               ],
               "type": "object"

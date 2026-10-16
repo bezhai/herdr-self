@@ -2100,3 +2100,71 @@ fn targeted_notification_method_requires_a_target_and_ordinary_method_accepts_op
         matches!(request.method, Method::NotificationShow(params) if params.target.as_ref().unwrap().tab_id.as_deref() == Some("tab_1"))
     );
 }
+
+#[test]
+fn agent_call_round_trips_with_answer_requests_off_by_default() {
+    let call: Request = serde_json::from_value(serde_json::json!({
+        "id": "req_call",
+        "method": "agent.call",
+        "params": {"target": "reviewer", "text": "review the diff", "caller_pane_id": "w1:p1"},
+    }))
+    .unwrap();
+    let Method::AgentCall(params) = &call.method else {
+        panic!("expected an agent call");
+    };
+    assert_eq!(
+        params,
+        &AgentCallParams {
+            target: "reviewer".into(),
+            text: "review the diff".into(),
+            caller_pane_id: "w1:p1".into(),
+            answer_requests: false,
+        }
+    );
+    let json = serde_json::to_value(&call).unwrap();
+    assert_eq!(json["method"], "agent.call");
+    assert!(json["params"].get("answer_requests").is_none(), "{json}");
+
+    let answering = Request {
+        id: "req_call".into(),
+        method: Method::AgentCall(AgentCallParams {
+            answer_requests: true,
+            ..params.clone()
+        }),
+    };
+    let json = serde_json::to_value(&answering).unwrap();
+    assert_eq!(json["params"]["answer_requests"], true);
+    assert_eq!(serde_json::from_value::<Request>(json).unwrap(), answering);
+}
+
+#[test]
+fn agent_call_result_carries_the_call_id_and_the_target_agent() {
+    let agent: AgentInfo = serde_json::from_value(serde_json::json!({
+        "terminal_id": "term_2",
+        "name": "reviewer",
+        "agent": "codex",
+        "agent_status": "idle",
+        "workspace_id": "w1",
+        "tab_id": "w1:t1",
+        "pane_id": "w1:p2",
+        "focused": false,
+        "revision": 1,
+    }))
+    .unwrap();
+    let called = SuccessResponse {
+        id: "req_call".into(),
+        result: ResponseResult::AgentCalled {
+            call_id: 3,
+            agent: agent.clone(),
+        },
+    };
+    let json = serde_json::to_value(&called).unwrap();
+    assert_eq!(json["result"]["type"], "agent_called");
+    assert_eq!(json["result"]["call_id"], 3);
+    assert_eq!(json["result"]["agent"]["name"], "reviewer");
+    let parsed: SuccessResponse = serde_json::from_value(json).unwrap();
+    assert!(matches!(
+        parsed.result,
+        ResponseResult::AgentCalled { call_id: 3, agent: parsed } if parsed == agent
+    ));
+}

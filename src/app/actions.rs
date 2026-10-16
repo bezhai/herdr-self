@@ -651,6 +651,7 @@ impl AppState {
     /// that still resolved to them. Every pane removal path calls this.
     pub(crate) fn forget_removed_panes(&mut self, pane_ids: impl IntoIterator<Item = PaneId>) {
         let pane_ids = pane_ids.into_iter().collect::<Vec<_>>();
+        self.end_agent_calls_of_removed_panes(&pane_ids);
         if self
             .previous_pane_focus
             .as_ref()
@@ -1610,6 +1611,10 @@ impl AppState {
             AppEvent::WorktreeRemoveFinished(_) => Vec::new(),
             AppEvent::TabBarCommandFinished { .. } => Vec::new(),
             AppEvent::PluginCommandFinished { .. } => Vec::new(),
+            AppEvent::AgentCallSubmissionFailed { call_id } => {
+                self.cancel_agent_call(call_id);
+                Vec::new()
+            }
         }
     }
 
@@ -1620,9 +1625,12 @@ impl AppState {
         report: crate::terminal::agent_replies::AgentReplyReport,
     ) -> Option<u64> {
         let terminal_id = self.terminal_id_attached_to(pane_id)?;
-        self.terminals
+        let seq = self
+            .terminals
             .get_mut(&terminal_id)?
-            .record_agent_reply(report, &mut self.next_agent_reply_seq)
+            .record_agent_reply(report, &mut self.next_agent_reply_seq)?;
+        self.advance_agent_calls_on_reply(pane_id, seq);
+        Some(seq)
     }
 
     /// Records a pending agent request for the terminal attached to `pane_id`
@@ -1637,6 +1645,7 @@ impl AppState {
             .terminals
             .get_mut(&terminal_id)?
             .record_agent_request(report, &mut self.next_agent_request_id)?;
+        self.advance_agent_calls_on_request(pane_id, Instant::now());
         Some((terminal_id, request_id))
     }
 
@@ -1737,6 +1746,7 @@ impl AppState {
             self.mark_session_dirty();
         }
         let agent_released = mutation.agent_released;
+        let agent_left = mutation.agent_left();
         let change = mutation.effective_state_change.or(unchanged_change)?;
         let suppress_completion = force_suppress_completion
             || (change.state == AgentState::Idle && suppress_acquisition_completion);
@@ -1749,6 +1759,7 @@ impl AppState {
                 .then_some(self.next_agent_state_change_seq);
             }
         }
+        self.advance_agent_calls_on_state(pane_id, change.state, agent_left, now);
         let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, suppress_completion)?;
         let update = PaneStateUpdate {
             pane_id,
