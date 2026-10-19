@@ -194,6 +194,10 @@ impl AgentRequests {
         self.pending.iter()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
     pub fn ids(&self) -> impl Iterator<Item = u64> + '_ {
         self.pending.iter().map(|request| request.id)
     }

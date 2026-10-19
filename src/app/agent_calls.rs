@@ -6,7 +6,8 @@
 //! the target's turn ends, with or without a reply, or when the target goes
 //! away, and it reports each wait for input on the way. Every outcome becomes
 //! a notice: a one-line message that is submitted to the calling agent once
-//! it is idle, one notice per idle period, in the order they were produced.
+//! it has stayed idle for [`CALL_NOTICE_SETTLE`] without a request of its own
+//! pending, one notice per idle period, in the order they were produced.
 //! Notices point at the target and at the commands that read its reply or
 //! requests; they never carry reply or request content.
 //!
@@ -29,6 +30,19 @@ pub(crate) const CALL_REPLY_GRACE: Duration = Duration::from_secs(10);
 /// How long a call that answers requests waits for a blocked target to
 /// report a request before it reports that a person has to answer.
 pub(crate) const CALL_REQUEST_SETTLE: Duration = Duration::from_secs(2);
+
+/// How long a calling agent has to stay idle, without a request of its own
+/// pending, before it receives a notice.
+///
+/// A notice is typed into the caller's terminal and submitted with Enter. A
+/// caller that reads idle only for a moment, for example while the screen
+/// of a dialog changes, would get the notice typed into the dialog and the
+/// dialog answered. Screen detection reads an identified agent every 300 ms,
+/// so the idle state has to survive ten readings. The period is longer than
+/// [`CALL_REQUEST_SETTLE`], the time a hook's request report may trail the
+/// screen, and as long as Herdr waits before it trusts the idle screen of an
+/// agent it launched. A caller that has been idle for longer is not delayed.
+pub(crate) const CALL_NOTICE_SETTLE: Duration = Duration::from_secs(3);
 
 /// The parties of a new call and how it treats the target's requests.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,13 +145,108 @@ struct CallerNotices {
     /// The next one waits until that seq changes: the caller left idle for
     /// the previous notice and came back.
     submitted_at_seq: Option<Option<u64>>,
+    /// The first notice could not be submitted; it waits at least until then.
     retry_at: Option<Instant>,
+    requests: CallerRequests,
+}
+
+/// Whether the calling agent waited on a request of its own when its
+/// notices were last considered. Herdr knows those requests only while
+/// remote answers are on for the caller, for example for a chat bridge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallerRequests {
+    None,
+    Pending,
+    /// The last pending request was seen gone at this time. The caller
+    /// resumes, so like a state change this starts the settle period over.
+    EndedAt(Instant),
+}
+
+/// What the first notice of a calling agent waits for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NoticeWait {
+    /// Another agent runs in the caller's pane; the notices are dropped.
+    Replaced,
+    /// The caller took the last notice; nothing is left to wait for.
+    Spent,
+    /// A change of the caller: to be detected, to take the previous notice,
+    /// to finish starting, to become idle, or to end its pending request.
+    Caller,
+    /// The notice goes out at this time unless the caller changes first.
+    Until(Instant),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CallNotice {
     call_id: u64,
     text: String,
+}
+
+impl CallerNotices {
+    fn new(agent: Agent) -> Self {
+        Self {
+            agent,
+            pending: VecDeque::new(),
+            submitted_at_seq: None,
+            retry_at: None,
+            requests: CallerRequests::None,
+        }
+    }
+
+    /// Notes whether the caller waits on a request of its own at `now`.
+    fn observe_requests(&mut self, pending: bool, now: Instant) {
+        self.requests = match (self.requests, pending) {
+            (_, true) => CallerRequests::Pending,
+            (CallerRequests::Pending, false) => CallerRequests::EndedAt(now),
+            (requests, false) => requests,
+        };
+    }
+
+    /// What the first notice waits for while the caller is in `terminal`.
+    ///
+    /// The notice goes to an idle caller only, and only once it has stayed
+    /// idle for [`CALL_NOTICE_SETTLE`] since its last state change: a caller
+    /// that reads idle for a moment may still be showing a dialog that the
+    /// notice's Enter would answer. A pending request of the caller's own
+    /// holds the notice for the same reason.
+    fn wait(&self, terminal: &crate::terminal::TerminalState) -> NoticeWait {
+        let Some(agent) = terminal.effective_known_agent() else {
+            // Not detected yet, for example right after a live handoff.
+            return NoticeWait::Caller;
+        };
+        if agent != self.agent {
+            return NoticeWait::Replaced;
+        }
+        let took_previous = self
+            .submitted_at_seq
+            .is_none_or(|seq| seq != terminal.last_agent_state_change_seq);
+        if self.pending.is_empty() {
+            return if took_previous {
+                NoticeWait::Spent
+            } else {
+                NoticeWait::Caller
+            };
+        }
+        if !took_previous
+            || terminal.state != AgentState::Idle
+            || terminal.managed_agent_launch_pending()
+            || !terminal.agent_requests().is_empty()
+        {
+            return NoticeWait::Caller;
+        }
+        let Some(changed_at) = terminal.last_agent_state_change_at else {
+            return NoticeWait::Caller;
+        };
+        let quiet_since = match self.requests {
+            CallerRequests::EndedAt(ended_at) => changed_at.max(ended_at),
+            CallerRequests::None | CallerRequests::Pending => changed_at,
+        };
+        let settled_at = quiet_since + CALL_NOTICE_SETTLE;
+        NoticeWait::Until(
+            self.retry_at
+                .map_or(settled_at, |retry_at| retry_at.max(settled_at)),
+        )
+    }
 }
 
 impl AgentCall {
@@ -459,13 +568,18 @@ impl AppState {
             .calls
             .values()
             .filter_map(AgentCall::next_deadline);
-        let retries = self
+        let notices = self
             .agent_calls
             .notices
-            .values()
-            .filter(|queue| !queue.pending.is_empty())
-            .filter_map(|queue| queue.retry_at);
-        calls.chain(retries).min()
+            .iter()
+            .filter_map(|(&caller_pane, queue)| {
+                let (_, terminal) = self.agent_call_pane(caller_pane)?;
+                match queue.wait(terminal) {
+                    NoticeWait::Until(at) => Some(at),
+                    NoticeWait::Replaced | NoticeWait::Spent | NoticeWait::Caller => None,
+                }
+            });
+        calls.chain(notices).min()
     }
 
     /// Target panes whose remote answers a call turned off since the last call.
@@ -473,65 +587,54 @@ impl AppState {
         std::mem::take(&mut self.agent_calls.remote_answers_changed)
     }
 
-    /// The first notice of each calling agent that is idle and ready for it.
-    /// Drops the notices of a pane whose agent was replaced.
+    /// The first notice of each calling agent that is ready for it; see
+    /// [`CallerNotices::wait`]. Drops the notices of a pane whose agent was
+    /// replaced.
     pub(crate) fn ready_agent_call_notices(&mut self, now: Instant) -> Vec<ReadyCallNotice> {
         if self.agent_calls.notices.is_empty() {
             return Vec::new();
         }
+        let callers = self.agent_calls.notices.keys().copied().collect::<Vec<_>>();
         let mut ready = Vec::new();
-        let mut finished = Vec::new();
-        let mut retry_passed = Vec::new();
-        for (&caller_pane, queue) in &self.agent_calls.notices {
-            if queue.retry_at.is_some_and(|retry_at| now >= retry_at) {
-                retry_passed.push(caller_pane);
-            }
-            let Some((ws_idx, terminal)) = self.agent_call_pane(caller_pane) else {
+        for caller_pane in callers {
+            let Some(requests_pending) = self
+                .agent_call_pane(caller_pane)
+                .map(|(_, terminal)| !terminal.agent_requests().is_empty())
+            else {
                 continue;
             };
-            let Some(agent) = terminal.effective_known_agent() else {
-                // Not detected yet, for example right after a live handoff.
-                continue;
-            };
-            if agent != queue.agent {
-                tracing::debug!(
-                    pane = caller_pane.raw(),
-                    "dropping agent call notices of a replaced caller"
-                );
-                finished.push(caller_pane);
-                continue;
-            }
-            let took_previous = queue
-                .submitted_at_seq
-                .is_none_or(|seq| seq != terminal.last_agent_state_change_seq);
-            let Some(notice) = queue.pending.front() else {
-                if took_previous {
-                    finished.push(caller_pane);
-                }
-                continue;
-            };
-            if took_previous
-                && terminal.state == AgentState::Idle
-                && !terminal.managed_agent_launch_pending()
-                && queue.retry_at.is_none_or(|retry_at| now >= retry_at)
-            {
-                ready.push(ReadyCallNotice {
-                    call_id: notice.call_id,
-                    ws_idx,
-                    caller_pane,
-                    text: notice.text.clone(),
-                });
-            }
-        }
-        // A passed retry time is not a deadline any more; the next try waits
-        // for the caller's next state change.
-        for caller_pane in retry_passed {
             if let Some(queue) = self.agent_calls.notices.get_mut(&caller_pane) {
-                queue.retry_at = None;
+                queue.observe_requests(requests_pending, now);
             }
-        }
-        for caller_pane in finished {
-            self.agent_calls.notices.remove(&caller_pane);
+            let (Some((ws_idx, terminal)), Some(queue)) = (
+                self.agent_call_pane(caller_pane),
+                self.agent_calls.notices.get(&caller_pane),
+            ) else {
+                continue;
+            };
+            match queue.wait(terminal) {
+                NoticeWait::Replaced => {
+                    tracing::debug!(
+                        pane = caller_pane.raw(),
+                        "dropping agent call notices of a replaced caller"
+                    );
+                    self.agent_calls.notices.remove(&caller_pane);
+                }
+                NoticeWait::Spent => {
+                    self.agent_calls.notices.remove(&caller_pane);
+                }
+                NoticeWait::Until(at) if now >= at => {
+                    if let Some(notice) = queue.pending.front() {
+                        ready.push(ReadyCallNotice {
+                            call_id: notice.call_id,
+                            ws_idx,
+                            caller_pane,
+                            text: notice.text.clone(),
+                        });
+                    }
+                }
+                NoticeWait::Until(_) | NoticeWait::Caller => {}
+            }
         }
         ready
     }
@@ -654,12 +757,7 @@ impl AppState {
         self.agent_calls
             .notices
             .entry(call.caller_pane)
-            .or_insert_with(|| CallerNotices {
-                agent: call.caller_agent,
-                pending: VecDeque::new(),
-                submitted_at_seq: None,
-                retry_at: None,
-            })
+            .or_insert_with(|| CallerNotices::new(call.caller_agent))
             .pending
             .push_back(CallNotice {
                 call_id: call.id,
@@ -859,12 +957,7 @@ impl AppState {
             self.agent_calls
                 .notices
                 .entry(caller_pane)
-                .or_insert_with(|| CallerNotices {
-                    agent,
-                    pending: VecDeque::new(),
-                    submitted_at_seq: None,
-                    retry_at: None,
-                })
+                .or_insert_with(|| CallerNotices::new(agent))
                 .pending
                 .extend(carried.notices.into_iter().map(|notice| CallNotice {
                     call_id: notice.call_id,
@@ -898,7 +991,7 @@ mod tests {
 
     use ratatui::layout::Direction;
 
-    use super::{NewAgentCall, CALL_REPLY_GRACE, CALL_REQUEST_SETTLE};
+    use super::{NewAgentCall, CALL_NOTICE_SETTLE, CALL_REPLY_GRACE, CALL_REQUEST_SETTLE};
     use crate::app::AppState;
     use crate::detect::{Agent, AgentState};
     use crate::events::AppEvent;
@@ -964,13 +1057,15 @@ mod tests {
         )
     }
 
-    fn request(state: &mut AppState, pane_id: PaneId) -> Option<u64> {
+    /// A permission request that the integration of `agent_label` reports
+    /// for the agent in `pane_id`.
+    fn request(state: &mut AppState, pane_id: PaneId, agent_label: &str) -> Option<u64> {
         state
             .record_agent_request(
                 pane_id,
                 crate::terminal::agent_requests::AgentRequestReport {
-                    source: "herdr:codex".into(),
-                    agent_label: "codex".into(),
+                    source: format!("herdr:{agent_label}"),
+                    agent_label: agent_label.into(),
                     agent_session_id: None,
                     content: crate::api::schema::AgentRequestContent {
                         kind: crate::api::schema::AgentRequestKind::Permission,
@@ -987,6 +1082,29 @@ mod tests {
 
     fn notices(state: &AppState, caller: PaneId) -> Vec<String> {
         state.agent_call_notice_texts(caller)
+    }
+
+    /// When the agent in `pane_id` last changed state.
+    fn changed_at(state: &mut AppState, pane_id: PaneId) -> Instant {
+        terminal_mut(state, pane_id)
+            .last_agent_state_change_at
+            .expect("the state change is recorded")
+    }
+
+    /// When the agent in `pane_id` has stayed in its state for the settle period.
+    fn settled(state: &mut AppState, pane_id: PaneId) -> Instant {
+        changed_at(state, pane_id) + CALL_NOTICE_SETTLE
+    }
+
+    /// A working Claude caller with one notice waiting: its target blocked.
+    fn caller_with_a_notice() -> (AppState, PaneId) {
+        let (mut state, caller, callee) = two_agents();
+        set_state(&mut state, caller, Agent::Claude, AgentState::Working);
+        call(&mut state, caller, callee, false);
+        set_state(&mut state, callee, Agent::Codex, AgentState::Working);
+        set_state(&mut state, callee, Agent::Codex, AgentState::Blocked);
+        assert_eq!(notices(&state, caller).len(), 1);
+        (state, caller)
     }
 
     fn public_id(state: &AppState, pane_id: PaneId) -> String {
@@ -1066,7 +1184,11 @@ mod tests {
             )]
         );
         assert_eq!(state.agent_call_of_callee(callee), None);
-        assert_eq!(state.next_agent_call_deadline(), None);
+        assert_eq!(
+            state.next_agent_call_deadline(),
+            Some(settled(&mut state, caller)),
+            "only the notice to the idle caller is due"
+        );
     }
 
     #[test]
@@ -1120,7 +1242,7 @@ mod tests {
         assert!(terminal_mut(&mut state, callee).enable_remote_answers());
         let id = call(&mut state, caller, callee, true);
         set_state(&mut state, callee, Agent::Codex, AgentState::Working);
-        request(&mut state, callee).expect("the request waits for a remote answer");
+        request(&mut state, callee, "codex").expect("the request waits for a remote answer");
 
         let pane = public_id(&state, callee);
         assert_eq!(
@@ -1317,13 +1439,14 @@ mod tests {
         state.publish_pane_process_exit_if_agent(other, false);
         assert_eq!(notices(&state, caller).len(), 2);
 
-        let now = Instant::now();
+        let later = Instant::now() + CALL_NOTICE_SETTLE * 10;
         assert!(
-            state.ready_agent_call_notices(now).is_empty(),
+            state.ready_agent_call_notices(later).is_empty(),
             "the caller is working"
         );
         set_state(&mut state, caller, Agent::Claude, AgentState::Idle);
-        let ready = state.ready_agent_call_notices(now);
+        let at = settled(&mut state, caller);
+        let ready = state.ready_agent_call_notices(at);
         assert_eq!(ready.len(), 1, "{ready:?}");
         assert_eq!(ready[0].caller_pane, caller);
         assert_eq!(ready[0].ws_idx, 0);
@@ -1331,18 +1454,101 @@ mod tests {
         assert!(ready[0].text.contains(" blocked: "), "{ready:?}");
         state.agent_call_notice_submitted(caller);
         assert!(
-            state.ready_agent_call_notices(now).is_empty(),
+            state.ready_agent_call_notices(at).is_empty(),
             "the caller has not taken the first notice yet"
         );
 
         set_state(&mut state, caller, Agent::Claude, AgentState::Working);
-        assert!(state.ready_agent_call_notices(now).is_empty());
+        assert!(state.ready_agent_call_notices(later).is_empty());
         set_state(&mut state, caller, Agent::Claude, AgentState::Idle);
-        let ready = state.ready_agent_call_notices(now);
+        let at = settled(&mut state, caller);
+        let ready = state.ready_agent_call_notices(at);
         assert_eq!(ready.len(), 1, "{ready:?}");
         assert!(ready[0].text.contains(" gone: pi agent"), "{ready:?}");
         state.agent_call_notice_submitted(caller);
         assert!(notices(&state, caller).is_empty());
+    }
+
+    #[test]
+    fn a_caller_that_just_became_idle_gets_its_notice_only_after_the_settle_period() {
+        let (mut state, caller) = caller_with_a_notice();
+        set_state(&mut state, caller, Agent::Claude, AgentState::Idle);
+        let idle_at = changed_at(&mut state, caller);
+        let settled = idle_at + CALL_NOTICE_SETTLE;
+
+        assert!(state.ready_agent_call_notices(idle_at).is_empty());
+        assert!(state
+            .ready_agent_call_notices(settled - Duration::from_millis(1))
+            .is_empty());
+        assert_eq!(
+            state.next_agent_call_deadline(),
+            Some(settled),
+            "the loop wakes when the caller has been idle for the settle period"
+        );
+
+        let ready = state.ready_agent_call_notices(settled);
+        assert_eq!(ready.len(), 1, "{ready:?}");
+        assert_eq!(ready[0].caller_pane, caller);
+    }
+
+    #[test]
+    fn a_caller_that_leaves_idle_within_the_settle_period_gets_no_notice() {
+        let (mut state, caller) = caller_with_a_notice();
+        set_state(&mut state, caller, Agent::Claude, AgentState::Idle);
+        let idle_at = changed_at(&mut state, caller);
+        assert!(state.ready_agent_call_notices(idle_at).is_empty());
+
+        // For example a dialog that the idle screen was a glimpse of.
+        set_state(&mut state, caller, Agent::Claude, AgentState::Blocked);
+        let later = idle_at + CALL_NOTICE_SETTLE * 10;
+        assert!(state.ready_agent_call_notices(later).is_empty());
+        assert_eq!(
+            state.next_agent_call_deadline(),
+            None,
+            "a blocked caller is waited for, not timed"
+        );
+
+        // Idle again: the settle period starts over.
+        set_state(&mut state, caller, Agent::Claude, AgentState::Idle);
+        let settled = settled(&mut state, caller);
+        assert_eq!(state.next_agent_call_deadline(), Some(settled));
+        assert!(state
+            .ready_agent_call_notices(settled - Duration::from_millis(1))
+            .is_empty());
+        assert_eq!(state.ready_agent_call_notices(settled).len(), 1);
+    }
+
+    #[test]
+    fn a_caller_with_a_pending_request_of_its_own_gets_no_notice() {
+        let (mut state, caller) = caller_with_a_notice();
+        set_state(&mut state, caller, Agent::Claude, AgentState::Idle);
+        let settled = settled(&mut state, caller);
+        // A client answers the caller's requests, for example a chat bridge,
+        // and the caller asks a question while its screen reads idle.
+        assert!(terminal_mut(&mut state, caller).enable_remote_answers());
+        let request_id = request(&mut state, caller, "claude").expect("the caller's request waits");
+
+        let later = settled + CALL_NOTICE_SETTLE * 10;
+        assert!(
+            state.ready_agent_call_notices(later).is_empty(),
+            "the notice would answer the caller's request"
+        );
+        assert_eq!(state.next_agent_call_deadline(), None);
+
+        // The request was answered; the caller resumes, so it settles again.
+        terminal_mut(&mut state, caller).remove_agent_request(request_id);
+        let answered_at = later + Duration::from_secs(1);
+        assert!(state.ready_agent_call_notices(answered_at).is_empty());
+        assert_eq!(
+            state.next_agent_call_deadline(),
+            Some(answered_at + CALL_NOTICE_SETTLE)
+        );
+        assert_eq!(
+            state
+                .ready_agent_call_notices(answered_at + CALL_NOTICE_SETTLE)
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1351,19 +1557,20 @@ mod tests {
         call(&mut state, caller, callee, false);
         set_state(&mut state, callee, Agent::Codex, AgentState::Working);
         set_state(&mut state, callee, Agent::Codex, AgentState::Blocked);
-        let now = Instant::now();
-        state.retry_agent_call_notice_at(caller, now + Duration::from_secs(1));
-        assert!(state.ready_agent_call_notices(now).is_empty());
+        let idle_at = changed_at(&mut state, caller);
+        let settled = idle_at + CALL_NOTICE_SETTLE;
+        state.retry_agent_call_notice_at(caller, idle_at + Duration::from_millis(500));
         assert_eq!(
             state.next_agent_call_deadline(),
-            Some(now + Duration::from_secs(1))
+            Some(settled),
+            "a retry does not cut the settle period short"
         );
-        assert_eq!(
-            state
-                .ready_agent_call_notices(now + Duration::from_secs(1))
-                .len(),
-            1
-        );
+
+        let retry_at = settled + Duration::from_secs(1);
+        state.retry_agent_call_notice_at(caller, retry_at);
+        assert!(state.ready_agent_call_notices(settled).is_empty());
+        assert_eq!(state.next_agent_call_deadline(), Some(retry_at));
+        assert_eq!(state.ready_agent_call_notices(retry_at).len(), 1);
     }
 
     #[test]
@@ -1500,7 +1707,8 @@ mod tests {
             "replies are counted again on the new server: {texts:?}"
         );
         assert!(!terminal_mut(&mut new, new_callee).remote_answers());
-        let ready = new.ready_agent_call_notices(Instant::now());
+        let at = settled(&mut new, new_caller);
+        let ready = new.ready_agent_call_notices(at);
         assert_eq!(ready.len(), 1, "{ready:?}");
         assert_eq!(ready[0].call_id, first);
         assert_eq!(ready[0].caller_pane, new_caller);

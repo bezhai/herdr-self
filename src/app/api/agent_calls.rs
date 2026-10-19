@@ -185,7 +185,8 @@ impl App {
     }
 
     /// Runs the timers of agent calls, reports the remote answers that ended
-    /// calls turned off, and submits the notices whose calling agents are idle.
+    /// calls turned off, and submits the notices whose calling agents are
+    /// ready for them (see `AppState::ready_agent_call_notices`).
     pub(crate) fn advance_agent_calls(&mut self, now: Instant) {
         self.state.advance_agent_calls(now);
         let changed = self.state.take_agent_call_remote_answer_changes();
@@ -236,6 +237,7 @@ mod tests {
         AgentCallParams, Method, PaneMoveDestination, PaneMoveParams, PaneSetRemoteAnswersParams,
         Request,
     };
+    use crate::app::agent_calls::CALL_NOTICE_SETTLE;
     use crate::app::App;
     use crate::detect::{Agent, AgentState};
     use crate::events::AppEvent;
@@ -315,6 +317,19 @@ mod tests {
             process_exited: false,
             observed_at: Instant::now(),
         });
+    }
+
+    /// When the agent in `pane_id` last changed state.
+    fn changed_at(app: &mut App, pane_id: PaneId) -> Instant {
+        terminal_mut(app, pane_id)
+            .last_agent_state_change_at
+            .expect("the state change is recorded")
+    }
+
+    /// When the agent in `pane_id` has stayed in its state for the notice
+    /// settle period.
+    fn settled(app: &mut App, pane_id: PaneId) -> Instant {
+        changed_at(app, pane_id) + CALL_NOTICE_SETTLE
     }
 
     fn start_call(app: &mut App, params: AgentCallParams) -> Receiver<String> {
@@ -580,7 +595,8 @@ mod tests {
         nothing_received(&mut f.caller_input).await;
 
         set_state(&mut f.app, f.caller, Agent::Claude, AgentState::Idle);
-        f.app.advance_agent_calls(Instant::now());
+        let at = settled(&mut f.app, f.caller);
+        f.app.advance_agent_calls(at);
         let first = received(&mut f.caller_input).await;
         assert!(
             first.starts_with(b"[herdr] call 1 blocked: "),
@@ -591,12 +607,13 @@ mod tests {
             received(&mut f.caller_input).await,
             Bytes::from_static(b"\r")
         );
-        f.app.advance_agent_calls(Instant::now());
+        f.app.advance_agent_calls(at);
         nothing_received(&mut f.caller_input).await;
 
         set_state(&mut f.app, f.caller, Agent::Claude, AgentState::Working);
         set_state(&mut f.app, f.caller, Agent::Claude, AgentState::Idle);
-        f.app.advance_agent_calls(Instant::now());
+        let at = settled(&mut f.app, f.caller);
+        f.app.advance_agent_calls(at);
         let second = received(&mut f.caller_input).await;
         assert!(
             second.starts_with(b"[herdr] call 1 finished: "),
@@ -632,13 +649,57 @@ mod tests {
             "{moved}"
         );
         finish_turn(&mut f.app, f.callee, 1);
-        f.app.advance_agent_calls(Instant::now());
+        let at = settled(&mut f.app, f.caller);
+        f.app.advance_agent_calls(at);
 
         let notice = received(&mut f.caller_input).await;
         assert!(
             notice.starts_with(b"[herdr] call 1 finished: "),
             "{:?}",
             String::from_utf8_lossy(&notice)
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_is_typed_into_a_caller_until_it_has_been_idle_for_the_settle_period() {
+        let mut f = fixture();
+        f.call("task");
+        received(&mut f.callee_input).await;
+        received(&mut f.callee_input).await;
+        set_state(&mut f.app, f.caller, Agent::Claude, AgentState::Working);
+        finish_turn(&mut f.app, f.callee, 1);
+        set_state(&mut f.app, f.caller, Agent::Claude, AgentState::Idle);
+        let idle_at = changed_at(&mut f.app, f.caller);
+
+        f.app.advance_agent_calls(idle_at);
+        nothing_received(&mut f.caller_input).await;
+        assert_eq!(
+            f.app
+                .next_headless_loop_deadline_with_git_refresh(idle_at, false, false),
+            Some(idle_at + CALL_NOTICE_SETTLE),
+            "the loop wakes when the caller has settled"
+        );
+
+        // The idle screen was a glimpse: the caller shows a dialog. Enter
+        // would answer it.
+        set_state(&mut f.app, f.caller, Agent::Claude, AgentState::Blocked);
+        f.app.advance_agent_calls(idle_at + CALL_NOTICE_SETTLE * 10);
+        nothing_received(&mut f.caller_input).await;
+
+        set_state(&mut f.app, f.caller, Agent::Claude, AgentState::Idle);
+        let at = settled(&mut f.app, f.caller);
+        f.app.advance_agent_calls(at - Duration::from_millis(1));
+        nothing_received(&mut f.caller_input).await;
+        f.app.advance_agent_calls(at);
+        let notice = received(&mut f.caller_input).await;
+        assert!(
+            notice.starts_with(b"[herdr] call 1 finished: "),
+            "{:?}",
+            String::from_utf8_lossy(&notice)
+        );
+        assert_eq!(
+            received(&mut f.caller_input).await,
+            Bytes::from_static(b"\r")
         );
     }
 

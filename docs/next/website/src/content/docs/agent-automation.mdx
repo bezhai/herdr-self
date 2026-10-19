@@ -135,7 +135,7 @@ Each notice is one line that begins with `[herdr] call <id> <status>:`. It names
 
 The exact text of all six notice forms is listed under [Agent calls](/docs/socket-api/#agent-calls) in the socket API reference.
 
-Notices go only to the agent that made the call, and they follow its pane if the pane moves. Herdr waits until that agent is `idle` or `done`, then submits the notice the way `agent prompt` submits text. Several notices arrive in order, one per idle period. If the calling agent exits or is replaced, or its pane closes, its calls end and their notices are dropped.
+Notices go only to the agent that made the call, and they follow its pane if the pane moves. Herdr waits until that agent has stayed `idle` or `done` for 3 seconds with no pending request of its own, then submits the notice the way `agent prompt` submits text. The 3 seconds keep a notice out of a dialog that the agent's screen showed as idle for a moment, where the notice's Enter would answer the dialog. Herdr knows about the caller's own requests only while remote answers are on for it. Several notices arrive in order, one per idle period. If the calling agent exits or is replaced, or its pane closes, its calls end and their notices are dropped.
 
 By default, a `blocked` notice says that a person has to answer in the target's terminal. With `--answer-requests`, remote answers are on for the target during the call, so the permission requests and questions that its integration hooks report wait for the caller instead: Claude Code permission requests and questions, and Codex approvals. The notice then says how many requests are pending, and the caller lists and answers them:
 

@@ -158,6 +158,9 @@ pub struct TerminalState {
     metadata_token_sequence_sources: std::collections::HashSet<String>,
     pub state: AgentState,
     pub last_agent_state_change_seq: Option<u64>,
+    /// When the effective state last changed; set with
+    /// `last_agent_state_change_seq`.
+    pub last_agent_state_change_at: Option<Instant>,
     pub last_agent_completion_seq: Option<u64>,
     agent_replies: AgentReplies,
     agent_requests: AgentRequests,
@@ -201,6 +204,7 @@ impl TerminalState {
             metadata_token_sequence_sources: std::collections::HashSet::new(),
             state: AgentState::Unknown,
             last_agent_state_change_seq: None,
+            last_agent_state_change_at: None,
             last_agent_completion_seq: None,
             agent_replies: AgentReplies::default(),
             agent_requests: AgentRequests::default(),
@@ -2133,6 +2137,7 @@ impl TerminalState {
         self.stale_full_lifecycle_hook_sessions.clear();
         self.state = AgentState::Unknown;
         self.last_agent_state_change_seq = None;
+        self.last_agent_state_change_at = None;
         self.last_agent_completion_seq = None;
         self.clear_agent_conversation();
         self.disable_remote_answers();
