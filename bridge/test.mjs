@@ -1,6 +1,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {spawn} from 'node:child_process';import net from 'node:net';
-import {normalizeMachine,remoteInvocation,herdr,makeDirectory,quote,Store} from './core.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
+import {Readable} from 'node:stream';
+import {normalizeMachine,remoteInvocation,herdr,makeDirectory,storeFile,removeDirectory,quote,Store} from './core.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
+import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {check} from './request-cards.mjs';import {nameOf} from './adoption.mjs';
 import {Registrations} from './registration.mjs';import {staticFile,sendStatic} from './web-assets.mjs';import {fileURLToPath} from 'node:url';
@@ -28,7 +30,7 @@ function registrationFixture(register,options={}){
 const ready=o=>o.onQRCodeReady({url:'https://open.feishu.cn/page/launcher?user_code=test',expireIn:600});
 test('registration stores credentials server-side, uses minimal bot scopes and allows only the creator',async()=>{
  const f=registrationFixture(async o=>{assert.equal(o.createOnly,false);assert.equal(o.addons.preset,false);assert.equal(o.addons.scopes.user,undefined);assert.deepEqual(o.addons.events.items.tenant,['im.message.receive_v1']);
-  assert.deepEqual(o.addons.scopes.tenant,['im:message:send_as_bot','im:message.p2p_msg:readonly','im:message.group_at_msg:readonly','application:bot.basic_info:read','im:message.reactions:write_only','application:app_slash_command:read','application:app_slash_command:write']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
+  assert.deepEqual(o.addons.scopes.tenant,['im:message:send_as_bot','im:message.p2p_msg:readonly','im:message.group_at_msg:readonly','application:bot.basic_info:read','im:message.reactions:write_only','application:app_slash_command:read','application:app_slash_command:write','im:message:readonly']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
  try{f.registrations.start({name:'test'});await f.registrations.current.done;assert.equal(f.registrations.status().status,'completed');const a=new Store(f.store.dir).data.apps[0];assert.equal(a.appSecret,'private-test-secret');assert.deepEqual(a.allowedUsers,['ou_owner']);assert.equal(a.enabled,false);assert.equal(a.domain,'feishu');assert.ok(!JSON.stringify(f.registrations.status()).includes('private-test-secret'));assert.equal(f.registrations.status().url,undefined);assert.equal(fs.statSync(path.join(f.store.dir,'state.json')).mode&0o777,0o600);}finally{f.close();}
 });
 test('duplicate starts reuse pending flow; cancellation fences a late SDK result and stale cancel',async()=>{
@@ -87,14 +89,55 @@ test('changing the permission mode of a Claude binding changes that field only; 
  for(const mode of ['bypassPermissions','plan','',undefined])assert.throws(()=>setPermissionMode(claude,mode),/^Error: 权限模式无效$/);assert.equal(claude.permissionMode,'default');
  for(const other of [codex,agy]){const before={...other};assert.throws(()=>setPermissionMode(other,'auto'),/^Error: 只有 Claude 绑定可以设置权限模式$/,other.kind);assert.deepEqual(other,before);}
 });
-test('Bridge takes text and rich text without resources from a person; mentions are left to topic handling',async()=>{
+test('Bridge takes every message of a person; it can forward text, rich text, images and files with content of at most 16000 characters, and no other kind; mentions are left to topic handling',async()=>{
  const raw={sender:{sender_type:'user',sender_id:{open_id:'ou_user'}},message:{message_id:'om_message',chat_id:'oc_1',chat_type:'group',root_id:'om_root',message_type:'text',content:'{"text":"@_user_1 hi"}',mentions:[{key:'@_user_1',id:{open_id:'ou_bot'},name:'bot'}]}};
- const e=await normalize(raw,{botIdentity:{openId:'ou_bot',name:'bot'}});
- assert.equal(e.content.trim(),'hi');assert.equal(e.chatType,'group');assert.equal(e.mentionedBot,true);assert.equal(routable(e),true);assert.equal(routable({...e,senderType:'bot'}),false);
+ const e=await normalize(raw,{botIdentity:{openId:'ou_bot',name:'bot'}}),of=(message_type,content)=>normalize({...raw,message:{...raw.message,message_type,content:JSON.stringify(content)}},{botIdentity:{openId:'ou_bot',name:'bot'}});
+ assert.equal(e.content.trim(),'hi');assert.equal(e.chatType,'group');assert.equal(e.mentionedBot,true);assert.equal(routable(e),true);assert.equal(routable({...e,senderType:'bot'}),false);assert.equal(routable({...e,senderId:''}),false);
  const other=await normalize({...raw,message:{...raw.message,mentions:[{key:'@_user_1',id:{open_id:'ou_other'},name:'other'}]}},{botIdentity:{openId:'ou_bot',name:'bot'}});
- assert.equal(other.mentionedBot,false);assert.equal(routable(other),true);assert.equal(routable({...e,resources:[{type:'image'}]}),false);assert.equal(routable({...e,rawContentType:'image'}),false);
+ assert.equal(other.mentionedBot,false);assert.equal(routable(other),true);
  const dm=await normalize({...raw,message:{...raw.message,chat_type:'p2p',root_id:undefined,mentions:[]}},{botIdentity:{openId:'ou_bot',name:'bot'}});
  assert.equal(dm.chatType,'p2p');assert.equal(routable(dm),true);
+ const kinds=x=>[routable(x),supported(x),forwardable(x)];
+ const image=await of('image',{image_key:'img_1'}),file=await of('file',{file_key:'file_1',file_name:'a.pdf'}),post=await of('post',{content:[[{tag:'text',text:'看图'},{tag:'img',image_key:'img_2'}]]});
+ assert.deepEqual([image.resources,file.resources,post.resources],[[{type:'image',fileKey:'img_1'}],[{type:'file',fileKey:'file_1',fileName:'a.pdf'}],[{type:'image',fileKey:'img_2'}]]);
+ for(const x of [e,dm,image,file,post])assert.deepEqual(kinds(x),[true,true,true],x.rawContentType);
+ // Stickers, merged forwards, cards and every other kind carry nothing Bridge can hand to an agent, whatever their content.
+ for(const [type,content] of [['sticker',{file_key:'stk_1'}],['merge_forward',{}],['interactive',{elements:[]}],['audio',{file_key:'file_a'}],['media',{file_key:'file_v'}],['share_chat',{chat_id:'oc_x'}]]){const x=await of(type,content);assert.ok(x.content,type);assert.deepEqual(kinds(x),[true,false,false],type);}
+ // Only the mention, blank, or more than 16000 characters: nothing to forward.
+ const mention=await of('text',{text:'@_user_1'});assert.equal(mention.content,'');assert.deepEqual(kinds(mention),[true,true,false]);
+ assert.equal(forwardable({...e,content:'  '}),false);assert.equal(forwardable({...e,content:'x'.repeat(16000)}),true);assert.equal(forwardable({...e,content:'x'.repeat(16001)}),false);assert.equal(forwardable({...e,senderType:'bot'}),true);
+});
+// What the SDK makes of an image message with image key key, and of a sticker.
+const imageOf=key=>({rawContentType:'image',content:`![image](${key})`,resources:[{type:'image',fileKey:key}]}),sticker={rawContentType:'sticker',content:'<sticker key="stk_1"/>',resources:[{type:'sticker',fileKey:'stk_1'}]};
+const imageMessage={...inbound,messageId:'om_image',...imageOf('img_1')},stickerMessage={...inbound,messageId:'om_sticker',...sticker};
+const unsupportedText='暂不支持这类消息，目前只能转发文字、图片和文件';
+test('the images and files of a message are numbered per kind and named in its prompt where they were: by absolute path, a file also by its name, or as failed; a path never ends a fragment that Claude Code would take as a pasted image',()=>{
+ const post={messageId:'om_1',rawContentType:'post',content:'看看这个报错 \n![image](img_b)\n还有![image](img_c)\n<file key="file_m"/>\n<file key="file_g" name="日志 &quot;1&quot;.txt"/>',
+  resources:[{type:'image',fileKey:'img_b'},{type:'image',fileKey:'img_c'},{type:'file',fileKey:'file_m'},{type:'file',fileKey:'file_g',fileName:'日志 "1"\n.txt'}]};
+ const list=attachmentsOf(post);assert.deepEqual(list.map(x=>[x.type,x.fileKey,x.index,x.n]),[['image','img_b',1,1],['image','img_c',2,2],['file','file_m',3,1],['file','file_g',4,2]]);
+ const dir='/srv/my app/.herdr-bridge/t';Object.assign(list[0],{path:dir+'/om_1-1.png'});Object.assign(list[1],{reason:'下载失败'});Object.assign(list[2],{path:dir+'/om_1-3.mp4'});Object.assign(list[3],{path:dir+'/om_1-4.txt'});
+ const prompt=promptOf(post,list);
+ assert.equal(prompt,`看看这个报错 \n[图片 1：${dir}/om_1-1.png]\n还有[图片 2：下载失败]\n[文件 1：未命名文件，${dir}/om_1-3.mp4]\n[文件 2：日志 "1" .txt，${dir}/om_1-4.txt]`);
+ // Claude Code splits pasted text on newlines and before a / that follows a space, and attaches a fragment that ends in an image extension.
+ for(const fragment of prompt.split('\n').flatMap(l=>l.split(/ (?=\/)/)))assert.doesNotMatch(fragment,/\.(png|jpe?g|gif|webp)$/i,fragment);
+ const file={messageId:'om_2',rawContentType:'file',content:'<file key="file_f" name="报告 v2.pdf"/>',resources:[{type:'file',fileKey:'file_f',fileName:'报告 v2.pdf'}]};
+ const [x]=attachmentsOf(file);assert.equal(promptOf(file,[{...x,path:'/srv/a/om_2-1.pdf'}]),'[文件 1：报告 v2.pdf，/srv/a/om_2-1.pdf]');assert.equal(promptOf(file,[{...x,reason:'超过 30 MB'}]),'[文件 1：下载失败]');
+ assert.equal(promptOf(imageMessage,[{...attachmentsOf(imageMessage)[0],path:'/srv/a/om_image-1.jpg'}]),'[图片 1：/srv/a/om_image-1.jpg]');
+ // Text that only looks like the markup of a resource stays as it is; a resource whose markup is missing is named at the end.
+ const text={rawContentType:'text',content:' ![image](img_x) <file key="k"/> ',resources:[]};assert.deepEqual(attachmentsOf(text),[]);assert.equal(promptOf(text,[]),'![image](img_x) <file key="k"/>');
+ const lost={rawContentType:'post',content:'看图',resources:[{type:'image',fileKey:'img_z'}]};assert.equal(promptOf(lost,[{...attachmentsOf(lost)[0],path:'/a/om-1.png'}]),'看图\n[图片 1：/a/om-1.png]');
+ // Only images and files count.
+ assert.deepEqual(attachmentsOf(stickerMessage),[]);
+});
+test('an attachment is written as <message id>-<position>.<extension>: an image takes the extension of its content type, a file that of its name, else of its content type; a topic title leaves attachments out',()=>{
+ const image={type:'image',index:1},file={type:'file',index:2};
+ for(const [type,name] of [['image/png','om_1-1.png'],['image/jpeg','om_1-1.jpg'],['image/gif','om_1-1.gif'],['image/webp','om_1-1.webp'],['',  'om_1-1.jpg'],['application/octet-stream','om_1-1.jpg']])assert.equal(fileName('om_1',image,type),name,type);
+ for(const [x,type,name] of [[{fileName:'main.PY'},'application/octet-stream','om_1-2.py'],[{fileName:'a.tar.gz'},'','om_1-2.gz'],[{fileName:'说明'},'application/pdf','om_1-2.pdf'],[{fileName:'x.p y'},'text/plain','om_1-2.txt'],[{},'video/mp4','om_1-2.mp4'],[{fileName:'.env'},'',  'om_1-2.env'],[{},'','om_1-2.bin'],[{fileName:'a.'+'x'.repeat(17)},'','om_1-2.bin']])assert.equal(fileName('om_1',{...file,...x},type),name,JSON.stringify(x));
+ assert.equal(fileName('om_../x y',image,'image/png'),'om____x_y-1.png');
+ assert.equal(titleOf({rawContentType:'post',content:'看看这个报错 \n![image](img_b)\n还有<file key="f" name="a.txt"/>',resources:[{type:'image',fileKey:'img_b'},{type:'file',fileKey:'f',fileName:'a.txt'}]}),'看看这个报错 还有');
+ assert.equal(titleOf(imageMessage),'图片');assert.equal(titleOf({rawContentType:'file',content:'<file key="f" name="a.txt"/>',resources:[{type:'file',fileKey:'f',fileName:'a.txt'}]}),'文件');
+ assert.equal(titleOf({rawContentType:'text',content:' ![image](x)  文字\n很长'+'长'.repeat(30),resources:[]}),'![image](x) 文字 很长'+'长'.repeat(7));
+ assert.deepEqual(limits,{image:10*1024*1024,file:30*1024*1024});
 });
 test('secrets are preserved only for the same application and are not part of the app status',()=>{const old={id:'a',appId:'cli_old',appSecret:'saved'};assert.equal(normalizeApp({name:'bot',appId:'cli_old',allowedUsers:[]},old).appSecret,'saved');assert.throws(()=>normalizeApp({name:'bot',appId:'cli_new',allowedUsers:[]},old));
  const f=platformFixture();try{assert.ok(!('appSecret' in JSON.parse(JSON.stringify(f.platforms.status({...old,allowedUsers:[]})))));}finally{f.close();}
@@ -103,16 +146,23 @@ test('a routed message goes to the topic handler with its app and binding, wheth
  const f=platformFixture();try{f.store.data.bindings=[{...route,requireMention:true}];f.platforms.receive(allowed,inbound);
  assert.deepEqual(f.messages,[[allowed,f.store.data.bindings[0],inbound]]);assert.deepEqual(f.store.data.logs,[]);}finally{f.close();}
 });
-test('messages from outside the allowlist, to a disabled app, of another kind or empty are not passed on',()=>{
+test('messages from outside the allowlist, to a disabled app or from a bot are not passed on; a bound chat gets what can be forwarded and the kinds that cannot, but no empty or overlong message',()=>{
  const f=platformFixture();try{f.store.data.bindings=[route];const dm={...inbound,chatId:'oc_2',chatType:'p2p'};
- for(const [app,msg] of [[allowed,{...inbound,senderId:'ou_other'}],[allowed,{...dm,senderId:'ou_other'}],[{...allowed,enabled:false},inbound],[{...allowed,enabled:false},dm],[allowed,{...inbound,content:'  '}],[allowed,{...dm,content:'  '}],[allowed,{...dm,senderType:'bot'}],[allowed,{...dm,resources:[{type:'image'}]}]])f.platforms.receive(app,msg);
- assert.deepEqual([f.messages,f.unbound],[[],[]]);}finally{f.close();}
+ for(const [app,msg] of [[allowed,{...inbound,senderId:'ou_other'}],[allowed,{...dm,senderId:'ou_other'}],[{...allowed,enabled:false},inbound],[{...allowed,enabled:false},dm],[allowed,{...dm,senderType:'bot'}],[allowed,{...imageMessage,senderType:'bot'}],[allowed,{...inbound,content:'  '}],[allowed,{...inbound,content:'x'.repeat(16001)}]])f.platforms.receive(app,msg);
+ assert.deepEqual([f.messages,f.unbound],[[],[]]);
+ // A sticker goes on whatever its content, so that the topic handler can say that it is not supported.
+ for(const msg of [imageMessage,stickerMessage,{...stickerMessage,messageId:'om_empty_sticker',content:''}])f.platforms.receive(allowed,msg);
+ assert.deepEqual(f.messages.map(([a,b,msg])=>[a.id,b.id,msg.messageId]),[['a','b','om_image'],['a','b','om_sticker'],['a','b','om_empty_sticker']]);assert.deepEqual(f.unbound,[]);}finally{f.close();}
 });
-test('a chat without a binding asks for one on any direct message but only on group messages that mention the bot; a disabled binding blocks both',()=>{
+test('a chat without a binding asks for one on any direct message and on any group message that mentions the bot, whether empty, with an image or of a kind Bridge cannot forward; a disabled binding blocks both',()=>{
  const f=platformFixture();try{f.store.data.bindings=[route,{...route,id:'off',chatId:'oc_off',enabled:false}];
   const dm={...inbound,chatId:'oc_dm',chatType:'p2p'},group={...inbound,chatId:'oc_group',chatType:'group',mentionedBot:false},mentioned={...group,messageId:'om_2',mentionedBot:true};
   for(const [app,msg] of [[allowed,dm],[allowed,group],[allowed,mentioned],[allowed,{...mentioned,chatId:'oc_off'}],[allowed,{...dm,chatId:'oc_off'}],[{...allowed,id:'other'},{...inbound,chatType:'p2p'}]])f.platforms.receive(app,msg);
   assert.deepEqual(f.unbound,[[allowed,dm],[allowed,mentioned],[{...allowed,id:'other'},{...inbound,chatType:'p2p'}]]);assert.deepEqual(f.messages,[]);
+  // Only the mention, an image, a sticker: in a direct chat, or in a group with the mention.
+  const variants=msg=>[{...msg,messageId:msg.messageId+'-empty',content:''},{...imageMessage,chatId:msg.chatId,chatType:msg.chatType,mentionedBot:msg.mentionedBot,messageId:msg.messageId+'-image'},{...stickerMessage,chatId:msg.chatId,chatType:msg.chatType,mentionedBot:msg.mentionedBot,messageId:msg.messageId+'-sticker'}];
+  f.unbound.length=0;for(const msg of [dm,group,mentioned].flatMap(variants))f.platforms.receive(allowed,msg);
+  assert.deepEqual(f.unbound.map(([,msg])=>msg.messageId),['om_1-empty','om_1-image','om_1-sticker','om_2-empty','om_2-image','om_2-sticker']);assert.deepEqual(f.messages,[]);
  }finally{f.close();}
 });
 test('a state file with legacy message queues loads only machines, apps, bindings, topics and logs',()=>{
@@ -159,6 +209,28 @@ test('message reactions are added and removed through the connected channel and 
   assert.deepEqual(calls,[['add','om_1','OneSecond'],['remove','om_1','r_1']]);
  }finally{f.close();}
 });
+// A response body that counts its reads; chunks are strings or buffers.
+function body(chunks){const s=new Readable({read(){s.reads++;this.push(chunks.length?Buffer.from(chunks.shift()):null);}});s.reads=0;return s;}
+test('a resource of a received message is downloaded through the connected channel with its content type; one whose length exceeds the limit is refused before its body is read, and a Feishu error keeps its code',async()=>{
+ const f=platformFixture(),calls=[],answers=[];try{
+  await assert.rejects(f.platforms.download(allowed,'om_1',{type:'image',fileKey:'img_1'},10),/飞书未连接/);
+  f.platforms.runtime.set('a',{channel:{getConnectionStatus:()=>({state:'connected'}),rawClient:{im:{v1:{messageResource:{get:async o=>{calls.push(o);return answers.shift()();}}}}}}});
+  const ok=body(['ab','cd']);answers.push(()=>({headers:{'content-type':'image/PNG; charset=binary','content-length':'4'},getReadableStream:()=>ok}));
+  assert.deepEqual(await f.platforms.download(allowed,'om_1',{type:'image',fileKey:'img_1'},10),{body:Buffer.from('abcd'),type:'image/png'});
+  assert.deepEqual(calls,[{path:{message_id:'om_1',file_key:'img_1'},params:{type:'image'}}]);
+  // The length says too much: nothing of the body is read.
+  const big=body(['x'.repeat(11)]);answers.push(()=>({headers:{'content-type':'application/pdf','content-length':'11'},getReadableStream:()=>big}));
+  await assert.rejects(f.platforms.download(allowed,'om_2',{type:'file',fileKey:'file_1',fileName:'a.pdf'},10),e=>e.code==='too_large');
+  assert.deepEqual([big.reads,big.destroyed,calls[1]],[0,true,{path:{message_id:'om_2',file_key:'file_1'},params:{type:'file'}}]);
+  // Without a length, or with a wrong one, the body counts as it comes.
+  for(const headers of [{},{'content-length':'3'}]){const s=body(['123456','78901']);answers.push(()=>({headers,getReadableStream:()=>s}));await assert.rejects(f.platforms.download(allowed,'om_3',{type:'image',fileKey:'img_3'},10),e=>e.code==='too_large',JSON.stringify(headers));assert.equal(s.destroyed,true);}
+  const exact=body(['1234567890']);answers.push(()=>({headers:{},getReadableStream:()=>exact}));assert.deepEqual(await f.platforms.download(allowed,'om_4',{type:'image',fileKey:'img_4'},10),{body:Buffer.from('1234567890'),type:''});
+  // Feishu answers an error with a JSON body, which the stream response carries as a stream.
+  answers.push(()=>{throw Object.assign(Error('Request failed with status code 400'),{response:{status:400,data:Readable.from([JSON.stringify({code:234003,msg:'File not in msg.'})])}});});
+  await assert.rejects(f.platforms.download(allowed,'om_5',{type:'image',fileKey:'img_x'},10),e=>e.code===234003&&e.message==='飞书接口错误 234003：File not in msg.');
+  answers.push(()=>{throw Error('timeout of 10000ms exceeded');});await assert.rejects(f.platforms.download(allowed,'om_6',{type:'image',fileKey:'img_6'},10),/^Error: timeout of 10000ms exceeded$/);
+ }finally{f.close();}
+});
 test('a start failure with a local path and an English Herdr error keeps them out of the Feishu notice',async()=>{
  const f=topicFixture(),raw='no herdr server is running at /home/someone/.config/herdr/herdr.sock; run `herdr server`';try{
   f.h.on['workspace list']=()=>{throw Error(raw);};await f.send({messageId:'om_1',content:'one'});
@@ -191,6 +263,60 @@ test('makeDirectory creates nested directories on a local machine, succeeds agai
   await makeDirectory(m,target);assert.ok(fs.statSync(target).isDirectory());
   await makeDirectory(m,target);assert.ok(fs.statSync(target).isDirectory());
   fs.writeFileSync(path.join(dir,'file'),'');await assert.rejects(makeDirectory(m,path.join(dir,'file','x')),/mkdir/);
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+const mode=p=>fs.statSync(p).mode&0o777;
+// Sets the modification time of directory p to n days ago.
+const age=(p,n)=>{const t=(Date.now()-n*86400000)/1000;fs.utimesSync(p,t,t);};
+// Runs fn with process.env[key] set to value for its duration.
+async function withEnv(key,value,fn){const old=process.env[key];process.env[key]=value;try{return await fn();}finally{if(old===undefined)delete process.env[key];else process.env[key]=old;}}
+// What storeFile does on any machine, given the home directory that ~/ stands for there: files 0600 in directories 0700, a .gitignore of *
+// that a person may change, and the clean-up of the other directories of the root.
+async function storeFileBehaves(m,home){
+ const body=Buffer.concat([Buffer.from("secret-marker ' \" $(id) `id`\n"),Buffer.from([0,255,10])]),root=path.join(home,'work','.herdr-bridge');
+ const file=await storeFile(m,'~/work/.herdr-bridge','t1','om_1-1.png',body);
+ assert.equal(file,path.join(root,'t1','om_1-1.png'));assert.deepEqual(fs.readFileSync(file),body);
+ assert.deepEqual([mode(root),mode(path.join(root,'t1')),mode(file),mode(path.join(root,'.gitignore'))],[0o700,0o700,0o600,0o600]);assert.equal(fs.readFileSync(path.join(root,'.gitignore'),'utf8'),'*\n');
+ fs.writeFileSync(path.join(root,'.gitignore'),'*\n!keep\n');
+ // Directories of other topics unchanged for more than 7 days go, with what they hold; the topic written to stays however old.
+ for(const [dir,days] of [['stale',8],['recent',6],['t1',30]]){fs.mkdirSync(path.join(root,dir),{recursive:true});fs.writeFileSync(path.join(root,dir,'x'),'');age(path.join(root,dir),days);}
+ const absolute=path.join(home,'abs dir','.herdr-bridge');
+ assert.equal(await storeFile(m,'~/work/.herdr-bridge','t1','om_2-1.pdf',Buffer.from('pdf')),path.join(root,'t1','om_2-1.pdf'));
+ assert.deepEqual(fs.readdirSync(root).sort(),['.gitignore','recent','t1']);assert.deepEqual(fs.readdirSync(path.join(root,'t1')).sort(),['om_1-1.png','om_2-1.pdf','x']);assert.equal(fs.readFileSync(path.join(root,'.gitignore'),'utf8'),'*\n!keep\n');
+ // An absolute root, here with a space, works the same.
+ assert.equal(await storeFile(m,absolute,'t2','om_3-1.jpg',Buffer.from('jpg')),path.join(absolute,'t2','om_3-1.jpg'));assert.equal(fs.readFileSync(path.join(absolute,'t2','om_3-1.jpg'),'utf8'),'jpg');
+ // A root that cannot be created fails.
+ fs.writeFileSync(path.join(home,'file'),'');await assert.rejects(storeFile(m,path.join(home,'file','.herdr-bridge'),'t3','om_4-1.png',Buffer.from('x')));
+ // removeDirectory removes a directory with what it holds; one that is gone already is fine.
+ await removeDirectory(m,path.join(root,'t1'));assert.deepEqual(fs.readdirSync(root).sort(),['.gitignore','recent']);await removeDirectory(m,path.join(root,'t1'));
+ await removeDirectory(m,'~/work/.herdr-bridge/recent');assert.deepEqual(fs.readdirSync(root),['.gitignore']);
+ return body;
+}
+test('storeFile on a local machine writes a file 0600 in a directory 0700 under a root with a .gitignore that ignores everything, removes the other directories of the root unchanged for 7 days and resolves to its absolute path',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-local-')),home=path.join(dir,'home'),m=normalizeMachine({name:'local',type:'local'});
+ try{fs.mkdirSync(home);await withEnv('HOME',home,()=>storeFileBehaves(m,home));}finally{fs.rmSync(dir,{recursive:true});}
+});
+test('storeFile on an SSH machine is one remote command under umask 077 that takes the content on stdin, never on the command line, and prints the absolute path; removeDirectory runs rm -rf there',async()=>{
+ // A fake ssh records its arguments and runs the remote command here, with its own home.
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-ssh-')),bin=path.join(dir,'bin'),home=path.join(dir,'remote home'),args=path.join(dir,'args');
+ fs.mkdirSync(bin);fs.mkdirSync(home);
+ fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh',`printf '%s\\n' "$@" >> ${quote(args)}`,'for last; do :; done',`HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
+ const m=normalizeMachine({name:'cpu2',host:'cpu2'});
+ try{
+  const body=await withEnv('PATH',bin+':'+process.env.PATH,()=>storeFileBehaves(m,home));
+  const lines=fs.readFileSync(args,'utf8');assert.ok(body.includes('secret-marker'));assert.ok(!lines.includes('secret-marker'));
+  // Every call is one remote command line: four writes, then three removals.
+  const prefix='env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c ',commands=lines.split('\n').filter(l=>l.startsWith(prefix)).map(l=>l.slice(prefix.length));
+  const unquote=s=>{assert.ok(s.startsWith("'")&&s.endsWith("'"),s);return s.slice(1,-1).replaceAll("'\\''","'");};
+  assert.equal(commands.length,7);
+  // The program is sh with a fixed script; the root, the directory and the name are its arguments, the root's ~/ the remote home.
+  const first=unquote(commands[0]);assert.ok(first.startsWith("'sh' '-c' '")&&first.endsWith(`' 'sh' "$HOME"/'work/.herdr-bridge' 't1' 'om_1-1.png'`),first);
+  assert.match(first,/umask 077/);assert.match(first,/cat >/);assert.equal(unquote(commands[2]).slice(unquote(commands[2]).lastIndexOf("' 'sh' ")),`' 'sh' ${quote(path.join(home,'abs dir','.herdr-bridge'))} 't2' 'om_3-1.jpg'`);
+  assert.deepEqual(commands.slice(4).map(unquote),[`'rm' '-rf' '--' ${quote(path.join(home,'work','.herdr-bridge','t1'))}`,`'rm' '-rf' '--' ${quote(path.join(home,'work','.herdr-bridge','t1'))}`,`'rm' '-rf' '--' "$HOME"/'work/.herdr-bridge/recent'`]);
+  // Output that is not the path of the file, such as what a login script of the remote shell prints, fails the write: the path is what
+  // removeDirectory later removes.
+  fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh','echo welcome','for last; do :; done',`HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
+  await withEnv('PATH',bin+':'+process.env.PATH,()=>assert.rejects(storeFile(m,'~/work/.herdr-bridge','t1','om_5-1.png',Buffer.from('x')),/未返回文件路径/));
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 
@@ -243,11 +369,19 @@ const cotPath='/open-apis/im/v1/message_cot';
 // The binding's machine m is cpu2; machines are further machines of the store. f.api records the Feishu OpenAPI requests of the topics,
 // the COT calls: a COT is created as c<n> in message om_cot_<n>. With cot false Feishu refuses every request, like for an app without the
 // scope. restart() reads the state file into a new Topics with the same fakes, as after a Bridge restart.
+// f.downloads records every attachment download as [app id, message id, type, file key, limit]; f.resources[file key], when present,
+// answers it, an error by throwing it, else the body is 'data:<file key>' of type image/png. f.stored records every file written as
+// [machine id, root, dir, name, body as text], which resolves to its path with ~/ as /home/u/; f.removed every directory removed as
+// [machine id, dir].
 function topicFixture({binding,machine,machines=[],cot=true}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],reacted=[],unreacted=[],updated=[],api=[],m={id:'m',name:'cpu2',enabled:true,...machine};
+ const downloads=[],resources={},stored=[],removed=[];
  store.data.machines=[m,...machines];store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];let sent=0,cots=0;
  // Every reply resolves to the next message id om_bot_<n>.
  const deps={herdr:h.herdr,makeDirectory:h.makeDirectory,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
+  download:async(a,messageId,r,limit)=>{downloads.push([a.id,messageId,r.type,r.fileKey,limit]);await null;const x=resources[r.fileKey];if(x instanceof Error)throw x;return x||{body:Buffer.from('data:'+r.fileKey),type:'image/png'};},
+  storeFile:async(m,root,dir,name,body)=>{stored.push([m.id,root,dir,name,String(body)]);await null;return root.replace(/^~\//,'/home/u/')+'/'+dir+'/'+name;},
+  removeDirectory:async(m,dir)=>{removed.push([m.id,dir]);await null;},
   reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);return 'om_bot_'+ ++sent;},
   react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);},
   updateCard:async(a,messageId,card)=>{updated.push([a.id,messageId,card]);},
@@ -255,7 +389,7 @@ function topicFixture({binding,machine,machines=[],cot=true}={}){
  const topics=new Topics(store,deps);
  const send=msg=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg});
  const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
- return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
 }
 // The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
 // id, reason].
@@ -442,6 +576,73 @@ test('topics still starting when Bridge restarts are marked failed',()=>{
   new Topics(new Store(dir),{herdr:async()=>{},machine:()=>{},reply:async()=>{}});
   assert.deepEqual(new Store(dir).data.topics.map(t=>[t.state,t.error]),[['failed','Bridge 重启时 Agent 启动未完成'],['ready',''],['choosing','']]);
  }finally{fs.rmSync(dir,{recursive:true});}
+});
+const attachmentLogs=f=>f.store.data.logs.filter(l=>l.kind==='附件').map(l=>[l.level,l.message]);
+test('the images and files of a message are downloaded and written into the topic directory under the binding working directory before the prompt, which names them by absolute path where they were; the title leaves them out',async()=>{
+ const f=topicFixture();try{
+  let before;const capture=()=>{f.h.on['agent prompt']=(args,run)=>{before=[...f.stored];return run(args);};};capture();
+  f.resources.file_g={body:Buffer.from('log'),type:'text/plain'};
+  await f.send({messageId:'om_1',rawContentType:'post',content:'看看这个报错 \n![image](img_b)\n<file key="file_g" name="日志 1.log"/>',resources:[{type:'image',fileKey:'img_b'},{type:'file',fileKey:'file_g',fileName:'日志 1.log'}]});
+  const t=f.store.data.topics[0],dir=`/home/u/work/.herdr-bridge/${t.id}`;
+  assert.deepEqual(f.downloads,[['a','om_1','image','img_b',limits.image],['a','om_1','file','file_g',limits.file]]);
+  assert.deepEqual(f.stored,[['m','~/work/.herdr-bridge',t.id,'om_1-1.png','data:img_b'],['m','~/work/.herdr-bridge',t.id,'om_1-2.log','log']]);assert.deepEqual(before,f.stored);
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt'),[['agent','prompt','w1:p1',`看看这个报错 \n[图片 1：${dir}/om_1-1.png]\n[文件 1：日志 1.log，${dir}/om_1-2.log]`]]);
+  assert.deepEqual([t.title,f.h.calls[2]],['看看这个报错',['tab','rename','w1:t1','看看这个报错']]);
+  assert.equal(t.attachmentDir,dir);assert.equal(new Store(f.dir).data.topics[0].attachmentDir,dir);assert.deepEqual(f.replies,[]);assert.deepEqual(attachmentLogs(f),[]);
+  // In the ready topic, an image alone; then text, which downloads nothing.
+  f.h.calls.length=0;capture();await f.send({messageId:'om_2',rootId:'om_1',...imageOf('img_c')});
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w1:p1',`[图片 1：${dir}/om_2-1.png]`]]);assert.equal(before.length,3);
+  await f.send({messageId:'om_3',rootId:'om_1',content:'谢谢'});assert.deepEqual([f.downloads.length,f.stored.length],[3,3]);
+  // A topic that an image alone opens is called 图片.
+  await f.send({messageId:'om_4',...imageOf('img_d')});assert.equal(f.store.data.topics[1].title,'图片');assert.deepEqual(f.stored.at(-1).slice(2,4),[f.store.data.topics[1].id,'om_4-1.png']);
+ }finally{f.close();}
+});
+test('an attachment that cannot be downloaded, exceeds its limit or cannot be written is named as failed in the prompt, which still goes out after one notice in the topic; the details are only logged',async()=>{
+ const f=topicFixture();try{
+  Object.assign(f.resources,{img_big:coded('too_large','超过上限'),img_gone:coded(234003,'飞书接口错误 234003：File not in msg.'),file_big:coded('too_large','超过上限')});
+  const store=f.topics.storeFile;f.topics.storeFile=async(m,root,dir,name,body)=>{if(name==='om_1-5.txt')throw Error('sh: 1: cannot create w: Permission denied');return store(m,root,dir,name,body);};
+  let noticed;f.h.on['agent prompt']=(args,run)=>{noticed=f.replies.length;return run(args);};
+  await f.send({messageId:'om_1',rawContentType:'post',content:'四个附件\n![image](img_ok)![image](img_big)![image](img_gone)\n<file key="file_big" name="big.zip"/>\n<file key="file_w" name="w.txt"/>',
+   resources:[{type:'image',fileKey:'img_ok'},{type:'image',fileKey:'img_big'},{type:'image',fileKey:'img_gone'},{type:'file',fileKey:'file_big',fileName:'big.zip'},{type:'file',fileKey:'file_w',fileName:'w.txt'}]});
+  const t=f.store.data.topics[0],dir=`/home/u/work/.herdr-bridge/${t.id}`;
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),[`四个附件\n[图片 1：${dir}/om_1-1.png][图片 2：下载失败][图片 3：下载失败]\n[文件 1：下载失败]\n[文件 2：下载失败]`]);
+  assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_1',notice('未能把附件交给 Agent：图片 2 超过 10 MB，图片 3 下载失败，文件 1 超过 30 MB，文件 2 写入失败')]]);assert.equal(noticed,1);
+  assert.deepEqual(attachmentLogs(f),[['error',`${t.agentName}：图片 2 超过 10 MB，超过上限`],['error',`${t.agentName}：图片 3 下载失败，飞书接口错误 234003：File not in msg.`],['error',`${t.agentName}：文件 1 超过 30 MB，超过上限`],['error',`${t.agentName}：文件 2 写入失败，sh: 1: cannot create w: Permission denied`]]);
+  assert.equal(t.attachmentDir,dir);assert.equal(t.state,'ready');assert.deepEqual(cotLog(f)[0],['create','om_1']);
+  // Nothing written: the topic has no attachment directory.
+  await f.send({messageId:'om_2',...imageOf('img_gone')});const other=f.store.data.topics[1];
+  assert.equal(f.h.calls.filter(c=>c[1]==='prompt').at(-1)[3],'[图片 1：下载失败]');assert.equal(other.attachmentDir,undefined);assert.deepEqual(f.replies.at(-1).slice(2),['om_2',notice('未能把附件交给 Agent：图片 1 下载失败')]);
+ }finally{f.close();}
+});
+test('a kind of message that Bridge cannot forward gets a notice in its thread and opens no topic; in a binding that requires the mention only when it mentions the bot',async()=>{
+ const f=topicFixture();try{
+  await f.send({messageId:'om_1',...sticker});
+  assert.deepEqual([f.store.data.topics,f.h.calls,f.reacted,f.downloads],[[],[],[],[]]);assert.deepEqual(f.replies,[['a','oc_1','om_1',notice(unsupportedText)]]);
+  await f.send({messageId:'om_2',content:'hi'});f.replies.length=0;f.h.calls.length=0;f.reacted.length=0;
+  await f.send({messageId:'om_3',rootId:'om_2',rawContentType:'merge_forward',content:'<forwarded_messages/>',resources:[]});
+  assert.deepEqual([f.replies,f.h.calls,f.reacted,f.store.data.topics[0].messageIds],[[['a','oc_1','om_2',notice(unsupportedText)]],[],[],['om_2']]);
+  f.topics.reply=async()=>{throw Error('飞书未连接');};await f.send({messageId:'om_4',...sticker});assert.match(f.store.data.logs.at(-1).message,/飞书未连接/);
+ }finally{f.close();}
+ const g=topicFixture({binding:{requireMention:true}});try{
+  await g.send({messageId:'om_1',...sticker});assert.deepEqual(g.replies,[]);
+  await g.send({messageId:'om_2',...sticker,mentionedBot:true});assert.deepEqual([g.replies,g.store.data.topics],[[['a','oc_1','om_2',notice(unsupportedText)]],[]]);
+ }finally{g.close();}
+});
+test('the attachment directory of a topic is removed when the topic ends and when its binding is removed, then also for a topic whose removal failed before; a failure is only logged and a topic without attachments removes nothing',async()=>{
+ const f=topicFixture();try{
+  await f.send({messageId:'om_1',...imageOf('img_1')});await f.send({messageId:'om_2',content:'没有附件'});await f.send({messageId:'om_3',...imageOf('img_3')});await f.send({messageId:'om_4',...imageOf('img_4')});
+  const [one,two,three,four]=f.store.data.topics,dirOf=t=>`/home/u/work/.herdr-bridge/${t.id}`;
+  // The agents of the first two topics exit.
+  f.h.agents=f.h.agents.filter(a=>!['w1:p1','w1:p2'].includes(a.pane_id));await f.topics.sync(f.m,f.h.agents);
+  assert.deepEqual([one.state,two.state],['closed','closed']);assert.deepEqual(f.removed,[['m',dirOf(one)]]);assert.equal(one.attachmentDir,undefined);assert.equal(new Store(f.dir).data.topics[0].attachmentDir,undefined);
+  // A removal that fails keeps the record for the next try.
+  f.topics.removeDirectory=async()=>{throw Error('连接超时，请检查 SSH 与 Herdr 状态');};
+  f.h.agents=f.h.agents.filter(a=>a.pane_id!=='w1:p3');await f.topics.sync(f.m,f.h.agents);
+  assert.deepEqual([three.state,three.attachmentDir],['closed',dirOf(three)]);assert.deepEqual(attachmentLogs(f),[['error',`${three.agentName}：未能删除附件目录，连接超时，请检查 SSH 与 Herdr 状态`]]);
+  f.topics.removeDirectory=async(m,dir)=>{f.removed.push([m.id,dir]);};f.h.calls.length=0;
+  await f.topics.unbind('b');
+  assert.deepEqual(f.removed.slice(1).sort(),[['m',dirOf(three)],['m',dirOf(four)]].sort());assert.deepEqual(f.h.calls,[['pane','remote-answers','w1:p4','off']]);assert.deepEqual(f.store.data.topics,[]);
+ }finally{f.close();}
 });
 
 // A ready topic whose agent runs in w1:p1, with the COT c1 of its first message om_1 open unless the fixture options refuse it;
@@ -1366,6 +1567,22 @@ test('removing a binding drops its topics, turns off remote answers for those li
   assert.deepEqual(f.store.data.topics,[]);assert.match(f.store.data.logs.at(-1).message,/未能关闭.*连接超时/);
  }finally{f.close();}
 });
+test('an adopted topic writes attachments under the working directory that Herdr reports for its agent, where the agent runs before where its shell is; without one they fail; /release removes the directory',async()=>{
+ const f=await adoptFixture();try{
+  const t=await f.adopt('om_cmd',claudeChoice),prompts=()=>f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),root='/home/someone/code/herdr/.herdr-bridge';f.replies.length=0;
+  await f.send({messageId:'om_2',rootId:'om_cmd',...imageOf('img_a')});
+  assert.deepEqual(f.stored,[['m',root,t.id,'om_2-1.png','data:img_a']]);assert.deepEqual(prompts().at(-1),`[图片 1：${root}/${t.id}/om_2-1.png]`);
+  const agent=f.h.agents.find(a=>a.pane_id==='w2:p1');agent.foreground_cwd='/home/someone/code/herdr/sub';
+  await f.send({messageId:'om_3',rootId:'om_cmd',...imageOf('img_b')});
+  assert.equal(f.stored.at(-1)[1],'/home/someone/code/herdr/sub/.herdr-bridge');assert.equal(t.attachmentDir,`/home/someone/code/herdr/sub/.herdr-bridge/${t.id}`);
+  delete agent.foreground_cwd;delete agent.cwd;assert.deepEqual(f.replies,[]);
+  await f.send({messageId:'om_4',rootId:'om_cmd',...imageOf('img_c')});
+  assert.deepEqual([f.stored.length,f.downloads.length,prompts().at(-1)],[2,2,'[图片 1：下载失败]']);assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能把附件交给 Agent：图片 1 写入失败')]);
+  assert.match(attachmentLogs(f).at(-1)[1],/图片 1 写入失败，Agent 的工作目录未知/);
+  await f.send({messageId:'om_5',rootId:'om_cmd',content:'/release'});
+  assert.equal(t.state,'closed');assert.deepEqual(f.removed,[['m',`/home/someone/code/herdr/sub/.herdr-bridge/${t.id}`]]);assert.equal(t.attachmentDir,undefined);
+ }finally{f.close();}
+});
 
 const minutes=n=>n*60000;
 function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}={}){
@@ -1432,6 +1649,15 @@ test('a group binding keeps the mention choice and the permission mode chosen; a
   await f.pending.open(allowed,{...firstDm,chatType:'group',chatId:'oc_group2',messageId:'om_g2'});f.store.data.apps=[];
   assert.throws(()=>f.pending.bind({...form,token:f.pending.list()[0].token}),/应用不存在/);
  }finally{f.close();}
+});
+test('binding a pending chat opens the first topic with its first message only when that message can be forwarded: an image does, only the mention or a sticker does not',async()=>{
+ for(const [message,opens] of [[{...firstDm,messageId:'om_image',...imageOf('img_1')},true],[{...firstDm,messageId:'om_mention',chatType:'group',chatId:'oc_group',content:'',mentionedBot:true},false],[{...firstDm,messageId:'om_sticker',...sticker},false]]){
+  const f=pendingFixture();try{
+   await f.pending.open(allowed,message);assert.deepEqual(f.replies.map(r=>r[2]),[message.messageId]);
+   const binding=f.pending.bind({...form,token:f.pending.list()[0].token});
+   assert.deepEqual(f.store.data.bindings,[binding],message.messageId);assert.deepEqual(f.bound,opens?[[f.store.data.apps[0],binding,message]]:[],message.messageId);assert.deepEqual(f.pending.list(),[]);
+  }finally{f.close();}
+ }
 });
 
 const png=Buffer.from('89504e470d0a1a0a0000','hex');
@@ -1596,14 +1822,15 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.equal((await api('machines/install',{id:machineId})).status,404);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
-test('the server hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; removing the binding turns off remote answers for its topic',async()=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),calls=path.join(dir,'calls');
+test('the server hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; removing the binding turns off remote answers for its topic and removes its attachment directory',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),calls=path.join(dir,'calls'),attachments=path.join(dir,'work','.herdr-bridge','t');
  const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',state_change_seq:2,reply_seq:1,request_ids:[1],remote_answers:true};
  fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'fake',type:'local',session:'default',binary:herdr,enabled:true}],
   apps:[{id:'app',name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false}],bindings:[{id:'b',name:'助手',appId:'app',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false,enabled:true}],
   topics:[{id:'t',bindingId:'b',appId:'app',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',state:'ready',error:'',messageIds:['om_1'],
-   reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],createdAt:1}]}));
+   reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],attachmentDir:attachments,createdAt:1}]}));
+ fs.mkdirSync(attachments,{recursive:true});fs.writeFileSync(path.join(attachments,'om_1-1.png'),'png');
  fs.writeFileSync(herdr,['#!/bin/sh',`echo "$*" >> ${quote(calls)}`,'case "$3 $4" in',
   ` 'agent list') echo ${quote(JSON.stringify({result:{type:'agent_list',agents:[agent]}}))};;`,
   ` 'agent replies') echo ${quote(JSON.stringify({result:{type:'agent_replies',agent,replies:[{seq:1,text:'hi'}]}}))};;`,
@@ -1622,6 +1849,7 @@ test('the server hands every refreshed agent list to the topics, which forward n
   const removed=await fetch(`http://127.0.0.1:${port}/api/bindings/remove`,{method:'POST',headers:{authorization:'Bearer '+key},body:JSON.stringify({id:'b'})});assert.equal(removed.status,200);
   const off=()=>fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('remote-answers'));for(let i=0;i<100&&!off().length;i++)await later(50);
   assert.deepEqual(off(),['--session default pane remote-answers w1:p1 off']);assert.deepEqual((await api('state')).topics,[]);
+  for(let i=0;i<100&&fs.existsSync(attachments);i++)await later(50);assert.equal(fs.existsSync(attachments),false);assert.ok(fs.existsSync(path.dirname(attachments)));
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
 test('the server refuses to start with a BRIDGE_URL that is not an http(s) origin',async()=>{

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import {normalizeBinding} from './platform.mjs';
+import {normalizeBinding,forwardable} from './platform.mjs';
 import {notice,linkNotice} from './message-cards.mjs';
 // A chat that writes to an app before it has a binding: it gets a link, and the binding saved through that link starts with its first message.
 const lifetime=30*60000;
@@ -29,11 +29,12 @@ export class PendingChats{
  take(token){this.prune();for(const [key,chat] of this.chats)if(chat.token===token){this.chats.delete(key);return chat;}return null;}
  prune(){const now=this.now();for(const [key,chat] of this.chats)if(chat.expiresAt<=now)this.chats.delete(key);}
  // Saves the binding asked for through b.token. App and chat come from the record, never from the client; an invalid form keeps the token.
- // The first message then opens the chat's first topic in the background.
+ // The first message then opens the chat's first topic in the background, when an agent can be prompted with it: a message that only
+ // mentions the bot, or of a kind that Bridge cannot forward, asked for the binding and opens nothing.
  bind(b){
   const chat=this.list().find(x=>x.token===b.token);if(!chat)throw Error('绑定链接已失效，请在飞书里重新发消息');
   const a=this.app(chat.appId),m=this.machine(b.machineId),binding=normalizeBinding({...b,machineId:m.id},chat,this.store.data.bindings),{message}=this.take(chat.token);
   this.store.data.bindings.push(binding);this.store.save();this.store.log('会话绑定',`${binding.name} → ${m.name} · ${binding.kind} · ${binding.cwd}`);
-  this.onBound(a,binding,message);return binding;
+  if(forwardable(message))this.onBound(a,binding,message);return binding;
  }
 }

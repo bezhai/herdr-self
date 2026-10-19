@@ -45,8 +45,21 @@ export function normalizeBinding(b,chat,bindings){
 }
 // Topics already open keep the mode their agent started with; the next topics start with the new one.
 export function setPermissionMode(binding,mode){if(binding.kind!=='claude')throw Error('只有 Claude 绑定可以设置权限模式');binding.permissionMode=claudeMode(mode);}
-// Bridge takes text, and rich text without resources, from a person. Mentions are left to routing and topic handling.
-export function routable(msg){return msg.senderType==='user'&&['text','post'].includes(msg.rawContentType)&&Boolean(msg.senderId)&&!msg.resources?.length;}
+// Bridge takes every message of a person. Mentions are left to routing and topic handling.
+export const routable=msg=>msg.senderType==='user'&&Boolean(msg.senderId);
+// The kinds of messages whose content Bridge can hand to an agent: text, and rich text with its images and files, an image and a file (see
+// attachments.mjs). Bridge gets nothing out of the others, such as stickers, merged forwards and cards.
+export const supported=msg=>['text','post','image','file'].includes(msg.rawContentType);
+// A message that Bridge can prompt an agent with: of a supported kind, with content of at most 16000 characters.
+export function forwardable(msg){const content=msg.content?.trim();return supported(msg)&&Boolean(content)&&content.length<=16000;}
+// A failed download of a message resource: Feishu answers with a JSON body, which a stream response carries as a stream. Keeps Feishu's
+// code like openApi; any other failure stays as it is.
+async function resourceError(e){
+ const body=e.response?.data;if(typeof body?.[Symbol.asyncIterator]!=='function')return e;
+ let text='';try{for await(const chunk of body){text+=chunk;if(text.length>4096)break;}const {code,msg}=JSON.parse(text);if(code)return Object.assign(Error(`飞书接口错误 ${code}：${msg||''}`),{code});}catch{}
+ return e;
+}
+const tooLarge=()=>Object.assign(Error('超过下载上限'),{code:'too_large'});
 export class Platforms{
  // onMessage(app,binding,msg) receives every allowed message of a bound chat; onUnbound(app,msg) the ones that ask for a binding;
  // onCardAction(app,evt) every card click of a person on the allowlist and returns the callback response. fetch downloads bot avatars.
@@ -131,10 +144,10 @@ export class Platforms{
   catch(e){this.store.log('斜杠命令',`${a.name}：未能注册斜杠命令，${missingScope.includes(e.code)?'应用缺少权限 application:app_slash_command:read / write；命令仍可手动输入':e.message}`,'error');}
  }
  receive(a,msg){if(!a.enabled||!a.allowedUsers.includes(msg.senderId)||!routable(msg))return;
-  const content=msg.content?.trim();if(!content||content.length>16000)return;
   const b=this.store.data.bindings.find(x=>x.appId===a.id&&x.chatId===msg.chatId);
-  if(b){if(b.enabled)this.onMessage(a,b,msg);}
-  // A chat without a binding asks for one: a direct chat with any message, a group only by mentioning the bot.
+  // A bound chat takes what an agent can be prompted with, and the kinds that Bridge cannot forward, which get a notice (see Topics.handle).
+  if(b){if(b.enabled&&(forwardable(msg)||!supported(msg)))this.onMessage(a,b,msg);}
+  // A chat without a binding asks for one, whatever the message holds: a direct chat with any message, a group only by mentioning the bot.
   else if(msg.chatType==='p2p'||msg.mentionedBot)this.onUnbound(a,msg);
  }
  // Like messages, a card click counts only from someone on the allowlist; anyone else in the chat can click too.
@@ -149,5 +162,15 @@ export class Platforms{
  async unreact(a,messageId,reactionId){await this.connected(a).removeReaction(messageId,reactionId);}
  // An OpenAPI call that the SDK does not cover, such as the COT calls (see openApi).
  async request(a,options){return openApi(this.connected(a),options);}
+ // Resource r ({type, fileKey}, type image or file) of message messageId, received by app a, as {body, type}, type its content type without
+ // parameters. A body over limit bytes is refused with code too_large: by the length the response announces before any of the body is read,
+ // and by what arrives when it announces none or too little. Feishu's own failures keep their code (see resourceError).
+ async download(a,messageId,r,limit){
+  let response;try{response=await this.connected(a).rawClient.im.v1.messageResource.get({path:{message_id:messageId,file_key:r.fileKey},params:{type:r.type}});}catch(e){throw await resourceError(e);}
+  const header=name=>response.headers?.[name]??response.headers?.[name.replace(/(^|-)./g,c=>c.toUpperCase())];
+  const stream=response.getReadableStream();if(Number(header('content-length'))>limit){stream.destroy();throw tooLarge();}
+  const chunks=[];let size=0;for await(const chunk of stream){size+=chunk.length;if(size>limit){stream.destroy();throw tooLarge();}chunks.push(chunk);}
+  return {body:Buffer.concat(chunks),type:String(header('content-type')||'').split(';')[0].trim().toLowerCase()};
+ }
  connected(a){const channel=this.runtime.get(a.id)?.channel;if(!channel||channel.getConnectionStatus()?.state!=='connected')throw Error('飞书未连接');return channel;}
 }
