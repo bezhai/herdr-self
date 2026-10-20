@@ -1,0 +1,21 @@
+id = "bezhai.worktree-task"
+name = "Worktree Task"
+version = "0.1.0"
+min_herdr_version = "0.9.1"
+description = "在新的 Git worktree 里开始一个 Claude 或 Codex 任务"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "start"
+title = "在新 worktree 里开始任务"
+description = "打开表单：任务描述、可选的已有分支和 Agent，提交后建 worktree 并启动 Agent"
+contexts = ["workspace", "pane"]
+command = ["node", "open.mjs"]
+
+[[panes]]
+id = "form"
+title = "开始任务"
+placement = "popup"
+width = "80%"
+height = "80%"
+command = ["node", "form.mjs"]
