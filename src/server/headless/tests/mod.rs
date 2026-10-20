@@ -8,6 +8,8 @@ mod agent_request_tests;
 mod pane_graphics_tests;
 #[path = "pane_move.rs"]
 mod pane_move_tests;
+#[path = "quiet_notifications.rs"]
+mod quiet_notification_tests;
 #[path = "surface_delta.rs"]
 mod surface_delta_tests;
 #[path = "surface_interest.rs"]

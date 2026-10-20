@@ -108,6 +108,7 @@ pub fn notification_toast_for_pane_state_update(
     update: &PaneStateUpdate,
 ) -> Option<ToastKind> {
     if update.suppress_completion
+        || update.quiet
         || suppress_active_tab_notifications
         || update.state == update.previous_state
     {
@@ -119,6 +120,26 @@ pub fn notification_toast_for_pane_state_update(
         update.previous_state,
         update.state,
     )
+}
+
+/// Whether nobody is notified of a `kind` notification of an agent whose
+/// work someone else follows. The agent that made an agent call learns from
+/// a call notice how the call went, so the turn that the target ends during
+/// the call does not raise Finished; a wait for input still raises
+/// NeedsAttention, since a person may have to answer it. While remote
+/// answers are on, the agent's requests go to whoever answers them, such as
+/// a chat bridge or the calling agent, so neither kind is raised. The pane
+/// still completes its work; only the notification is left out.
+fn agent_notification_is_quiet(
+    kind: ToastKind,
+    during_agent_call: bool,
+    remote_answers: bool,
+) -> bool {
+    match kind {
+        ToastKind::Finished => during_agent_call || remote_answers,
+        ToastKind::NeedsAttention => remote_answers,
+        ToastKind::UpdateInstalled => false,
+    }
 }
 
 fn toast_agent_label(agent_label: &str) -> &str {
@@ -181,6 +202,9 @@ pub struct PaneStateUpdate {
     pub agent_released: bool,
     pub agent_release_status: Option<crate::api::schema::AgentStatus>,
     pub suppress_completion: bool,
+    /// Nobody is notified of this change, which still completes work as
+    /// usual; see [`agent_notification_is_quiet`].
+    pub quiet: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +330,7 @@ impl AppState {
                     .get_mut(&terminal_id)?
                     .expire_agent_metadata_at(scheduled_deadline, now)?;
                 let change = mutation.effective_state_change?;
-                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, false)?;
+                let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, false, false)?;
                 let update = PaneStateUpdate {
                     pane_id,
                     ws_idx,
@@ -324,6 +348,7 @@ impl AppState {
                     agent_released: false,
                     agent_release_status: None,
                     suppress_completion: false,
+                    quiet: false,
                 };
                 Some(update)
             })
@@ -1702,10 +1727,14 @@ impl AppState {
             unchanged_change,
             suppress_acquisition_completion,
             completion_reset,
+            remote_answers,
         ) = {
             let terminal = self.terminals.get_mut(&terminal_id)?;
             let previous_agent_name = terminal.agent_name.clone();
             let had_completion = terminal.last_agent_completion_seq.is_some() || !previous_seen;
+            // An agent that leaves takes its remote answers along below; the
+            // change still happened while they were on.
+            let remote_answers = terminal.remote_answers();
             let mutation = update(terminal)?;
             let completion_reset = mutation.session_ref_changed
                 || mutation
@@ -1736,6 +1765,7 @@ impl AppState {
                 unchanged_change,
                 suppress_acquisition_completion,
                 completion_reset,
+                remote_answers,
             )
         };
         if completion_reset {
@@ -1750,6 +1780,16 @@ impl AppState {
         let change = mutation.effective_state_change.or(unchanged_change)?;
         let suppress_completion = force_suppress_completion
             || (change.state == AgentState::Idle && suppress_acquisition_completion);
+        // A call whose reply is already in ends below when its target goes
+        // idle, so the call is looked up before calls advance.
+        let quiet = notification_toast_for_state_change(false, change.previous_state, change.state)
+            .is_some_and(|kind| {
+                agent_notification_is_quiet(
+                    kind,
+                    self.agent_call_of_callee(pane_id).is_some(),
+                    remote_answers,
+                )
+            });
         if change.previous_state != change.state {
             self.next_agent_state_change_seq += 1;
             if let Some(terminal) = self.terminals.get_mut(&terminal_id) {
@@ -1758,10 +1798,12 @@ impl AppState {
                 terminal.last_agent_completion_seq = (!suppress_completion
                     && is_completion_transition(&change))
                 .then_some(self.next_agent_state_change_seq);
+                terminal.set_last_agent_state_change_quiet(quiet);
             }
         }
         self.advance_agent_calls_on_state(pane_id, change.state, agent_left, now);
-        let seen = self.apply_pane_state_change(ws_idx, pane_id, &change, suppress_completion)?;
+        let seen =
+            self.apply_pane_state_change(ws_idx, pane_id, &change, suppress_completion, quiet)?;
         let update = PaneStateUpdate {
             pane_id,
             ws_idx,
@@ -1787,6 +1829,7 @@ impl AppState {
             agent_released,
             agent_release_status: agent_released.then(|| pane_agent_status(change.state, seen)),
             suppress_completion,
+            quiet,
         };
         Some(update)
     }
@@ -1832,6 +1875,7 @@ impl AppState {
         pane_id: PaneId,
         change: &EffectiveStateChange,
         suppress_completion: bool,
+        quiet: bool,
     ) -> Option<bool> {
         let is_active_tab = self.pane_is_in_active_tab(ws_idx, pane_id);
         let suppress_active_tab_notifications =
@@ -1848,7 +1892,7 @@ impl AppState {
         }
         let seen = pane.seen;
 
-        if !suppress_completion {
+        if !suppress_completion && !quiet {
             if let Some(delivery) =
                 self.record_or_deliver_agent_notification(ws_idx, pane_id, change)
             {
@@ -4653,6 +4697,129 @@ mod tests {
         assert!(active_tab_suppresses_notifications(true, Some(true)));
         assert!(!active_tab_suppresses_notifications(true, Some(false)));
         assert!(!active_tab_suppresses_notifications(false, None));
+    }
+
+    #[test]
+    fn agent_notifications_are_quiet_for_a_call_turn_and_under_remote_answers() {
+        use ToastKind::{Finished, NeedsAttention, UpdateInstalled};
+        for (kind, during_agent_call, remote_answers, quiet) in [
+            (Finished, false, false, false),
+            (Finished, true, false, true),
+            (Finished, false, true, true),
+            (NeedsAttention, false, false, false),
+            (NeedsAttention, true, false, false),
+            (NeedsAttention, false, true, true),
+            (UpdateInstalled, true, true, false),
+        ] {
+            assert_eq!(
+                agent_notification_is_quiet(kind, during_agent_call, remote_answers),
+                quiet,
+                "{kind:?}, during a call: {during_agent_call}, remote answers: {remote_answers}"
+            );
+        }
+    }
+
+    /// A background Pi agent and a Claude agent beside it, with Herdr toasts
+    /// shown after `delay_seconds`.
+    fn quiet_notification_app(delay_seconds: u64) -> (AppState, PaneId, PaneId) {
+        let mut state = app_with_workspaces(&["active", "background"]);
+        state.toast_config.delivery = crate::config::ToastDelivery::Herdr;
+        state.toast_config.delay_seconds = delay_seconds;
+        let pane_id = state.workspaces[1].tabs[0].root_pane;
+        let neighbor = state.workspaces[1].test_split(Direction::Horizontal);
+        state.ensure_test_terminals();
+        set_agent_state(&mut state, neighbor, Agent::Claude, AgentState::Idle);
+        set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Idle);
+        (state, pane_id, neighbor)
+    }
+
+    fn set_agent_state(
+        state: &mut AppState,
+        pane_id: PaneId,
+        agent: Agent,
+        agent_state: AgentState,
+    ) {
+        state.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(agent),
+            state: agent_state,
+            visible_blocker: agent_state == AgentState::Blocked,
+            visible_working: agent_state == AgentState::Working,
+            process_exited: false,
+            observed_at: Instant::now(),
+        });
+    }
+
+    fn assert_no_agent_notification(state: &AppState, case: &str) {
+        assert!(state.toast.is_none(), "{case}: {:?}", state.toast);
+        assert!(
+            state.pending_agent_notifications.is_empty(),
+            "{case}: {:?}",
+            state.pending_agent_notifications
+        );
+    }
+
+    #[test]
+    fn call_turn_finishes_without_herdr_toast_or_delayed_notification() {
+        for delay_seconds in [0, 1] {
+            let (mut state, pane_id, caller) = quiet_notification_app(delay_seconds);
+            state.register_agent_call(crate::app::agent_calls::NewAgentCall {
+                caller_pane: caller,
+                caller_agent: Agent::Claude,
+                callee_pane: pane_id,
+                callee_agent: Agent::Pi,
+                answer_requests: false,
+                turns_remote_answers_off: false,
+            });
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Working);
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Idle);
+
+            let case = format!("delay {delay_seconds}");
+            assert_no_agent_notification(&state, &case);
+            assert!(!state.workspaces[1].panes[&pane_id].seen, "{case}: done");
+            let terminal =
+                &state.terminals[&state.workspaces[1].panes[&pane_id].attached_terminal_id];
+            assert!(terminal.last_agent_completion_seq.is_some(), "{case}");
+        }
+    }
+
+    #[test]
+    fn remote_answers_leave_no_herdr_toast_or_delayed_notification() {
+        for delay_seconds in [0, 1] {
+            let (mut state, pane_id, _) = quiet_notification_app(delay_seconds);
+            let terminal_id = state.workspaces[1].panes[&pane_id]
+                .attached_terminal_id
+                .clone();
+            assert!(state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .enable_remote_answers());
+            let case = format!("delay {delay_seconds}");
+
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Working);
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Blocked);
+            assert_no_agent_notification(&state, &format!("{case}, blocked"));
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Working);
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Idle);
+            assert_no_agent_notification(&state, &format!("{case}, finished"));
+            assert!(!state.workspaces[1].panes[&pane_id].seen, "{case}: done");
+            assert!(state.terminals[&terminal_id]
+                .last_agent_completion_seq
+                .is_some());
+
+            state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .disable_remote_answers();
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Working);
+            set_agent_state(&mut state, pane_id, Agent::Pi, AgentState::Idle);
+            assert!(
+                state.toast.is_some() || !state.pending_agent_notifications.is_empty(),
+                "{case}: notifies once remote answers are off"
+            );
+        }
     }
 
     #[test]

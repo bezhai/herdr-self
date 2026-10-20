@@ -162,6 +162,9 @@ pub struct TerminalState {
     /// `last_agent_state_change_seq`.
     pub last_agent_state_change_at: Option<Instant>,
     pub last_agent_completion_seq: Option<u64>,
+    /// The `last_agent_state_change_seq` of a state change that nobody is
+    /// notified of; see [`TerminalState::last_agent_state_change_is_quiet`].
+    quiet_agent_state_change_seq: Option<u64>,
     agent_replies: AgentReplies,
     agent_requests: AgentRequests,
     agent_tool_calls: AgentToolCalls,
@@ -206,6 +209,7 @@ impl TerminalState {
             last_agent_state_change_seq: None,
             last_agent_state_change_at: None,
             last_agent_completion_seq: None,
+            quiet_agent_state_change_seq: None,
             agent_replies: AgentReplies::default(),
             agent_requests: AgentRequests::default(),
             agent_tool_calls: AgentToolCalls::default(),
@@ -2139,6 +2143,7 @@ impl TerminalState {
         self.last_agent_state_change_seq = None;
         self.last_agent_state_change_at = None;
         self.last_agent_completion_seq = None;
+        self.quiet_agent_state_change_seq = None;
         self.clear_agent_conversation();
         self.disable_remote_answers();
         self.launch_argv = None;
@@ -2261,6 +2266,21 @@ impl TerminalState {
 
     pub fn remote_answers(&self) -> bool {
         self.remote_answers
+    }
+
+    /// Marks whether nobody is notified of the state change recorded in
+    /// `last_agent_state_change_seq`.
+    pub fn set_last_agent_state_change_quiet(&mut self, quiet: bool) {
+        self.quiet_agent_state_change_seq = self.last_agent_state_change_seq.filter(|_| quiet);
+    }
+
+    /// Whether nobody is notified of the last effective state change. Herdr
+    /// decides this when the state changes, so that a notification decided
+    /// later, from the state before and after an API request, follows the
+    /// same rule; see `agent_notification_is_quiet` in `app::actions`.
+    pub fn last_agent_state_change_is_quiet(&self) -> bool {
+        self.quiet_agent_state_change_seq.is_some()
+            && self.quiet_agent_state_change_seq == self.last_agent_state_change_seq
     }
 
     /// Lets the current agent's requests wait for an answer from outside the
@@ -3005,6 +3025,29 @@ mod tests {
         terminal.clear_agent_runtime_identity_after_respawn();
 
         assert!(!terminal.remote_answers());
+    }
+
+    #[test]
+    fn a_quiet_mark_belongs_to_the_state_change_it_was_set_for() {
+        let mut terminal = test_terminal();
+        terminal.set_last_agent_state_change_quiet(true);
+        assert!(
+            !terminal.last_agent_state_change_is_quiet(),
+            "no state change to mark yet"
+        );
+
+        terminal.last_agent_state_change_seq = Some(1);
+        terminal.set_last_agent_state_change_quiet(true);
+        assert!(terminal.last_agent_state_change_is_quiet());
+
+        terminal.last_agent_state_change_seq = Some(2);
+        assert!(
+            !terminal.last_agent_state_change_is_quiet(),
+            "a later change is not marked"
+        );
+        terminal.set_last_agent_state_change_quiet(true);
+        terminal.clear_agent_runtime_identity_after_respawn();
+        assert!(!terminal.last_agent_state_change_is_quiet());
     }
 
     #[test]

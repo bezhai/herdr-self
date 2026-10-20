@@ -147,6 +147,8 @@ herdr agent answer reviewer 8 --answers '{"Which database?":["sqlite"]}'
 
 A dialog that the hooks do not report, such as a trust-folder dialog or a Codex question, still needs a person; after waiting 2 seconds for a request, the notice says so. When the call ends, remote answers return to their previous setting: the call turns them off only if it turned them on, and leaves them alone if they were already on, for example for a chat bridge, or if someone set them explicitly during the call.
 
+The turn that the target works on for the call ends without a finished notification, whether its reply arrives before or after the target goes idle; the notice to the caller takes its place. When the target waits for input, it still raises a needs-input notification, unless remote answers are on for it, as they are with `--answer-requests`. After the call has ended, the target's own turns notify as usual. See [Notifications](/docs/configuration/#notifications).
+
 Calls and their queued notices survive a live handoff, such as `herdr update --handoff`. Replies do not, so after a handoff a `finished` notice from before it can point at a reply that is gone; read the target with `herdr agent read` instead. A cold server restart drops calls and notices, as it drops replies.
 
 ## Recipes

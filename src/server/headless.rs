@@ -3294,10 +3294,14 @@ impl HeadlessServer {
                 continue;
             };
 
+            // Whether nobody is notified of the change was decided when it
+            // happened: the request may already have ended the agent call
+            // that the change belonged to.
             let new_state = terminal_after.state;
             if new_state == *prev_state
                 || (new_state == crate::detect::AgentState::Idle
                     && terminal_after.last_agent_completion_seq.is_none())
+                || terminal_after.last_agent_state_change_is_quiet()
             {
                 continue;
             }

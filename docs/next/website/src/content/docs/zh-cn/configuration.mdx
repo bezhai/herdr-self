@@ -479,6 +479,8 @@ position = "bottom-right"
 
 选择 `herdr` 可使用应用内 toast，选择 `terminal` 可使用适合 SSH 场景的外层终端通知，选择 `system` 可使用本地操作系统通知服务，选择 `off` 可禁用弹出通知。Herdr 会抑制活动标签页的弹出通知。在[配置参考](/docs/config-reference/)中搜索 `ui.toast`，可查看位置、延迟行为和剪贴板反馈设置。
 
+对于工作由别处跟进的智能体，Herdr 不发通知。智能体在处理[智能体调用](/zh-cn/docs/agent-automation/#智能体调用)期间结束一轮时，不发完成通知，因为发起调用的智能体会收到调用结果；它等待输入时，需要输入的通知照常发出。窗格的远程应答（remote answers）打开期间，例如为聊天桥接打开，或在带 `--answer-requests` 的调用期间，其智能体的完成通知和需要输入的通知都不发。调用结束或远程应答关闭后，通知照常。省去的只是通知和它的提示音：窗格仍显示 `done`，`herdr notification show` 不受影响。这些规则由服务器执行，因此对所有连接的客户端都有效。
+
 在 macOS 上，`system` 使用内嵌的原生 `Herdr.app`（`dev.herdr.notifications`），私有安装于 `~/Library/Application Support/Herdr Notifications/`。它会请求通知中心权限，不显示 Dock 图标，无需 Homebrew 辅助程序或运行时编译器。Agent 通知标题包含事件和机器名。点击定向通知后，原客户端切换到对应机器并聚焦 pane、tab 或 workspace；客户端已退出、目标已删除或服务器已重启时会报告不可用。对已运行且受支持的宿主终端，会尽力将其置前。原生安装或启动失败时可回退到已安装的 `terminal-notifier`；不再使用 AppleScript 通知。系统专注模式和权限仍决定是否显示横幅。Linux 和 Windows 保留现有系统通知实现。
 
 ## 声音

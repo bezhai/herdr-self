@@ -64,7 +64,7 @@ impl HeadlessServer {
         &mut self,
         update: &crate::app::actions::PaneStateUpdate,
     ) -> bool {
-        if update.suppress_completion {
+        if update.suppress_completion || update.quiet {
             return false;
         }
         self.forward_semantic_agent_transition(
@@ -164,7 +164,10 @@ impl HeadlessServer {
         let suppress_active_tab_notifications =
             self.active_tab_suppresses_notifications(is_active_tab);
 
-        if !update.suppress_completion && self.app.state.sound.allows(update.known_agent) {
+        if !update.suppress_completion
+            && !update.quiet
+            && self.app.state.sound.allows(update.known_agent)
+        {
             if let Some(sound) = crate::app::actions::notification_sound_for_state_change(
                 suppress_active_tab_notifications,
                 update.previous_state,
@@ -420,9 +423,9 @@ impl HeadlessServer {
                 // sound policy so reloads can keep server-side notification policy live.
                 self.sync_foreground_client_state();
                 let pane_updates = self.app.handle_internal_event_with_pane_updates(ev);
-                let suppress_completion = pane_updates
-                    .iter()
-                    .any(|update| update.pane_id == pane_id_val && update.suppress_completion);
+                let silent = pane_updates.iter().any(|update| {
+                    update.pane_id == pane_id_val && (update.suppress_completion || update.quiet)
+                });
                 for update in pane_updates
                     .iter()
                     .filter(|update| update.pane_id == pane_id_val)
@@ -446,7 +449,7 @@ impl HeadlessServer {
 
                 let next_state = self.pane_effective_state(pane_id_val);
 
-                if !suppress_completion
+                if !silent
                     && self.app.state.toast_config.delay_seconds == 0
                     && self.app.state.sound.allows(agent_val)
                 {
@@ -463,7 +466,7 @@ impl HeadlessServer {
                     }
                 }
 
-                let toast_msg = if !suppress_completion
+                let toast_msg = if !silent
                     && self.app.state.toast_config.delay_seconds == 0
                     && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
                 {
@@ -513,9 +516,9 @@ impl HeadlessServer {
 
                 self.sync_foreground_client_state();
                 let pane_updates = self.app.handle_internal_event_with_pane_updates(ev);
-                let suppress_completion = pane_updates
-                    .iter()
-                    .any(|update| update.pane_id == pane_id_val && update.suppress_completion);
+                let silent = pane_updates.iter().any(|update| {
+                    update.pane_id == pane_id_val && (update.suppress_completion || update.quiet)
+                });
                 for update in pane_updates
                     .iter()
                     .filter(|update| update.pane_id == pane_id_val)
@@ -540,7 +543,7 @@ impl HeadlessServer {
 
                 let next_state = self.pane_effective_state(pane_id_val);
 
-                if !suppress_completion
+                if !silent
                     && self.app.state.toast_config.delay_seconds == 0
                     && self.app.state.sound.allows(agent_val)
                 {
@@ -557,7 +560,7 @@ impl HeadlessServer {
                     }
                 }
 
-                let toast_msg = if !suppress_completion
+                let toast_msg = if !silent
                     && self.app.state.toast_config.delay_seconds == 0
                     && should_forward_toast_to_clients(self.app.state.toast_config.delivery)
                 {
