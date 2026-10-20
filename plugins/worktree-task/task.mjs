@@ -1,7 +1,7 @@
 // The task script: starts a Claude or Codex task in a new worktree of the repository of the current directory. The popup of the plugin
 // and the wt shell function both run it; `node task.mjs --help` lists the options.
 import fs from 'node:fs';import path from 'node:path';
-import {configDir,loadConfig} from './config.mjs';import {startTask,notifyUser} from './start.mjs';
+import {configDir,loadConfig} from './config.mjs';import {startTask,notifyUser} from './start.mjs';import {continueBranch} from '../../bridge/worktree-branch.mjs';
 const usage=`用法：node task.mjs [--codex] [-b <分支>] [--notify] [--] <描述… | 文件 [补充说明…] | - [补充说明…]>
   描述可以是几个参数（用空格连起来）、一个文件，或者 -（从标准输入读）；文件和 - 后面的参数作为 Additional context 附在后面。
   -b, --branch <分支>  用本地或 origin 上已有的分支，不再起名；不给描述时让 Agent 继续这个分支上的工作
@@ -35,7 +35,7 @@ function readDescription(rest,{cwd,branch}){
  else text=rest.join(' ');
  text=text.trimEnd();
  if(extra.length)text=`${text?text+'\n\n':''}Additional context: ${extra.join(' ')}`;
- return text||(branch?`Continue work on branch ${branch}`:'');
+ return text||(branch?continueBranch(branch):'');
 }
 async function main(){
  let o;try{o=parseArgs(process.argv.slice(2));}catch(e){if(!(e instanceof UsageError))throw e;console.error(`${e.message}\n${usage}`);process.exit(2);}

@@ -1,7 +1,8 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {spawn} from 'node:child_process';import net from 'node:net';
+import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';
 import {Readable} from 'node:stream';
-import {normalizeMachine,remoteInvocation,herdr,makeDirectory,storeFile,removeDirectory,quote,Store} from './core.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
+import {normalizeMachine,remoteInvocation,herdr,exec,makeDirectory,storeFile,removeDirectory,quote,Store} from './core.mjs';
+import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {check} from './request-cards.mjs';import {nameOf} from './adoption.mjs';
@@ -321,6 +322,13 @@ test('storeFile on an SSH machine is one remote command under umask 077 that tak
 });
 
 const coded=(code,message)=>Object.assign(Error(message),{code});
+// Git for the throwaway repositories of the tests: without the user's or the system's configuration and the HERDR_* variables, in English.
+const gitEnv={...Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_'))),GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',
+ GIT_AUTHOR_NAME:'t',GIT_AUTHOR_EMAIL:'t@example.com',GIT_COMMITTER_NAME:'t',GIT_COMMITTER_EMAIL:'t@example.com',LC_ALL:'C'};
+const git=(cwd,...args)=>execFileSync('git',args,{cwd,env:gitEnv,encoding:'utf8'}).trim();
+const gitIn=(cwd,...args)=>spawnSync('git',['-C',cwd,...args],{env:gitEnv,encoding:'utf8'});
+// The --name value options of a Herdr command line.
+const flags=args=>Object.fromEntries(args.flatMap((a,i)=>a.startsWith('--')&&typeof args[i+1]==='string'&&!args[i+1].startsWith('--')?[[a,args[i+1]]]:[]));
 // In-memory Herdr: records every CLI call; h.on['<group> <verb>'] replaces the next such call and may call run(args) for the default result.
 // Agents start idle with state_change_seq 1; a prompt returns the agent as it is.
 // h.retained[paneId] holds the replies Herdr keeps for the agent of that pane. h.made records every makeDirectory as [machine id, path].
@@ -329,7 +337,9 @@ const coded=(code,message)=>Object.assign(Error(message),{code});
 // `api snapshot` returns the agents with h.workspaces, h.tabs and h.panes, the entries that only carry what Bridge reads (ids and labels).
 // h.hosts[machine id], when present, is another machine with its own agents, retained replies and requests; every call to a host with
 // down fails with that message. h.toolCalls[paneId] holds the tool call records Herdr keeps for the agent of that pane; `agent send-keys`
-// only succeeds.
+// only succeeds. `worktree create`, `list` and `remove` run the real git on the throwaway repositories of the tests, as Herdr does: create
+// adds the worktree and opens a workspace for it, which h.workspaces lists with its checkout and repository; list reports the workspace
+// open for each worktree; remove removes the worktree of an open workspace and closes it.
 function fakeHerdr(){
  const h={calls:[],timeouts:[],machines:[],workspaces:[],tabs:[],panes:[],agents:[],retained:{},requests:{},toolCalls:{},hosts:{},made:[],created:0,opened:0,on:{}};
  const run=(args,host=h)=>{
@@ -354,6 +364,24 @@ function fakeHerdr(){
    const agent=host.agents.find(a=>a.pane_id===args[2]);if(args[3]==='on'&&!agent)throw coded('agent_not_found',`pane ${args[2]} has no agent`);
    if(agent){if(args[3]==='on')agent.remote_answers=true;else delete agent.remote_answers;}return {type:'ok'};
   }
+  if(group==='worktree'&&verb==='create'){
+   const o=flags(args),local=gitIn(o['--cwd'],'show-ref','--verify','--quiet','refs/heads/'+o['--branch']).status===0;fs.mkdirSync(path.dirname(o['--path']),{recursive:true});
+   const r=gitIn(o['--cwd'],'worktree','add',...local?[o['--path'],o['--branch']]:['-b',o['--branch'],o['--path'],o['--base']||'HEAD']);if(r.status!==0)throw coded('worktree_create_failed',r.stderr.trim());
+   const id='w'+ ++h.created,n=++h.opened;h.workspaces.push({workspace_id:id,label:o['--branch'],checkout:o['--path'],repo:o['--cwd']});
+   return {type:'worktree_created',workspace:{workspace_id:id},tab:{tab_id:`${id}:t${n}`},root_pane:{pane_id:`${id}:p${n}`},worktree:{path:o['--path'],branch:o['--branch'],is_linked_worktree:true,open_workspace_id:id}};
+  }
+  if(group==='worktree'&&verb==='list'){
+   const r=gitIn(flags(args)['--cwd'],'worktree','list','--porcelain');if(r.status!==0)throw coded('not_git_worktree',r.stderr.trim());
+   return {type:'worktree_list',worktrees:r.stdout.trim().split('\n\n').map(block=>{
+    const field=k=>block.split('\n').find(l=>l.startsWith(k+' '))?.slice(k.length+1),checkout=field('worktree'),open=h.workspaces.find(w=>w.checkout===checkout);
+    return {path:checkout,branch:field('branch')?.replace('refs/heads/',''),...open&&{open_workspace_id:open.workspace_id}};
+   })};
+  }
+  if(group==='worktree'&&verb==='remove'){
+   const w=h.workspaces.find(x=>x.workspace_id===args[3]&&x.checkout);if(!w)throw coded('workspace_not_found',`workspace ${args[3]} not found`);
+   const r=gitIn(w.repo,'worktree','remove',w.checkout);if(r.status!==0)throw coded(/contains modified or untracked files/.test(r.stderr)?'dirty_worktree_requires_force':'worktree_remove_failed',r.stderr.trim());
+   h.workspaces=h.workspaces.filter(x=>x!==w);return {type:'worktree_removed',workspace_id:w.workspace_id,path:w.checkout,forced:false};
+  }
   throw Error('unexpected herdr '+args.join(' '));
  };
  h.herdr=async(m,args,options={})=>{
@@ -372,16 +400,23 @@ const cotPath='/open-apis/im/v1/message_cot';
 // f.downloads records every attachment download as [app id, message id, type, file key, limit]; f.resources[file key], when present,
 // answers it, an error by throwing it, else the body is 'data:<file key>' of type image/png. f.stored records every file written as
 // [machine id, root, dir, name, body as text], which resolves to its path with ~/ as /home/u/; f.removed every directory removed as
-// [machine id, dir].
+// [machine id, dir]. f.execs records every other command run on a machine (see exec in core.mjs) as [machine id, ...argv]: claude answers
+// from f.h.claude, by default with BRANCH=feat/add-login, as {code, stdout, stderr} or an Error to reject with, and f.naming records each of
+// its calls as {argv, input, timeoutMs, shell}; anything else, git and test, runs here for real (see gitEnv).
 function topicFixture({binding,machine,machines=[],cot=true}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],reacted=[],unreacted=[],updated=[],api=[],m={id:'m',name:'cpu2',enabled:true,...machine};
- const downloads=[],resources={},stored=[],removed=[];
+ const downloads=[],resources={},stored=[],removed=[],execs=[],naming=[];
  store.data.machines=[m,...machines];store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];let sent=0,cots=0;
  // Every reply resolves to the next message id om_bot_<n>.
  const deps={herdr:h.herdr,makeDirectory:h.makeDirectory,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
   download:async(a,messageId,r,limit)=>{downloads.push([a.id,messageId,r.type,r.fileKey,limit]);await null;const x=resources[r.fileKey];if(x instanceof Error)throw x;return x||{body:Buffer.from('data:'+r.fileKey),type:'image/png'};},
   storeFile:async(m,root,dir,name,body)=>{stored.push([m.id,root,dir,name,String(body)]);await null;return root.replace(/^~\//,'/home/u/')+'/'+dir+'/'+name;},
   removeDirectory:async(m,dir)=>{removed.push([m.id,dir]);await null;},
+  exec:async(m,argv,options={})=>{
+   execs.push([m.id,...argv]);await null;const args=argv.map(a=>typeof a==='string'?a:a.path);
+   if(args.some(a=>/\bclaude\b/.test(a))){naming.push({argv,input:options.input,timeoutMs:options.timeoutMs,shell:options.shell});if(h.claude instanceof Error)throw h.claude;return {code:0,stdout:'BRANCH=feat/add-login\n',stderr:'',...h.claude};}
+   const r=spawnSync(args[0],args.slice(1),{env:gitEnv,encoding:'utf8'});return {code:r.status,stdout:r.stdout,stderr:r.stderr};
+  },
   reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);return 'om_bot_'+ ++sent;},
   react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);},
   updateCard:async(a,messageId,card)=>{updated.push([a.id,messageId,card]);},
@@ -389,7 +424,7 @@ function topicFixture({binding,machine,machines=[],cot=true}={}){
  const topics=new Topics(store,deps);
  const send=msg=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg});
  const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
- return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,execs,naming,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
 }
 // The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
 // id, reason].
@@ -1584,6 +1619,267 @@ test('an adopted topic writes attachments under the working directory that Herdr
  }finally{f.close();}
 });
 
+// A throwaway repository main with one commit, in a directory of its own; target(branch) is where the worktree of branch goes, and
+// origin(branch) gives main an origin that has branch, which main has not fetched.
+function gitRepo(){
+ const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-wt-'))),main=path.join(root,'main');fs.mkdirSync(main);
+ git(main,'init','-q','-b','main');git(main,'commit','-q','--allow-empty','-m','init');
+ return {root,main,target:branch=>path.join(root,'main-worktrees',branch.replaceAll('/','-')),
+  origin(branch){const origin=path.join(root,'origin.git');git(root,'clone','-q','--bare',main,origin);git(main,'remote','add','origin',origin);git(origin,'branch',branch,'main');},
+  close(){fs.rmSync(root,{recursive:true,force:true});}};
+}
+// A topic fixture whose binding works in a repository of its own (see gitRepo), by default in its main checkout.
+function wtFixture({binding,...options}={}){const repo=gitRepo(),f=topicFixture({...options,binding:{cwd:repo.main,...binding}});return {...f,repo,close(){f.close();repo.close();}};}
+const gitArgs=(cwd,...args)=>['env','GIT_TERMINAL_PROMPT=0','LC_ALL=C','git','-C',{path:cwd},...args];
+const namingArgs=root=>['sh','-c','cd -- "$1" && exec claude -p --model haiku','sh',root];
+// A notice of several lines, whose summary has its whitespace collapsed and holds at most 100 code points.
+const noticeOf=text=>{const s=[...text.replace(/\s+/g,' ').trim()];return notice(text,s.length>100?s.slice(0,99).join('')+'…':s.join(''));};
+const intro=(branch,p,...notes)=>noticeOf(['已在 cpu2 新建 worktree',`分支：${branch}`,`路径：${p}`,...notes].join('\n'));
+const wtUsage=notice('用法：/wt <任务描述>，或 /wt -b <已有分支> [任务描述]'),notRetried=notice('这个 worktree 话题没有启动成功，请重新发送 /wt 开新话题');
+const randomName=/^worktree\/[a-z]+-[a-z]+-[0-9a-f]{4}$/;
+const removeButton=render=>({tag:'button',text:{tag:'plain_text',content:'删除 worktree'},type:'danger',behaviors:[{type:'callback',value:{worktree:'remove',render}}]});
+const keptHint=plainText('worktree 已保留。删除时如有未提交的改动会拒绝，分支始终保留');
+// The card of a worktree topic without an agent: heading and text, the branch and path of its worktree, then the hint and the button drawn
+// with render, what a click that removed nothing found and the button, or who removed it.
+const removalCardOf=(heading,text,branch,p,{render,refused,removed}={})=>cardOf(heading,removed?'green':refused?'orange':'grey',[plainText(text),plainText(`分支：${branch}\n路径：${p}`),
+ ...removed?[{tag:'markdown',content:`${removed} · <at id=ou_user></at>`}]:[refused?plainText(refused):keptHint,removeButton(render)]]);
+const endedText='该话题的会话已结束，请发起新话题';
+// A click on the 删除 worktree button of card messageId as drawn with render, by an allowed person unless openId says otherwise.
+const removeClick=(messageId,render,openId='ou_user')=>({messageId,chatId:'oc_1',operator:{openId},action:{tag:'button',value:{worktree:'remove',render}}});
+test('worktree branches: haiku\'s answer names a branch only with a clean exit and a valid BRANCH= line, the fallback looks like Herdr\'s names, and the worktree of a branch is beside its repository with / as -',()=>{
+ assert.equal(parseBranch('x\nBRANCH=feat/a-b c\nBRANCH=fix/z'),'feat/a-b');assert.equal(parseBranch('nothing'),undefined);
+ for(const b of ['feat/add-login','fix/a1','style/x'])assert.ok(validBranch(b),b);
+ for(const b of ['feature/x','feat/','feat/Add','feat/a_b','feat/a--b','feat/-a','feat/a/b','feat/'+'a'.repeat(60),'Feat/x'])assert.ok(!validBranch(b),b);
+ assert.deepEqual(branchOf({code:0,stdout:'Sure.\nBRANCH=feat/add-login\n',stderr:''}),{branch:'feat/add-login'});
+ assert.deepEqual(branchOf({code:1,stdout:'',stderr:' Not logged in \n'}),{reason:'claude 退出码 1：Not logged in'});
+ assert.deepEqual(branchOf({code:0,stdout:'BRANCH=Feature/X\n',stderr:''}),{reason:'输出里没有可用的 BRANCH= 行：BRANCH=Feature/X'});
+ for(let i=0;i<20;i++)assert.match(randomBranch(),randomName);
+ assert.equal(worktreePath('/src/genvi','feat/a/b'),'/src/genvi-worktrees/feat-a-b');assert.equal(continueBranch('fix/x'),'Continue work on branch fix/x');
+ assert.match(namingPrompt('加验证码'),/^You are a git branch naming tool[\s\S]*BRANCH=type\/short-kebab-name[\s\S]*Requirement:\n加验证码$/);
+});
+test('exec resolves to the exit status and output of a command on a machine whatever the status, and rejects when it cannot start, does not finish in time or ssh itself fails; with shell, a local command line goes through the user\'s shell like an SSH command, without the HERDR_* variables',async()=>{
+ const local=normalizeMachine({name:'local',type:'local'}),ssh=normalizeMachine({name:'cpu2',host:'cpu2'}),shell=os.userInfo().shell||'/bin/sh';
+ assert.deepEqual(await exec(local,['sh','-c','echo out; echo err >&2; exit 3']),{code:3,stdout:'out\n',stderr:'err\n'});
+ await assert.rejects(exec(local,['sleep','5'],{timeoutMs:100}),e=>e.timedOut===true&&/连接超时/.test(e.message));
+ await assert.rejects(exec(local,['/nonexistent/bridge-program']),/ENOENT/);
+ assert.deepEqual(remoteInvocation(local,['sh','-c','exec claude "$@"',{path:'~/w x'}],{shell:true}),[shell,['-c',`'sh' '-c' 'exec claude "$@"' "$HOME"/'w x'`]]);
+ assert.deepEqual(remoteInvocation(ssh,['claude','-p'],{shell:true}),remoteInvocation(ssh,['claude','-p']));
+ const r=await withEnv('HERDR_PANE_ID','w1:p1',()=>exec(local,['sh','-c','env; printf "%s" "$1"','sh',{path:'~/x'}],{shell:true}));
+ assert.equal(r.code,0);assert.doesNotMatch(r.stdout,/^HERDR_/m);assert.ok(r.stdout.endsWith(os.homedir()+'/x'),r.stdout.slice(-200));
+ // A fake ssh that runs the remote command here: its status comes back, and 255 is the failure of ssh itself.
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-exec-')),bin=path.join(dir,'bin');fs.mkdirSync(bin);
+ try{
+  fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh','for last; do :; done','exec sh -c "$last"',''].join('\n'),{mode:0o700});
+  await withEnv('PATH',bin+':'+process.env.PATH,async()=>{
+   assert.deepEqual(await exec(ssh,['sh','-c','echo no >&2; exit 1']),{code:1,stdout:'',stderr:'no\n'});
+   fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh','echo "ssh: connect to host cpu2 port 22: Connection refused" >&2','exit 255',''].join('\n'),{mode:0o700});
+   await assert.rejects(exec(ssh,['true']),/Connection refused/);
+  });
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('/wt with a description names the branch with Claude haiku on the binding machine, creates the worktree beside the repository through Herdr without changing focus, starts the agent in its root pane like any topic, names the branch and path in its first reply and prompts the description',async()=>{
+ const f=wtFixture();try{
+  await f.send({messageId:'om_1',content:'/wt 给登录页加验证码\n第二行'});
+  const t=f.store.data.topics[0],target=f.repo.target('feat/add-login');
+  assert.deepEqual(f.naming,[{argv:namingArgs(f.repo.main),input:namingPrompt('给登录页加验证码\n第二行'),timeoutMs:30000,shell:true}]);
+  assert.deepEqual(f.execs,[['m',...gitArgs(f.repo.main,'rev-parse','--path-format=absolute','--git-dir','--git-common-dir')],['m',...namingArgs(f.repo.main)],['m','test','-e',{path:target}],
+   ['m',...gitArgs(f.repo.main,'show-ref','--verify','--quiet','refs/heads/feat/add-login')],['m',...gitArgs(f.repo.main,'fetch','--quiet','origin','+refs/heads/feat/add-login:refs/remotes/origin/feat/add-login')],
+   ['m',...gitArgs(f.repo.main,'show-ref','--verify','--quiet','refs/remotes/origin/feat/add-login')]]);
+  assert.deepEqual(f.h.calls,[['worktree','create','--cwd',f.repo.main,'--branch','feat/add-login','--path',target,'--no-focus'],['agent','start',t.agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],
+   ['pane','remote-answers','w1:p1','on'],['agent','prompt','w1:p1','给登录页加验证码\n第二行']]);
+  assert.deepEqual(f.h.timeouts.slice(0,2),[120000,70000]);assert.deepEqual([...new Set(f.h.machines)],['m']);
+  assert.equal(git(target,'rev-parse','--abbrev-ref','HEAD'),'feat/add-login');assert.equal(git(target,'rev-parse','HEAD'),git(f.repo.main,'rev-parse','HEAD'));
+  const worktree={branch:'feat/add-login',path:target,root:f.repo.main};
+  assert.deepEqual([t.state,t.workspaceId,t.tabId,t.paneId,t.title,t.worktree],['ready','w1','w1:t1','w1:p1','给登录页加验证码 第二行',worktree]);assert.match(t.agentName,/^feishu-[0-9a-f]{8}$/);
+  assert.deepEqual(new Store(f.dir).data.topics[0].worktree,worktree);assert.equal(f.b.workspaceId,undefined);
+  assert.deepEqual(f.replies,[['a','oc_1','om_1',intro('feat/add-login',target)]]);
+  assert.deepEqual(f.reacted.map(r=>r[1]),['om_1']);assert.deepEqual(cotLog(f)[0],['create','om_1']);
+ }finally{f.close();}
+});
+test('/wt -b with a local branch uses it as it is, without naming or fetching; without a description the agent is asked to continue on the branch and the topic is named after it',async()=>{
+ const f=wtFixture();try{
+  git(f.repo.main,'branch','feat/local');git(f.repo.main,'branch','fix/crash');
+  await f.send({messageId:'om_1',content:'/wt -b feat/local'});await f.send({messageId:'om_2',content:'/wt -b fix/crash  接着做\n完'});
+  const [one,two]=f.store.data.topics;
+  assert.deepEqual(f.naming,[]);assert.ok(!f.execs.some(c=>c.includes('fetch')));
+  assert.deepEqual(f.h.calls.filter(c=>c[0]==='worktree'),[['worktree','create','--cwd',f.repo.main,'--branch','feat/local','--path',f.repo.target('feat/local'),'--no-focus'],['worktree','create','--cwd',f.repo.main,'--branch','fix/crash','--path',f.repo.target('fix/crash'),'--no-focus']]);
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c.slice(2)),[[one.paneId,'Continue work on branch feat/local'],[two.paneId,'接着做\n完']]);
+  assert.deepEqual([one.title,two.title,one.worktree.branch,two.worktree.branch],['feat/local','接着做 完','feat/local','fix/crash']);
+  assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_1',intro('feat/local',f.repo.target('feat/local'))],['om_2',intro('fix/crash',f.repo.target('fix/crash'))]]);
+ }finally{f.close();}
+});
+test('/wt -b with a branch that only origin has fetches it and creates a local branch that tracks it, which the first reply says; a branch that neither has, or an invalid name, fails before anything is created',async()=>{
+ const f=wtFixture();try{
+  f.repo.origin('feat/remote');await f.send({messageId:'om_1',content:'/wt -b feat/remote 接着做'});
+  const target=f.repo.target('feat/remote');
+  assert.equal(git(f.repo.main,'rev-parse','--abbrev-ref','feat/remote@{upstream}'),'origin/feat/remote');assert.equal(git(target,'rev-parse','--abbrev-ref','HEAD'),'feat/remote');
+  assert.deepEqual(f.replies.map(r=>r[3]),[intro('feat/remote',target,'已从 origin/feat/remote 建立跟踪它的本地分支')]);assert.equal(f.store.data.topics[0].state,'ready');
+  f.replies.length=0;f.h.calls.length=0;
+  await f.send({messageId:'om_2',content:'/wt -b feat/missing x'});await f.send({messageId:'om_3',content:'/wt -b bad..name x'});
+  assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_2',noticeOf('启动失败：本地和 origin 都没有分支 feat/missing\n没有创建任何东西')],['om_3',noticeOf('启动失败：分支名无效：bad..name\n没有创建任何东西')]]);
+  assert.deepEqual(f.store.data.topics.slice(1).map(t=>[t.state,t.worktree]),[['failed',{}],['failed',{}]]);assert.deepEqual(f.h.calls,[]);
+  assert.equal(fs.existsSync(f.repo.target('feat/missing')),false);assert.notEqual(gitIn(f.repo.main,'show-ref','--verify','--quiet','refs/heads/feat/missing').status,0);
+ }finally{f.close();}
+});
+test('a naming that fails falls back to a random worktree/ branch and the first reply says why: claude exits with an error, prints no usable BRANCH= line, cannot run or does not answer in time',async()=>{
+ const cases=[[{code:1,stderr:'Not logged in\n'},'claude 退出码 1：Not logged in'],[{stdout:'BRANCH=Feature/Add Login\n'},'输出里没有可用的 BRANCH= 行：BRANCH=Feature/Add Login'],
+  [Error('spawn sh ENOENT'),'无法运行 claude：spawn sh ENOENT'],[Object.assign(Error('连接超时，请检查 SSH 与 Herdr 状态'),{timedOut:true}),'30 秒内没有返回']];
+ for(const [claude,reason] of cases){
+  const f=wtFixture();try{
+   f.h.claude=claude;await f.send({messageId:'om_1',content:'/wt 任务描述'});
+   const t=f.store.data.topics[0],branch=t.worktree.branch;
+   assert.match(branch,randomName,reason);assert.equal(t.state,'ready',reason);assert.deepEqual(f.h.calls[0].slice(4,8),['--branch',branch,'--path',f.repo.target(branch)],reason);
+   assert.deepEqual(f.replies.map(r=>r[3]),[intro(branch,f.repo.target(branch),`起名失败（${reason}），改用随机分支名`)],reason);
+  }finally{f.close();}
+ }
+});
+test('/wt in a binding whose directory is outside Git fails the topic with the reason in its thread before anything is created; later messages in its thread get a notice and start nothing',async()=>{
+ const f=wtFixture();try{
+  const plain=path.join(f.repo.root,'plain');fs.mkdirSync(plain);f.b.cwd=plain;
+  await f.send({messageId:'om_1',content:'/wt x'});
+  const t=f.store.data.topics[0];
+  assert.deepEqual([t.state,t.error,t.worktree],['failed',`${plain} 不在 Git 仓库中`,{}]);assert.deepEqual([f.h.calls,f.naming,f.execs.length],[[],[],1]);
+  assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_1',noticeOf(`启动失败：${plain} 不在 Git 仓库中\n没有创建任何东西`)]]);
+  await f.send({messageId:'om_2',rootId:'om_1',content:'再试一次'});
+  assert.deepEqual(f.replies.at(-1).slice(2),['om_1',notRetried]);assert.deepEqual([f.h.calls,f.execs.length],[[],1]);assert.deepEqual(t.messageIds,['om_1','om_2']);
+ }finally{f.close();}
+});
+test('/wt in a binding whose directory is in a linked worktree creates the new worktree from the main checkout and beside it, with the HEAD of the linked worktree as base',async()=>{
+ const f=wtFixture();try{
+  const linked=path.join(f.repo.root,'linked');git(f.repo.main,'worktree','add','-q','-b','side',linked);
+  fs.writeFileSync(path.join(linked,'a.txt'),'x');git(linked,'add','a.txt');git(linked,'commit','-q','-m','side');fs.mkdirSync(path.join(linked,'sub'));
+  f.b.cwd=path.join(linked,'sub');const head=git(linked,'rev-parse','HEAD'),target=f.repo.target('feat/add-login');
+  await f.send({messageId:'om_1',content:'/wt from the side'});
+  assert.deepEqual(f.h.calls[0],['worktree','create','--cwd',f.repo.main,'--branch','feat/add-login','--path',target,'--base',head,'--no-focus']);
+  assert.equal(git(target,'rev-parse','HEAD'),head);assert.deepEqual(f.store.data.topics[0].worktree,{branch:'feat/add-login',path:target,root:f.repo.main});
+  assert.deepEqual(f.replies.map(r=>r[3]),[intro('feat/add-login',target,`绑定目录在 linked worktree 里，新分支基于它的 HEAD ${head.slice(0,12)}`)]);assert.deepEqual(f.naming[0].argv,namingArgs(f.repo.main));
+ }finally{f.close();}
+});
+test('/wt whose worktree directory exists already fails before anything is created and names the directory',async()=>{
+ const f=wtFixture();try{
+  const target=f.repo.target('feat/add-login');fs.mkdirSync(target,{recursive:true});
+  await f.send({messageId:'om_1',content:'/wt x'});
+  assert.deepEqual(f.replies.map(r=>r[3]),[noticeOf(`启动失败：目录已存在：${target}，不会覆盖它；换一个分支，或者先处理这个目录\n没有创建任何东西`)]);
+  assert.deepEqual([f.store.data.topics[0].state,f.h.calls],['failed',[]]);assert.notEqual(gitIn(f.repo.main,'show-ref','--verify','--quiet','refs/heads/feat/add-login').status,0);
+ }finally{f.close();}
+});
+test('in a binding that requires the mention, /wt without it is ignored like any message; with it it opens a worktree topic',async()=>{
+ const f=wtFixture({binding:{requireMention:true}});try{
+  await f.send({messageId:'om_1',content:'/wt x'});
+  assert.deepEqual([f.store.data.topics,f.execs,f.h.calls,f.replies,f.reacted],[[],[],[],[],[]]);
+  await f.send({messageId:'om_2',content:'/wt x',mentionedBot:true});
+  assert.deepEqual([f.store.data.topics[0].state,f.store.data.topics[0].worktree.branch],['ready','feat/add-login']);
+ }finally{f.close();}
+});
+test('/wt without a description or a branch, or -b without a branch, gets the usage in its thread and opens no topic; /wt in a thread and other text that starts with /wt are messages like any other',async()=>{
+ const f=wtFixture();try{
+  for(const [id,content] of [['om_1','/wt'],['om_2',' /wt  '],['om_3','/wt -b']])await f.send({messageId:id,content});
+  assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_1',wtUsage],['om_2',wtUsage],['om_3',wtUsage]]);assert.deepEqual([f.store.data.topics,f.execs,f.h.calls,f.reacted],[[],[],[],[]]);
+  await f.send({messageId:'om_4',content:'/wtx 普通消息'});await f.send({messageId:'om_5',rootId:'om_4',content:'/wt 话题里的消息'});
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['/wtx 普通消息','/wt 话题里的消息']);assert.equal(f.store.data.topics[0].worktree,undefined);assert.deepEqual(f.execs,[]);
+ }finally{f.close();}
+});
+test('the images and files of a /wt topic go under its worktree, those of the /wt message too, which the naming leaves out; a /wt with attachments but no text is not named',async()=>{
+ const f=wtFixture();try{
+  await f.send({messageId:'om_1',rawContentType:'post',content:'/wt 看看这个报错 ![image](img_b)',resources:[{type:'image',fileKey:'img_b'}]});
+  const t=f.store.data.topics[0],target=f.repo.target('feat/add-login'),root=`${target}/.herdr-bridge`,dir=`${root}/${t.id}`;
+  assert.equal(f.naming[0].input,namingPrompt('看看这个报错'));
+  assert.deepEqual(f.stored,[['m',root,t.id,'om_1-1.png','data:img_b']]);
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),[`看看这个报错 [图片 1：${dir}/om_1-1.png]`]);assert.deepEqual([t.title,t.attachmentDir],['看看这个报错',dir]);
+  await f.send({messageId:'om_2',rootId:'om_1',...imageOf('img_c')});
+  assert.deepEqual(f.stored.at(-1).slice(0,4),['m',root,t.id,'om_2-1.png']);assert.equal(f.h.calls.filter(c=>c[1]==='prompt').at(-1)[3],`[图片 1：${dir}/om_2-1.png]`);
+  await f.send({messageId:'om_3',rawContentType:'post',content:'/wt ![image](img_d)',resources:[{type:'image',fileKey:'img_d'}]});
+  const other=f.store.data.topics[1],branch=other.worktree.branch;
+  assert.equal(f.naming.length,1);assert.match(branch,randomName);assert.equal(other.title,'图片');
+  assert.deepEqual(f.replies.at(-1)[3],intro(branch,f.repo.target(branch),'起名失败（任务描述里没有文字），改用随机分支名'));
+  assert.equal(f.h.calls.filter(c=>c[1]==='prompt').at(-1)[3],`[图片 1：${f.repo.target(branch)}/.herdr-bridge/${other.id}/om_3-1.png]`);
+ }finally{f.close();}
+});
+test('a /wt topic whose agent cannot start fails with the reason and what exists in a card that offers removing the worktree; nothing is rolled back and later messages start nothing; a worktree that Herdr could not create leaves a plain notice',async()=>{
+ const f=wtFixture();try{
+  f.h.on['agent start']=()=>{throw coded('agent_start_failed','agent process exited before becoming interactive');};
+  await f.send({messageId:'om_1',content:'/wt x'});
+  const t=f.store.data.topics[0],target=f.repo.target('feat/add-login');
+  const text=`启动失败：agent process exited before becoming interactive（agent_start_failed）\n已经创建、保持原样（没有回滚）的有：\n- worktree ${target}（分支 feat/add-login）\n- workspace w1，pane w1:p1`;
+  assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_1',intro('feat/add-login',target)],['om_1',{card:removalCardOf('启动失败',text,'feat/add-login',target,{render:1})}]]);
+  assert.deepEqual([t.state,t.worktree.card],['failed',{messageId:'om_bot_2',heading:'启动失败',text}]);assert.ok(fs.existsSync(target));assert.ok(f.h.workspaces.some(w=>w.checkout===target));
+  f.h.calls.length=0;await f.send({messageId:'om_2',rootId:'om_1',content:'再试'});
+  assert.deepEqual(f.h.calls,[]);assert.deepEqual(f.replies.at(-1)[3],notRetried);
+  // The button works on this card too.
+  f.topics.click(allowed,removeClick('om_bot_2',1));await Promise.all(f.topics.answering.values());assert.equal(fs.existsSync(target),false);
+  f.h.claude={stdout:'BRANCH=fix/other'};f.h.on['worktree create']=()=>{throw coded('worktree_create_failed','fatal: invalid reference: HEAD');};
+  await f.send({messageId:'om_3',content:'/wt y'});
+  assert.deepEqual(f.replies.at(-1).slice(2),['om_3',noticeOf('启动失败：创建 worktree 失败（worktree_create_failed：fatal: invalid reference: HEAD）\n没有创建任何东西')]);
+  assert.deepEqual(f.store.data.topics[1].worktree,{branch:'fix/other',path:f.repo.target('fix/other'),root:f.repo.main});
+  // A worktree that Herdr created but opened no workspace for is offered for removal, which git does.
+  f.h.claude={stdout:'BRANCH=fix/open'};f.h.on['worktree create']=(args,run)=>{run(args);f.h.workspaces.pop();throw coded('worktree_open_failed','created worktree but failed to open workspace: no space');};
+  await f.send({messageId:'om_4',content:'/wt z'});const open=f.repo.target('fix/open');
+  const failedOpen=`启动失败：创建 worktree 失败（worktree_open_failed：created worktree but failed to open workspace: no space）\n已经创建、保持原样（没有回滚）的有：\n- worktree ${open}（分支 fix/open），Herdr 没有为它打开 workspace`;
+  assert.deepEqual(f.replies.at(-1).slice(2),['om_4',{card:removalCardOf('启动失败',failedOpen,'fix/open',open,{render:3})}]);assert.ok(fs.existsSync(open));
+  f.topics.click(allowed,removeClick(f.store.data.topics[2].worktree.card.messageId,3));await Promise.all(f.topics.answering.values());
+  assert.equal(fs.existsSync(open),false);assert.deepEqual(f.execs.at(-1),['m',...gitArgs(f.repo.main,'worktree','remove',open)]);
+ }finally{f.close();}
+});
+test('a /wt topic whose agent is gone ends with a card that keeps the worktree and offers removing it; a click by an allowed person removes a clean worktree through Herdr, which closes its workspace, keeps the branch and marks the card removed, also after a Bridge restart',async()=>{
+ const f=wtFixture();try{
+  await f.send({messageId:'om_1',content:'/wt x'});const target=f.repo.target('feat/add-login');
+  f.h.agents=[];await f.topics.sync(f.m,[]);
+  const t=f.store.data.topics[0];
+  assert.equal(t.state,'closed');assert.deepEqual(f.replies.at(-1).slice(2),['om_1',{card:removalCardOf('话题已结束',endedText,'feat/add-login',target,{render:1})}]);
+  assert.deepEqual(t.worktree,{branch:'feat/add-login',path:target,root:f.repo.main,card:{messageId:'om_bot_2',heading:'话题已结束',text:endedText}});assert.ok(fs.existsSync(target));
+  // What the agent left under .herdr-bridge, which ignores itself, is no change.
+  fs.mkdirSync(path.join(target,'.herdr-bridge','x'),{recursive:true});fs.writeFileSync(path.join(target,'.herdr-bridge','.gitignore'),'*\n');fs.writeFileSync(path.join(target,'.herdr-bridge','x','a.png'),'png');
+  const {topics}=f.restart();f.h.calls.length=0;f.execs.length=0;
+  assert.deepEqual(topics.click(allowed,removeClick('om_bot_2',1)),{toast:{type:'info',content:'正在删除 worktree'}});
+  await Promise.all(topics.answering.values());
+  assert.deepEqual(f.h.calls,[['worktree','list','--cwd',f.repo.main],['worktree','remove','--workspace','w1']]);
+  assert.deepEqual(f.execs,[['m','test','-e',{path:target}],['m',...gitArgs(target,'-c','core.quotePath=false','status','--porcelain','--untracked-files=all')]]);
+  assert.equal(fs.existsSync(target),false);assert.equal(git(f.repo.main,'rev-parse','--verify','feat/add-login'),git(f.repo.main,'rev-parse','main'));assert.equal(f.h.workspaces.some(w=>w.checkout),false);
+  assert.deepEqual(f.updated.at(-1),['a','om_bot_2',removalCardOf('话题已结束',endedText,'feat/add-login',target,{removed:'已删除 worktree，分支 feat/add-login 保留'})]);
+  assert.equal(new Store(f.dir).data.topics[0].worktree.removed,true);
+  assert.deepEqual(topics.click(allowed,removeClick('om_bot_2',1)),{toast:{type:'info',content:'worktree 已删除'}});assert.deepEqual(topics.click(allowed,removeClick('om_other',1)),{toast:{type:'info',content:'这张卡片已失效'}});
+ }finally{f.close();}
+});
+test('the 删除 worktree button refuses a worktree with changes that are not committed and lists them, removes it with git once Herdr no longer has it open, and counts a worktree that is gone as removed',async()=>{
+ const f=wtFixture();try{
+  await f.send({messageId:'om_1',content:'/wt x'});const target=f.repo.target('feat/add-login'),settle=()=>Promise.all(f.topics.answering.values());
+  f.h.agents=[];await f.topics.sync(f.m,[]);
+  fs.writeFileSync(path.join(target,'new.txt'),'x');fs.writeFileSync(path.join(target,'说明.md'),'x');f.h.calls.length=0;
+  f.topics.click(allowed,removeClick('om_bot_2',1));await settle();
+  assert.ok(fs.existsSync(target));assert.deepEqual(f.h.calls,[]);assert.equal(f.store.data.topics[0].worktree.removed,undefined);
+  assert.deepEqual(f.updated.at(-1)[2],removalCardOf('话题已结束',endedText,'feat/add-login',target,{render:2,refused:'worktree 里有未提交的改动，没有删除：\n?? new.txt\n?? 说明.md'}));
+  // Committed work stays on the branch.
+  git(target,'add','.');git(target,'commit','-q','-m','work');f.h.workspaces=f.h.workspaces.filter(w=>!w.checkout);f.execs.length=0;
+  f.topics.click(allowed,removeClick('om_bot_2',2));await settle();
+  assert.deepEqual(f.h.calls,[['worktree','list','--cwd',f.repo.main]]);assert.deepEqual(f.execs.at(-1),['m',...gitArgs(f.repo.main,'worktree','remove',target)]);
+  assert.equal(fs.existsSync(target),false);assert.equal(git(f.repo.main,'log','-1','--format=%s','feat/add-login'),'work');
+  assert.deepEqual(f.updated.at(-1)[2],removalCardOf('话题已结束',endedText,'feat/add-login',target,{removed:'已删除 worktree，分支 feat/add-login 保留'}));
+ }finally{f.close();}
+ const g=wtFixture();try{
+  await g.send({messageId:'om_1',content:'/wt x'});const target=g.repo.target('feat/add-login');
+  g.h.agents=[];await g.topics.sync(g.m,[]);fs.rmSync(target,{recursive:true});g.h.calls.length=0;
+  g.topics.click(allowed,removeClick('om_bot_2',1));await Promise.all(g.topics.answering.values());
+  assert.deepEqual(g.h.calls,[]);assert.deepEqual(g.updated.at(-1)[2],removalCardOf('话题已结束',endedText,'feat/add-login',target,{removed:'worktree 已不在，按已删除处理'}));
+  assert.equal(g.store.data.topics[0].worktree.removed,true);
+ }finally{g.close();}
+});
+test('the 删除 worktree button does nothing for a person outside the allowlist of the app',async()=>{
+ const f=wtFixture(),p=platformFixture({channelFactory:()=>({on(){}}),onCardAction:(...args)=>f.topics.click(...args)});try{
+  await f.send({messageId:'om_1',content:'/wt x'});const target=f.repo.target('feat/add-login');
+  f.h.agents=[];await f.topics.sync(f.m,[]);f.h.calls.length=0;f.execs.length=0;const updates=f.updated.length;
+  assert.deepEqual(p.platforms.cardAction(allowed,removeClick('om_bot_2',1,'ou_other')),{toast:{type:'error',content:'你不在这个应用的允许名单中，不能处理这个请求'}});
+  assert.equal(f.topics.answering.size,0);assert.deepEqual([f.h.calls,f.execs,f.updated.length],[[],[],updates]);assert.ok(fs.existsSync(target));
+  assert.deepEqual(p.platforms.cardAction(allowed,removeClick('om_bot_2',1)),{toast:{type:'info',content:'正在删除 worktree'}});
+  await Promise.all(f.topics.answering.values());assert.equal(fs.existsSync(target),false);
+ }finally{p.close();f.close();}
+});
+test('removing the binding of a /wt topic keeps its worktree and its workspace, as any topic keeps its tab',async()=>{
+ const f=wtFixture();try{
+  await f.send({messageId:'om_1',content:'/wt x'});const target=f.repo.target('feat/add-login');f.h.calls.length=0;
+  await f.topics.unbind('b');
+  assert.deepEqual(f.h.calls,[['pane','remote-answers','w1:p1','off']]);assert.ok(fs.existsSync(target));assert.ok(f.h.workspaces.some(w=>w.checkout===target));assert.deepEqual(f.store.data.topics,[]);
+ }finally{f.close();}
+});
 const minutes=n=>n*60000;
 function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-pending-')),store=new Store(dir),replies=[],bound=[],clock={now:1000};
@@ -1663,7 +1959,8 @@ test('binding a pending chat opens the first topic with its first message only w
 const png=Buffer.from('89504e470d0a1a0a0000','hex');
 // The app's slash commands as Feishu lists them, by default the bridge's own with their descriptions.
 const slashPath='/open-apis/application/v7/app_slash_commands',described=text=>({default_value:text,i18n:{zh_cn:text}});
-const registered=[{command_id:'c-adopt',command:'adopt',description:described('接管正在运行的 Agent')},{command_id:'c-release',command:'release',description:described('结束接管')},{command_id:'c-stop',command:'stop',description:described('停止 Agent 当前这一轮')}];
+const registered=[{command_id:'c-adopt',command:'adopt',description:described('接管正在运行的 Agent')},{command_id:'c-release',command:'release',description:described('结束接管')},{command_id:'c-stop',command:'stop',description:described('停止 Agent 当前这一轮')},
+ {command_id:'c-wt',command:'wt',description:described('在新的 Git worktree 里开一个话题')}];
 // A connected channel whose bot info comes from info() and whose slash command calls are answered by commands(request); every avatar
 // download is answered by avatar(url).
 function botFixture({info,avatar,commands=()=>({code:0,msg:'success',data:{items:registered}})}={}){
@@ -1725,8 +2022,9 @@ test('connecting offers the commands in the slash command panel of the app: a mi
  const items=[registered[0],{...registered[1],description:described('旧的说明')},{command_id:'c-deploy',command:'deploy',description:described('部署')}];
  const f=botFixture({info:botInfo({avatar_url:''}),avatar:()=>assert.fail('no download'),commands:o=>o.method==='GET'?{code:0,data:{items}}:{code:0,data:{command_id:'c-new'}}});try{
   await f.platforms.start(f.a);
-  assert.deepEqual(f.requests.slice(1),[{method:'GET',url:slashPath},{method:'PATCH',url:slashPath+'/c-release',data:{command:'release',description:described('结束接管')}},{method:'POST',url:slashPath,data:{command:'stop',description:described('停止 Agent 当前这一轮')}}]);
-  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]),[['info','飞书机器人：已注册斜杠命令 /release、/stop']]);
+  assert.deepEqual(f.requests.slice(1),[{method:'GET',url:slashPath},{method:'PATCH',url:slashPath+'/c-release',data:{command:'release',description:described('结束接管')}},{method:'POST',url:slashPath,data:{command:'stop',description:described('停止 Agent 当前这一轮')}},
+   {method:'POST',url:slashPath,data:{command:'wt',description:described('在新的 Git worktree 里开一个话题')}}]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]),[['info','飞书机器人：已注册斜杠命令 /release、/stop、/wt']]);
  }finally{f.close();}
 });
 test('without the slash command scopes, or when Feishu refuses a command, connecting logs one line and the app stays connected; every connection tries again',async()=>{
@@ -1785,14 +2083,15 @@ test('channel startup and shutdown do not revive a cancelled connection',async()
  const store=new Store(dir),messages=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}}),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true};
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety.batch.text.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions, request cards or COT',async()=>{
+test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions, request cards, COT or the card of a worktree',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
  fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'initialized'),'1');fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
  const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},createdAt:1};
+ const worktree={branch:'feat/x',path:'/src/r-worktrees/feat-x',root:'/src/r'};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
  const claude={id:'b-claude',name:'助手',appId:'x',machineId:'m',chatId:'oc_8',cwd:'~/work',kind:'claude',requireMention:false,enabled:true},codex={...claude,id:'b-codex',chatId:'oc_7',kind:'codex'},agy={...claude,id:'b-agy',chatId:'oc_6',kind:'agy'};
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({apps:[{...app,id:'app-avatar',avatar:{type:'image/png',updatedAt:5}},{...app,id:'app-plain',appId:'cli_plain'},{...app,id:'app-gone',appId:'cli_gone',avatar:{type:'image/png',updatedAt:5}}],
-  bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'},claude,codex,agy],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready'}]}));
+  bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'},claude,codex,agy],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready',worktree:{...worktree,card:{messageId:'om_wt',heading:'话题已结束',text:'x'}}}]}));
  fs.writeFileSync(herdr,`#!/bin/sh\nif [ "$3" = agent ]; then echo '${JSON.stringify({result:{agents}})}'; else echo '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'; fi\n`,{mode:0o700});
  const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
  const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:'http://127.0.0.1:'+port+'/'},stdio:['ignore','pipe','inherit']});
@@ -1806,6 +2105,7 @@ test('the server lists pending chats, saves bindings only through a link token, 
   const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
   assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old','b-claude','b-codex','b-agy']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
   const {messageIds,reactions,cards,cot,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards','cot'])assert.equal(key in s.topics[1],false,key);
+  assert.deepEqual(s.topics[1].worktree,worktree);
   // Other fields sent along are ignored; a refused change keeps the saved bindings as they are.
   assert.deepEqual(await api('bindings/permission-mode',{id:'b-claude',permissionMode:'auto',name:'改名',cwd:'/etc',kind:'codex'}),{status:200,body:{ok:true}});
   for(const [body,error] of [[{id:'b-claude',permissionMode:'bypassPermissions'},'权限模式无效'],[{id:'b-codex',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'b-agy',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'unknown',permissionMode:'auto'},'会话绑定不存在']])assert.deepEqual(await api('bindings/permission-mode',body),{status:400,body:{error}},body.id);

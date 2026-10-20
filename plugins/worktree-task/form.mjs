@@ -2,7 +2,7 @@
 // runs the task script. Herdr opens it from the start action with the context of the focused pane.
 import fs from 'node:fs';import os from 'node:os';import path from 'node:path';import {spawn} from 'node:child_process';import {fileURLToPath} from 'node:url';
 import {StringDecoder} from 'node:string_decoder';
-import {field,insert,backspace,del,left,right,home,end,up,down,layout,width,clip} from './text-field.mjs';import {repoOf} from './repo.mjs';
+import {field,insert,backspace,del,left,right,home,end,up,down,layout,width,clip} from './text-field.mjs';import {repoOf} from '../../bridge/worktree-branch.mjs';import {git} from './repo.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 // focus 0 is the description, 1 the branch, 2 the agent. paste collects a bracketed paste until it ends.
 export const newForm=()=>({desc:field(),branch:field(),kind:'claude',focus:0,paste:null,error:''});
@@ -80,7 +80,7 @@ async function main(){
  input.setRawMode(true);input.setEncoding('utf8');write('\x1b[?2004h');
  const stop=async(message,code)=>{write(`\x1b[?25h\x1b[2J\x1b[H${message.replace(/\n/g,'\r\n')}\r\n\r\n按任意键关闭`);await key();process.exit(code);};
  const dir=contextDir(process.env);if(!dir)return stop('Herdr 没有给出聚焦 pane 或 workspace 的目录，无法确定在哪个仓库开任务',1);
- let repo;try{repo=await repoOf(dir);}catch(e){return stop(e.message,1);}
+ let repo;try{repo=await repoOf(git,dir);}catch(e){return stop(e.message,1);}
  const s=newForm(),draw=()=>write(render(s,{cols:output.columns,rows:output.rows,repo}));
  output.on('resize',draw);draw();
  const done=await new Promise(resolve=>{const on=d=>{const a=press(s,d);if(a){input.off('data',on);resolve(a);}else draw();};input.on('data',on);});

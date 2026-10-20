@@ -1,7 +1,8 @@
 import fs from 'node:fs';import path from 'node:path';
 import {herdr} from './herdr.mjs';
-import {repoOf,worktreePath,validRefName,localBranch} from './repo.mjs';
-import {nameBranch,randomBranch,agentName} from './naming.mjs';
+import {repoOf,worktreePath,validRefName,localBranch,randomBranch} from '../../bridge/worktree-branch.mjs';
+import {git} from './repo.mjs';
+import {nameBranch,agentName} from './naming.mjs';
 // herdr agent prompt takes the description as one command-line argument, which Linux caps at 128 KiB.
 export const MAX_DESCRIPTION_BYTES=128000;
 // The flags that start each agent without permission prompts, as wt did; config.bypassPermissions turns them off.
@@ -22,10 +23,10 @@ export async function startTask(task,say){
 async function steps({dir,description,branch:given,kind,config,notify},say,created){
  const bytes=Buffer.byteLength(description);
  if(bytes>MAX_DESCRIPTION_BYTES)throw Error(`任务描述有 ${bytes} 字节，超过 ${MAX_DESCRIPTION_BYTES} 字节，herdr agent prompt 的命令行参数放不下`);
- const repo=await repoOf(dir);
+ const repo=await repoOf(git,dir);
  if(repo.linked)say(`从 linked worktree 发起：新分支基于它的 HEAD ${repo.base.slice(0,12)}，worktree 仍建在 ${path.basename(repo.mainRoot)}-worktrees/ 下`);
  let branch=given;
- if(given){if(!await validRefName(repo.mainRoot,given))throw Error(`分支名无效：${given}`);say(`分支：${given}`);}
+ if(given){if(!await validRefName(git,repo.mainRoot,given))throw Error(`分支名无效：${given}`);say(`分支：${given}`);}
  else{
   say('正在用 Claude haiku 起分支名…');
   const named=await nameBranch(description,{cwd:repo.mainRoot,timeoutMs:config.namingTimeoutMs});
@@ -33,7 +34,7 @@ async function steps({dir,description,branch:given,kind,config,notify},say,creat
  }
  const target=worktreePath(repo.mainRoot,branch);
  if(fs.existsSync(target))throw Error(`目录已存在：${target}，不会覆盖它；换一个分支，或者先处理这个目录`);
- const local=await localBranch(repo.mainRoot,branch);
+ const local=await localBranch(git,repo.mainRoot,branch);
  if(given&&local==='none')throw Error(`本地和 origin 都没有分支 ${branch}`);
  if(local==='tracking'){created.push(`本地分支 ${branch}（跟踪 origin/${branch}）`);say(`已从 origin/${branch} 建立本地跟踪分支 ${branch}`);}
  say(`正在创建 worktree：${target}`);

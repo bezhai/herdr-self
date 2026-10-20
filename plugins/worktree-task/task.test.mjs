@@ -1,6 +1,6 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {spawn,execFileSync} from 'node:child_process';import {fileURLToPath} from 'node:url';
-import {agentName,validBranch,parseBranch,randomBranch} from './naming.mjs';import {worktreePath} from './repo.mjs';
+import {agentName} from './naming.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url)),realGit=execFileSync('sh',['-c','command -v git'],{encoding:'utf8'}).trim();
 // The tests run inside Herdr sessions too: nothing they start may see the HERDR_* variables of the session, or reach its server.
@@ -245,14 +245,6 @@ test('usage errors exit with status 2',async()=>{
   for(const args of [[],['--unknown','x'],['-b']]){const r=await f.run(args);assert.equal(r.code,2,args.join(' '));assert.match(r.stderr,/用法/);}
   assert.deepEqual(f.calls(),[]);
  }finally{f.close();}
-});
-
-test('branch names: haiku output is validated, the fallback looks like Herdr\'s, and the path replaces / with -',()=>{
- assert.equal(parseBranch('x\nBRANCH=feat/a-b c\nBRANCH=fix/z'),'feat/a-b');assert.equal(parseBranch('nothing'),undefined);
- for(const b of ['feat/add-login','fix/a1','style/x'])assert.ok(validBranch(b),b);
- for(const b of ['feature/x','feat/','feat/Add','feat/a_b','feat/a--b','feat/-a','feat/a/b','feat/'+'a'.repeat(60),'Feat/x'])assert.ok(!validBranch(b),b);
- for(let i=0;i<20;i++)assert.match(randomBranch(),randomName);
- assert.equal(worktreePath('/src/genvi','feat/a/b'),'/src/genvi-worktrees/feat-a-b');
 });
 
 test('agent names fit Herdr: lowercase, starting with a letter, at most 32 characters, unique',()=>{

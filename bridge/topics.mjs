@@ -6,8 +6,10 @@ import {permissionMode,supported} from './platform.mjs';
 import {attachmentsOf,promptOf,fileName,titleOf,limits,label,reason} from './attachments.mjs';
 import {slash} from './commands.mjs';
 import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,steps} from './cot.mjs';
-// One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, or one that already runs
-// in any pane of any machine and that the topic adopted (/adopt). Everything goes through the Herdr CLI.
+import {wtRequest,usage,notRetried,createWorktree,worktreeIntro,failedText,removeWorktree,dirtyText,removalFailed,removalCard} from './worktrees.mjs';
+// One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, one that a /wt topic
+// starts in a new Git worktree (see worktrees.mjs), or one that already runs in any pane of any machine and that the topic adopted
+// (/adopt). Everything goes through the Herdr CLI, besides what worktrees and attachments need on the machine.
 const workspaceLabel=b=>'飞书 · '+b.name;
 // Arguments that Herdr passes on to the agent it starts, after --, per binding kind. Claude gets the binding's permission mode. Codex runs
 // in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
@@ -52,11 +54,12 @@ export class Topics{
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes; storeFile(m,root,dir,name,body) writes a file on
- // machine m and resolves to its absolute path, and removeDirectory(m,dir) removes a directory there (see core.mjs).
- constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact,request,download,storeFile,removeDirectory}){
+ // machine m and resolves to its absolute path, removeDirectory(m,dir) removes a directory there, and exec(m,argv,options) runs any other
+ // command there and resolves to its {code, stdout, stderr} (see core.mjs).
+ constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact,request,download,storeFile,removeDirectory,exec}){
   this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.topicQueues=new Map();this.workspaceQueues=new Map();
-  // In memory: the clicks being handled as '<topic id> <request id>' or '<topic id> adopt' → the promise of their handling; per topic the
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.exec=exec;this.topicQueues=new Map();this.workspaceQueues=new Map();
+  // In memory: the clicks being handled as '<topic id> <request id>', '<topic id> adopt' or '<topic id> worktree' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
   this.answering=new Map();this.blockedSeen=new Map();this.renders=0;this.claims=new Set();
@@ -72,15 +75,19 @@ export class Topics{
   if(!supported(msg))return this.unsupported(a,b,msg);
   const rootId=msg.rootId||msg.messageId;let t=this.store.data.topics.find(x=>x.bindingId===b.id&&x.rootId===rootId);
   if(!msg.messageId||t?.messageIds.includes(msg.messageId))return;
-  const text=msg.content.trim();
+  const text=msg.content.trim();let request;
   if(!t){
    // A root message has no root id; in a thread the command is a message to the agent like any other.
    if(!msg.rootId&&text===slash.adopt)return this.offer(a,b,msg);
    if(!msg.rootId&&text===slash.stop)return this.stopChat(a,b,msg);
-   // Recorded before the first await, so messages arriving meanwhile join this topic instead of opening another tab.
+   request=msg.rootId?null:wtRequest(text);
+   if(request?.usage)return this.answerRoot(a,b,msg,usage);
+   // Recorded before the first await, so messages arriving meanwhile join this topic instead of opening another tab. worktree marks a /wt
+   // topic; it gets the branch and the path of its worktree once they are known (see createWorktree).
    const id=uuid();
    t={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:b.machineId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
-    title:titleOf(msg),state:'starting',error:'',messageIds:[],replySeq:0,reactions:[],cards:[],createdAt:Date.now()};
+    title:request?titleOf({...msg,content:request.description})||request.branch:titleOf(msg),state:'starting',error:'',messageIds:[],replySeq:0,reactions:[],cards:[],
+    ...request&&{worktree:{}},createdAt:Date.now()};
    this.store.data.topics.push(t);
   }
   // At most once: the id is on disk before Herdr is called, and a message seen before is dropped.
@@ -90,7 +97,8 @@ export class Topics{
   // Not behind the topic queue, where an earlier message may be starting the agent for a minute.
   const reacted=this.addReaction(a,t,msg.messageId);
   await enqueue(this.topicQueues,t.id,async()=>{
-   let agent;try{agent=await this.forward(a,b,t,msg);}
+   // The /wt message prompts its task, without the command.
+   let agent;try{agent=await this.forward(a,b,t,request?{...msg,content:request.prompt}:msg,request);}
    // Settled in the queue, so a later message that closes the topic finds this record. A prompted message keeps its reaction
    // until its turn ends (see sync) or its COT takes its place; any other message loses it now.
    finally{const r=await reacted;if(agent&&r){r.stateSeq=agent.state_change_seq;this.store.save();}else await this.dropReaction(t,r);}
@@ -146,17 +154,24 @@ export class Topics{
  async unsupported(a,b,msg){
   try{await this.reply(a,b.chatId,msg.rootId||msg.messageId,{card:notice(unsupportedNotice)});}catch(e){this.store.log('话题通知',`${b.name}：${brief(e)}`,'error');}
  }
- // Sends message msg to the topic's agent, opening the topic first when it is new or failed; a topic still waiting for an agent to adopt
- // prompts nothing. The images and files of the message are written under the agent's working directory first (see attach): the binding's
- // for a topic that Bridge opened, and for an adopted one what Herdr reports for the agent, where the agent runs before where its shell is.
- // Resolves to the prompted agent, or to nothing when the message was not prompted.
- async forward(a,b,t,msg){
+ // Answers root message msg of binding b with text in its thread, which opens no topic. Never rejects.
+ async answerRoot(a,b,msg,text){
+  try{await this.reply(a,b.chatId,msg.messageId,{card:notice(text)});}catch(e){this.store.log('话题通知',`${b.name}：${brief(e)}`,'error');}
+ }
+ // Sends message msg to the topic's agent, opening the topic first when it is new or failed, a new /wt topic with its request (see
+ // wtRequest); a topic still waiting for an agent to adopt prompts nothing, and neither does a /wt topic that failed to start: its first
+ // message had the task, and what it created stays in place. The images and files of the message are written under the agent's working
+ // directory first (see attach): the binding's for a topic that Bridge opened in a tab, the worktree for a /wt topic, and for an adopted one
+ // what Herdr reports for the agent, where the agent runs before where its shell is. Resolves to the prompted agent, or to nothing when the
+ // message was not prompted.
+ async forward(a,b,t,msg,request){
   if(t.state==='closed')return;
   if(t.state==='choosing'){await this.notify(a,t,'请先在上面的卡片中选择要接管的 Agent');return;}
-  let cwd=b.cwd;
-  if(t.state==='ready'){const agent=await this.alive(a,t);if(!agent)return;if(t.adopted)cwd=agent.foreground_cwd||agent.cwd;}
-  else if(!await this.open(a,b,t))return;
-  const text=await this.attach(a,t,msg,cwd);
+  if(t.worktree&&t.state==='failed'){await this.notify(a,t,notRetried);return;}
+  let agent;
+  if(t.state==='ready'){agent=await this.alive(a,t);if(!agent)return;}
+  else if(!await this.open(a,b,t,request))return;
+  const text=await this.attach(a,t,msg,t.adopted?agent.foreground_cwd||agent.cwd:t.worktree?.path||b.cwd);
   let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,text]);}
   catch(e){if(e.code!=='agent_blocked')throw e;await this.notify(a,t,'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息');return this.noticed(t);}
   this.store.log('消息投递',`${a.name} → ${b.name}：已发送到 ${t.agentName}`);return r.agent;
@@ -201,30 +216,42 @@ export class Topics{
   if(!agent&&t.state==='ready')await this.end(a,t,t.adopted?adoptedGone:endedNotice);
   return agent;
  }
- // Ends a ready topic with a notice; its open COT shows the run failed, its reactions are removed, its cards show 已失效 and the directory of
- // its attachments is removed. A reaction still being added is removed when its message settles, unprompted.
+ // Ends a ready topic with a notice, which for a /wt topic is the card that offers removing its worktree, which stays; its open COT shows
+ // the run failed, its reactions are removed, its cards show 已失效 and the directory of its attachments is removed. A reaction still being
+ // added is removed when its message settles, unprompted.
  async end(a,t,text){
-  this.update(t,{state:'closed'});await this.notify(a,t,text);
+  this.update(t,{state:'closed'});
+  if(t.worktree)await this.offerRemoval(a,t,{heading:'话题已结束',text});else await this.notify(a,t,text);
   if(t.cot)await this.closeCot(t,[runError('话题已结束')],'error');
   for(const r of t.reactions||[])await this.dropReaction(t,r);
   for(const c of this.gone(t,[]))await this.dropCard(a,t,c);
   await this.clean(t);
  }
- // Opens a tab for the topic and starts its agent. Returns false when that failed; the topic is then failed and notified.
- async open(a,b,t){
-  this.update(t,{state:'starting',error:''});let m;
+ // Opens a tab for the topic, or for a /wt topic the worktree of request with its first reply (see createWorktree), and starts its agent
+ // there. Returns false when that failed; the topic is then failed and notified.
+ async open(a,b,t,request){
+  this.update(t,{state:'starting',error:''});let m,made,started=false;
   try{
    m=this.target(t);
-   Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();
+   if(t.worktree){
+    made=await createWorktree(m,b.cwd,request,{exec:this.exec,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
+    this.update(t,{workspaceId:made.workspaceId,tabId:made.tabId,paneId:made.paneId});await this.notify(a,t,worktreeIntro(m,made));
+   }else{Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();}
    try{await this.herdr(m,['agent','start',t.agentName,'--kind',b.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs[b.kind](b)],{timeoutMs:70000});}
    // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
    catch(e){if(e.code!=='agent_not_ready')throw e;}
+   started=true;
    // Before the topic is ready, which links it to its agent only while the setting is on.
    await this.herdr(m,remoteAnswers(t.paneId,true));
   }catch(e){
    this.update(t,{state:'failed',error:brief(e)});this.store.log('话题会话',`${b.name}：启动失败，${t.error}`,'error');
-   // Details can hold local paths and raw Herdr errors; they stay in the topic and the log.
-   await this.notify(a,t,'启动失败，请在 Bridge 管理台查看原因');return false;
+   // Details can hold local paths and raw Herdr errors; they stay in the topic and the log. A /wt topic tells them, with what exists.
+   if(!t.worktree)await this.notify(a,t,'启动失败，请在 Bridge 管理台查看原因');
+   else{
+    const created=[...made?.created||e.created||[],...started?[`Agent ${t.agentName}（pane ${t.paneId}）`]:[]],text=failedText(e,created);
+    if(made||e.kept)await this.offerRemoval(a,t,{heading:'启动失败',text});else await this.notify(a,t,text);
+   }
+   return false;
   }
   this.update(t,{state:'ready'});this.store.log('话题会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}`);return true;
  }
@@ -299,11 +326,43 @@ export class Topics{
   this.update(t,{cards:(t.cards||[]).filter(x=>x!==c)});
   try{await this.updateCard(a,c.messageId,card);}catch(e){this.store.log('请求卡片',`${t.agentName}：请求 #${c.requestId} 的卡片未能更新，${brief(e)}`,'error');}
  }
+ // Posts the card that offers removing the worktree of /wt topic t, which has no agent any more, saying says ({heading, text}), and records
+ // it as the worktree's card with what it says, to draw it again after a click (see removalCard). Never rejects: a card that cannot be
+ // sent is logged.
+ async offerRemoval(a,t,says){
+  try{const messageId=await this.reply(a,t.chatId,t.rootId,{card:removalCard(says,t.worktree,++this.renders)});this.update(t,{worktree:{...t.worktree,card:{messageId,...says}}});}
+  catch(e){this.store.log('worktree',`${t.agentName}：删除 worktree 的卡片未发出，${brief(e)}`,'error');}
+ }
+ // A click on the 删除 worktree button of a topic's card by someone on the app's allowlist (see click). The worktree is removed afterwards
+ // in the topic's queue, and the card then shows how it went.
+ removal(a,evt){
+  const t=this.store.data.topics.find(x=>x.appId===a.id&&x.worktree?.card?.messageId===evt.messageId);
+  if(!t)return toast('info','这张卡片已失效');
+  if(t.worktree.removed)return toast('info','worktree 已删除');
+  const key=t.id+' worktree';if(this.answering.has(key))return toast('info','正在删除，请稍候');
+  this.answering.set(key,enqueue(this.topicQueues,t.id,()=>this.removeWorktreeOf(a,t,evt.operator)).finally(()=>this.answering.delete(key)));
+  return toast('info','正在删除 worktree');
+ }
+ // Removes the worktree of topic t, which the person operator asked for, unless it has changes that are not committed (see
+ // removeWorktree), and draws its card again with the outcome. A removed worktree is marked removed. Never rejects.
+ async removeWorktreeOf(a,t,operator){
+  const w=t.worktree;let outcome;
+  try{
+   const r=await removeWorktree(this.target(t),w,{exec:this.exec,herdr:this.herdr});
+   if(r.dirty){outcome={text:dirtyText(r.dirty)};this.store.log('worktree',`${t.agentName}：${w.path} 有未提交的改动，没有删除`);}
+   else{
+    this.update(t,{worktree:{...w,removed:true}});this.store.log('worktree',`${t.agentName}：${r.gone?`${w.path} 已不在，按已删除处理`:`已删除 ${w.path}`}`);
+    outcome={removed:r.gone?'worktree 已不在，按已删除处理':`已删除 worktree，分支 ${w.branch} 保留`,openId:operator.openId};
+   }
+  }catch(e){outcome={text:removalFailed(e)};this.store.log('worktree',`${t.agentName}：未能删除 ${w.path}，${brief(e)}`,'error');}
+  try{await this.updateCard(a,w.card.messageId,removalCard(w.card,w,++this.renders,outcome));}catch(e){this.store.log('worktree',`${t.agentName}：删除 worktree 的卡片未能更新，${brief(e)}`,'error');}
+ }
  // A click on a request card by someone on the app's allowlist (see Platforms), which waits for the returned callback response: Feishu
  // gives it a few seconds, and Herdr over SSH can take longer. The answer goes to Herdr afterwards and outside the topic queue, where a
  // message may be starting the agent for a minute; the card then shows how it ended.
  click(a,evt){
   if(evt.action?.value?.adopt)return this.choose(a,evt);
+  if(evt.action?.value?.worktree)return this.removal(a,evt);
   const v=evt.action?.value||{},t=this.store.data.topics.find(x=>x.appId===a.id&&x.cards?.some(c=>c.messageId===evt.messageId)),c=t?.cards.find(x=>x.messageId===evt.messageId&&x.requestId===v.request);
   if(!c)return toast('info','这个请求已结束');
   const key=t.id+' '+c.requestId;if(this.answering.has(key))return toast('info','正在提交，请稍候');

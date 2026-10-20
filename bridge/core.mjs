@@ -18,12 +18,18 @@ export function normalizeMachine(b){
 }
 // A path on this machine: a leading ~/ is its home.
 const localPath=p=>p.replace(/^~\//,os.homedir()+'/');
+// The shell of the user's passwd entry, which sshd runs every SSH command with.
+const userShell=()=>os.userInfo().shell||'/bin/sh';
 // argv[0] is the program, argv[1..] its arguments. Each is a string passed verbatim, or {path} for a path on machine m whose
-// leading ~/ expands to that machine's home. Herdr itself does not expand ~ in --cwd.
-export function remoteInvocation(m,argv){
+// leading ~/ expands to that machine's home. Herdr itself does not expand ~ in --cwd. An SSH machine runs the command line through the
+// user's shell, which finds the program on the PATH that the shell sets up without a login or a terminal (for zsh in ~/.zshenv). With
+// shell a local machine does the same, instead of looking the program up on Bridge's own PATH: for commands the user installs, such as
+// claude, whose directory a service's PATH may lack.
+export function remoteInvocation(m,argv,{shell=false}={}){
  const shellPath=p=>p.startsWith('~/')?'"$HOME"/'+quote(p.slice(2)):quote(p);
  const command=argv.map(a=>typeof a==='string'?quote(a):shellPath(a.path)).join(' ');
  if(m.type==='ssh')return ['ssh',['-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=7','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=1','-p',String(m.port),'--',m.host,'env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c '+quote(command)]];
+ if(shell)return [userShell(),['-c',command]];
  const [program,...args]=argv.map(a=>typeof a==='string'?a:localPath(a.path));return [program,args];
 }
 // Herdr reports a failed request as one {"id","error":{"code","message"}} line on stderr and exits non-zero; keep its code.
@@ -31,11 +37,16 @@ function failure(text){
  try{const {error}=JSON.parse(text.trim().split('\n').at(-1));if(error?.code)return Object.assign(Error(error.message),{code:error.code});}catch{}
  return Error((text||'远程命令失败').slice(-1000));
 }
-// Runs argv (see remoteInvocation) on machine m and resolves to its stdout. input, when given, is its stdin, which is closed otherwise.
-function run(m,argv,{timeoutMs=12000,input}={}){
- const [bin,args]=remoteInvocation(m,argv),env={...process.env};for(const k of Object.keys(env))if(k.startsWith('HERDR_'))delete env[k];
- return new Promise((resolve,reject)=>{const p=spawn(bin,args,{env,stdio:['pipe','pipe','pipe']});let out='',err='';const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Error('连接超时，请检查 SSH 与 Herdr 状态'));},timeoutMs);p.stdout.on('data',d=>{out+=d;if(out.length>4e6){p.kill('SIGKILL');reject(Error('响应过大'));}});p.stderr.on('data',d=>{err=(err+d).slice(-2000);});p.on('error',e=>{clearTimeout(timer);reject(e);});p.on('close',code=>{clearTimeout(timer);if(code!==0)return reject(failure(err||out));resolve(out);});p.stdin.on('error',()=>{});p.stdin.end(input);});
+// Runs argv (see remoteInvocation, which shell goes to) on machine m without the HERDR_* variables of Bridge and resolves to
+// {code, stdout, stderr} whatever its exit status; stderr keeps its last 2000 characters. Rejects when it cannot start, prints too much,
+// does not finish within timeoutMs (the error then has timedOut) or, on an SSH machine, when ssh itself fails, which it reports with
+// status 255. input, when given, is its stdin, which is closed otherwise.
+export function exec(m,argv,{timeoutMs=12000,input,shell}={}){
+ const [bin,args]=remoteInvocation(m,argv,{shell}),env={...process.env};for(const k of Object.keys(env))if(k.startsWith('HERDR_'))delete env[k];
+ return new Promise((resolve,reject)=>{const p=spawn(bin,args,{env,stdio:['pipe','pipe','pipe']});let out='',err='';const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Object.assign(Error('连接超时，请检查 SSH 与 Herdr 状态'),{timedOut:true}));},timeoutMs);p.stdout.on('data',d=>{out+=d;if(out.length>4e6){p.kill('SIGKILL');reject(Error('响应过大'));}});p.stderr.on('data',d=>{err=(err+d).slice(-2000);});p.on('error',e=>{clearTimeout(timer);reject(e);});p.on('close',code=>{clearTimeout(timer);if(m.type==='ssh'&&code===255)return reject(failure(err||out));resolve({code,stdout:out,stderr:err});});p.stdin.on('error',()=>{});p.stdin.end(input);});
 }
+// Like exec, and resolves to its stdout; any exit status other than 0 rejects.
+async function run(m,argv,options){const r=await exec(m,argv,options);if(r.code!==0)throw failure(r.stderr||r.stdout);return r.stdout;}
 export async function herdr(m,args,options){
  const out=await run(m,[{path:m.binary},'--session',m.session,...args],options);
  try{return JSON.parse(out).result;}catch{throw Error('远程服务未返回有效 JSON');}

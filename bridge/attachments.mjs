@@ -44,9 +44,11 @@ export function promptOf(msg,list){
  });
  return [text.trim(),...left.map(placeholder)].filter(Boolean).join('\n');
 }
+// The text of content, the content of a message, with the markup of its attachments as spaces.
+export const withoutAttachments=content=>content.replace(markup,' ');
 // The title of a topic that message msg opens: the first 24 characters of its content with whitespace collapsed and the markup of its
 // attachments left out; without any text, the kind of its first attachment.
 export function titleOf(msg){
- const list=attachmentsOf(msg),text=(list.length?msg.content.replace(markup,' '):msg.content).replace(/\s+/g,' ').trim();
+ const list=attachmentsOf(msg),text=(list.length?withoutAttachments(msg.content):msg.content).replace(/\s+/g,' ').trim();
  return [...text].slice(0,24).join('')||(list.length?kinds[list[0].type]:'');
 }

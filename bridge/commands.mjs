@@ -1,7 +1,8 @@
-// The commands a person sends to the bot, each as a whole message (see Topics.handle): /adopt as a root message offers the running agents to
-// adopt, /release in an adopted topic lets go of its agent, and /stop in a ready topic, or as a root message, interrupts the agent's turn.
-// Each has the description that Feishu's slash command panel shows. Feishu takes only names that match ^[a-z][a-z0-9_-]{0,31}$.
-export const commands={adopt:'接管正在运行的 Agent',release:'结束接管',stop:'停止 Agent 当前这一轮'};
+// The commands a person sends to the bot (see Topics.handle): /adopt as a root message offers the running agents to adopt, /release in an
+// adopted topic lets go of its agent, and /stop in a ready topic, or as a root message, interrupts the agent's turn; each of these is a
+// whole message. /wt as a root message, followed by the task, opens a topic in a new Git worktree (see worktrees.mjs). Each has the
+// description that Feishu's slash command panel shows. Feishu takes only names that match ^[a-z][a-z0-9_-]{0,31}$.
+export const commands={adopt:'接管正在运行的 Agent',release:'结束接管',stop:'停止 Agent 当前这一轮',wt:'在新的 Git worktree 里开一个话题'};
 // Each command as sent, such as /adopt.
 export const slash=Object.fromEntries(Object.keys(commands).map(c=>[c,'/'+c]));
 const path='/open-apis/application/v7/app_slash_commands';

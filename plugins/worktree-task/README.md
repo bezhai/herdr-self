@@ -13,7 +13,7 @@ herdr plugin link /path/to/herdr/plugins/worktree-task
 herdr plugin action list --plugin bezhai.worktree-task
 ```
 
-`plugin link` 只登记目录、不复制文件，修改插件后不用重新 link。
+`plugin link` 只登记目录、不复制文件，修改插件后不用重新 link。起名提示词、分支名校验、随机备用名、worktree 路径和仓库检查这些逻辑在仓库的 `bridge/worktree-branch.mjs` 里，和 Herdr Bridge 的 `/wt` 话题共用，插件从 `../../bridge/worktree-branch.mjs` 导入它，所以要从完整的仓库 checkout 里 link 插件，不能只复制 `plugins/worktree-task` 这一个目录。这个文件只用 Node 自带的模块，不需要在 `bridge/` 里 `npm install`。
 
 ## 快捷键
 
@@ -130,4 +130,4 @@ cd plugins/worktree-task
 node --test
 ```
 
-测试在临时目录里建 Git 仓库，用假的 `herdr`、`claude` 和一个记录参数的 `git` 包装（`testing/` 下，内部调用真实的 git）替换 PATH 上的同名命令，并去掉当前会话的 `HERDR_*` 变量，不会连接正在运行的 herdr，也不会调用真实的 Claude。`just check` 不包含这些测试。
+分支名的解析、校验和随机备用名、worktree 路径这些共用逻辑的单元测试在 `bridge/test.mjs` 里。测试在临时目录里建 Git 仓库，用假的 `herdr`、`claude` 和一个记录参数的 `git` 包装（`testing/` 下，内部调用真实的 git）替换 PATH 上的同名命令，并去掉当前会话的 `HERDR_*` 变量，不会连接正在运行的 herdr，也不会调用真实的 Claude。`just check` 不包含这些测试。
