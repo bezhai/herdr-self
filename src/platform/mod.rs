@@ -154,6 +154,10 @@ pub(crate) struct PlatformCapabilities {
     pub(crate) live_handoff: bool,
     pub(crate) direct_terminal_attach: bool,
     pub(crate) preserve_legacy_doubled_escape_input: bool,
+    /// Whether the foreground process group of a pane names one job for that
+    /// job's whole life, as a Unix process group does. Windows picks it from a
+    /// process snapshot instead.
+    pub(crate) foreground_group_is_job: bool,
 }
 
 pub(crate) const fn capabilities() -> PlatformCapabilities {
@@ -161,6 +165,7 @@ pub(crate) const fn capabilities() -> PlatformCapabilities {
         live_handoff: cfg!(unix),
         direct_terminal_attach: cfg!(unix),
         preserve_legacy_doubled_escape_input: cfg!(target_os = "macos"),
+        foreground_group_is_job: cfg!(unix),
     }
 }
 

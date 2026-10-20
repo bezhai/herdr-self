@@ -3423,6 +3423,68 @@ mod tests {
         assert_eq!(latest_reply_seq(&app, 0, pane_id), None);
     }
 
+    // While a pane counts its claude as running, a startup session from another
+    // id is a nested claude, such as `claude -p` run by a tool: its reports are
+    // dropped. Once the pane reports the exit and a replacement process, a new
+    // claude's session and replies are its own.
+    #[test]
+    fn claude_replies_follow_a_replacement_process_but_not_a_nested_session() {
+        let mut app = app_with_workspaces(&["one"]);
+        let pane_id = app.workspaces[0].tabs[0].root_pane;
+        let detected = |app: &mut AppState| {
+            app.handle_app_event(AppEvent::AgentProcessDetected {
+                pane_id,
+                agent: Agent::Claude,
+                observed_at: Instant::now(),
+            });
+        };
+        let report_session = |app: &mut AppState, seq: u64, session: &str| {
+            app.handle_app_event(AppEvent::AgentSessionReported {
+                pane_id,
+                source: "herdr:claude".into(),
+                agent_label: "claude".into(),
+                seq: Some(seq),
+                session_ref: crate::agent_resume::AgentSessionRef::id(session),
+                session_start_source: Some("startup".into()),
+            });
+        };
+        let reply = |app: &mut AppState, seq: u64, session: &str| {
+            app.record_agent_reply(
+                pane_id,
+                crate::terminal::agent_replies::AgentReplyReport {
+                    source: "herdr:claude".into(),
+                    agent_label: "claude".into(),
+                    seq: Some(seq),
+                    agent_session_id: Some(session.into()),
+                    text: format!("reply {seq}"),
+                    truncated: false,
+                },
+            )
+        };
+        detected(&mut app);
+        report_session(&mut app, 1, "print");
+        assert_eq!(reply(&mut app, 2, "print"), Some(1));
+
+        report_session(&mut app, 3, "nested");
+        assert_eq!(reply(&mut app, 4, "nested"), None);
+        assert_eq!(reply(&mut app, 5, "print"), Some(2));
+
+        app.handle_app_event(AppEvent::StateChanged {
+            pane_id,
+            agent: Some(Agent::Claude),
+            state: AgentState::Idle,
+            visible_blocker: false,
+            visible_working: false,
+            process_exited: true,
+            observed_at: Instant::now(),
+        });
+        detected(&mut app);
+        report_session(&mut app, 6, "interactive");
+        assert_eq!(reply(&mut app, 7, "interactive"), Some(3));
+        assert_eq!(reply(&mut app, 8, "print"), None);
+        app.assert_invariants_for_test();
+    }
+
     #[test]
     fn agent_replies_clear_when_the_agent_changes_or_exits() {
         let mut app = app_with_workspaces(&["one"]);
