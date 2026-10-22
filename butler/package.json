@@ -1,0 +1,11 @@
+{
+  "name": "herdr-butler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=24"},
+  "scripts": {
+    "start": "node --disable-warning=ExperimentalWarning cli.mjs run",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.mjs"
+  }
+}
