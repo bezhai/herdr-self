@@ -8,7 +8,7 @@ import {Reconciler} from './reconcile.mjs';
 
 export const DEFAULTS={cycleMs:60_000,threadFeedEveryMs:600_000,mentionsEveryMs:600_000,slackMs:900_000,mentionOverlapMs:600_000,
  reconnectMinMs:1000,reconnectMaxMs:30_000,connectTimeoutMs:30_000,startupRetryMs:60_000,heartbeatMs:5000,requestGapMs:100,threadFetchDelayMs:1000,
- maxChatsPerCycle:200,maxThreadsPerCycle:30,threadAttempts:10};
+ maxChatsPerCycle:50,chatPages:5,readAttempts:5,maxThreadsPerCycle:30,threadAttempts:10};
 const message=e=>e?.message??String(e);
 
 export class Collector{

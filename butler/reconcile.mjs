@@ -2,7 +2,9 @@
 // open-lark writes during gap repair, backfill or background thread syncs), so each cycle reads open-lark's store:
 // - conversation lists, newest first down to a horizon, to find chats whose entry changed; those chats are read by
 //   position from where butler stopped (all of them, since a reply to me in any group counts and Lark keeps no
-//   history of replies to look up), and watched groups on every cycle;
+//   history of replies to look up), and watched groups on every cycle. Topic groups are not read by position: open-lark
+//   cannot be trusted with their message window (see syncChat), and what concerns me there is in topics I took part
+//   in or @s me, which the next two cover;
 // - the thread feed, for threads I took part in whose reply count changed;
 // - the @me history search over a time window, for mentions in chats whose entry did not change;
 // and fetches replies of threads whose root showed a grown reply count.
@@ -12,8 +14,7 @@ const PAGE=100;
 // Positions read again before a cursor. A normal group's thread replies have position <= 0 and are mixed into a page
 // by time from its first row on, so the first row must be no later than the last one read before.
 const OVERLAP=3;
-const MAX_FORWARD_PAGES=50,MAX_BACK_PAGES=10,MAX_THREAD_PAGES=5,MAX_LIST_PAGES=50,MAX_SEARCH_PAGES=40;
-const GAP_RETRIES=3,MAX_PENDING_ATTEMPTS=20;
+const MAX_THREAD_PAGES=5,MAX_LIST_PAGES=50,MAX_SEARCH_PAGES=40,MAX_PENDING_ATTEMPTS=20;
 const message=e=>e?.message??String(e);
 
 export class Reconciler{
@@ -71,6 +72,7 @@ export class Reconciler{
      if(c.isDoc||(c.feedType!==undefined&&c.feedType!==1))continue;
      if(!c.onTopRankAt&&!(Date.parse(c.rankAt??'')>=horizon)){past=true;break;}
      this.store.upsertChatInfo(c);
+     if(c.chatMode==='topic')continue;
      const signature=[c.preview?.messageId??'',c.rankAt??'',c.updatedAtMs??''].join('|');
      if(this.store.chat(c.feedId).signature!==signature)this.store.markDirty(c.feedId,signature);
     }
@@ -88,40 +90,78 @@ export class Reconciler{
   }
   return ids.length;
  }
- // Reads one chat from its cursor (or, the first time, from its newest messages back to when collection started) and
- // records every message; the recorder keeps the ones that concern me.
+ // Reads one chat by position from its cursor, or the first time from its newest messages back to when collection
+ // started, and records every message; the recorder keeps the ones that concern me. At most options.chatPages pages a
+ // cycle: a long backlog goes on in the next cycle, so one chat cannot hold a cycle (a page can take open-lark seconds
+ // when it has to fetch the positions from Lark).
+ //
+ // The chat is settled only when the read reached what its conversation entry showed (see #reached). open-lark bounds
+ // every page by its stored last position of the chat, and that can lag or be 0: its feed refresh writes "0" when Lark's
+ // chat card has no last_message_position (seen live for topic groups), and for topic groups storing messages does not
+ // move it forward again. It then answers a tail read with the chat's position-0 message and no maxPosition, and a
+ // forward read with an empty page and hasNewer:false. A read that fell short is retried by later cycles and given up
+ // after options.readAttempts with one error, until the entry changes again. Topic groups are not read at all.
  async syncChat(feedId){
-  const chat=this.store.chat(feedId);
-  if(chat?.cursor==null)await this.#readFromTail(feedId);
-  else if(!await this.#readForward(feedId,chat.cursor))return;
+  let chat=this.store.chat(feedId);
+  if(!chat?.chatMode){await this.fillChatInfo([feedId]);chat=this.store.chat(feedId);}
+  if(chat?.chatMode==='topic'){if(chat.dirty)this.store.settleChat(feedId);return;}
+  const name=chat?.name||feedId,lastTry=(chat?.readRetries??0)+1>=this.options.readAttempts;
+  // A cursor is a positive position; anything else (0 from an earlier version) counts as never read.
+  const read=chat?.cursor>0?await this.#readForward(feedId,chat.cursor,{name,lastTry}):await this.#readFromTail(feedId);
+  if(read.state==='more')return;
+  const target=chat?.pendingSignature?.split('|')[0]||undefined;
+  if(read.state==='end'&&await this.#reached(read,target)){this.store.settleChat(feedId);return;}
+  if(!chat?.dirty)return;
+  const tries=this.store.readRetry(feedId);
+  if(tries<this.options.readAttempts)return;
   this.store.settleChat(feedId);
+  this.store.addError(`聊天 ${name}`,read.state==='invalid'
+   ?`open-lark 的尾页没有正的 maxPosition（它记的这个聊天的最后位置不对），读了 ${tries} 次，放弃到它下次有变化`
+   :`按位置读到 ${read.cursor} 仍没读到会话列表显示的最后一条消息 ${target}，读了 ${tries} 次，放弃到它下次有变化`);
+ }
+ // Whether a read reached the chat's last message: it has a cursor, and the message the conversation entry shows is
+ // among what it read or at or below the cursor. Its position is asked of GET /messages/:id only when the read did not
+ // show it; that GET reads open-lark's store but checks the chat with Lark first (cached per chat for a minute).
+ async #reached(read,target){
+  if(!(read.cursor>0))return false;
+  if(!target||read.seen.has(target))return true;
+  let view;
+  try{view=await this.openLark.message(target);}catch(e){if(e.status===403||e.status===404)return false;throw e;}
+  const position=Number(view.position);
+  if(position>0)return position<=read.cursor;
+  // A normal group's thread reply has no position of its own: record it from here; the read counts if it had rows.
+  this.recorder.record([view]);return read.rows>0;
  }
  async #readFromTail(feedId){
   let page=await this.openLark.messages(feedId,{tail:true,limit:PAGE});
-  const cursor=Number(page.maxPosition??0),views=[...page.items??[]];
-  for(let n=1;n<MAX_BACK_PAGES&&page.hasOlder&&page.minPosition&&page.items?.length&&Date.parse(page.items[0].createdAt)>=this.collectedSince;n++){
+  const cursor=Number(page.maxPosition);
+  // Without a positive maxPosition this is not the chat's tail: nothing is recorded and no cursor set.
+  if(!(cursor>0))return {state:'invalid'};
+  const views=[...page.items??[]];
+  for(let n=1;n<this.options.chatPages&&page.hasOlder&&page.items?.length&&Date.parse(page.items[0].createdAt)>=this.collectedSince;n++){
    const min=Number(page.minPosition);
    page=await this.openLark.messages(feedId,{beforePosition:min+OVERLAP,limit:PAGE});views.push(...page.items??[]);
    if(!(Number(page.minPosition)<min))break;
   }
   this.recorder.record(views);this.store.setCursor(feedId,cursor);
+  return {state:'end',cursor,rows:1,seen:new Set(views.map(v=>v.id))};
  }
- // Returns whether the chat was read to its end.
- async #readForward(feedId,cursor){
-  let after=Math.max(0,cursor-OVERLAP);
-  for(let n=0;n<MAX_FORWARD_PAGES;n++){
-   const page=await this.openLark.messages(feedId,{afterPosition:after,limit:PAGE});
+ // state: 'end' (open-lark says there is nothing newer), 'more' (page budget used up) or 'gap'.
+ async #readForward(feedId,cursor,{name,lastTry}){
+  const seen=new Set();let after=Math.max(0,cursor-OVERLAP),rows=0;
+  for(let n=0;n<this.options.chatPages;n++){
+   const page=await this.openLark.messages(feedId,{afterPosition:after,limit:PAGE}),items=page.items??[],max=Number(page.maxPosition);
+   this.recorder.record(items);for(const v of items)seen.add(v.id);
    if(page.syncState==='gap'){
-    // open-lark could not fill this window from Lark: keep the cursor and try again next cycle, a few times.
-    const tries=this.store.gapRetry(feedId);this.recorder.record(page.items??[]);
-    if(tries<GAP_RETRIES)throw Error(`open-lark 报告位置 ${after+1} 之后的消息有缺口，下个周期重试`);
-    this.store.addError(`聊天 ${this.store.chat(feedId)?.name||feedId}`,`open-lark 报告的消息缺口重试 ${tries} 次仍在，跳过`);
-   }else this.recorder.record(page.items??[]);
-   if(page.maxPosition){cursor=Math.max(cursor,Number(page.maxPosition));this.store.setCursor(feedId,cursor);}
-   if(!page.hasNewer||!page.nextNewerCursor)return true;
+    // open-lark could not fill this window from Lark: the cursor stays before it for later cycles; the last try moves past.
+    if(!lastTry)return {state:'gap',cursor,rows,seen};
+    this.store.addError(`聊天 ${name}`,`open-lark 报告位置 ${after+1} 之后的消息有缺口，读了 ${this.options.readAttempts} 次仍在，跳过`);
+   }
+   if(max>0){rows+=1;cursor=Math.max(cursor,max);this.store.setCursor(feedId,cursor);}
+   if(!page.hasNewer||!page.nextNewerCursor)return {state:'end',cursor,rows,seen};
    after=Number(page.nextNewerCursor)-OVERLAP;
   }
-  return false;
+  return {state:'more',cursor,rows,seen};
  }
  // Names and kinds of chats that records point at but no conversation list has shown yet.
  async fillChatInfo(feedIds){

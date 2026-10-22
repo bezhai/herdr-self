@@ -71,7 +71,11 @@ export class FakeOpenLark{
  chat({name,chatMode='group',memberCount=chatMode==='direct'?2:10,pinned=false,isMuted=false,feedId}){
   const id=feedId??String(6800000000000000000n+BigInt(++this.seq)),t=this.now();
   this.conversations.set(id,{feedId:id,name,chatMode,isGroup:chatMode!=='direct',memberCount,isMuted,feedType:1,rankTimeMs:t,onTopRankTimeMs:pinned?t+1e12:0,updatedAtMs:t,previewMessageId:undefined,lastPosition:0});
-  this.byFeed.set(id,[]);return id;
+  // Like a real chat, it starts with a system message at position 0, long before anything else.
+  const origin=this.#id();
+  this.messages.set(origin,{id:origin,feedId:id,position:'0',createdAt:iso(t-365*86400e3),senderId:'0',senderName:'',senderType:'user',isMine:false,isEdited:false,isRecalled:false,
+   isSystem:true,localState:'synced',messageType:1,chatType:chatMode==='direct'?1:2,parts:[],textPreview:'',reactions:[],editHistory:[],threadId:origin,threadMessageType:'none',threadReplyCount:0});
+  this.byFeed.set(id,[origin]);return id;
  }
  conversationView(c){
   const preview=this.messages.get(c.previewMessageId);
@@ -114,6 +118,11 @@ export class FakeOpenLark{
   const v=this.messages.get(id);v.isRecalled=true;v.parts=[];v.textPreview='';
   if(event)this.emit({type:'message.recalled',feedId:v.feedId,messageId:id});
  }
+ // open-lark's stored last position of a chat, which bounds every message page, stays at `position` until thawed. Its
+ // feed refresh writes 0 for topic groups (Lark's chat entity has no last_message_position for them), and only later
+ // pushes restore it.
+ freezeWindow(feedId,position=0){this.conversations.get(feedId).frozenLastPosition=position;}
+ thawWindow(feedId){delete this.conversations.get(feedId).frozenLastPosition;}
  setSync(state,mode,{event=true}={}){this.syncState={state,mode};if(event)this.emit({type:'sync.upstream',state,mode,since:iso(Date.now())});}
  emit(event){const data=frame(0x1,Buffer.from(JSON.stringify(event)));for(const s of this.sockets)s.write(data);}
  // open-lark going away: sockets drop at once and nothing answers until up().
@@ -193,17 +202,19 @@ export class FakeOpenLark{
  #page(c,q){
   const anchor=q.aroundPosition??q.beforePosition??q.afterPosition;
   const scene=q.aroundPosition?'specified-position':q.beforePosition?'previous-page':q.afterPosition?'next-page':'first-screen';
-  const range=planMessageWindow({anchorPosition:anchor,count:Number(q.limit??50),lastPosition:c.lastPosition,scene});
+  const last=c.frozenLastPosition??c.lastPosition;
+  const range=planMessageWindow({anchorPosition:anchor,count:Number(q.limit??50),lastPosition:last,scene});
   if(!range)return {hasNewer:false,hasOlder:false,items:[],syncState:'complete'};
   const views=this.byFeed.get(c.feedId).map(id=>this.messages.get(id));
   const rows=views.filter(v=>Number(v.position)>=range.start&&Number(v.position)<=range.end).sort((a,b)=>Number(a.position)-Number(b.position));
   let replies=[];
   if(rows.length&&c.chatMode!=='topic'){
-   const earliest=Date.parse(rows[0].createdAt),latest=Date.parse(rows.at(-1).createdAt),tail=range.end>=c.lastPosition;
+   const earliest=Date.parse(rows[0].createdAt),latest=Date.parse(rows.at(-1).createdAt),tail=range.end>=last;
    replies=views.filter(v=>Number(v.position)<=0&&v.threadId!==v.id&&Date.parse(v.createdAt)>=earliest&&(tail||Date.parse(v.createdAt)<=latest));
   }
   const items=[...rows,...replies].sort((a,b)=>Date.parse(a.createdAt)-Date.parse(b.createdAt)||a.id.localeCompare(b.id)).map(clone);
-  const hasOlder=range.start>0,hasNewer=range.end<c.lastPosition,main=rows.map(v=>v.position);
+  // maxPosition and minPosition only count positions above 0, as open-lark's do.
+  const hasOlder=range.start>0,hasNewer=range.end<last,main=rows.map(v=>v.position).filter(p=>Number(p)>0);
   return {hasNewer,hasOlder,items,maxPosition:main.at(-1),minPosition:main[0],...(hasNewer?{nextNewerCursor:String(range.end)}:{}),...(hasOlder?{nextOlderCursor:String(range.start)}:{}),syncState:this.gaps.has(c.feedId)?'gap':'complete'};
  }
  #thread(rootId,q){

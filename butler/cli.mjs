@@ -136,7 +136,10 @@ async function main(argv){
      // The store knows the groups seen so far; anything it cannot resolve uniquely is looked up in open-lark.
      if(queries.some(q=>matches(store.groups(),q).length!==1))await refreshGroups(store,openLark());
      const picked=queries.map(q=>pick(store.groups(),q)),since=Date.now();
-     for(const g of picked){store.watch(g.feedId,since);console.log(`已加入关注：${g.name}（${g.feedId}），从 ${time(store.watchSince(g.feedId))} 开始收集`);}
+     for(const g of picked){
+      store.watch(g.feedId,since);console.log(`已加入关注：${g.name}（${g.feedId}），从 ${time(store.watchSince(g.feedId))} 开始收集`);
+      if(g.chatMode==='topic')console.log(`注意：${g.name} 是话题群。butler 不按位置读话题群（open-lark 给话题群的消息窗口不可靠），这个群只能收到推送来的消息，收集器停机或断线期间的消息补不上；其中我参与的话题和 @我 的消息不受影响。`);
+     }
      return 0;
     }
     if(action==='remove'){

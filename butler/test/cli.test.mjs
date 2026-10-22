@@ -39,6 +39,10 @@ test('watch list commands: add by name or id, refuse ambiguous names, remove; gr
  r=await cli(config,'watch','list');assert.match(r.stdout,/项目群/);assert.match(r.stdout,/测试群B/);assert.doesNotMatch(r.stdout,/测试群A/);
  r=await cli(config,'groups');assert.match(r.stdout.split('\n').find(l=>l.includes('项目群')),/★/);
  r=await cli(config,'watch','remove','项目群');assert.equal(r.code,0,r.stderr);assert.deepEqual(store.watches().map(w=>w.feedId),[b]);
+ // A topic group is added, with a warning: butler does not read topic groups by position.
+ const topic=lark.chat({name:'需求讨论',chatMode:'topic'});
+ r=await cli(config,'watch','add','需求讨论');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/是话题群/);assert.ok(store.watchSince(topic));
+ r=await cli(config,'watch','add',b);assert.doesNotMatch(r.stdout,/是话题群/);
  assert.ok(a);assert.deepEqual(lark.writes(),[]);
 });
 

@@ -3,6 +3,14 @@ import assert from 'node:assert/strict';
 import {setup,waitFor,sleep,LINK_BASE} from './helpers.mjs';
 import {CATALOG} from './fake-open-lark.mjs';
 import {readOnly,REQUIRED_ROUTES} from '../open-lark.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {DatabaseSync} from 'node:sqlite';
+import {startFakeOpenLark} from './fake-open-lark.mjs';
+import {Store} from '../store.mjs';
+import {Collector} from '../collector.mjs';
+import {FAST} from './helpers.mjs';
 
 const cats=(store,id)=>store.message(id)?.categories;
 
@@ -86,9 +94,9 @@ test('a thread reply in a watched group is reconciled even when no new main mess
  const root=lark.post(group,{text:'讨论'});for(let i=0;i<6;i++)lark.post(group,{text:`后面第${i}条`});await c.reconcile('periodic');
  // Its position is <= 0 and its root is older than the rows read again, so only a page whose first row is no later
  // than the last read row brings it in, by time.
- const reply=lark.post(group,{thread:root.id,text:'话题里的新回复'},{event:'none'});
+ const reply=lark.post(group,{thread:root.id,text:'话题里的新回复'},{event:'none'}),last=lark.post(group,{thread:root.id,text:'又一个回复'},{event:'none'});
  await c.reconcile('periodic');
- assert.deepEqual(cats(store,reply.id),['watched']);
+ assert.deepEqual(cats(store,reply.id),['watched']);assert.deepEqual(cats(store,last.id),['watched']);
 });
 
 test('after an open-lark restart the event socket reconnects and reconciliation catches up',async t=>{
@@ -226,13 +234,99 @@ test('open-lark not live holds the reconciliation watermark until sync returns t
  await waitFor(()=>store.message(v.id),{message:'reconcile on sync live'});
 });
 
-test('a gap reported by open-lark keeps the chat for the next reconciliation',async t=>{
+test('a gap reported by open-lark keeps the chat for later cycles, then is skipped with one error',async t=>{
  const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});
- const c=await running();lark.post(dm,{text:'第一条'});await c.reconcile('periodic');
+ const c=await running();lark.post(dm,{text:'第一条'});await c.reconcile('periodic');const cursor=store.chat(dm).cursor;
  lark.gaps.add(dm);lark.post(dm,{text:'缺口旁边'},{event:'none'});await c.reconcile('periodic');
- assert.equal(store.chat(dm).dirty,true);assert.match(store.status().errors[0].message,/缺口/);
- lark.gaps.delete(dm);await c.reconcile('periodic');assert.equal(store.chat(dm).dirty,false);
+ assert.equal(store.chat(dm).dirty,true);assert.equal(store.chat(dm).cursor,cursor);assert.equal(store.errors(100).length,0);
+ lark.gaps.delete(dm);await c.reconcile('periodic');assert.equal(store.chat(dm).dirty,false);assert.ok(store.chat(dm).cursor>cursor);
+ // A gap that stays: after the bound one error, and the cursor moves past it so the next read does not stop there again.
+ lark.gaps.add(dm);const v=lark.post(dm,{text:'一直有缺口'},{event:'none'});
+ for(let n=0;n<c.options.readAttempts;n++)await c.reconcile('periodic');
+ assert.equal(store.chat(dm).dirty,false);assert.equal(store.errors(100).length,1);assert.match(store.errors(1)[0].message,/缺口/);
+ assert.equal(store.chat(dm).cursor,Number(v.position));
 });
+
+// open-lark's message window comes from its stored last position of the chat, which its feed refresh sets to 0 for
+// topic groups. Live, that gave a tail page with only the chat's position-0 message and no maxPosition, and forward
+// pages that were empty with hasNewer:false while newer messages existed.
+test('a tail page without a positive maxPosition is not a read: the chat stays unread for later cycles',async t=>{
+ const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});const c=await running();
+ lark.freezeWindow(dm,0);const v=lark.post(dm,{text:'窗口坏掉时的私聊'},{event:'none'});
+ await c.reconcile('periodic');
+ assert.equal(store.chat(dm).cursor,null);assert.equal(store.chat(dm).dirty,true);assert.equal(store.message(v.id),undefined);assert.equal(store.errors(100).length,0);
+ lark.thawWindow(dm);await c.reconcile('periodic');
+ assert.equal(store.chat(dm).cursor,Number(v.position));assert.equal(store.chat(dm).dirty,false);assert.deepEqual(cats(store,v.id),['dm']);
+});
+
+for(const frozenAt of ['zero','the cursor'])test(`a forward read that ends below the entry's last message is not the end (window at ${frozenAt})`,async t=>{
+ const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});const c=await running();
+ lark.post(dm,{text:'第一条'});await c.reconcile('periodic');const cursor=store.chat(dm).cursor;assert.ok(cursor>0);
+ lark.freezeWindow(dm,frozenAt==='zero'?0:cursor);const v=lark.post(dm,{text:'窗口坏掉时的私聊'},{event:'none'});
+ await c.reconcile('periodic');
+ assert.equal(store.chat(dm).cursor,cursor);assert.equal(store.chat(dm).dirty,true,'not settled below the last message');assert.equal(store.message(v.id),undefined);
+ lark.thawWindow(dm);await c.reconcile('periodic');
+ assert.deepEqual(cats(store,v.id),['dm']);assert.equal(store.chat(dm).dirty,false);
+});
+
+test('a chat that cannot be read to its last message is given up after a bound with one error, until it changes again',async t=>{
+ const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});const c=await running();
+ lark.post(dm,{text:'第一条'});await c.reconcile('periodic');
+ lark.freezeWindow(dm,0);lark.post(dm,{text:'读不到'},{event:'none'});
+ for(let n=1;n<c.options.readAttempts;n++){await c.reconcile('periodic');assert.equal(store.chat(dm).dirty,true);assert.equal(store.errors(100).length,0);}
+ await c.reconcile('periodic');
+ assert.equal(store.chat(dm).dirty,false);const errors=store.errors(100);assert.equal(errors.length,1);assert.match(errors[0].source,/张三/);
+ const reads=()=>lark.requests.filter(r=>r.path===`/agent/v1/conversations/${dm}/messages`).length,before=reads();
+ await c.reconcile('periodic');assert.equal(reads(),before,'given up: no more reads');
+ lark.thawWindow(dm);const v=lark.post(dm,{text:'之后的私聊'},{event:'none'});await c.reconcile('periodic');assert.deepEqual(cats(store,v.id),['dm']);
+});
+
+test('one chat reads at most a few pages per cycle and goes on in the next',async t=>{
+ const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});const c=await running();
+ lark.post(dm,{text:'第一条'});await c.reconcile('periodic');
+ const many=Array.from({length:700},(_,i)=>lark.post(dm,{text:`第${i}条`},{event:'none'}));
+ const reads=()=>lark.requests.filter(r=>r.path===`/agent/v1/conversations/${dm}/messages`).length,before=reads();
+ await c.reconcile('periodic');
+ assert.ok(reads()-before<=5,`${reads()-before} pages in one cycle`);assert.equal(store.chat(dm).dirty,true);
+ await c.reconcile('periodic');await c.reconcile('periodic');
+ assert.equal(store.chat(dm).dirty,false);for(const v of many)assert.ok(store.message(v.id),v.textPreview);
+});
+
+test('topic groups are never read by position; my topics come from the thread feed and @me from the sweep',async t=>{
+ const {lark,store,running}=await setup(t);const topic=lark.chat({name:'话题群',chatMode:'topic'}),watchedTopic=lark.chat({name:'关注的话题群',chatMode:'topic'});
+ const first=await running();store.watch(watchedTopic,lark.now());
+ lark.freezeWindow(topic,0);lark.freezeWindow(watchedTopic,0);
+ const root=lark.post(topic,{text:'别人的话题'}),mine=lark.post(topic,{thread:root.id,mine:true,text:'我的回复'});
+ const pushed=lark.post(watchedTopic,{text:'关注的话题群里推送来的'});
+ lark.emit({type:'message.upserted',feedId:topic,messageId:'sync:complete'});
+ await waitFor(()=>store.message(mine.id)&&store.message(pushed.id));await first.reconcile('periodic');await first.stop();
+ // While butler is down: a reply in my topic and an @me in another topic, neither moving the conversation entry.
+ const later=lark.post(topic,{thread:root.id,text:'之后的回复'},{event:'none',touch:false});
+ const other=lark.post(topic,{text:'另一个话题'},{event:'none',touch:false}),atMe=lark.post(topic,{thread:other.id,atMe:true,text:'@我'},{event:'none',touch:false});
+ const c=await running();await c.reconcile('manual');
+ assert.deepEqual(cats(store,later.id),['thread']);assert.deepEqual(cats(store,atMe.id),['mention']);assert.deepEqual(cats(store,pushed.id),['watched']);
+ assert.deepEqual(lark.requests.filter(r=>r.path.endsWith('/messages')&&(r.path.includes(topic)||r.path.includes(watchedTopic))).map(r=>r.path),[]);
+ for(const id of [topic,watchedTopic])assert.ok(!store.chat(id)?.cursor,'no cursor for a topic group');
+});
+
+test('a store from the previous version is upgraded, and a chat it left at cursor 0 is read from its tail',async t=>{
+ const lark=await startFakeOpenLark(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db');
+ const dm=lark.chat({name:'张三',chatMode:'direct'});
+ // The chats table as the deployed version created it, with a row its tail read left at cursor 0.
+ const old=new DatabaseSync(file);
+ old.exec(`CREATE TABLE chats(feed_id TEXT PRIMARY KEY, name TEXT, chat_mode TEXT, member_count INTEGER, is_muted INTEGER, last_active_at INTEGER,
+  cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, gap_retries INTEGER NOT NULL DEFAULT 0)`);
+ old.prepare('INSERT INTO chats(feed_id,name,chat_mode,cursor,dirty) VALUES(?,?,?,0,0)').run(dm,'张三','direct');old.close();
+ const store=new Store(file,{linkBase:'http://127.0.0.1:3333'}),c=new Collector({store,url:lark.url,token:lark.token,options:FAST});
+ t.after(async()=>{await c.stop();await lark.close();store.close();fs.rmSync(dir,{recursive:true,force:true});});
+ await c.start();await waitFor(()=>c.connected);await c.idle();
+ const v=lark.post(dm,{text:'升级后的私聊'},{event:'none'});await c.reconcile('periodic');
+ const reads=lark.requests.filter(r=>r.path===`/agent/v1/conversations/${dm}/messages`);
+ assert.ok(reads.length>=1);assert.equal(reads[0].query.tail,'1','read from the tail, not forward from 0');assert.ok(!reads.some(r=>r.query.afterPosition==='0'));
+ assert.deepEqual(cats(store,v.id),['dm']);assert.equal(store.chat(dm).cursor,Number(v.position));
+ assert.equal(store.chat(dm).dirty,false);assert.equal(store.chat(dm).name,'张三');assert.deepEqual(store.errors(100),[]);
+});
+
 
 test('status shows the event socket, reconciliation times, open-lark sync and recent errors',async t=>{
  const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});

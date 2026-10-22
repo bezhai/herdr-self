@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS message_categories(
 CREATE INDEX IF NOT EXISTS categories_by_time ON message_categories(category,created_at);
 CREATE TABLE IF NOT EXISTS chats(
  feed_id TEXT PRIMARY KEY, name TEXT, chat_mode TEXT, member_count INTEGER, is_muted INTEGER, last_active_at INTEGER,
- cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, gap_retries INTEGER NOT NULL DEFAULT 0);
+ cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, read_retries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS watches(feed_id TEXT PRIMARY KEY, since INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS threads(
  root_id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, reply_count INTEGER NOT NULL DEFAULT 0, announced_count INTEGER NOT NULL DEFAULT 0,
@@ -30,6 +30,9 @@ CREATE TABLE IF NOT EXISTS pending_mentions(
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, source TEXT NOT NULL, message TEXT NOT NULL);
 `;
+// Columns added after a store was first created, added to an older store when it is opened.
+const ADDED_COLUMNS=[['chats','read_retries','INTEGER NOT NULL DEFAULT 0'],['threads','announced_count','INTEGER NOT NULL DEFAULT 0'],
+ ['threads','attempts','INTEGER NOT NULL DEFAULT 0'],['threads','last_error','TEXT']];
 const KEEP_ERRORS=100;
 const order=c=>CATEGORIES.indexOf(c);
 
@@ -38,7 +41,13 @@ export class Store{
  constructor(file,{linkBase,log}){
   fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});
   this.file=file;this.linkBase=linkBase;this.log=log;this.db=new DatabaseSync(file);
-  this.db.exec('PRAGMA journal_mode=WAL;PRAGMA busy_timeout=5000;PRAGMA foreign_keys=ON;');this.db.exec(SCHEMA);
+  this.db.exec('PRAGMA journal_mode=WAL;PRAGMA busy_timeout=5000;PRAGMA foreign_keys=ON;');this.db.exec(SCHEMA);this.#upgrade();
+ }
+ // A store created by an earlier version: chats.gap_retries became read_retries, and later columns are added.
+ #upgrade(){
+  const columns=table=>new Set(this.#all(`PRAGMA table_info(${table})`).map(c=>c.name));
+  if(columns('chats').has('gap_retries'))this.db.exec('ALTER TABLE chats RENAME COLUMN gap_retries TO read_retries');
+  for(const [table,column,definition] of ADDED_COLUMNS)if(!columns(table).has(column))this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
  }
  close(){if(this.db.isOpen)this.db.close();}
  #all(sql,...p){return this.db.prepare(sql).all(...p);}
@@ -106,7 +115,7 @@ export class Store{
  chat(feedId){
   const r=this.#get('SELECT * FROM chats WHERE feed_id=?',feedId);
   return r&&{feedId:r.feed_id,name:r.name,chatMode:r.chat_mode,memberCount:r.member_count,isMuted:Boolean(r.is_muted),lastActiveAt:r.last_active_at,
-   cursor:r.cursor,signature:r.signature,dirty:Boolean(r.dirty),gapRetries:r.gap_retries};
+   cursor:r.cursor,signature:r.signature,pendingSignature:r.pending_signature,dirty:Boolean(r.dirty),readRetries:r.read_retries};
  }
  // Group chats butler has seen, most recently active first.
  groups(){return this.#all(`SELECT feed_id FROM chats WHERE chat_mode IN ('group','topic') ORDER BY last_active_at DESC`).map(r=>this.chat(r.feed_id));}
@@ -115,9 +124,10 @@ export class Store{
  }
  dirtyChats(limit){return this.#all('SELECT feed_id FROM chats WHERE dirty=1 ORDER BY last_active_at DESC LIMIT ?',limit).map(r=>r.feed_id);}
  setCursor(feedId,cursor){this.#run('INSERT INTO chats(feed_id,cursor) VALUES(?,?) ON CONFLICT(feed_id) DO UPDATE SET cursor=excluded.cursor',feedId,cursor);}
- // The chat has been read up to what its conversation entry showed when it was marked.
- settleChat(feedId){this.#run('UPDATE chats SET signature=COALESCE(pending_signature,signature),pending_signature=NULL,dirty=0,gap_retries=0 WHERE feed_id=?',feedId);}
- gapRetry(feedId){this.#run('UPDATE chats SET gap_retries=gap_retries+1 WHERE feed_id=?',feedId);return this.#get('SELECT gap_retries FROM chats WHERE feed_id=?',feedId).gap_retries;}
+ // The chat has been read up to what its conversation entry showed when it was marked (or reading it was given up).
+ settleChat(feedId){this.#run('UPDATE chats SET signature=COALESCE(pending_signature,signature),pending_signature=NULL,dirty=0,read_retries=0 WHERE feed_id=?',feedId);}
+ // A read that fell short; returns how many in a row.
+ readRetry(feedId){this.#run('UPDATE chats SET read_retries=read_retries+1 WHERE feed_id=?',feedId);return this.#get('SELECT read_retries FROM chats WHERE feed_id=?',feedId).read_retries;}
  chatsMissingInfo(limit){return this.#all('SELECT DISTINCT m.feed_id FROM messages m LEFT JOIN chats c ON c.feed_id=m.feed_id WHERE c.name IS NULL LIMIT ?',limit).map(r=>r.feed_id);}
 
  // ---- watched groups
@@ -192,7 +202,7 @@ export class Store{
   return {collector:this.meta('collector')??{},events:this.meta('events')??{},reconcile:this.meta('reconcile')??{},sync:this.meta('sync')??{},
    collectedSince:this.meta('collectedSince'),mentionsSweptUntil:this.meta('mentions.sweptUntil'),threadFeedScannedAt:this.meta('threadFeed.scannedAt'),
    counts:this.counts(),pendingMentions:this.#get('SELECT count(*) n FROM pending_mentions').n,watched:this.#get('SELECT count(*) n FROM watches').n,
-   chatsRead:this.#get('SELECT count(*) n FROM chats WHERE cursor IS NOT NULL').n,staleThreads:this.#get('SELECT count(*) n FROM threads WHERE stale=1').n,
+   chatsRead:this.#get('SELECT count(*) n FROM chats WHERE cursor>0').n,staleThreads:this.#get('SELECT count(*) n FROM threads WHERE stale=1').n,
    errors:this.errors(10),file:this.file,sizeBytes:size(this.file)+size(`${this.file}-wal`)};
  }
 }

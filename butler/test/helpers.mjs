@@ -7,7 +7,7 @@ import {Collector} from '../collector.mjs';
 
 export const LINK_BASE='http://127.0.0.1:3333';
 // Fast timers; periodic work is effectively off so each test triggers reconciliation itself.
-export const FAST={cycleMs:3600e3,threadFeedEveryMs:3600e3,mentionsEveryMs:3600e3,slackMs:0,reconnectMinMs:20,reconnectMaxMs:50,connectTimeoutMs:500,startupRetryMs:30,heartbeatMs:3600e3,requestGapMs:0,threadFetchDelayMs:10,threadAttempts:3};
+export const FAST={cycleMs:3600e3,threadFeedEveryMs:3600e3,mentionsEveryMs:3600e3,slackMs:0,reconnectMinMs:20,reconnectMaxMs:50,connectTimeoutMs:500,startupRetryMs:30,heartbeatMs:3600e3,requestGapMs:0,threadFetchDelayMs:10,threadAttempts:3,readAttempts:3};
 
 export async function waitFor(check,{timeout=3000,message='condition'}={}){
  const end=Date.now()+timeout;
