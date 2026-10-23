@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {setup,waitFor,LINK_BASE} from './helpers.mjs';
+import {setup,waitFor,post,LINK_BASE} from './helpers.mjs';
+import {Matters} from '../matters.mjs';
 
 const CLI=fileURLToPath(new URL('../cli.mjs',import.meta.url));
 // The CLI runs as its own process against the same store file; async so the in-process fake can answer it.
@@ -14,9 +15,9 @@ function cli(config,...args){
   let stdout='',stderr='';p.stdout.on('data',d=>stdout+=d);p.stderr.on('data',d=>stderr+=d);p.on('error',reject);p.on('close',code=>resolve({code,stdout,stderr}));
  });
 }
-function writeConfig(dir,lark,mode=0o600){
+function writeConfig(dir,lark,mode=0o600,extra=''){
  const file=path.join(dir,'butler.env');
- fs.writeFileSync(file,`# butler\nBUTLER_OPEN_LARK_TOKEN="${lark.token}"\nBUTLER_OPEN_LARK_URL=${lark.url}\nBUTLER_LINK_BASE=${LINK_BASE}\nBUTLER_DATA_DIR=${dir}\n`,{mode});fs.chmodSync(file,mode);return file;
+ fs.writeFileSync(file,`# butler\nBUTLER_OPEN_LARK_TOKEN="${lark.token}"\nBUTLER_OPEN_LARK_URL=${lark.url}\nBUTLER_LINK_BASE=${LINK_BASE}\nBUTLER_DATA_DIR=${dir}\n${extra}`,{mode});fs.chmodSync(file,mode);return file;
 }
 
 test('the config file holds the token and must not be readable by others',async t=>{
@@ -72,4 +73,47 @@ test('run collects as a long-running process and stops cleanly on SIGTERM',async
  const exited=new Promise(r=>p.on('close',(code,signal)=>r({code,signal})));p.kill('SIGTERM');
  assert.deepEqual(await exited,{code:0,signal:null});
  assert.ok(store.status().collector.stoppedAt,'the stop is recorded');assert.doesNotMatch(out,/ExperimentalWarning/);
+});
+
+test('ignore list commands: add senders by name or id, refuse ambiguous or unknown ones, remove',async t=>{
+ const {lark,store,dir}=await setup(t);const config=writeConfig(dir,lark);
+ post(store,{sender:'6994621142325526532',name:'Zebra2.0自动化投放平台',type:'bot'});post(store,{sender:'7623741666586840285',name:'赤尾工具人',type:'bot'});
+ post(store,{sender:'7000000000000000004',name:'赤尾',type:'bot'});post(store,{sender:'u1',name:'陈帆'});post(store,{mine:true,text:'我发的'});
+ let r=await cli(config,'ignore','list');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/忽略名单是空的/);
+ r=await cli(config,'ignore','add','Zebra2.0自动化投放平台','7623741666586840285');assert.equal(r.code,0,r.stderr);
+ assert.match(r.stdout,/Zebra2\.0自动化投放平台/);assert.match(r.stdout,/赤尾工具人/);
+ r=await cli(config,'ignore','add','赤');assert.equal(r.code,1);assert.match(r.stderr,/赤尾工具人/);assert.match(r.stderr,/7000000000000000004/);
+ r=await cli(config,'ignore','add','赤尾');assert.equal(r.code,0,'an exact name is not ambiguous');
+ r=await cli(config,'ignore','add','王五');assert.equal(r.code,1);assert.match(r.stderr,/没有找到发送方/);
+ r=await cli(config,'ignore','add','原智鸿');assert.equal(r.code,1,'I am not a sender to ignore');
+ const matters=new Matters(store);
+ assert.deepEqual(matters.ignoredSenders().map(s=>s.name).sort(),['Zebra2.0自动化投放平台','赤尾','赤尾工具人'].sort());
+ r=await cli(config,'ignore','list');assert.match(r.stdout,/6994621142325526532/);assert.match(r.stdout,/赤尾工具人/);
+ r=await cli(config,'ignore','remove','赤尾工具人');assert.equal(r.code,0,r.stderr);
+ assert.deepEqual(matters.ignoredSenders().map(s=>s.name).sort(),['Zebra2.0自动化投放平台','赤尾'].sort());
+ assert.deepEqual(lark.writes(),[]);
+});
+
+// A herdr executable for the CLI: a shell script that runs the fake with its state directory.
+function fakeHerdr(dir,script){
+ const state=path.join(dir,'herdr');fs.mkdirSync(state);fs.writeFileSync(path.join(state,'script.json'),JSON.stringify(script));
+ const bin=path.join(dir,'herdr.sh'),fake=fileURLToPath(new URL('./fake-herdr.mjs',import.meta.url));
+ fs.writeFileSync(bin,`#!/bin/sh\nexec "${process.execPath}" "${fake}" "${state}" "$@"\n`,{mode:0o755});return bin;
+}
+
+test('process --once turns the backlog into matters through herdr; matters lists them with links',async t=>{
+ const {lark,store,dir}=await setup(t);
+ const ask=post(store,{text:'@原智鸿 帮忙审批下这个合并请求',categories:['mention','watched']}),noise=post(store,{chat:'g2',name:'李四',text:'收到'});
+ const herdr=fakeHerdr(dir,{replies:[{text:JSON.stringify({new:[{title:'审批合并请求',who:'陈帆',ask:'审批 MR',due:null,urgency:'high',messages:['m1']}],updates:[]})}]});
+ let r=await cli(writeConfig(dir,lark),'process','--once');assert.equal(r.code,1);assert.match(r.stderr,/BUTLER_MODEL_MACHINE/);
+ const config=writeConfig(dir,lark,0o600,`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`);
+ r=await cli(config,'process','--once');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/1 次/);
+ r=await cli(config,'matters');assert.equal(r.code,0,r.stderr);
+ assert.match(r.stdout,/#1/);assert.match(r.stdout,/审批合并请求/);assert.match(r.stdout,/陈帆/);assert.match(r.stdout,/紧急/);
+ assert.ok(r.stdout.includes(store.message(ask).link));
+ r=await cli(config,'matters','--json');const [m]=JSON.parse(r.stdout);assert.deepEqual(m.messageIds,[ask]);assert.equal(m.link,store.message(ask).link);
+ new Matters(store).apply({created:[],updated:[{matterId:1,messageIds:[noise],changes:{},close:'对方说不用了'}],processedIds:[]});
+ r=await cli(config,'matters');assert.match(r.stdout,/没有未结束的事项/);
+ r=await cli(config,'matters','--all');assert.match(r.stdout,/已结束：对方说不用了/);
+ r=await cli(config,'status');assert.match(r.stdout,/加工：/);assert.match(r.stdout,/待加工 0 条/);assert.match(r.stdout,/未结束的事项 0 个/);assert.match(r.stdout,/跳过 0 条/);
 });

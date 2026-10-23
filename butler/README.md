@@ -1,6 +1,11 @@
-# Butler 收集器
+# Butler 收集器和加工端
 
-工作管家的第一阶段：在运行 open-lark 的机器上常驻运行，从 open-lark 的只读 Agent 接口（`/agent/v1`）把和我有关的飞书消息收进管家自己的存储。它只收集和记录，不分类、不汇总、不提醒，也不调用模型；这些是后续阶段的事（方案见 `.local/prd/butler-overview.md`，本阶段的 spec 见 `.local/prd/butler-message-collection.md`）。
+工作管家的前两部分，都在运行 open-lark 的机器上常驻运行：
+
+- **收集器**（第一阶段）从 open-lark 的只读 Agent 接口（`/agent/v1`）把和我有关的飞书消息收进管家自己的存储。它只收集和记录，不分类，也不调用模型。spec 见 `.local/prd/butler-message-collection.md`。
+- **加工端**（第二阶段）把收到的消息交给模型，整理成事项：谁、要我做什么、期限、紧急程度，加上原消息的链接；后续消息归到原事项上，事项结束时记下理由。见下面「加工端」，spec 见 `.local/prd/butler-processing.md`。
+
+汇总和对话由之后的管家机器人负责，不在这里。总体方案见 `.local/prd/butler-overview.md`。
 
 ## 收集什么
 
@@ -60,6 +65,55 @@ open-lark 的推送（`/agent/v1/events` WebSocket）只推送当下发生的事
 
 open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启动时用 `GET /agent/v1` 的路由目录检查它要用的路由都在，不全就记一条错误，每分钟重新检查，直到齐了才开始收集。
 
+## 加工端
+
+加工端是另一个常驻进程，和收集器共用 `butler.db`。它只读收集器的表，只写自己的表：忽略名单、哪些消息处理过、事项和它们的来源消息、每次模型运行的记录。每 10 分钟，它把还没处理过的消息按时间从早到晚分批交给模型，一次一批，每批最多 40 条，直到处理完。
+
+### 交给模型什么
+
+每批新消息，加上帮助理解它们的上下文：同一聊天里在它们之前的 8 条消息、话题的根消息和被回复的消息、这些聊天里未结束事项最近的 3 条来源消息，以及全部未结束的事项（编号、标题、谁、要我做什么、期限、紧急程度）。每条消息带着收集器记下的事实：发送者和类型（人、机器人、agent），是不是我发的，类别（`mention`、`dm`、`reply`、`thread`、`watched`），是否 @所有人，在话题里的位置，是否撤回或编辑过，内容是否不可读。消息和事项以这一次的编号交给模型（消息是 `m1`、`m2`……，事项是它的编号），消息 id 和链接都不经过模型。一条消息最多给 1500 个字，再长的截断。
+
+### 模型决定什么，代码检查什么
+
+什么算事项，哪些消息属于同一件事（包括把新消息归到已有事项上），紧急程度（`high`、`normal`、`low`），期限，已有事项结束没有、为什么结束，都由模型判断。代码里没有关键词、发送者或群的规则，收集器的类别和发送者类型只作为事实交给模型权衡。
+
+我自己发的消息只作为上下文：它们不能单独构成事项，但可以说明某个事项已经处理了。一批里只有我自己的消息、又没有未结束的事项时，不调用模型，直接记为处理过。
+
+模型只输出一个 JSON 对象：`new` 是新事项（标题、谁、要我做什么、期限、紧急程度、来源消息的编号），`updates` 是对已有事项的修改（新归入的消息、改动的字段、关闭及理由）。加工端只采纳引用这一批编号的部分。下面这些不采纳，各记一条错误：引用了不存在的消息或事项，新事项没有引用任何一条别人发的新消息（只引用了旧消息或我自己的消息），关闭事项但没有写理由。模型写的文字里的网址换成「[链接]」，事项的链接由加工端用它最早的来源消息生成，和收集器的消息链接相同。采纳的部分和这一批消息的「已处理」标记在同一个事务里写入。
+
+### 忽略名单
+
+按发送方 id 记录。名单上的发送方的消息不交给模型，也不出现在上下文里。它们被跳过时就记为已处理，所以之后把发送方移出名单，不会把它在名单上期间发的消息补交给模型。
+
+### 模型在哪里
+
+模型是另一台机器（cpu1）上的 claude，经 herdr 调用，claude 访问的网关 token 不离开那台机器。`BUTLER_MODEL_MACHINE` 是 herdr 保存的机器（`herdr machine list`），它指向那台机器上专给管家用的 herdr session，不是我自己用的默认 session。每一批这样运行：
+
+1. `herdr --machine <机器> workspace create --cwd <BUTLER_MODEL_CWD> --label butler-model --no-focus`；
+2. 在它的第一个 pane 里 `herdr --machine <机器> agent start <名字> --kind claude -- --tools "" --strict-mcp-config --disable-slash-commands --system-prompt <说明>`：没有内置工具，没有 MCP 服务器，没有技能和斜杠命令，模型只能回答；
+3. `agent prompt <名字> <数据> --wait`，等这一轮结束；
+4. `agent replies <名字>` 取它最后的回复（由 claude 的 Stop hook 报给 herdr，可能比状态变化晚一点到，所以最多再等 15 秒）；
+5. 不管成功与否，`workspace close` 关掉这个工作区，claude 随之退出。
+
+加工端启动时关掉以前被打断、没来得及关的 `butler-model` 工作区。同一个存储同时只能有一个加工端，第二个会拒绝启动，所以批次不会重叠。
+
+### 失败时
+
+连不上那台机器、claude 没有起来、超时（15 分钟）、没有回复、回复不是要求的 JSON，这一批都保持未处理，记一条错误，这一轮停下，下一轮再试；连续失败时每次把批次减半（最少 1 条），成功一次后恢复到 40 条。整个模型出问题时消息不会被丢掉，那台机器断开期间的消息在恢复后补加工。
+
+只有一种失败会让加工端跳过消息：一条消息单独成批，模型给了回答，但回答用不了（不是要求的 JSON，或者超过 64 KiB 被 herdr 截断）。网关或 API 出错时不会是这样：claude 这时运行 StopFailure hook 而不是 Stop，herdr 收不到任何回复（claude 2.1.309 里的说明：「Fires instead of Stop when an API error … ended the turn」）。这时这条消息先放到一边，这一轮接着处理它后面的消息；如果紧接着的那次运行成功了，说明模型本身正常，这次失败记在这条消息上。如果那次也失败了，就算模型的问题，什么都不记，这一轮停下。被记过的消息以后总是单独成批，也不再作为别的消息的上下文；一轮里只试它一次，所以几次尝试至少隔一轮。记满 3 次就把它记为已处理并跳过，同时记一条错误，写明消息 id、所在聊天、发送者、时间、开头的文字和最后一次的原因；`status` 显示跳过了多少条。它挡住后面的消息，最多到它第一次被记上为止（减半到单独成批要几轮）。之后哪次它单独成批成功了，记录就清掉。每次运行的开始和结束时间、消息数、提示大小、是否成功、错误和模型的原始回复都记在 `model_runs` 表里，方便事后看模型为什么这样判断。
+
+### 第一次设置
+
+在加工端所在的机器上保存模型机器，并让 herdr 在那台机器上开一个单独的 session：
+
+```bash
+herdr machine add --label cpu1-butler --remote-session butler <cpu1 的 SSH 地址>
+ssh <cpu1 的 SSH 地址> 'mkdir -p -m 700 ~/.local/share/butler-model'
+```
+
+`machine add` 需要两边的 herdr 版本兼容；它要求批准安装、更新或替换远端 herdr 时，先停下来确认。`BUTLER_MODEL_CWD` 写这个目录在模型机器上的绝对路径：herdr 对不存在的目录和 `~` 开头的路径都会悄悄换成主目录。这个目录在已信任的主目录下面，claude 启动时不会停在信任对话框上。
+
 ## 配置和数据
 
 配置文件默认是 `~/.config/butler/butler.env`（`--config` 或环境变量 `BUTLER_CONFIG` 可以换），权限必须是 600，否则收集器和命令行都拒绝运行：
@@ -77,8 +131,11 @@ grep '^OPEN_LARK_AGENT_READ_TOKEN=' ~/.config/open-lark/app.env | sed 's/^OPEN_L
 | `BUTLER_OPEN_LARK_URL` | `http://127.0.0.1:8081` | open-lark Agent 接口的地址 |
 | `BUTLER_LINK_BASE` | `http://127.0.0.1:3333` | open-lark 网页的地址，用来生成消息链接（open-lark 的 `OPEN_LARK_PUBLIC_URL`） |
 | `BUTLER_DATA_DIR` | `~/.local/share/butler` | 数据目录 |
+| `BUTLER_MODEL_MACHINE` | 无，加工端必填 | herdr 保存的模型机器的名称（见上面「第一次设置」） |
+| `BUTLER_MODEL_CWD` | 无（herdr 用远端的主目录） | 模型在那台机器上运行的目录，绝对路径 |
+| `BUTLER_HERDR` | `herdr` | 本机 herdr 可执行文件。systemd 用户服务的 PATH 里通常没有 `~/.local/bin`，服务里写完整路径 |
 
-数据是数据目录里的一个 SQLite 文件 `butler.db`（WAL 模式，旁边还有 `butler.db-wal` 和 `butler.db-shm`），目录权限 700，文件权限 600。里面有消息和它们的类别、每个聊天的名称和读取位置、关注名单、跟踪的话题、待补取的 @我、收集器状态和最近 100 条错误。本阶段不做清理，存储会持续增长；`butler status` 显示文件大小，也可以用 `du -sh ~/.local/share/butler` 查看。
+数据是数据目录里的一个 SQLite 文件 `butler.db`（WAL 模式，旁边还有 `butler.db-wal` 和 `butler.db-shm`），目录权限 700，文件权限 600。里面有消息和它们的类别、每个聊天的名称和读取位置、关注名单、跟踪的话题、待补取的 @我、收集器状态和最近 100 条错误，以及加工端的忽略名单、处理记录、事项和模型运行记录。本阶段不做清理，存储会持续增长；`butler status` 显示文件大小，也可以用 `du -sh ~/.local/share/butler` 查看。
 
 ## 运行
 
@@ -102,6 +159,11 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 ./cli.mjs watch list
 ./cli.mjs watch add <群名或 id>...
 ./cli.mjs watch remove <群名或 id>...
+./cli.mjs process [--once]
+./cli.mjs matters [--all] [--json]
+./cli.mjs ignore list
+./cli.mjs ignore add <发送方名称或 id>...
+./cli.mjs ignore remove <发送方名称或 id>...
 ```
 
 命令行可以从仓库里运行，也可以用部署的那一份（`~/apps/herdr-butler/cli.mjs`）；两者读同一个配置文件，用同一个存储。
@@ -110,6 +172,10 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 - `list`：按类别和时间列出消息，新的在前，每条带链接；`--since` 和 `--until` 接受 ISO 时间或 `30m`、`2h`、`7d` 这样的相对时间。
 - `groups`：从 open-lark 读出我所在的全部群，显示名称、人数、最近活跃时间，★ 标出关注的群。
 - `watch add`：按完整名称、id 或名称中唯一的一段文字加入关注名单，名称对应多个群时列出它们并拒绝；从加入的时刻起收集这个群的全部消息，之前的消息不补。加入的是话题群时照样加入，但会提示：话题群只能收到推送来的消息（见上面「话题群」）。`watch remove` 移出名单，之后的新消息不再因为关注而收集，已收的保留。名单初始为空，改动直接写进存储，正在运行的收集器处理下一条消息时就按新名单判断，不需要重启。
+- `status` 还显示加工端最近一轮和最近成功的时间、待加工的消息数、跳过的消息数（见上面「失败时」）和未结束的事项数；加工端的错误记在同一个错误列表里，来源是「加工」。
+- `process`：运行加工端（常驻）。`--once` 把积压处理完就退出，有失败时退出码是 1。
+- `matters`：未结束的事项，紧急的在前，每个带编号、紧急程度、标题、谁、要我做什么、期限、来源消息数、所在聊天和链接；`--all` 连同已结束的事项和结束理由。
+- `ignore add`：按完整名称、id 或名称中唯一的一段文字把发送方加入忽略名单，只能是存储里发过消息的发送方（我自己除外），对应多个时列出它们并拒绝。`ignore remove` 移出名单，之后的新消息照常交给模型。改动直接写进存储，加工端下一批就按新名单处理。
 
 ## 安装为用户服务
 
@@ -142,7 +208,28 @@ UMask=0077
 WantedBy=default.target
 ```
 
-更新：在仓库根目录重新执行第 1 步的 `rsync`，再 `systemctl --user restart butler`。
+加工端是第二个用户服务，单元文件 `~/.config/systemd/user/butler-processor.service`。它通过 herdr 用 SSH 连模型机器，所以服务里要能不经交互地 SSH 过去（不带口令的密钥，或者把 SSH agent 的套接字传给服务），`BUTLER_HERDR` 写 herdr 的完整路径：
+
+```ini
+[Unit]
+Description=Butler processor: matters from the collected Feishu messages, by a model reached through herdr
+After=butler.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/apps/herdr-butler
+ExecStart=%h/.local/share/fnm/node-versions/v24.13.0/installation/bin/node --disable-warning=ExperimentalWarning cli.mjs process
+Restart=on-failure
+RestartSec=30
+UMask=0077
+
+[Install]
+WantedBy=default.target
+```
+
+第一次启动前，用命令行加好忽略名单（比如 `./cli.mjs ignore add Zebra2.0自动化投放平台`），否则这些发送方积压的消息会交给模型。加工端停止时等正在运行的那一批结束，最多 20 秒；没等到的那一批下次重做，留在模型机器上的工作区在下次启动时关掉。
+
+更新：在仓库根目录重新执行第 1 步的 `rsync`，再 `systemctl --user restart butler butler-processor`。
 
 日志看 `journalctl --user -u butler`：里面有推送的连接和断开，以及每一条错误（同样记在存储里，`status` 能看到）。
 
@@ -177,7 +264,17 @@ npm test
 - 启动时缺少所需路由就记错误、不收集，路由齐了再开始；推送连接一直没有应答时放弃这次连接并重试。
 - 状态反映推送的连接和最近时间、对账的最近完成和成功时间、open-lark 同步状态和最近的错误；命令行的 `status`、`list`、`groups`、`watch` 和配置文件权限检查。
 
-测试不连接真实的 open-lark。和真实 open-lark、真实飞书消息的对照（链接能否打开、停机几分钟后的补齐）放在部署后的实测里做。
+加工端的测试用假的模型（按收到的提示给出回复的函数）和假的 herdr（`test/fake-herdr.mjs`，一个单独的进程，按 herdr 0.9.1 的命令和 JSON 形状回答，记下每次调用）。覆盖：
+
+- 新消息由模型整理成事项，加工端记下来源消息、用它们生成链接；这一批的消息都记为处理过，收集器的表不变；没有新消息时不调用模型。
+- 后续消息归到模型指出的已有事项上，模型看得到这个事项和它之前的消息；模型说事项结束时关闭它并记下理由；我自己的消息作为上下文交给模型，只由它们构成的新事项不采纳。
+- 忽略名单上的发送方的消息不交给模型，也不出现在上下文里；移出名单后，以前跳过的消息不会再交给模型。只有我自己的消息、又没有未结束的事项时不调用模型。
+- 模型连不上时消息保持未处理并记错误，之后批次减半，成功一次后恢复；回复不是要求的 JSON 时同样，原始回复留在运行记录里。一条消息单独成批时回答总是用不了、而别的消息正常：它放到一边，后面的消息照常处理，它也不再作为它们的上下文；它每轮试一次，3 次后跳过并记一条写明这条消息的错误。模型整体出问题（连不上、没有回复、对什么都回答用不了的内容、放到一边后紧接着的运行也失败）时一条都不跳过，每轮最多多运行一次。单独成批成功一次的消息清掉记录。批次一次一个、从早到晚；提示超过上限时拆小批次和上下文。同一个存储上的第二个加工端拒绝启动。
+- 提示：交给模型的是事实和这一次的编号，没有消息 id 和链接；说明是一行（herdr 不接受参数里的控制字符）；长消息截断。读回复：代码块包着的 JSON 也能读，不是 JSON 或缺少 `new` 和 `updates` 时报错；引用不存在的消息或事项、只引用旧消息或我自己的消息的新事项、没有理由的关闭都不采纳；网址被替换；文字长度有上限。
+- herdr 调用层：每一批在自己的工作区里开一个新的、没有工具的 claude，命令都带 `--machine`，提示原样送到；出任何错（claude 起不来、超时、没有回复、回复被截断、停在确认界面）都关掉工作区并说明原因，其中只有回复被截断算模型回答了；回复晚到一点也能取到；机器连不上时直接报出 herdr 的错误；提示超过一个命令行参数的上限时什么都不启动；清理只关 `butler-model` 工作区。
+- 命令行的 `ignore`、`process --once`（经假的 herdr）、`matters` 和 `status` 里加工端的一行。
+
+测试不连接真实的 open-lark，也不调用真实的模型。和真实 open-lark、真实飞书消息的对照（链接能否打开、停机几分钟后的补齐）放在部署后的实测里做。
 
 ## 已知限制
 
@@ -186,3 +283,7 @@ npm test
 - 回复我的消息靠 `replyTo` 判断，open-lark 没有存下被回复的消息、管家存储里也没有时，判断不出来。
 - 参与话题的判断只往回看话题最近的 500 条回复；在更长的话题里，我很早以前的回复找不到。
 - 收集器跟随 open-lark 当前登录的账号，不检查账号是否变化。
+- 加工端交给模型的 claude 是交互式的，它的会话记录（包括交给它的消息）留在模型机器上 `~/.claude/projects/` 里对应 `BUTLER_MODEL_CWD` 的目录：`--no-session-persistence` 只能和 `--print` 一起用。
+- 提示是本机 herdr 命令行的一个参数（`herdr agent prompt` 不能从标准输入或文件读），Linux 上一个参数最多 128 KiB；加工端把提示限制在 80 KB，超过就拆小批次。
+- 模型对某条消息总是给出空回答时，herdr 那边和 API 出错一样，都是「没有回复」，分不出来。这种消息不会被跳过，会一直留在队首，后面的消息也跟着等；错误记在 `status` 里。要分开这两种情况，需要 herdr 把 claude 的 StopFailure 和空回复分别报出来。
+- 已经处理过的消息之后被编辑或撤回，不会再交给模型。

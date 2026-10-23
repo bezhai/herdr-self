@@ -25,3 +25,22 @@ export async function setup(t,{options={}}={}){
   // Starts a collector and waits until its first reconciliation (and the one after the event socket opened) is done.
   async running(extra){const c=collector(extra);await c.start();await waitFor(()=>c.connected,{message:'event socket'});await c.idle();return c;}};
 }
+
+// A store of its own (no open-lark) and a way to put messages into it as the collector would have recorded them.
+export function tempStore(t){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db'),store=new Store(file,{linkBase:LINK_BASE});
+ t.after(()=>{store.close();fs.rmSync(dir,{recursive:true,force:true});});
+ return {store,dir,file};
+}
+let seq=0;
+const CHATS={g1:['项目群','group'],g2:['大群','group'],d1:['张三','direct'],bot:['Zebra2.0自动化投放平台','direct']};
+// o: chat (a key of CHATS), sender id, name, type, mine, text, at (ms), categories, threadRole, rootId, parentId.
+export function post(store,o){
+ const id=String(7200000000000000000n+BigInt(++seq)),chat=o.chat??'g1',[chatName,chatKind]=CHATS[chat]??[chat,'group'];
+ store.upsertChatInfo({feedId:chat,name:chatName,chatMode:chatKind});
+ const mine=Boolean(o.mine);
+ store.upsertMessage({id,feedId:chat,chatKind,senderId:mine?'me':o.sender??'u1',senderName:mine?'原智鸿':o.name??'陈帆',senderType:o.type??'user',
+  createdAt:o.at??Date.now(),position:String(seq),threadRole:o.threadRole??'none',rootId:o.rootId??null,parentId:o.parentId??null,replyToSenderId:null,
+  text:o.text??'hi',parts:'[]',unreadable:false,isMine:mine,mentionsAll:false,isRecalled:false,isEdited:false,isEphemeral:false},o.categories??(chatKind==='direct'?['dm']:['watched']));
+ return id;
+}

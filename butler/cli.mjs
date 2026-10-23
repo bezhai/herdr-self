@@ -1,9 +1,13 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-// butler's command line: runs the collector, shows its status and what it collected, and keeps the watched-group list.
+// butler's command line: runs the collector and the processor, shows their status, what they collected and the
+// matters made of it, and keeps the watched-group and ignored-sender lists.
 import {parseArgs} from 'node:util';
-import {loadConfig,requireToken,storeFile} from './config.mjs';
+import {loadConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
 import {CATEGORIES} from './rules.mjs';
+import {Matters} from './matters.mjs';
+import {Processor} from './processor.mjs';
+import {HerdrModel} from './herdr-model.mjs';
 
 // node:sqlite is still flagged experimental and warns on load; that warning says nothing to a butler user. Installed
 // before the store is imported (hence the dynamic imports); every other warning is printed as usual.
@@ -23,6 +27,11 @@ const HELP=`用法：butler [--config 配置文件] <命令>
   watch list                       关注群名单
   watch add <群名或 id>...          加入关注名单，从加入时开始收集这个群的全部消息
   watch remove <群名或 id>...       移出关注名单
+  process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项；--once 处理完积压就退出
+  matters [--all] [--json]         未结束的事项，紧急的在前；--all 连同已结束的
+  ignore list                      忽略名单：这些发送方的消息不交给模型
+  ignore add <发送方名称或 id>...    加入忽略名单
+  ignore remove <发送方名称或 id>... 移出忽略名单
 
 配置文件默认是 ~/.config/butler/butler.env（也可用 BUTLER_CONFIG 指定），说明见 butler/README.md。`;
 
@@ -53,6 +62,8 @@ function printStatus(s){
  lines.push(`@我补扫：已扫到 ${time(s.mentionsSweptUntil&&s.mentionsSweptUntil*1000)}；话题列表检查于 ${time(s.threadFeedScannedAt)}；从 ${time(s.collectedSince)} 开始收集`);
  lines.push(`消息：共 ${s.counts.total} 条 · ${CATEGORIES.map(c=>`${c} ${s.counts[c]}`).join(' · ')}；待补取的 @我 ${s.pendingMentions} 条，待取回复的话题 ${s.staleThreads} 个`);
  lines.push(`关注群：${s.watched} 个；已记下读取位置的聊天 ${s.chatsRead} 个`);
+ const p=s.processing;
+ lines.push(`加工：最近一轮 ${time(p.lastRoundAt)}，最近成功 ${time(p.lastSuccessAt)}${p.stoppedAt?`，已停止于 ${time(p.stoppedAt)}`:''}；待加工 ${p.pending} 条，跳过 ${p.skipped} 条（模型单独处理它们几次都给不出可用的回答），未结束的事项 ${p.openMatters} 个`);
  lines.push(`存储：${s.file}（${size(s.sizeBytes)}）`);
  lines.push(s.errors.length?'最近的错误：':'最近的错误：无');
  for(const err of s.errors)lines.push(`  ${time(err.at)}  ${err.source}：${err.message}`);
@@ -77,20 +88,32 @@ async function refreshGroups(store,openLark){
   if(!page.hasMore||!page.nextCursor)break;cursor=page.nextCursor;
  }
 }
-function matches(groups,query){
- const exact=groups.filter(g=>g.feedId===query||g.name===query);if(exact.length)return exact;
- const q=query.toLowerCase();return groups.filter(g=>(g.name??'').toLowerCase().includes(q));
+// Items named by an exact id or name, else by a part of the name. key: the id field.
+function matches(items,query,key='feedId'){
+ const exact=items.filter(i=>i[key]===query||i.name===query);if(exact.length)return exact;
+ const q=query.toLowerCase();return items.filter(i=>(i.name??'').toLowerCase().includes(q));
 }
-function pick(groups,query){
- const found=matches(groups,query);
+const GROUPS={key:'feedId',noun:'群',missing:'butler groups 可以列出我所在的群',line:g=>`  ${g.name}（${g.memberCount??'?'} 人）  ${g.feedId}`};
+const SENDERS={key:'senderId',noun:'发送方',missing:'只能忽略存储里发过消息的发送方',line:s=>`  ${s.name}（${s.type??'?'}，${s.messages??'?'} 条消息）  ${s.senderId}`};
+function pick(items,query,{key,noun,missing,line}=GROUPS){
+ const found=matches(items,query,key);
  if(found.length===1)return found[0];
- if(!found.length)throw new UsageError(`没有找到群：${query}（butler groups 可以列出我所在的群）`);
- throw new UsageError(`“${query}”对应多个群，请用完整名称或 id：\n${found.map(g=>`  ${g.name}（${g.memberCount??'?'} 人）  ${g.feedId}`).join('\n')}`);
+ if(!found.length)throw new UsageError(`没有找到${noun}：${query}（${missing}）`);
+ throw new UsageError(`“${query}”对应多个${noun}，请用完整名称或 id：\n${found.map(line).join('\n')}`);
+}
+
+const URGENCY={high:'紧急',normal:'一般',low:'不急'};
+function printMatters(list,all){
+ if(!list.length){console.log(all?'还没有事项':'没有未结束的事项');return;}
+ for(const m of list){
+  const state=m.status==='open'?'未结束':`已结束：${m.reason}（${time(m.closedAt)}）`;
+  console.log(`#${m.id} [${URGENCY[m.urgency]??m.urgency}] ${m.title}\n  ${m.who}：${m.ask}${m.due?`（期限：${m.due}）`:''}\n  ${state} · ${m.messageIds.length} 条消息 · ${m.chats.join('、')} · ${time(m.since)} 起\n  ${m.link??''}`);
+ }
 }
 
 async function main(argv){
  process.umask(0o077);
- const {values,positionals}=parseArgs({args:argv,allowPositionals:true,options:{config:{type:'string'},json:{type:'boolean'},category:{type:'string'},
+ const {values,positionals}=parseArgs({args:argv,allowPositionals:true,options:{config:{type:'string'},json:{type:'boolean'},once:{type:'boolean'},all:{type:'boolean'},category:{type:'string'},
   since:{type:'string'},until:{type:'string'},limit:{type:'string'},search:{type:'string'},help:{type:'boolean',short:'h'}}});
  const [command,...rest]=positionals;
  if(values.help||!command){console.log(HELP);return 0;}
@@ -107,10 +130,35 @@ async function main(argv){
   await collector.start();console.log('butler 收集器已开始收集');
   return undefined;
  }
- const store=new Store(storeFile(config),{linkBase:config.linkBase});
+ if(command==='process')return processCommand(config,values.once);
+ const store=new Store(storeFile(config),{linkBase:config.linkBase}),matters=new Matters(store);
  try{
   switch(command){
-   case 'status':{const s=store.status();if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;}
+   case 'status':{
+    const s={...store.status(),processing:{...store.meta('processor'),pending:matters.pendingCount(),skipped:matters.skippedCount(),openMatters:matters.list().length}};
+    if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;
+   }
+   case 'matters':{const list=matters.list({all:values.all});if(values.json)console.log(JSON.stringify(list,null,1));else printMatters(list,values.all);return 0;}
+   case 'ignore':{
+    const [action,...queries]=rest;
+    if(action==='list'||action===undefined){
+     const list=matters.ignoredSenders();if(!list.length)console.log('忽略名单是空的（butler ignore add <发送方名称或 id>）');
+     for(const s of list)console.log(`${s.name||'（无名）'}  ${s.senderId}  从 ${time(s.since)} 起忽略`);
+     return 0;
+    }
+    if(!queries.length)throw new UsageError(`ignore ${action} 需要发送方名称或 id`);
+    if(action==='add'){
+     const picked=queries.map(q=>pick(matters.senders(),q,SENDERS));
+     for(const s of picked){matters.ignore(s.senderId,s.name);console.log(`已忽略：${s.name}（${s.senderId}），之后它的消息不再交给模型`);}
+     return 0;
+    }
+    if(action==='remove'){
+     const picked=queries.map(q=>pick(matters.ignoredSenders(),q,{...SENDERS,missing:'butler ignore list 列出忽略名单'}));
+     for(const s of picked){matters.unignore(s.senderId);console.log(`已移出忽略名单：${s.name||s.senderId}，之后的新消息照常交给模型`);}
+     return 0;
+    }
+    throw new UsageError(`ignore 没有这个操作：${action}`);
+   }
    case 'list':{
     if(values.category&&!CATEGORIES.includes(values.category))throw new UsageError(`没有这个类别：${values.category}（可选 ${CATEGORIES.join(' ')}）`);
     const limit=values.limit===undefined?50:Number(values.limit);if(!Number.isInteger(limit)||limit<1)throw new UsageError('--limit 要是正整数');
@@ -152,6 +200,24 @@ async function main(argv){
    default:throw new UsageError(`没有这个命令：${command}\n\n${HELP}`);
   }
  }finally{store.close();}
+}
+
+// The processor, as a service or (once) for the backlog only.
+async function processCommand(config,once){
+ const machine=requireModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
+ const model=new HerdrModel({machine,cwd:config.modelCwd,command:[config.herdr],log:m=>console.error(m)});
+ const processor=new Processor({store,matters,model,log:m=>console.log(m)});
+ if(once){
+  try{
+   await processor.start({periodic:false});const r=await processor.runOnce();await processor.stop();
+   console.log(`加工完成：模型运行 ${r.runs} 次，失败 ${r.failures} 次；待加工 ${matters.pendingCount()} 条，未结束的事项 ${matters.list().length} 个`);
+   return r.failures?1:0;
+  }finally{store.close();}
+ }
+ const stop=async()=>{await Promise.race([processor.stop(),new Promise(r=>setTimeout(r,20_000))]);process.exit(0);};
+ process.on('SIGTERM',stop);process.on('SIGINT',stop);
+ console.log(`butler 加工端启动：模型在 herdr 机器 ${machine}，存储 ${store.file}`);
+ await processor.start();return undefined;
 }
 
 main(process.argv.slice(2)).then(code=>{if(code!==undefined)process.exitCode=code;},e=>{
