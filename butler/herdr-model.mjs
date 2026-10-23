@@ -12,11 +12,17 @@ export const CLAUDE_ARGS=['--tools','','--strict-mcp-config','--disable-slash-co
 const MAX_ARG_BYTES=120_000;
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
-// What herdr said went wrong: its JSON error on stderr, or the text there.
-function herdrError(stderr,error){
- const text=String(stderr??'').trim();
- try{const e=JSON.parse(text.split('\n').at(-1)).error;if(e?.message)return `${e.message}（${e.code}）`;}catch{}
- return text.split('\n').slice(-3).join(' ')||error.message;
+// A failed herdr call as the subcommand, its target, the exit status and the end of stderr. Never its arguments:
+// Node's own message for a failed command repeats the whole command line, the prompt and its message texts included,
+// and this text goes to the store's errors, to status and to the journal.
+function failure(args,error,stderr){
+ const target=args[2]&&!args[2].startsWith('-')?`（${args[2]}）`:'';
+ const status=typeof error.code==='number'?`退出码 ${error.code}`:error.signal?`被信号 ${error.signal} 终止${error.killed?'（超时）':''}`:`无法运行（${error.code??'未知错误'}）`;
+ const lines=String(stderr??'').trim().split('\n').map(l=>l.trim()).filter(Boolean);let tail;
+ try{const e=JSON.parse(lines.at(-1)).error;if(e?.message)tail=`${e.message}（${e.code}）`;}catch{}
+ tail??=lines.slice(-3).join(' ');
+ if(tail.length>300)tail=`…${tail.slice(-300)}`;
+ return `herdr ${args.slice(0,2).join(' ')}${target} 失败，${status}${tail?`：${tail}`:''}`;
 }
 
 export class HerdrModel{
@@ -28,7 +34,7 @@ export class HerdrModel{
  #herdr(args,timeoutMs=60_000){
   const [bin,...lead]=this.command,what=`herdr ${args.slice(0,2).join(' ')}`;
   return new Promise((resolve,reject)=>execFile(bin,[...lead,'--machine',this.machine,...args],{timeout:timeoutMs,maxBuffer:16<<20,encoding:'utf8'},(error,stdout,stderr)=>{
-   if(error)return reject(Error(`${what}：${herdrError(stderr,error)}`));
+   if(error)return reject(Error(failure(args,error,stderr)));
    try{resolve(JSON.parse(stdout));}catch{reject(Error(`${what} 的输出不是 JSON：${String(stdout).slice(0,200)}`));}
   }));
  }

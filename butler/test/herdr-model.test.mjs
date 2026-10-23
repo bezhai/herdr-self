@@ -79,3 +79,27 @@ test('cleanup closes the workspaces a crashed run left behind, and only those',a
  assert.equal(await model.cleanup(),2);
  assert.deepEqual(Object.keys(state().workspaces),['w1']);
 });
+
+test('a failed herdr call is reported by its subcommand, target, exit status and the end of stderr, never its arguments',async t=>{
+ const MARK='消息原文-MARKER-7f3a',SYS_MARK='说明原文-SYSMARK-91c2',prompt=`以下是这次要整理的数据：\n{"text":"${MARK}"}`,system=`你替「${SYS_MARK}」整理消息。`;
+ const leaks=e=>[MARK,SYS_MARK,'--wait','--tools','Command failed'].filter(x=>e.message.includes(x));
+ const cases=[
+  [{fail:{'agent prompt':{code:1}}},/agent prompt/,/退出码 1/],
+  [{fail:{'agent prompt':{signal:'SIGTERM'}}},/agent prompt/,/SIGTERM/],
+  [{fail:{'agent prompt':{code:7,stderr:`${'x'.repeat(5000)}\nerror: machine 'cpu1-butler': connection lost\n`}}},/agent prompt.*退出码 7.*connection lost/s,/^.{0,600}$/s],
+  [{fail:{'agent start':{code:1}}},/agent start/,/退出码 1/],
+ ];
+ for(const [script,...shapes] of cases){
+  const {model}=setup(t,script);
+  const e=await model.ask({system,prompt}).then(()=>assert.fail('should fail'),e=>e);
+  assert.deepEqual(leaks(e),[],`nothing of the command line in: ${e.message.slice(0,300)}`);
+  for(const shape of shapes)assert.match(e.message,shape);
+  assert.match(e.message,/butler-[a-z0-9]+/,'the target agent is named');
+ }
+});
+
+test('herdr that cannot be run at all is reported without the command line',async t=>{
+ const model=new HerdrModel({machine:'cpu1-butler',command:['/nonexistent/herdr']});
+ const e=await model.ask({system:'说明-SYSMARK',prompt:'数据-MARKER'}).then(()=>assert.fail('should fail'),e=>e);
+ assert.doesNotMatch(e.message,/MARKER|SYSMARK|--machine/);assert.match(e.message,/workspace create/);assert.match(e.message,/ENOENT/);
+});

@@ -2,7 +2,7 @@
 // It answers the commands butler uses with the JSON shapes of herdr 0.9.1, keeps its state (workspaces, agents and
 // their replies) in <dir>/state.json and logs every invocation to <dir>/calls.jsonl. What the "model" replies and
 // what fails comes from <dir>/script.json, written by the test:
-//   {unreachable, fail:{"agent start":{code,stderr}}, replies:[{text,truncated,lateMs} | {none:true} | {timeout:true} | {blocked:true}]}
+//   {unreachable, fail:{"agent start":{code,stderr,signal}}, replies:[{text,truncated,lateMs} | {none:true} | {timeout:true} | {blocked:true}]}
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -20,7 +20,7 @@ if(args[0]==='--machine')args=args.slice(2);
 if(script.unreachable){process.stderr.write("error: machine 'cpu1-butler': ssh: connect to host cpu1 port 22: Connection refused\n");process.exit(1);}
 const command=args.slice(0,2).join(' '),opt=name=>{const i=args.indexOf(name);return i<0?undefined:args[i+1];};
 const scripted=script.fail?.[command];
-if(scripted){process.stderr.write(scripted.stderr??'');process.exit(scripted.code??1);}
+if(scripted){process.stderr.write(scripted.stderr??'');if(scripted.signal)process.kill(process.pid,scripted.signal);else process.exit(scripted.code??1);}
 const agentOf=name=>state.agents[name];
 
 switch(command){
