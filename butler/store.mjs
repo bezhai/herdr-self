@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS messages(
  sender_id TEXT, sender_name TEXT, sender_type TEXT, created_at INTEGER NOT NULL, position TEXT,
  thread_role TEXT NOT NULL, root_id TEXT, parent_id TEXT, reply_to_sender_id TEXT,
  text TEXT NOT NULL, parts TEXT NOT NULL, unreadable INTEGER NOT NULL, is_mine INTEGER NOT NULL, mentions_all INTEGER NOT NULL,
- is_recalled INTEGER NOT NULL, is_edited INTEGER NOT NULL, first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);
+ is_recalled INTEGER NOT NULL, is_edited INTEGER NOT NULL, first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+ is_ephemeral INTEGER NOT NULL DEFAULT 0);
 CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS messages_root ON messages(root_id);
 CREATE INDEX IF NOT EXISTS messages_feed ON messages(feed_id);
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEG
 `;
 // Columns added after a store was first created, added to an older store when it is opened.
 const ADDED_COLUMNS=[['chats','read_retries','INTEGER NOT NULL DEFAULT 0'],['threads','announced_count','INTEGER NOT NULL DEFAULT 0'],
- ['threads','attempts','INTEGER NOT NULL DEFAULT 0'],['threads','last_error','TEXT']];
+ ['threads','attempts','INTEGER NOT NULL DEFAULT 0'],['threads','last_error','TEXT'],['messages','is_ephemeral','INTEGER NOT NULL DEFAULT 0']];
 const KEEP_ERRORS=100;
 const order=c=>CATEGORIES.indexOf(c);
 
@@ -60,15 +61,15 @@ export class Store{
  // recalled or less edited than the stored record (a page fetched before the edit arrived) does not replace its content.
  upsertMessage(r,categories,now=Date.now()){
   this.#tx(()=>{
-   this.#run(`INSERT INTO messages(id,feed_id,chat_kind,sender_id,sender_name,sender_type,created_at,position,thread_role,root_id,parent_id,reply_to_sender_id,text,parts,unreadable,is_mine,mentions_all,is_recalled,is_edited,first_seen_at,updated_at)
-    VALUES($id,$feedId,$chatKind,$senderId,$senderName,$senderType,$createdAt,$position,$threadRole,$rootId,$parentId,$replyToSenderId,$text,$parts,$unreadable,$isMine,$mentionsAll,$isRecalled,$isEdited,$now,$now)
+   this.#run(`INSERT INTO messages(id,feed_id,chat_kind,sender_id,sender_name,sender_type,created_at,position,thread_role,root_id,parent_id,reply_to_sender_id,text,parts,unreadable,is_mine,mentions_all,is_recalled,is_edited,is_ephemeral,first_seen_at,updated_at)
+    VALUES($id,$feedId,$chatKind,$senderId,$senderName,$senderType,$createdAt,$position,$threadRole,$rootId,$parentId,$replyToSenderId,$text,$parts,$unreadable,$isMine,$mentionsAll,$isRecalled,$isEdited,$isEphemeral,$now,$now)
     ON CONFLICT(id) DO UPDATE SET chat_kind=excluded.chat_kind,sender_name=excluded.sender_name,sender_type=excluded.sender_type,position=excluded.position,
      thread_role=excluded.thread_role,root_id=excluded.root_id,parent_id=excluded.parent_id,reply_to_sender_id=excluded.reply_to_sender_id,
      text=CASE WHEN excluded.is_recalled<messages.is_recalled OR excluded.is_edited<messages.is_edited THEN messages.text ELSE excluded.text END,
      parts=CASE WHEN excluded.is_recalled<messages.is_recalled OR excluded.is_edited<messages.is_edited THEN messages.parts ELSE excluded.parts END,
      unreadable=CASE WHEN excluded.is_recalled<messages.is_recalled OR excluded.is_edited<messages.is_edited THEN messages.unreadable ELSE excluded.unreadable END,
-     mentions_all=excluded.mentions_all,is_recalled=MAX(messages.is_recalled,excluded.is_recalled),is_edited=MAX(messages.is_edited,excluded.is_edited),updated_at=excluded.updated_at`,
-    {...r,unreadable:r.unreadable?1:0,isMine:r.isMine?1:0,mentionsAll:r.mentionsAll?1:0,isRecalled:r.isRecalled?1:0,isEdited:r.isEdited?1:0,now});
+     mentions_all=excluded.mentions_all,is_recalled=MAX(messages.is_recalled,excluded.is_recalled),is_edited=MAX(messages.is_edited,excluded.is_edited),is_ephemeral=excluded.is_ephemeral,updated_at=excluded.updated_at`,
+    {...r,unreadable:r.unreadable?1:0,isMine:r.isMine?1:0,mentionsAll:r.mentionsAll?1:0,isRecalled:r.isRecalled?1:0,isEdited:r.isEdited?1:0,isEphemeral:r.isEphemeral?1:0,now});
    const add=this.db.prepare('INSERT OR IGNORE INTO message_categories(message_id,category,created_at) VALUES(?,?,?)');
    for(const c of categories)add.run(r.id,c,r.createdAt);
   });
@@ -78,10 +79,12 @@ export class Store{
  hasMessagesIn(feedId){return Boolean(this.#get('SELECT 1 FROM messages WHERE feed_id=? LIMIT 1',feedId));}
  // The position of a message butler holds in this chat, as open-lark gave it (text); undefined when it holds none.
  position(feedId,id){return this.#get('SELECT position FROM messages WHERE id=? AND feed_id=?',id,feedId)?.position;}
- // Whether butler holds a message of the chat at every position from..to (> 0). Positions are integers kept as text,
- // so they are compared as integers; main-sequence positions are dense with one message each.
+ // Whether butler holds a message of the chat at every position from..to (> 0; true when from>to). Positions are
+ // integers kept as text, so they are compared as integers. Main-sequence positions are dense with one message each,
+ // apart from ephemeral messages (only I see them), which open-lark puts at the position of the message before them:
+ // those do not count, or one would stand for a message butler never saw.
  holdsPositions(feedId,from,to){
-  return this.#get('SELECT count(DISTINCT CAST(position AS INTEGER)) n FROM messages WHERE feed_id=? AND CAST(position AS INTEGER) BETWEEN ? AND ?',feedId,from,to).n===to-from+1;
+  return this.#get('SELECT count(DISTINCT CAST(position AS INTEGER)) n FROM messages WHERE feed_id=? AND is_ephemeral=0 AND CAST(position AS INTEGER) BETWEEN ? AND ?',feedId,from,to).n===Math.max(0,to-from+1);
  }
  isMine(id){return Boolean(this.#get('SELECT is_mine FROM messages WHERE id=?',id)?.is_mine);}
  hasCategory(id,category){return Boolean(this.#get('SELECT 1 FROM message_categories WHERE message_id=? AND category=?',id,category));}

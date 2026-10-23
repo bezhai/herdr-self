@@ -87,7 +87,9 @@ export class FakeOpenLark{
  // 'none' (written to the database only, as gap repair or backfill do) or 'root-only' (a background thread sync: only
  // the root is sent again). touch: whether the conversation entry moves (rank, preview, update time). stored: false
  // when open-lark has not stored it yet (GET /messages/:id is 404, while a page around it fetches it from Lark).
- post(feedId,{text='',sender='6900000000000000099',senderName='同事',senderType='user',mine=false,atMe=false,atAll=false,isAtMe,replyTo,thread,at}={},{event='full',touch=true,stored=true}={}){
+ // ephemeral: a message only I see (Lark's 仅你可见); open-lark stores it at its pre_message_position, the position of
+ // the message before it, so it shares that position (packet-dispatcher.ts persistEphemeralMessages).
+ post(feedId,{text='',sender='6900000000000000099',senderName='同事',senderType='user',mine=false,atMe=false,atAll=false,isAtMe,replyTo,thread,at,ephemeral=false}={},{event='full',touch=true,stored=true}={}){
   const c=this.conversations.get(feedId),t=at??this.now(),id=this.#id();
   if(mine){sender=this.me;senderName='我';}
   let position,threadMessageType='none',threadId=id,parentId,threadPosition,root;
@@ -95,14 +97,14 @@ export class FakeOpenLark{
    root=this.messages.get(thread);if(root.threadMessageType==='none'){root.threadMessageType='root';root.threadPosition='-1';}
    threadMessageType='reply';threadId=root.id;parentId=replyTo??root.id;root.threadReplyCount+=1;root.replyCount=(root.replyCount??0)+1;
    threadPosition=String(root.threadReplyCount);position=c.chatMode==='topic'?String(++c.lastPosition):'-1';
-  }else{position=String(++c.lastPosition);if(replyTo){parentId=replyTo;threadId=this.messages.get(replyTo).threadId;}}
+  }else{position=String(ephemeral?c.lastPosition:++c.lastPosition);if(replyTo){parentId=replyTo;threadId=this.messages.get(replyTo).threadId;}}
   const parent=parentId&&this.messages.get(parentId);
   const parts=[...(atAll?[{kind:'at',refId:'all',text:'@所有人'}]:[]),...(atMe?[{kind:'at',refId:this.me,text:'@我'}]:[]),...(text?[{kind:'text',text}]:[])];
   const view={id,feedId,position,createdAt:iso(t),senderId:sender,senderName,senderType,isMine:mine,isEdited:false,isRecalled:false,isSystem:false,localState:'synced',
    messageType:4,chatType:c.chatMode==='direct'?1:2,parts,textPreview:parts.map(p=>p.text).join(''),reactions:[],editHistory:[],threadId,threadMessageType,threadReplyCount:0,
    ...(threadPosition?{threadPosition}:{}),...(parentId?{parentId}:{}),
    ...(parent?{replyTo:{id:parent.id,senderId:parent.senderId,senderName:parent.senderName,parts:clone(parent.parts),textPreview:parent.textPreview,isRecalled:parent.isRecalled}}:{}),
-   ...((isAtMe??atMe)?{isAtMe:true}:{}),...(atAll?{isAtAll:true}:{})};
+   ...((isAtMe??atMe)?{isAtMe:true}:{}),...(atAll?{isAtAll:true}:{}),...(ephemeral?{isEphemeral:true}:{})};
   this.messages.set(id,view);this.byFeed.get(feedId).push(id);if(!stored)this.notStored.add(id);
   if(root&&(root.isMine||mine||this.threadCards.has(root.id)))this.threadCards.set(root.id,t);
   if(touch){c.rankTimeMs=Math.max(c.rankTimeMs,t);c.updatedAtMs=this.now();c.previewMessageId=id;}
@@ -114,6 +116,9 @@ export class FakeOpenLark{
   const v=this.messages.get(id);v.parts=[...v.parts.filter(p=>p.kind==='at'),{kind:'text',text}];v.textPreview=v.parts.map(p=>p.text).join('');v.isEdited=true;
   if(event)this.emit({type:'message.upserted',feedId:v.feedId,messageId:id,message:clone(v)});
  }
+ // Lark deleted or removed the message: open-lark keeps it with isDeleted, leaves it out of every page (they filter
+ // isDeleted) and still answers GET /messages/:id with it (repository.message does not).
+ remove(id){this.messages.get(id).isDeleted=true;}
  recall(id,{event=true}={}){
   const v=this.messages.get(id);v.isRecalled=true;v.parts=[];v.textPreview='';
   if(event)this.emit({type:'message.recalled',feedId:v.feedId,messageId:id});
@@ -205,7 +210,7 @@ export class FakeOpenLark{
   const last=c.frozenLastPosition??c.lastPosition;
   const range=planMessageWindow({anchorPosition:anchor,count:Number(q.limit??50),lastPosition:last,scene});
   if(!range)return {hasNewer:false,hasOlder:false,items:[],syncState:'complete'};
-  const views=this.byFeed.get(c.feedId).map(id=>this.messages.get(id));
+  const views=this.byFeed.get(c.feedId).map(id=>this.messages.get(id)).filter(v=>!v.isDeleted);
   const rows=views.filter(v=>Number(v.position)>=range.start&&Number(v.position)<=range.end).sort((a,b)=>Number(a.position)-Number(b.position));
   let replies=[];
   if(rows.length&&c.chatMode!=='topic'){

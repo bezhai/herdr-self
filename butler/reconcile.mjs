@@ -131,17 +131,26 @@ export class Reconciler{
   let view;
   try{view=await this.openLark.message(target);}catch(e){if(e.status===403||e.status===404)return false;throw e;}
   const position=Number(view.position);
-  if(position>0)return position<=read.cursor;
+  if(position>0){
+   if(position<=read.cursor)return true;
+   // Above the cursor the view itself stands for its position: open-lark builds it as it builds page rows
+   // (viewsForRows), so recording it is the same as reading it on a page. Not an ephemeral message, which shares the
+   // position of the one before it, nor a deleted one, which no page shows.
+   if(view.isEphemeral||view.isDeleted)return false;
+   this.recorder.record([view]);return this.#heldUpTo(chat,read.cursor,position,position-1);
+  }
   // A normal group's thread reply has no position of its own: record it from here; the read counts if it had rows.
   this.recorder.record([view]);return read.rows>0;
  }
- // A read that ended at the cursor still reached a stored message above it when butler holds every position in between:
- // live, open-lark's window of a direct chat with a bot stayed one behind its newest message, pushed and stored, for
- // cycles on end. Main-sequence positions are dense, one message each, so nothing in the main sequence is left unread;
- // the cursor moves there. In practice that holds in a direct chat or a watched group, where butler stores every
- // message; other groups hold only what concerns me, so a range there is rarely complete.
- #heldUpTo(chat,cursor,position){
-  if(!this.store.holdsPositions(chat.feedId,cursor+1,position))return false;
+ // A read that ended at the cursor still reached a message above it when butler holds every position from just after
+ // the cursor `through` the message's own, or the one before it when the message is the view just read by id. Live,
+ // open-lark's window stayed one behind the newest message for cycles on end: in a direct chat with a bot, whose newest
+ // message was pushed and stored, and in a group that is not watched, whose newest one did not concern me. Main-sequence
+ // positions are dense, one message each besides ephemeral ones (see Store.holdsPositions), so nothing in the main
+ // sequence is left unread; the cursor moves there. A longer range is complete mostly in a direct chat or a watched
+ // group, where butler stores every message; other groups hold only what concerns me.
+ #heldUpTo(chat,cursor,position,through=position){
+  if(!this.store.holdsPositions(chat.feedId,cursor+1,through))return false;
   this.store.setCursor(chat.feedId,position);return true;
  }
  async #readFromTail(feedId){

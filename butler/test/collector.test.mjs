@@ -259,20 +259,22 @@ test('a tail page without a positive maxPosition is not a read: the chat stays u
  assert.equal(store.chat(dm).cursor,Number(v.position));assert.equal(store.chat(dm).dirty,false);assert.deepEqual(cats(store,v.id),['dm']);
 });
 
+// Two messages behind: one behind is settled by asking open-lark for the last message (see the lagging-window tests).
 for(const frozenAt of ['zero','the cursor'])test(`a forward read that ends below the entry's last message is not the end (window at ${frozenAt})`,async t=>{
  const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});const c=await running();
  lark.post(dm,{text:'第一条'});await c.reconcile('periodic');const cursor=store.chat(dm).cursor;assert.ok(cursor>0);
- lark.freezeWindow(dm,frozenAt==='zero'?0:cursor);const v=lark.post(dm,{text:'窗口坏掉时的私聊'},{event:'none'});
+ lark.freezeWindow(dm,frozenAt==='zero'?0:cursor);const v=lark.post(dm,{text:'窗口坏掉时的私聊'},{event:'none'}),last=lark.post(dm,{text:'又一条'},{event:'none'});
  await c.reconcile('periodic');
  assert.equal(store.chat(dm).cursor,cursor);assert.equal(store.chat(dm).dirty,true,'not settled below the last message');assert.equal(store.message(v.id),undefined);
  lark.thawWindow(dm);await c.reconcile('periodic');
- assert.deepEqual(cats(store,v.id),['dm']);assert.equal(store.chat(dm).dirty,false);
+ assert.deepEqual(cats(store,v.id),['dm']);assert.deepEqual(cats(store,last.id),['dm']);assert.equal(store.chat(dm).dirty,false);
 });
 
 test('a chat that cannot be read to its last message is given up after a bound with one error, until it changes again',async t=>{
  const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});const c=await running();
  lark.post(dm,{text:'第一条'});await c.reconcile('periodic');
- lark.freezeWindow(dm,0);lark.post(dm,{text:'读不到'},{event:'none'});
+ // Two behind, as above.
+ lark.freezeWindow(dm,0);lark.post(dm,{text:'读不到'},{event:'none'});lark.post(dm,{text:'也读不到'},{event:'none'});
  for(let n=1;n<c.options.readAttempts;n++){await c.reconcile('periodic');assert.equal(store.chat(dm).dirty,true);assert.equal(store.errors(100).length,0);}
  await c.reconcile('periodic');
  assert.equal(store.chat(dm).dirty,false);const errors=store.errors(100);assert.equal(errors.length,1);assert.match(errors[0].source,/张三/);
@@ -281,32 +283,49 @@ test('a chat that cannot be read to its last message is given up after a bound w
  lark.thawWindow(dm);const v=lark.post(dm,{text:'之后的私聊'},{event:'none'});await c.reconcile('periodic');assert.deepEqual(cats(store,v.id),['dm']);
 });
 
-// Live, open-lark's stored last position of a direct chat with a bot stayed one behind its newest message for cycles on
-// end, while that message had been pushed and stored. A chat read to its cursor whose window is then held there while
-// `posts` arrive: 'pushed' ones butler stores at once (they @ me, so that it does in any chat), 'quiet' ones only open-lark.
+// Live, open-lark's stored last position of a chat stayed one behind its newest message for cycles on end, in a direct
+// chat with a bot whose newest message had been pushed and stored, and in a group that is not watched whose newest
+// message does not concern me. A chat read to its cursor whose window is then held there while `posts` arrive, each
+// '<how>[ <kind>]': 'pushed' butler stores at once (it @s me, so that it does in any chat), 'quiet' (@ me as well) and
+// 'unrelated' only open-lark stores; kind 'ephemeral' is a message only I see, at the position of the one before it,
+// and 'deleted' one that Lark deleted.
 async function laggingWindow(t,{chatMode='direct',watched=false,posts}){
  const {lark,store,running}=await setup(t);const id=lark.chat({name:'机器人',chatMode});const c=await running();
  if(watched)store.watch(id,lark.now());
  lark.post(id,{text:'第一条'});await c.reconcile('periodic');const cursor=store.chat(id).cursor;assert.ok(cursor>0);
  lark.freezeWindow(id,cursor);
- const last=posts.map(p=>lark.post(id,{atMe:true,text:p},{event:p==='pushed'?'full':'none'})).at(-1);
- await waitFor(()=>store.message(last.id),{message:'the pushed message'});
- return {store,c,id,cursor,last,asked:()=>lark.requests.some(r=>r.path===`/agent/v1/messages/${last.id}`)};
+ const views=posts.map(p=>{
+  const [how,kind]=p.split(' '),v=lark.post(id,{atMe:how!=='unrelated',ephemeral:kind==='ephemeral',text:p},{event:how==='pushed'?'full':'none'});
+  if(kind==='deleted')lark.remove(v.id);return {v,pushed:how==='pushed'};
+ });
+ for(const {v} of views.filter(x=>x.pushed))await waitFor(()=>store.message(v.id),{message:'the pushed messages'});
+ const last=views.at(-1).v;
+ return {store,c,id,cursor,last,asked:()=>lark.requests.filter(r=>r.path===`/agent/v1/messages/${last.id}`).length};
 }
-for(const [what,options] of [['a direct chat',{posts:['pushed']}],['a direct chat two behind',{posts:['pushed','pushed']}],['a watched group',{chatMode:'group',watched:true,posts:['pushed']}],['a group that is not watched',{chatMode:'group',posts:['pushed']}]])
- test(`${what} whose window lags behind messages butler stored is read to its last message without asking open-lark for it`,async t=>{
+// asks: how often butler asks open-lark for the last message (GET /messages/:id) when its store does not have it.
+for(const [what,options,asks] of [['a direct chat',{posts:['pushed']},0],['a direct chat two behind',{posts:['pushed','pushed']},0],
+ ['a watched group',{chatMode:'group',watched:true,posts:['pushed']},0],['a group that is not watched',{chatMode:'group',posts:['pushed']},0],
+ ['a direct chat one behind a message it was not pushed',{posts:['quiet']},1],['a group that is not watched one behind a message it does not keep',{chatMode:'group',posts:['unrelated']},1]])
+ test(`${what} whose window lags behind is read to its last message in the first cycle`,async t=>{
   const w=await laggingWindow(t,options);await w.c.reconcile('periodic');
   assert.equal(w.store.chat(w.id).dirty,false,'settled in the first cycle');assert.equal(w.store.chat(w.id).cursor,Number(w.last.position));
-  assert.deepEqual(w.store.errors(100),[]);assert.equal(w.asked(),false,'no GET /messages/:id');
+  assert.deepEqual(w.store.errors(100),[]);assert.equal(w.asked(),asks,'GET /messages/:id');
  });
-for(const [what,options] of [['a group that is not watched missing a position before it',{chatMode:'group',posts:['quiet','pushed']}],['a direct chat missing a position before it',{posts:['quiet','pushed']}]])
- test(`${what} whose window lags behind its stored last message is still short, and given up after the bound`,async t=>{
+// asks: whether butler asks open-lark for the last message in every cycle (it is not in butler's store, or not as one
+// that can stand for its position).
+for(const [what,options,asks] of [['a group that is not watched missing a position before it',{chatMode:'group',posts:['quiet','pushed']},false],
+ ['a direct chat missing a position before it',{posts:['quiet','pushed']},false],
+ ['a group that is not watched two behind messages it does not keep',{chatMode:'group',posts:['unrelated','unrelated']},true],
+ ['a direct chat whose missing position also holds a pushed ephemeral message',{posts:['quiet','pushed ephemeral','pushed']},false],
+ ['a direct chat whose last message is ephemeral, at the missing position before it',{posts:['quiet','quiet ephemeral']},true],
+ ['a direct chat whose last message is deleted',{posts:['quiet deleted']},true]])
+ test(`${what} whose window lags behind is still short, and given up after the bound`,async t=>{
   const w=await laggingWindow(t,options);
   for(let n=1;n<w.c.options.readAttempts;n++){await w.c.reconcile('periodic');assert.equal(w.store.chat(w.id).dirty,true);assert.equal(w.store.chat(w.id).cursor,w.cursor);}
   await w.c.reconcile('periodic');
   assert.equal(w.store.chat(w.id).dirty,false);const errors=w.store.errors(100);assert.equal(errors.length,1);
   assert.match(errors[0].message,new RegExp(`读到 ${w.cursor} 仍没读到.*${w.last.id}`));
-  assert.equal(w.asked(),false,'butler\'s store has its position: no GET /messages/:id');
+  assert.equal(w.asked(),asks?w.c.options.readAttempts:0,'GET /messages/:id');
  });
 
 test('one chat reads at most a few pages per cycle and goes on in the next',async t=>{
@@ -344,7 +363,12 @@ test('a store from the previous version is upgraded, and a chat it left at curso
  const old=new DatabaseSync(file);
  old.exec(`CREATE TABLE chats(feed_id TEXT PRIMARY KEY, name TEXT, chat_mode TEXT, member_count INTEGER, is_muted INTEGER, last_active_at INTEGER,
   cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, gap_retries INTEGER NOT NULL DEFAULT 0)`);
- old.prepare('INSERT INTO chats(feed_id,name,chat_mode,cursor,dirty) VALUES(?,?,?,0,0)').run(dm,'张三','direct');old.close();
+ old.prepare('INSERT INTO chats(feed_id,name,chat_mode,cursor,dirty) VALUES(?,?,?,0,0)').run(dm,'张三','direct');
+ // And its messages table, before is_ephemeral.
+ old.exec(`CREATE TABLE messages(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, chat_kind TEXT NOT NULL, sender_id TEXT, sender_name TEXT, sender_type TEXT,
+  created_at INTEGER NOT NULL, position TEXT, thread_role TEXT NOT NULL, root_id TEXT, parent_id TEXT, reply_to_sender_id TEXT, text TEXT NOT NULL, parts TEXT NOT NULL,
+  unreadable INTEGER NOT NULL, is_mine INTEGER NOT NULL, mentions_all INTEGER NOT NULL, is_recalled INTEGER NOT NULL, is_edited INTEGER NOT NULL,
+  first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);old.close();
  const store=new Store(file,{linkBase:'http://127.0.0.1:3333'}),c=new Collector({store,url:lark.url,token:lark.token,options:FAST});
  t.after(async()=>{await c.stop();await lark.close();store.close();fs.rmSync(dir,{recursive:true,force:true});});
  await c.start();await waitFor(()=>c.connected);await c.idle();
