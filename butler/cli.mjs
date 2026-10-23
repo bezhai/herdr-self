@@ -1,13 +1,17 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-// butler's command line: runs the collector and the processor, shows their status, what they collected and the
-// matters made of it, and keeps the watched-group and ignored-sender lists.
+// butler's command line: runs the collector and the processor (with the bot), shows their status, what they collected
+// and the matters made of it, keeps the watched-group and ignored-sender lists, and creates the bot's Feishu app.
 import {parseArgs} from 'node:util';
-import {loadConfig,requireToken,requireModel,storeFile} from './config.mjs';
+import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
 import {CATEGORIES} from './rules.mjs';
 import {Matters} from './matters.mjs';
-import {Processor} from './processor.mjs';
+import {Processor,DEFAULTS as PROCESSOR} from './processor.mjs';
 import {HerdrModel} from './herdr-model.mjs';
+import {ModelQueue} from './model-queue.mjs';
+import {find} from './lookup.mjs';
+import {Conversation} from './conversation.mjs';
+import {Digests,digestStatus,endReason} from './digest.mjs';
 
 // node:sqlite is still flagged experimental and warns on load; that warning says nothing to a butler user. Installed
 // before the store is imported (hence the dynamic imports); every other warning is printed as usual.
@@ -15,6 +19,8 @@ process.removeAllListeners('warning');
 process.on('warning',w=>{if(!(w.name==='ExperimentalWarning'&&/SQLite/.test(w.message)))console.error(`${w.name}: ${w.message}`);});
 const {Store}=await import('./store.mjs');
 const {Collector,DEFAULTS}=await import('./collector.mjs');
+// The Feishu SDK takes most of the command line's start-up time; only the commands that use it load it.
+const feishu=async()=>({...await import('./bot.mjs'),...await import('./bot-app.mjs')});
 
 const HELP=`用法：butler [--config 配置文件] <命令>
 
@@ -27,11 +33,13 @@ const HELP=`用法：butler [--config 配置文件] <命令>
   watch list                       关注群名单
   watch add <群名或 id>...          加入关注名单，从加入时开始收集这个群的全部消息
   watch remove <群名或 id>...       移出关注名单
-  process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项；--once 处理完积压就退出
+  process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项；配置了机器人时
+                                   也运行机器人：定时汇总、私聊对话；--once 处理完积压就退出，不运行机器人
   matters [--all] [--json]         未结束的事项，紧急的在前；--all 连同已结束的
   ignore list                      忽略名单：这些发送方的消息不交给模型
   ignore add <发送方名称或 id>...    加入忽略名单
   ignore remove <发送方名称或 id>... 移出忽略名单
+  bot create [--name 名称]          通过飞书的官方流程创建管家机器人的应用，凭证写进配置文件
 
 配置文件默认是 ~/.config/butler/butler.env（也可用 BUTLER_CONFIG 指定），说明见 butler/README.md。`;
 
@@ -64,6 +72,13 @@ function printStatus(s){
  lines.push(`关注群：${s.watched} 个；已记下读取位置的聊天 ${s.chatsRead} 个`);
  const p=s.processing;
  lines.push(`加工：最近一轮 ${time(p.lastRoundAt)}，最近成功 ${time(p.lastSuccessAt)}${p.stoppedAt?`，已停止于 ${time(p.stoppedAt)}`:''}；待加工 ${p.pending} 条，跳过 ${p.skipped} 条（模型单独处理它们几次都给不出可用的回答），未结束的事项 ${p.openMatters} 个`);
+ const b=s.bot,processing=p.heartbeatAt&&!p.stoppedAt&&Date.now()-p.heartbeatAt<3*PROCESSOR.heartbeatMs;
+ lines.push(!b.configured?'机器人：没有配置（butler bot create 创建它的飞书应用）':!processing?'机器人：未运行（加工端未运行）'
+  :b.state==='connected'?`机器人：已连接（连接于 ${time(b.connectedAt)}）`:b.state==='reconnecting'?`机器人：正在重连（上次连接于 ${time(b.connectedAt)}）`
+  :b.state==='error'?`机器人：连接失败，正在重试（${b.error}）`:b.state==='connecting'?'机器人：正在连接':`机器人：${b.state??'未知'}`);
+ const d=s.digest;
+ lines.push(`汇总：${d.at?`上次 ${time(d.at)}，共发出 ${d.sent} 份`:'还没有发过'}${d.failedAt?`；${time(d.failedAt)} 发送失败`:''}；下一份：${d.next
+  ?`${time(d.next)}（新事项 ${d.fresh} 个，结束 ${d.ended} 个）`:'暂无（上次以来没有新的或结束的事项）'}`);
  lines.push(`存储：${s.file}（${size(s.sizeBytes)}）`);
  lines.push(s.errors.length?'最近的错误：':'最近的错误：无');
  for(const err of s.errors)lines.push(`  ${time(err.at)}  ${err.source}：${err.message}`);
@@ -88,15 +103,10 @@ async function refreshGroups(store,openLark){
   if(!page.hasMore||!page.nextCursor)break;cursor=page.nextCursor;
  }
 }
-// Items named by an exact id or name, else by a part of the name. key: the id field.
-function matches(items,query,key='feedId'){
- const exact=items.filter(i=>i[key]===query||i.name===query);if(exact.length)return exact;
- const q=query.toLowerCase();return items.filter(i=>(i.name??'').toLowerCase().includes(q));
-}
 const GROUPS={key:'feedId',noun:'群',missing:'butler groups 可以列出我所在的群',line:g=>`  ${g.name}（${g.memberCount??'?'} 人）  ${g.feedId}`};
 const SENDERS={key:'senderId',noun:'发送方',missing:'只能忽略存储里发过消息的发送方',line:s=>`  ${s.name}（${s.type??'?'}，${s.messages??'?'} 条消息）  ${s.senderId}`};
 function pick(items,query,{key,noun,missing,line}=GROUPS){
- const found=matches(items,query,key);
+ const found=find(items,query,key);
  if(found.length===1)return found[0];
  if(!found.length)throw new UsageError(`没有找到${noun}：${query}（${missing}）`);
  throw new UsageError(`“${query}”对应多个${noun}，请用完整名称或 id：\n${found.map(line).join('\n')}`);
@@ -106,7 +116,7 @@ const URGENCY={high:'紧急',normal:'一般',low:'不急'};
 function printMatters(list,all){
  if(!list.length){console.log(all?'还没有事项':'没有未结束的事项');return;}
  for(const m of list){
-  const state=m.status==='open'?'未结束':`已结束：${m.reason}（${time(m.closedAt)}）`;
+  const state=m.status==='open'?'未结束':`已结束：${endReason(m)}（${time(m.closedAt)}）`;
   console.log(`#${m.id} [${URGENCY[m.urgency]??m.urgency}] ${m.title}\n  ${m.who}：${m.ask}${m.due?`（期限：${m.due}）`:''}\n  ${state} · ${m.messageIds.length} 条消息 · ${m.chats.join('、')} · ${time(m.since)} 起\n  ${m.link??''}`);
  }
 }
@@ -114,7 +124,7 @@ function printMatters(list,all){
 async function main(argv){
  process.umask(0o077);
  const {values,positionals}=parseArgs({args:argv,allowPositionals:true,options:{config:{type:'string'},json:{type:'boolean'},once:{type:'boolean'},all:{type:'boolean'},category:{type:'string'},
-  since:{type:'string'},until:{type:'string'},limit:{type:'string'},search:{type:'string'},help:{type:'boolean',short:'h'}}});
+  since:{type:'string'},until:{type:'string'},limit:{type:'string'},search:{type:'string'},name:{type:'string'},help:{type:'boolean',short:'h'}}});
  const [command,...rest]=positionals;
  if(values.help||!command){console.log(HELP);return 0;}
  const config=loadConfig(values.config);
@@ -131,11 +141,13 @@ async function main(argv){
   return undefined;
  }
  if(command==='process')return processCommand(config,values.once);
+ if(command==='bot')return botCommand(config,rest,values);
  const store=new Store(storeFile(config),{linkBase:config.linkBase}),matters=new Matters(store);
  try{
   switch(command){
    case 'status':{
-    const s={...store.status(),processing:{...store.meta('processor'),pending:matters.pendingCount(),skipped:matters.skippedCount(),openMatters:matters.list().length}};
+    const s={...store.status(),processing:{...store.meta('processor'),pending:matters.pendingCount(),skipped:matters.skippedCount(),openMatters:matters.list().length},
+     bot:{configured:Boolean(config.bot),...store.meta('bot')},digest:digestStatus({store,matters,schedule:config.schedule})};
     if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;
    }
    case 'matters':{const list=matters.list({all:values.all});if(values.json)console.log(JSON.stringify(list,null,1));else printMatters(list,values.all);return 0;}
@@ -167,7 +179,7 @@ async function main(argv){
    }
    case 'groups':{
     await refreshGroups(store,openLark());
-    const watched=new Set(store.watches().map(w=>w.feedId)),groups=values.search?matches(store.groups(),values.search):store.groups();
+    const watched=new Set(store.watches().map(w=>w.feedId)),groups=values.search?find(store.groups(),values.search,'feedId'):store.groups();
     if(values.json){console.log(JSON.stringify(groups.map(g=>({...g,watched:watched.has(g.feedId)})),null,1));return 0;}
     for(const g of groups)console.log(`${watched.has(g.feedId)?'★':' '} ${g.name}  ${g.memberCount??'?'} 人  最近活跃 ${time(g.lastActiveAt)}${g.chatMode==='topic'?'  话题群':''}  ${g.feedId}`);
     return 0;
@@ -182,7 +194,7 @@ async function main(argv){
     if(!queries.length)throw new UsageError(`watch ${action} 需要群名或 id`);
     if(action==='add'){
      // The store knows the groups seen so far; anything it cannot resolve uniquely is looked up in open-lark.
-     if(queries.some(q=>matches(store.groups(),q).length!==1))await refreshGroups(store,openLark());
+     if(queries.some(q=>find(store.groups(),q,'feedId').length!==1))await refreshGroups(store,openLark());
      const picked=queries.map(q=>pick(store.groups(),q)),since=Date.now();
      for(const g of picked){
       store.watch(g.feedId,since);console.log(`已加入关注：${g.name}（${g.feedId}），从 ${time(store.watchSince(g.feedId))} 开始收集`);
@@ -202,10 +214,11 @@ async function main(argv){
  }finally{store.close();}
 }
 
-// The processor, as a service or (once) for the backlog only.
+// The processor, as a service or (once) for the backlog only. As a service it also runs the bot, when one is
+// configured: digests and the conversation, whose turns share the model with the batches (see model-queue.mjs).
 async function processCommand(config,once){
  const machine=requireModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
- const model=new HerdrModel({machine,cwd:config.modelCwd,command:[config.herdr],log:m=>console.error(m)});
+ const model=new ModelQueue(new HerdrModel({machine,cwd:config.modelCwd,command:[config.herdr],log:m=>console.error(m)}));
  const processor=new Processor({store,matters,model,log:m=>console.log(m)});
  if(once){
   try{
@@ -214,10 +227,45 @@ async function processCommand(config,once){
    return r.failures?1:0;
   }finally{store.close();}
  }
- const stop=async()=>{await Promise.race([processor.stop(),new Promise(r=>setTimeout(r,20_000))]);process.exit(0);};
+ let bot,digests,conversation;
+ if(config.bot){
+  const {Bot}=await feishu();
+  bot=new Bot({store,...config.bot,log:m=>console.log(m)});
+  conversation=new Conversation({store,matters,model,bot});digests=new Digests({store,matters,bot,schedule:config.schedule});
+  bot.onMessage=msg=>conversation.handle(msg);
+ }
+ // The model run under way (a batch or a turn) is waited for, bounded; a turn cut off here goes unanswered.
+ const stop=async()=>{
+  await Promise.race([Promise.all([processor.stop(),digests?.stop(),conversation?.idle()]),new Promise(r=>setTimeout(r,20_000))]);
+  await Promise.race([bot?.stop(),new Promise(r=>setTimeout(r,5000))]);process.exit(0);
+ };
  process.on('SIGTERM',stop);process.on('SIGINT',stop);
  console.log(`butler 加工端启动：模型在 herdr 机器 ${machine}，存储 ${store.file}`);
- await processor.start();return undefined;
+ await processor.start();
+ if(bot){
+  console.log(`管家机器人（${config.bot.appId}）正在连接飞书`);
+  bot.start().catch(e=>store.addError('机器人',`机器人停了：${e?.message??e}`));digests.start();
+ }else console.log('没有配置管家机器人（butler bot create），只做加工，不发汇总');
+ return undefined;
+}
+
+// bot create: the bot's Feishu app, through Feishu's official flow; the credentials and the owner (whoever creates
+// it) go into the config file.
+async function botCommand(config,[action],values){
+ if(action!=='create')throw new UsageError(action?`bot 没有这个操作：${action}`:'用法：butler bot create [--name 名称]');
+ if(config.bot)throw new UsageError(`机器人已经配置（应用 ${config.bot.appId}）。要换一个，先从 ${config.file} 删掉 BUTLER_BOT_ 开头的几行`);
+ const controller=new AbortController(),abort=()=>controller.abort();process.on('SIGINT',abort);
+ try{
+  const {createApp}=await feishu();
+  const app=await createApp({name:values.name,signal:controller.signal,onLink:(url,expiresIn)=>console.log(
+   `用飞书扫码或在浏览器里打开下面的链接，在飞书的页面上确认创建应用和它的权限（${Math.round(expiresIn/60)} 分钟内有效）：\n\n${url}\n\n等待确认……（Ctrl-C 放弃）`)});
+  saveConfig(config.file,{BUTLER_BOT_APP_ID:app.appId,BUTLER_BOT_APP_SECRET:app.appSecret,BUTLER_BOT_OWNER:app.owner,BUTLER_BOT_DOMAIN:app.domain});
+  console.log(`已创建应用 ${app.appId}，只听创建它的人（${app.owner}）的话；凭证已写进 ${config.file}。重启加工端（systemctl --user restart butler-processor）后机器人上线。`);
+  return 0;
+ }catch(e){
+  if(controller.signal.aborted)throw new UsageError('已放弃创建。如果已经在飞书确认过，这个应用已经建好，可以在飞书开放平台删掉它，再重新创建');
+  throw e;
+ }finally{process.off('SIGINT',abort);}
 }
 
 main(process.argv.slice(2)).then(code=>{if(code!==undefined)process.exitCode=code;},e=>{

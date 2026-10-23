@@ -1,7 +1,7 @@
 // The processor's own tables in butler's store: the ignore list, which messages have been processed, the matters and
 // their source messages, and the model runs. The collector's tables (messages, chats, …) are only read here; the
-// processor is a separate process on the same SQLite file (WAL, busy timeout), and the bot will edit the ignore list
-// and the matters through this same class.
+// processor is a separate process on the same SQLite file (WAL, busy timeout). The bot, in the processor's process,
+// edits the ignore list and closes and reopens matters through this same class.
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS ignored_senders(sender_id TEXT PRIMARY KEY, name TEXT, since INTEGER NOT NULL);
@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS processed(
  message_id TEXT PRIMARY KEY REFERENCES messages(id), outcome TEXT NOT NULL, run_id INTEGER, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS matters(
  id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, who TEXT NOT NULL, ask TEXT NOT NULL, due TEXT, urgency TEXT NOT NULL,
- status TEXT NOT NULL, reason TEXT, opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER);
+ status TEXT NOT NULL, reason TEXT, opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER, closed_by TEXT);
 CREATE TABLE IF NOT EXISTS matter_messages(
  matter_id INTEGER NOT NULL REFERENCES matters(id), message_id TEXT NOT NULL REFERENCES messages(id), added_at INTEGER NOT NULL,
  PRIMARY KEY(matter_id,message_id));
@@ -20,12 +20,18 @@ CREATE TABLE IF NOT EXISTS model_runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, finished_at INTEGER, messages INTEGER NOT NULL, prompt_bytes INTEGER NOT NULL,
  ok INTEGER, error TEXT, output TEXT);
 `;
+// Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
+// judged the matter ended) or owner (I closed it in the conversation).
+const ADDED_COLUMNS=[['matters','closed_by','TEXT']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
 const NOT_IN='m.id NOT IN (SELECT value FROM json_each(?))';
 
 export class Matters{
- constructor(store){this.store=store;this.db=store.db;this.db.exec(SCHEMA);}
+ constructor(store){
+  this.store=store;this.db=store.db;this.db.exec(SCHEMA);
+  for(const [table,column,definition] of ADDED_COLUMNS)if(!this.#all(`PRAGMA table_info(${table})`).some(c=>c.name===column))this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+ }
  #all(sql,...p){return this.db.prepare(sql).all(...p);}
  #get(sql,...p){return this.db.prepare(sql).get(...p);}
  #run(sql,...p){return this.db.prepare(sql).run(...p);}
@@ -67,13 +73,25 @@ export class Matters{
   const chatIds=[...new Set(sources.map(s=>s.feed_id))];
   return {id:row.id,title:row.title,who:row.who,ask:row.ask,due:row.due,urgency:row.urgency,status:row.status,reason:row.reason,
    // since: when it started, by its earliest message; openedAt: when butler made it.
-   since:sources[0]?.created_at??row.opened_at,openedAt:row.opened_at,updatedAt:row.updated_at,closedAt:row.closed_at,messageIds:sources.map(s=>s.message_id),chatIds,
+   since:sources[0]?.created_at??row.opened_at,openedAt:row.opened_at,updatedAt:row.updated_at,closedAt:row.closed_at,closedBy:row.closed_by,messageIds:sources.map(s=>s.message_id),chatIds,
    chats:chatIds.map(id=>sources.find(s=>s.feed_id===id).name??id),link:sources.length?this.store.message(sources[0].message_id)?.link:undefined};
  }
  matter(id){return this.#matter(this.#get('SELECT * FROM matters WHERE id=?',id));}
  // Open matters, most urgent first, newest first within one urgency; all: closed ones too, after them.
  list({all=false}={}){
   return this.#all(`SELECT * FROM matters ${all?'':"WHERE status='open'"} ORDER BY status='closed',CASE urgency WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,opened_at DESC,id DESC`).map(r=>this.#matter(r));
+ }
+ // Matters that ended after t, in the order they ended.
+ closedSince(t){return this.#all("SELECT * FROM matters WHERE status='closed' AND closed_at>? ORDER BY closed_at,id",t??-1).map(r=>this.#matter(r));}
+ // The latest matters to end, latest first.
+ recentlyClosed(limit){return this.#all("SELECT * FROM matters WHERE status='closed' ORDER BY closed_at DESC,id DESC LIMIT ?",limit).map(r=>this.#matter(r));}
+ // I closed an open matter myself, with my reason if I gave one; returns whether it was open.
+ close(id,reason,now=Date.now()){
+  return Number(this.#run(`UPDATE matters SET status='closed',reason=?,closed_at=?,closed_by='owner',updated_at=? WHERE id=? AND status='open'`,reason||null,now,now,id).changes)>0;
+ }
+ // An ended matter is open again; returns whether it had ended.
+ reopen(id,now=Date.now()){
+  return Number(this.#run(`UPDATE matters SET status='open',reason=NULL,closed_at=NULL,closed_by=NULL,updated_at=? WHERE id=? AND status='closed'`,now,id).changes)>0;
  }
  // A model answer (see prompt.mjs readReply) and the messages it covered, in one transaction. outcome: how the
  // messages were processed (model, or context for my own messages that needed no model).
@@ -88,7 +106,7 @@ export class Matters{
     const c=u.changes??{};
     this.#run('UPDATE matters SET title=COALESCE(?,title),who=COALESCE(?,who),ask=COALESCE(?,ask),due=COALESCE(?,due),urgency=COALESCE(?,urgency),updated_at=? WHERE id=?',
      c.title??null,c.who??null,c.ask??null,c.due??null,c.urgency??null,now,u.matterId);
-    if(u.close)this.#run(`UPDATE matters SET status='closed',reason=?,closed_at=? WHERE id=? AND status='open'`,u.close,now,u.matterId);
+    if(u.close)this.#run(`UPDATE matters SET status='closed',reason=?,closed_at=?,closed_by='model' WHERE id=? AND status='open'`,u.close,now,u.matterId);
     for(const message of u.messageIds)link.run(u.matterId,message,now);
    }
    const done=this.db.prepare('INSERT OR IGNORE INTO processed(message_id,outcome,run_id,at) VALUES(?,?,?,?)');

@@ -62,11 +62,12 @@ export function composePrompt({now,me,batch,context,openMatters,textChars=1500})
 
 // Model text is shown to me later; a link in it would be one the model made up or copied from a message, so links
 // are replaced (the real ones are butler's, made from the source messages).
-const URL=/(?:https?:\/\/|www\.)\S+/gi;
-const clean=(v,max)=>typeof v==='string'?v.replace(URL,'[链接]').replace(/\s+/g,' ').trim().slice(0,max):'';
+export const LINKS=/(?:https?:\/\/|www\.)\S+/gi;
+export const clean=(v,max)=>typeof v==='string'?v.replace(LINKS,'[链接]').replace(/\s+/g,' ').trim().slice(0,max):'';
 const LIMITS={title:80,who:60,ask:400,due:40,reason:200};
 
-function parse(text){
+// The JSON object in a model's reply, which may come in a code block or with words around it.
+export function parse(text){
  const s=String(text??'').trim(),tries=[s],fence=/```(?:json)?\s*([\s\S]*?)```/.exec(s),a=s.indexOf('{'),b=s.lastIndexOf('}');
  if(fence)tries.push(fence[1]);if(a>=0&&b>a)tries.push(s.slice(a,b+1));
  for(const t of tries){try{return JSON.parse(t);}catch{}}

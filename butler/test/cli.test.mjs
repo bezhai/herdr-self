@@ -117,3 +117,29 @@ test('process --once turns the backlog into matters through herdr; matters lists
  r=await cli(config,'matters','--all');assert.match(r.stdout,/已结束：对方说不用了/);
  r=await cli(config,'status');assert.match(r.stdout,/加工：/);assert.match(r.stdout,/待加工 0 条/);assert.match(r.stdout,/未结束的事项 0 个/);assert.match(r.stdout,/跳过 0 条/);
 });
+
+test('status shows the bot connection, the last digest and the next one when one is due',async t=>{
+ const {lark,store,dir}=await setup(t);
+ let r=await cli(writeConfig(dir,lark),'status');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/机器人：没有配置/);
+ const config=writeConfig(dir,lark,0o600,'BUTLER_BOT_APP_ID=cli_a1b2c3d4e5f6\nBUTLER_BOT_APP_SECRET=secret-value-never-shown\nBUTLER_BOT_OWNER=ou_owner0000000000000000000000001\n');
+ r=await cli(config,'status');assert.match(r.stdout,/机器人：未运行（加工端未运行）/);assert.match(r.stdout,/汇总：还没有发过/);
+ assert.doesNotMatch(r.stdout,/secret-value/);
+ const now=Date.now(),matters=new Matters(store);
+ store.setMeta('processor',{pid:process.pid,startedAt:now,heartbeatAt:now});
+ store.setMeta('bot',{state:'connected',since:now-60e3,connectedAt:now-60e3});
+ store.setMeta('digest',{at:now-1800e3,slot:now-1800e3,sent:3});
+ r=await cli(config,'status');
+ assert.match(r.stdout,/机器人：已连接/);assert.match(r.stdout,/汇总：上次 \d{4}-\d\d-\d\d \d\d:\d\d/);assert.match(r.stdout,/下一份：暂无/);
+ const id=post(store,{text:'@原智鸿 看下'});matters.apply({created:[{title:'看一下',who:'陈帆',ask:'看',urgency:'normal',messageIds:[id]}],processedIds:[id]});
+ r=await cli(config,'status');assert.match(r.stdout,/下一份：\d{4}-\d\d-\d\d \d\d:\d\d/);assert.match(r.stdout,/新事项 1 个/);
+ const s=JSON.parse((await cli(config,'status','--json')).stdout);
+ assert.equal(s.bot.state,'connected');assert.equal(s.digest.sent,3);assert.equal(typeof s.digest.next,'number');
+ store.setMeta('bot',{state:'error',since:now,error:'WebSocket connect failed'});
+ r=await cli(config,'status');assert.match(r.stdout,/机器人：连接失败.*WebSocket connect failed/);
+});
+
+test('bot create refuses to replace a configured bot',async t=>{
+ const {lark,dir}=await setup(t);
+ const config=writeConfig(dir,lark,0o600,'BUTLER_BOT_APP_ID=cli_a1b2c3d4e5f6\nBUTLER_BOT_APP_SECRET=s\nBUTLER_BOT_OWNER=ou_owner0000000000000000000000001\n');
+ const r=await cli(config,'bot','create');assert.equal(r.code,1);assert.match(r.stderr,/已经配置/);assert.match(r.stderr,/cli_a1b2c3d4e5f6/);
+});
