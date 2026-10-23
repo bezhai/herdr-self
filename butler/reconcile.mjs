@@ -110,7 +110,7 @@ export class Reconciler{
   const read=chat?.cursor>0?await this.#readForward(feedId,chat.cursor,{name,lastTry}):await this.#readFromTail(feedId);
   if(read.state==='more')return;
   const target=chat?.pendingSignature?.split('|')[0]||undefined;
-  if(read.state==='end'&&await this.#reached(read,target)){this.store.settleChat(feedId);return;}
+  if(read.state==='end'&&await this.#reached(chat,read,target)){this.store.settleChat(feedId);return;}
   if(!chat?.dirty)return;
   const tries=this.store.readRetry(feedId);
   if(tries<this.options.readAttempts)return;
@@ -120,17 +120,29 @@ export class Reconciler{
    :`按位置读到 ${read.cursor} 仍没读到会话列表显示的最后一条消息 ${target}，读了 ${tries} 次，放弃到它下次有变化`);
  }
  // Whether a read reached the chat's last message: it has a cursor, and the message the conversation entry shows is
- // among what it read or at or below the cursor. Its position is asked of GET /messages/:id only when the read did not
- // show it; that GET reads open-lark's store but checks the chat with Lark first (cached per chat for a minute).
- async #reached(read,target){
+ // among what it read or at or below the cursor. When the read did not show it, its position comes from butler's store
+ // if butler holds it (a position does not change), else from GET /messages/:id; that GET reads open-lark's store but
+ // checks the chat with Lark first (cached per chat for a minute).
+ async #reached(chat,read,target){
   if(!(read.cursor>0))return false;
   if(!target||read.seen.has(target))return true;
+  const stored=Number(this.store.position(chat.feedId,target));
+  if(stored>0)return stored<=read.cursor||this.#heldUpTo(chat,read.cursor,stored);
   let view;
   try{view=await this.openLark.message(target);}catch(e){if(e.status===403||e.status===404)return false;throw e;}
   const position=Number(view.position);
   if(position>0)return position<=read.cursor;
   // A normal group's thread reply has no position of its own: record it from here; the read counts if it had rows.
   this.recorder.record([view]);return read.rows>0;
+ }
+ // A read that ended at the cursor still reached a stored message above it when butler holds every position in between:
+ // live, open-lark's window of a direct chat with a bot stayed one behind its newest message, pushed and stored, for
+ // cycles on end. Main-sequence positions are dense, one message each, so nothing in the main sequence is left unread;
+ // the cursor moves there. In practice that holds in a direct chat or a watched group, where butler stores every
+ // message; other groups hold only what concerns me, so a range there is rarely complete.
+ #heldUpTo(chat,cursor,position){
+  if(!this.store.holdsPositions(chat.feedId,cursor+1,position))return false;
+  this.store.setCursor(chat.feedId,position);return true;
  }
  async #readFromTail(feedId){
   let page=await this.openLark.messages(feedId,{tail:true,limit:PAGE});

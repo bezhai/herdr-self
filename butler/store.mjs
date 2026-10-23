@@ -76,6 +76,13 @@ export class Store{
  markRecalled(id,now=Date.now()){this.#run('UPDATE messages SET is_recalled=1,updated_at=? WHERE id=?',now,id);}
  hasMessage(id){return Boolean(this.#get('SELECT 1 FROM messages WHERE id=?',id));}
  hasMessagesIn(feedId){return Boolean(this.#get('SELECT 1 FROM messages WHERE feed_id=? LIMIT 1',feedId));}
+ // The position of a message butler holds in this chat, as open-lark gave it (text); undefined when it holds none.
+ position(feedId,id){return this.#get('SELECT position FROM messages WHERE id=? AND feed_id=?',id,feedId)?.position;}
+ // Whether butler holds a message of the chat at every position from..to (> 0). Positions are integers kept as text,
+ // so they are compared as integers; main-sequence positions are dense with one message each.
+ holdsPositions(feedId,from,to){
+  return this.#get('SELECT count(DISTINCT CAST(position AS INTEGER)) n FROM messages WHERE feed_id=? AND CAST(position AS INTEGER) BETWEEN ? AND ?',feedId,from,to).n===to-from+1;
+ }
  isMine(id){return Boolean(this.#get('SELECT is_mine FROM messages WHERE id=?',id)?.is_mine);}
  hasCategory(id,category){return Boolean(this.#get('SELECT 1 FROM message_categories WHERE message_id=? AND category=?',id,category));}
  static #select=`SELECT m.*,c.name AS chat_name,c.chat_mode,COALESCE(t.root_position,r.position) AS root_position,

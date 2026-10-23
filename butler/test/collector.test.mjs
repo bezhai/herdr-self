@@ -281,6 +281,34 @@ test('a chat that cannot be read to its last message is given up after a bound w
  lark.thawWindow(dm);const v=lark.post(dm,{text:'之后的私聊'},{event:'none'});await c.reconcile('periodic');assert.deepEqual(cats(store,v.id),['dm']);
 });
 
+// Live, open-lark's stored last position of a direct chat with a bot stayed one behind its newest message for cycles on
+// end, while that message had been pushed and stored. A chat read to its cursor whose window is then held there while
+// `posts` arrive: 'pushed' ones butler stores at once (they @ me, so that it does in any chat), 'quiet' ones only open-lark.
+async function laggingWindow(t,{chatMode='direct',watched=false,posts}){
+ const {lark,store,running}=await setup(t);const id=lark.chat({name:'机器人',chatMode});const c=await running();
+ if(watched)store.watch(id,lark.now());
+ lark.post(id,{text:'第一条'});await c.reconcile('periodic');const cursor=store.chat(id).cursor;assert.ok(cursor>0);
+ lark.freezeWindow(id,cursor);
+ const last=posts.map(p=>lark.post(id,{atMe:true,text:p},{event:p==='pushed'?'full':'none'})).at(-1);
+ await waitFor(()=>store.message(last.id),{message:'the pushed message'});
+ return {store,c,id,cursor,last,asked:()=>lark.requests.some(r=>r.path===`/agent/v1/messages/${last.id}`)};
+}
+for(const [what,options] of [['a direct chat',{posts:['pushed']}],['a direct chat two behind',{posts:['pushed','pushed']}],['a watched group',{chatMode:'group',watched:true,posts:['pushed']}],['a group that is not watched',{chatMode:'group',posts:['pushed']}]])
+ test(`${what} whose window lags behind messages butler stored is read to its last message without asking open-lark for it`,async t=>{
+  const w=await laggingWindow(t,options);await w.c.reconcile('periodic');
+  assert.equal(w.store.chat(w.id).dirty,false,'settled in the first cycle');assert.equal(w.store.chat(w.id).cursor,Number(w.last.position));
+  assert.deepEqual(w.store.errors(100),[]);assert.equal(w.asked(),false,'no GET /messages/:id');
+ });
+for(const [what,options] of [['a group that is not watched missing a position before it',{chatMode:'group',posts:['quiet','pushed']}],['a direct chat missing a position before it',{posts:['quiet','pushed']}]])
+ test(`${what} whose window lags behind its stored last message is still short, and given up after the bound`,async t=>{
+  const w=await laggingWindow(t,options);
+  for(let n=1;n<w.c.options.readAttempts;n++){await w.c.reconcile('periodic');assert.equal(w.store.chat(w.id).dirty,true);assert.equal(w.store.chat(w.id).cursor,w.cursor);}
+  await w.c.reconcile('periodic');
+  assert.equal(w.store.chat(w.id).dirty,false);const errors=w.store.errors(100);assert.equal(errors.length,1);
+  assert.match(errors[0].message,new RegExp(`读到 ${w.cursor} 仍没读到.*${w.last.id}`));
+  assert.equal(w.asked(),false,'butler\'s store has its position: no GET /messages/:id');
+ });
+
 test('one chat reads at most a few pages per cycle and goes on in the next',async t=>{
  const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});const c=await running();
  lark.post(dm,{text:'第一条'});await c.reconcile('periodic');
