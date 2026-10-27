@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {readSchedule} from './schedule.mjs';
+import {readSchedule,duration} from './schedule.mjs';
 
 export const defaultConfigPath=()=>path.join(process.env.XDG_CONFIG_HOME||path.join(os.homedir(),'.config'),'butler','butler.env');
 const home=p=>p.replace(/^~(?=\/|$)/,os.homedir());
@@ -43,7 +43,9 @@ export function loadConfig(file=process.env.BUTLER_CONFIG||defaultConfigPath()){
   linkBase:httpUrl(v.BUTLER_LINK_BASE||'http://127.0.0.1:3333','BUTLER_LINK_BASE'),
   dataDir:path.resolve(home(v.BUTLER_DATA_DIR||path.join(process.env.XDG_DATA_HOME||'~/.local/share','butler'))),
   // The processor's model: a saved herdr machine (its label), a directory there, and the local herdr executable.
-  modelMachine:v.BUTLER_MODEL_MACHINE||undefined,modelCwd:v.BUTLER_MODEL_CWD||undefined,herdr:home(v.BUTLER_HERDR||'herdr')};
+  modelMachine:v.BUTLER_MODEL_MACHINE||undefined,modelCwd:v.BUTLER_MODEL_CWD||undefined,herdr:home(v.BUTLER_HERDR||'herdr'),
+  // How often the processor reviews the open matters; undefined: its default.
+  reviewEveryMs:v.BUTLER_REVIEW_EVERY?duration(v.BUTLER_REVIEW_EVERY,'整理事项的间隔'):undefined};
 }
 export function requireToken(config){
  if(!config.token)throw Error(`配置文件 ${config.file} 没有 BUTLER_OPEN_LARK_TOKEN（open-lark 的只读 token）`);

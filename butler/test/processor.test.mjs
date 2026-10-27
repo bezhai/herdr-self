@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {tempStore,post,LINK_BASE} from './helpers.mjs';
+import {tempStore,post,waitFor,LINK_BASE} from './helpers.mjs';
 import {Matters} from '../matters.mjs';
 import {Processor} from '../processor.mjs';
 
@@ -19,9 +19,12 @@ function fakeModel(answer){
 const messagesOf=data=>data.chats.flatMap(c=>c.messages);
 const ref=(data,text)=>{const m=messagesOf(data).find(m=>m.text.includes(text));assert.ok(m,`message in prompt: ${text}`);return m.ref;};
 const none={new:[],updates:[]};
-function setup(t,{answer,options}={}){
+// now: the processor's clock. reviewed: a review of the open matters has just been done, so a round runs only its
+// batches (a store without one reviews in its first round).
+function setup(t,{answer,options,now,reviewed=true}={}){
  const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??(()=>none));
- const processor=new Processor({store,matters,model,options:{maxMessages:40,...options}});
+ const processor=new Processor({store,matters,model,options:{maxMessages:40,...options},...now&&{now}});
+ if(reviewed)store.setMeta('review',{at:(now??Date.now)(),reviewed:0,closed:0});
  return {store,matters,model,processor};
 }
 
@@ -216,4 +219,68 @@ test('a message that gets through after failing loses its strikes',async t=>{
  await processor.runOnce();assert.equal(matters.struck().size,1);
  healed=true;post(store,{text:'又来一条',at:min(2)});await processor.runOnce();
  assert.equal(matters.struck().size,0);assert.equal(matters.pendingCount(),0);assert.equal(matters.skippedCount(),0);
+});
+
+// ---- the review of the open matters (see review.mjs), which a round runs after its batches when it is due
+const isReview=c=>Boolean(c.data.matters);
+const kinds=model=>model.calls.map(c=>isReview(c)?'review':'batch');
+// A model that makes a matter of every new message, titled with its text, and answers reviews with review(data).
+const making=review=>d=>d.matters?review(d):{new:newTexts(d).map(text=>({title:text,who:'陈帆',ask:'处理',urgency:'normal',messages:[ref(d,text)]})),updates:[]};
+
+test('a round reviews the open matters after its batches when there has been no review, and again reviewEveryMs after the last',async t=>{
+ let clock=T0+3600e3;
+ const {store,matters,model,processor}=setup(t,{reviewed:false,now:()=>clock,
+  answer:making(d=>({updates:d.matters.filter(m=>m.title.includes('方案')).map(m=>({matter:m.matter,status:'closed',reason:'TA已经看过了'}))}))});
+ post(store,{text:'@原智鸿 看下方案',at:min(1)});
+ let r=await processor.runOnce();
+ assert.deepEqual(kinds(model),['batch','review'],'the first round reviews, after its batch');
+ assert.deepEqual(model.calls[1].data.matters.map(m=>m.title),['@原智鸿 看下方案'],'the review sees what the batch made');
+ assert.deepEqual(r.review,{runs:1,reviewed:1,closed:1,complete:true});
+ assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:1});
+ const [ended]=matters.list({all:true});assert.deepEqual([ended.status,ended.closedBy,ended.reason],['closed','model','TA已经看过了']);
+ post(store,{text:'在吗',at:min(2)});clock+=3600e3;
+ r=await processor.runOnce();
+ assert.deepEqual(kinds(model),['batch','review','batch'],'not again within reviewEveryMs');assert.equal(r.review,undefined);
+ clock+=2*3600e3;
+ r=await processor.runOnce();
+ assert.equal(r.runs,0);assert.deepEqual(kinds(model).at(-1),'review','three hours on, a round reviews with nothing new to process');
+ assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:0});
+});
+
+test('a failed review is on record and goes again on the next round, never twice in one; it holds up no message',async t=>{
+ let down=true;
+ const {store,matters,model,processor}=setup(t,{reviewed:false,answer:making(()=>{if(down)throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');return {updates:[]};})});
+ post(store,{text:'第一件',at:min(1)});
+ let r=await processor.runOnce();
+ assert.equal(r.failures,0);assert.match(r.review.error,/Connection refused/);assert.deepEqual(kinds(model),['batch','review']);
+ assert.equal(matters.pendingCount(),0);assert.equal(matters.list().length,1);
+ const failed=store.meta('review');
+ assert.equal(failed.at,undefined);assert.ok(failed.failedAt);assert.match(failed.error,/Connection refused/);
+ assert.ok(store.errors().some(e=>e.source==='加工'&&/整理.*下一轮再试.*Connection refused/.test(e.message)));
+ post(store,{text:'第二件',at:min(2)});
+ r=await processor.runOnce();
+ assert.equal(matters.pendingCount(),0,'messages are processed as before');assert.equal(matters.list().length,2);
+ assert.deepEqual(kinds(model),['batch','review','batch','review'],'tried again on the next round');
+ down=false;r=await processor.runOnce();
+ assert.deepEqual(r.review,{runs:1,reviewed:2,closed:0,complete:true});
+ const done=store.meta('review');assert.ok(done.at);assert.deepEqual(Object.keys(done).sort(),['at','closed','reviewed'],'the failure is cleared');
+});
+
+test('no review after a round whose batch failed: the model is not there',async t=>{
+ const {store,matters,model,processor}=setup(t,{reviewed:false,answer:()=>{throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');}});
+ const id=post(store,{text:'旧事',at:min(0)});matters.apply({created:[{title:'旧事',who:'陈帆',ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id]});
+ post(store,{text:'在吗',at:min(1)});
+ const r=await processor.runOnce();
+ assert.equal(r.failures,1);assert.equal(r.review,undefined);assert.deepEqual(kinds(model),['batch']);assert.equal(store.meta('review'),undefined);
+});
+
+test('a review cut short by stopping is not recorded as done',async t=>{
+ let release;const gate=new Promise(r=>{release=r;});
+ const {store,matters,model,processor}=setup(t,{reviewed:false,options:{maxPromptBytes:5000},answer:async()=>{await gate;return {updates:[]};}});
+ for(let i=0;i<4;i++){const id=post(store,{chat:`c${i}`,text:`${i}${'长'.repeat(700)}`,at:min(i)});matters.apply({created:[{title:`事项${i}`,who:'陈帆',ask:'处理',urgency:'low',messageIds:[id]}],processedIds:[id]});}
+ await processor.start({periodic:false});t.after(()=>{release();return processor.stop();});
+ const round=processor.runOnce();await waitFor(()=>model.calls.length===1,{message:'the first part with the model'});
+ const stopping=processor.stop();release();await stopping;
+ const r=await round;
+ assert.equal(r.review.complete,false);assert.equal(model.calls.length,1,'no part after the stop');assert.equal(store.meta('review'),undefined);
 });

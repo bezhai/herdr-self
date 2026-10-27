@@ -18,11 +18,13 @@ CREATE TABLE IF NOT EXISTS message_failures(
  message_id TEXT PRIMARY KEY REFERENCES messages(id), strikes INTEGER NOT NULL, last_error TEXT, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS model_runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, finished_at INTEGER, messages INTEGER NOT NULL, prompt_bytes INTEGER NOT NULL,
- ok INTEGER, error TEXT, output TEXT);
+ ok INTEGER, error TEXT, output TEXT, kind TEXT NOT NULL DEFAULT 'batch', matters INTEGER);
 `;
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
-// judged the matter ended) or owner (I closed it in the conversation).
-const ADDED_COLUMNS=[['matters','closed_by','TEXT']];
+// judged the matter ended) or owner (I closed it in the conversation). A model run's kind: batch (of new messages)
+// or review (of the open matters, see review.mjs); runs from before reviews were batches. Its matters: how many open
+// matters it was shown, unknown for runs from before.
+const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
 const NOT_IN='m.id NOT IN (SELECT value FROM json_each(?))';
@@ -72,8 +74,8 @@ export class Matters{
   const sources=this.#all('SELECT mm.message_id,m.feed_id,m.created_at,c.name FROM matter_messages mm JOIN messages m ON m.id=mm.message_id LEFT JOIN chats c ON c.feed_id=m.feed_id WHERE mm.matter_id=? ORDER BY m.created_at,m.id',row.id);
   const chatIds=[...new Set(sources.map(s=>s.feed_id))];
   return {id:row.id,title:row.title,who:row.who,ask:row.ask,due:row.due,urgency:row.urgency,status:row.status,reason:row.reason,
-   // since: when it started, by its earliest message; openedAt: when butler made it.
-   since:sources[0]?.created_at??row.opened_at,openedAt:row.opened_at,updatedAt:row.updated_at,closedAt:row.closed_at,closedBy:row.closed_by,messageIds:sources.map(s=>s.message_id),chatIds,
+   // since: when it started, by its earliest message; lastAt: its latest message; openedAt: when butler made it.
+   since:sources[0]?.created_at??row.opened_at,lastAt:sources.at(-1)?.created_at??row.opened_at,openedAt:row.opened_at,updatedAt:row.updated_at,closedAt:row.closed_at,closedBy:row.closed_by,messageIds:sources.map(s=>s.message_id),chatIds,
    chats:chatIds.map(id=>sources.find(s=>s.feed_id===id).name??id),link:sources.length?this.store.message(sources[0].message_id)?.link:undefined};
  }
  matter(id){return this.#matter(this.#get('SELECT * FROM matters WHERE id=?',id));}
@@ -126,10 +128,13 @@ export class Matters{
  skippedCount(){return this.#get(`SELECT count(*) n FROM processed WHERE outcome='failed'`).n;}
 
  // ---- model runs, kept with the raw reply so a decision can be looked into later
- startRun({messages,promptBytes,now=Date.now()}){return Number(this.#run('INSERT INTO model_runs(started_at,messages,prompt_bytes) VALUES(?,?,?)',now,messages,promptBytes).lastInsertRowid);}
+ // messages: the new messages it was given to process (none for a review); matters: the open matters it was shown.
+ startRun({kind='batch',messages,matters,promptBytes,now=Date.now()}){
+  return Number(this.#run('INSERT INTO model_runs(started_at,kind,messages,matters,prompt_bytes) VALUES(?,?,?,?,?)',now,kind,messages,matters??null,promptBytes).lastInsertRowid);
+ }
  finishRun(id,{ok,error,output,now=Date.now()}){this.#run('UPDATE model_runs SET finished_at=?,ok=?,error=?,output=? WHERE id=?',now,ok?1:0,error??null,output??null,id);}
  runs(limit=1000){
   return this.#all('SELECT * FROM (SELECT * FROM model_runs ORDER BY id DESC LIMIT ?) ORDER BY id',limit)
-   .map(r=>({id:r.id,startedAt:r.started_at,finishedAt:r.finished_at,messages:r.messages,promptBytes:r.prompt_bytes,ok:r.ok===null?undefined:Boolean(r.ok),error:r.error,output:r.output}));
+   .map(r=>({id:r.id,kind:r.kind,startedAt:r.started_at,finishedAt:r.finished_at,messages:r.messages,matters:r.matters??undefined,promptBytes:r.prompt_bytes,ok:r.ok===null?undefined:Boolean(r.ok),error:r.error,output:r.output}));
  }
 }

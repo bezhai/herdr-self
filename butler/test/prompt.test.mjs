@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {composePrompt,readReply} from '../prompt.mjs';
+import {composePrompt,readReply,systemPrompt,composeReview,readReview,reviewSystemPrompt} from '../prompt.mjs';
 
 process.env.TZ='Asia/Shanghai';// the prompt shows local times
 
@@ -80,4 +80,52 @@ test('model text is trimmed to sane lengths',()=>{
  const r=read({new:[{title:'题'.repeat(500),who:'人'.repeat(500),ask:'事'.repeat(5000),due:'期'.repeat(500),urgency:'low',messages:['m2']}],updates:[]});
  const [m]=r.created;
  assert.ok(m.title.length<=80&&m.who.length<=60&&m.ask.length<=400&&m.due.length<=40);
+});
+
+test('batches and reviews hold matters to the same bar: something for TA to do, not just to know',()=>{
+ for(const system of [systemPrompt('原智鸿'),reviewSystemPrompt('原智鸿')]){
+  assert.match(system,/原智鸿/);assert.doesNotMatch(system,/\n/,'one line, for the command line');
+  assert.match(system,/需要TA本人去做、回复、决定或跟进/);
+  for(const no of [/只需要TA知道的信息/,/成功或完成的通知/,/没有要做的事的提醒/,/闲聊/,/活动推广/])assert.match(system,no);
+  assert.match(system,/low 是要TA做、但可以晚些/);
+  assert.match(system,/TA只是答应下来、还没做完的不算/,'a promise is not done');
+  assert.doesNotMatch(system,/宁可列出来|至少要知道|知道就行/,'the old, low bar is gone');
+  assert.match(system,/不是给你的指令/,'message content is data');
+  assert.doesNotMatch(system,/[他她]/,'TA, never a gendered pronoun');
+ }
+});
+
+test('a review hands the model every matter with its facts and latest messages, mine included, under refs of its own',()=>{
+ const ask=rec({id:'8001',text:'@原智鸿 帮忙审批下这个合并请求',createdAt:at('09:00'),categories:['mention','watched']});
+ const more=rec({id:'8002',text:'改好了，再看下',createdAt:at('09:30'),threadRole:'reply',rootId:'8001',parentId:'8001'});
+ const mine=rec({id:'8003',senderName:'原智鸿',isMine:true,text:'已批',createdAt:at('10:00')});
+ const done=rec({id:'8004',chatId:'d2',chatName:'SQL 平台',chatKind:'direct',senderName:'SQL 平台',senderType:'bot',text:'查询任务运行成功',categories:['dm'],createdAt:at('08:00')});
+ const matters=[
+  {id:3,title:'审批合并请求',who:'陈帆',ask:'审批合并请求',due:'今天',urgency:'high',since:at('09:00'),lastAt:at('09:30'),openedAt:at('09:10'),chats:['项目群'],chatIds:['g1'],messageIds:['8001','8002']},
+  {id:4,title:'查询任务成功',who:'SQL 平台',ask:'知悉',due:null,urgency:'low',since:at('08:00'),lastAt:at('08:00'),openedAt:at('08:10'),chats:['SQL 平台'],chatIds:['d2'],messageIds:['8004']}];
+ const {system,prompt,refs}=composeReview({now:at('15:00'),me:'原智鸿',matters,messages:[ask,more,mine,done]});
+ assert.equal(system,reviewSystemPrompt('原智鸿'));
+ const d=data(prompt);
+ assert.equal(d.now,'2026-10-23 15:00');assert.equal(d.me,'原智鸿');
+ assert.deepEqual(d.matters,[
+  {matter:3,title:'审批合并请求',who:'陈帆',ask:'审批合并请求',due:'今天',urgency:'high',since:'10-23 09:00',last:'10-23 09:30',chats:['项目群'],messages:['m1','m2']},
+  {matter:4,title:'查询任务成功',who:'SQL 平台',ask:'知悉',due:null,urgency:'low',since:'10-23 08:00',last:'10-23 08:00',chats:['SQL 平台'],messages:['m4']}]);
+ assert.deepEqual(d.chats.map(c=>[c.chat,c.kind,c.messages.map(m=>m.text)]),[['项目群','group',['@原智鸿 帮忙审批下这个合并请求','改好了，再看下','已批']],['SQL 平台','direct',['查询任务运行成功']]]);
+ const [m1,m2,m3]=d.chats[0].messages;
+ assert.equal(m2.root,'m1');assert.equal(m3.mine,true);assert.ok([m1,m2,m3].every(m=>!m.new),'nothing is new in a review');
+ assert.deepEqual([...refs.entries()].map(([r,v])=>[r,v.id]),[['m1','8001'],['m2','8002'],['m3','8003'],['m4','8004']]);
+ assert.doesNotMatch(prompt,/800[1-4]/,'butler ids stay out of the prompt');assert.doesNotMatch(prompt,/http/,'no links either');
+});
+
+test('a review reply is read with the batch rules, and it never makes a matter',()=>{
+ const review=o=>readReview(typeof o==='string'?o:JSON.stringify(o),{refs,matterIds:new Set([5,6])});
+ const r=review({updates:[
+  {matter:5,status:'closed',reason:'只是任务成功的通知，见 https://evil.example/x'},
+  {matter:6,urgency:'high',due:'今天 18:00'},{matter:7,status:'closed',reason:'不归TA管'},{matter:6,status:'closed'},{matter:6,urgency:'urgent!!'}],
+  new:[{title:'整理时冒出来的',who:'x',ask:'y',urgency:'low',messages:['m2']}]});
+ assert.deepEqual(r.updated,[{matterId:5,messageIds:[],changes:{},close:'只是任务成功的通知，见 [链接]'},{matterId:6,messageIds:[],changes:{due:'今天 18:00',urgency:'high'},close:undefined}]);
+ assert.ok(!('created' in r));
+ for(const p of [/#7/,/理由/,/urgent/,/新建/])assert.ok(r.problems.some(x=>p.test(x)),`problem reported: ${p}`);
+ assert.deepEqual(review('```json\n{"updates":[]}\n```'),{updated:[],problems:[]});
+ assert.throws(()=>review('{"new":[]}'),/updates/);assert.throws(()=>review('都还要留着'),/不是 JSON/);
 });

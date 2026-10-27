@@ -107,7 +107,8 @@ test('process --once turns the backlog into matters through herdr; matters lists
  const herdr=fakeHerdr(dir,{replies:[{text:JSON.stringify({new:[{title:'审批合并请求',who:'陈帆',ask:'审批 MR',due:null,urgency:'high',messages:['m1']}],updates:[]})}]});
  let r=await cli(writeConfig(dir,lark),'process','--once');assert.equal(r.code,1);assert.match(r.stderr,/BUTLER_MODEL_MACHINE/);
  const config=writeConfig(dir,lark,0o600,`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`);
- r=await cli(config,'process','--once');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/1 次/);
+ r=await cli(config,'process','--once');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/模型运行 1 次/);
+ assert.match(r.stdout,/整理了 1 个未结束的事项，关掉 0 个/,'no review yet, so the round reviews too');
  r=await cli(config,'matters');assert.equal(r.code,0,r.stderr);
  assert.match(r.stdout,/#1/);assert.match(r.stdout,/审批合并请求/);assert.match(r.stdout,/陈帆/);assert.match(r.stdout,/紧急/);
  assert.ok(r.stdout.includes(store.message(ask).link));
@@ -136,6 +137,22 @@ test('status shows the bot connection, the last digest and the next one when one
  assert.equal(s.bot.state,'connected');assert.equal(s.digest.sent,3);assert.equal(typeof s.digest.next,'number');
  store.setMeta('bot',{state:'error',since:now,error:'WebSocket connect failed'});
  r=await cli(config,'status');assert.match(r.stdout,/机器人：连接失败.*WebSocket connect failed/);
+});
+
+test('status shows the last review of the open matters and when the next is due; BUTLER_REVIEW_EVERY sets how often',async t=>{
+ const {lark,store,dir}=await setup(t);
+ let r=await cli(writeConfig(dir,lark),'status');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/整理：还没有整理过/);
+ const at=Date.parse('2026-10-27T12:00:00+08:00'),time=ms=>new Date(ms).toLocaleString('sv-SE');
+ store.setMeta('review',{at,reviewed:119,closed:80});
+ r=await cli(writeConfig(dir,lark),'status');
+ assert.ok(r.stdout.includes(`整理：上次 ${time(at)}（119 个未结束的事项，关掉 80 个），下一次在 ${time(at+3*3600e3)} 之后`),r.stdout);
+ const every=writeConfig(dir,lark,0o600,'BUTLER_REVIEW_EVERY=90m\n');
+ r=await cli(every,'status');assert.ok(r.stdout.includes(`下一次在 ${time(at+90*60e3)} 之后`),r.stdout);
+ store.setMeta('review',{at,reviewed:119,closed:80,failedAt:at+4*3600e3,error:'herdr workspace create（cpu1-butler） 失败，退出码 1'});
+ r=await cli(every,'status');
+ assert.ok(r.stdout.includes(`；${time(at+4*3600e3)} 没有完成，下一轮再试：herdr workspace create`),r.stdout);assert.doesNotMatch(r.stdout,/下一次在/);
+ assert.equal(JSON.parse((await cli(every,'status','--json')).stdout).review.everyMs,90*60e3);
+ r=await cli(writeConfig(dir,lark,0o600,'BUTLER_REVIEW_EVERY=3 hours\n'),'status');assert.equal(r.code,1);assert.match(r.stderr,/整理事项的间隔的格式不对/);
 });
 
 test('bot create refuses to replace a configured bot',async t=>{

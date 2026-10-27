@@ -8,7 +8,8 @@
 export const DEFAULT_SCHEDULE={days:[1,2,3,4,5],start:600,end:1200,everyMs:3600e3,offHoursNew:3,offHoursGapMs:7200e3};
 const DAY_MS=86400e3;
 
-const duration=(v,what,min=1)=>{
+// A duration like 30m or 2h, of at least min of its unit; what: what it is, for the error.
+export const duration=(v,what,min=1)=>{
  const m=/^(\d+)([mh])$/.exec(v);if(!m||Number(m[1])<min)throw Error(`${what}的格式不对：${v}（例如 30m、2h）`);
  return Number(m[1])*(m[2]==='h'?3600e3:60e3);
 };

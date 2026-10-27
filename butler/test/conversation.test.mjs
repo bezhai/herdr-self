@@ -150,7 +150,8 @@ test('receipt is acknowledged at once, and a turn waits only for the model run u
  assert.match(shown(bot.replies[0].input),/整理/,'saying what it waits for');
  model.gate=undefined;open();
  await round;await conversation.idle();
- assert.deepEqual(model.calls.map(c=>c.data.said===undefined?'batch':'turn'),['batch','turn','batch'],'the turn goes before the next batch');
+ // The round ends with its review of the open matters (there has been none in this store).
+ assert.deepEqual(model.calls.map(c=>c.data.said!==undefined?'turn':c.data.matters?'review':'batch'),['batch','turn','batch','review'],'the turn goes before the next batch');
  assert.equal(model.overlapped,false,'one model run at a time');
  assert.match(shown(bot.replies.at(-1).input),/在的。/);
 });

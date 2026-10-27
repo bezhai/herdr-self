@@ -33,8 +33,9 @@ const HELP=`用法：butler [--config 配置文件] <命令>
   watch list                       关注群名单
   watch add <群名或 id>...          加入关注名单，从加入时开始收集这个群的全部消息
   watch remove <群名或 id>...       移出关注名单
-  process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项；配置了机器人时
-                                   也运行机器人：定时汇总、私聊对话；--once 处理完积压就退出，不运行机器人
+  process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每 3 小时把未结束的
+                                   事项交给模型整理一遍；配置了机器人时也运行机器人：定时汇总、私聊对话；
+                                   --once 只运行一轮（处理完积压，到了时间也整理事项）就退出，不运行机器人
   matters [--all] [--json]         未结束的事项，紧急的在前；--all 连同已结束的
   ignore list                      忽略名单：这些发送方的消息不交给模型
   ignore add <发送方名称或 id>...    加入忽略名单
@@ -72,6 +73,9 @@ function printStatus(s){
  lines.push(`关注群：${s.watched} 个；已记下读取位置的聊天 ${s.chatsRead} 个`);
  const p=s.processing;
  lines.push(`加工：最近一轮 ${time(p.lastRoundAt)}，最近成功 ${time(p.lastSuccessAt)}${p.stoppedAt?`，已停止于 ${time(p.stoppedAt)}`:''}；待加工 ${p.pending} 条，跳过 ${p.skipped} 条（模型单独处理它们几次都给不出可用的回答），未结束的事项 ${p.openMatters} 个`);
+ const v=s.review;
+ lines.push(`整理：${v.at?`上次 ${time(v.at)}（${v.reviewed} 个未结束的事项，关掉 ${v.closed} 个）`:'还没有整理过'}${v.failedAt?`；${time(v.failedAt)} 没有完成，下一轮再试：${v.error}`
+  :v.at?`，下一次在 ${time(v.at+v.everyMs)} 之后`:'，加工端的下一轮就整理'}`);
  const b=s.bot,processing=p.heartbeatAt&&!p.stoppedAt&&Date.now()-p.heartbeatAt<3*PROCESSOR.heartbeatMs;
  lines.push(!b.configured?'机器人：没有配置（butler bot create 创建它的飞书应用）':!processing?'机器人：未运行（加工端未运行）'
   :b.state==='connected'?`机器人：已连接（连接于 ${time(b.connectedAt)}）`:b.state==='reconnecting'?`机器人：正在重连（上次连接于 ${time(b.connectedAt)}）`
@@ -147,6 +151,7 @@ async function main(argv){
   switch(command){
    case 'status':{
     const s={...store.status(),processing:{...store.meta('processor'),pending:matters.pendingCount(),skipped:matters.skippedCount(),openMatters:matters.list().length},
+     review:{...store.meta('review'),everyMs:config.reviewEveryMs??PROCESSOR.reviewEveryMs},
      bot:{configured:Boolean(config.bot),...store.meta('bot')},digest:digestStatus({store,matters,schedule:config.schedule})};
     if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;
    }
@@ -214,17 +219,19 @@ async function main(argv){
  }finally{store.close();}
 }
 
-// The processor, as a service or (once) for the backlog only. As a service it also runs the bot, when one is
-// configured: digests and the conversation, whose turns share the model with the batches (see model-queue.mjs).
+// The processor, as a service or (once) for one round: the backlog, and the review of the open matters when one is
+// due, as a round of the service would. As a service it also runs the bot, when one is configured: digests and the
+// conversation, whose turns share the model with the batches and reviews (see model-queue.mjs).
 async function processCommand(config,once){
  const machine=requireModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
  const model=new ModelQueue(new HerdrModel({machine,cwd:config.modelCwd,command:[config.herdr],log:m=>console.error(m)}));
- const processor=new Processor({store,matters,model,log:m=>console.log(m)});
+ const processor=new Processor({store,matters,model,options:config.reviewEveryMs?{reviewEveryMs:config.reviewEveryMs}:{},log:m=>console.log(m)});
  if(once){
   try{
    await processor.start({periodic:false});const r=await processor.runOnce();await processor.stop();
-   console.log(`加工完成：模型运行 ${r.runs} 次，失败 ${r.failures} 次；待加工 ${matters.pendingCount()} 条，未结束的事项 ${matters.list().length} 个`);
-   return r.failures?1:0;
+   const v=r.review,reviewed=!v?'':v.error?`整理没有完成：${v.error}；`:`整理了 ${v.reviewed} 个未结束的事项，关掉 ${v.closed} 个；`;
+   console.log(`加工完成：模型运行 ${r.runs} 次，失败 ${r.failures} 次；${reviewed}待加工 ${matters.pendingCount()} 条，未结束的事项 ${matters.list().length} 个`);
+   return r.failures||v?.error?1:0;
   }finally{store.close();}
  }
  let bot,digests,conversation;
