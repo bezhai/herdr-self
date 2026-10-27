@@ -18,7 +18,7 @@ const endByModel=(matters,id,reason,t)=>matters.apply({updated:[{matterId:id,mes
 const size=card=>Buffer.byteLength(JSON.stringify(JSON.stringify(card)));
 const elements=cards=>cards.flatMap(c=>c.body.elements);
 
-test('a digest has three parts: new matters by urgency in full with their links, the others still open briefly, and those ended with the reason',t=>{
+test('a digest has three parts: new matters by urgency in full with their links, the urgent ones still open briefly and the others counted, and those ended with the reason',t=>{
  const {store}=tempStore(t),matters=new Matters(store);
  const old=made(store,matters,{title:'老事项',t:fri('09:00')}),older=made(store,matters,{title:'更老的紧急事项',urgency:'high',t:fri('08:50')});
  const ended=made(store,matters,{title:'已经解决的事',t:fri('09:10')});
@@ -35,15 +35,40 @@ test('a digest has three parts: new matters by urgency in full with their links,
  assert.equal(cards.length,1);
  const text=shown({card:cards[0]});
  assert.match(cards[0].header.title.content,/汇总.*10-23 10:00/);
- assert.match(cards[0].config.summary.content,/新事项 2/);
+ assert.equal(cards[0].config.summary.content,'新事项 2 个 · 仍未结束 2 个 · 已结束 2 个');
  const pos=s=>{const i=text.indexOf(s);assert.ok(i>=0,`in the digest: ${s}`);return i;};
  assert.ok(pos(`#${high} [紧急] 今天要批的权限`)<pos(`#${low} [不急] 知道就行的事`),'by urgency');
  pos('黄凯熙：给黄凯熙加权限');pos('2026-10-23 18:00');pos('大群');
- assert.ok(pos(`#${low}`)<pos(`#${older} [紧急] 更老的紧急事项`)&&pos(`#${older}`)<pos(`#${old} [一般] 老事项`),'the new part comes first, then the open ones');
- assert.doesNotMatch(text,/处理：老事项/,'still open ones are listed briefly');
- assert.ok(pos(`#${old}`)<pos(`#${ended} 已经解决的事`));pos('对方说已经解决了');pos(`#${mine} 我在私聊里关掉的`);pos('不用管');
+ assert.ok(pos(`#${low}`)<pos(`#${older} [紧急] 更老的紧急事项`),'the new part comes first, then the urgent ones still open');
+ assert.doesNotMatch(text,/处理：更老的紧急事项/,'still open ones are listed briefly');
+ assert.ok(!text.includes(`#${old} `)&&pos(`#${older}`)<pos('另有 1 个一般的没有列出'),'the others still open are only counted');
+ assert.ok(pos('另有 1 个一般的')<pos(`#${ended} 已经解决的事`)&&pos(`#${ended}`)<pos(`#${mine} 我在私聊里关掉的`));pos('对方说已经解决了');pos('不用管');
+ assert.doesNotMatch(text,/也结束了/,'every ended one is listed');
  const links=elements(cards).filter(e=>e.tag==='markdown'&&e.content.includes('http'));
  assert.deepEqual(links.map(e=>e.content),[high,low].map(id=>`[打开原消息](${matters.matter(id).link})`),'a link per new matter, made by butler');
+});
+
+test('a long digest lists only the urgent matters still open and counts the others, and at most five that ended: those butler ended first, the latest first',t=>{
+ const {store}=tempStore(t),matters=new Matters(store);
+ let n=0;const make=(urgency,k)=>[...Array(k)].map(()=>made(store,matters,{title:`事项${++n}`,urgency,t:fri('08:00')+n*60e3}));
+ const high=make('high',3),normal=make('normal',4),low=make('low',2),byModel=make('normal',6),mine=make('low',2);
+ byModel.forEach((id,i)=>endByModel(matters,id,`原因${i}`,fri('09:40')+i*60e3));
+ mine.forEach((id,i)=>matters.close(id,undefined,fri('09:50')+i*60e3));
+ const cards=digestCards({at:fri('10:00'),...digestOf(matters,fri('09:30'))}),text=shown({card:cards[0]});
+ assert.equal(cards.length,1);
+ assert.equal(cards[0].config.summary.content,'新事项 0 个 · 仍未结束 9 个 · 已结束 8 个','the summary counts them all');
+ const pos=s=>{const i=text.indexOf(s);assert.ok(i>=0,`in the digest: ${s}`);return i;};
+ for(const id of high)assert.ok(pos('仍未结束（9）')<pos(`#${id} [紧急]`));
+ for(const id of [...normal,...low])assert.ok(!text.includes(`#${id} `),`#${id} is only counted`);
+ assert.ok(pos(`#${high.at(-1)}`)<pos('另有 4 个一般、2 个不急的没有列出'));pos('现在有哪些事');
+ // The latest five butler ended, the latest first; the two I closed myself even later are left out.
+ [...byModel].reverse().slice(0,5).reduce((p,id)=>{const i=pos(`#${id} `);assert.ok(p<i,`#${id} in order`);return i;},pos('上次以来结束（8）'));
+ for(const id of [byModel[0],...mine])assert.ok(!text.includes(`#${id} `),`#${id} is only counted`);
+ assert.ok(pos(`#${byModel[1]} `)<pos('另有 3 个也结束了，没有列出'));
+ const digest=(fresh,open)=>shown({card:digestCards({at:fri('10:00'),fresh:fresh.map(id=>matters.matter(id)),open:open.map(id=>matters.matter(id)),ended:[]})[0]});
+ assert.match(digest([],low),/\*\*仍未结束（2）\*\*\n另有 2 个不急的没有列出[^\n]*$/,'no urgent ones: the part has just the count, of the urgencies there are');
+ assert.doesNotMatch(digest([],high),/另有/,'only urgent ones: nothing to count');
+ assert.doesNotMatch(digest(high,[]),/仍未结束/,'nothing else open: no part');
 });
 
 test('text from the model and the chats is shown as plain text: only butler writes markdown, and only links come from butler',t=>{

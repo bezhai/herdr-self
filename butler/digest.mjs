@@ -1,8 +1,9 @@
 // The digest: what it reports and how it reads, and the sender that checks every minute whether one is due (see
 // schedule.mjs) and sends it to my direct chat with the bot. A digest has three parts: the matters new since the last
-// digest in full, most urgent first, each with its number and a link to its first message; the others still open,
-// one line each; and the matters that ended since the last digest, with the reason. Matters I closed myself in the
-// conversation are listed among the ended ones, but are no reason to send a digest: I know of them already.
+// digest in full, most urgent first, each with its number and a link to its first message; of the others still open
+// the urgent ones, one line each, and how many the rest are by urgency; and of the matters that ended since the last
+// digest at most five with the reason, and how many more did. Matters I closed myself in the conversation are listed
+// among the ended ones after those butler ended, but are no reason to send a digest: I know of them already.
 import {decide,nextDigest} from './schedule.mjs';
 import {plain,heading,link,rule,lines,cards} from './cards.mjs';
 export {CARD_BYTES} from './cards.mjs';
@@ -26,12 +27,20 @@ export function matterElements(list){
   ...m.link?[link('打开原消息',m.link)]:[]]);
 }
 export const briefElements=list=>lines(list.map(label));
+// The open matters a digest does not list, counted by urgency in one line.
+const counted=list=>`另有 ${[...Map.groupBy(list,m=>m.urgency)].map(([u,ms])=>`${ms.length} 个${URGENCY[u]??u}`).join('、')}的没有列出，在私聊里说「现在有哪些事」可以看全部`;
+// The ended matters a digest lists: those butler ended before those I closed myself, which I know of already; the
+// latest to end first.
+const ENDED_LISTED=5;
+const listedEnded=ended=>[...ended].sort((a,b)=>(a.closedBy==='owner')-(b.closedBy==='owner')||b.closedAt-a.closedAt||b.id-a.id).slice(0,ENDED_LISTED);
 
 export function digestCards({at,fresh,open,ended}){
  const parts=[];
  if(fresh.length)parts.push([heading(`新事项（${fresh.length}）`),...matterElements(fresh)]);
- if(open.length)parts.push([heading(`仍未结束（${open.length}）`),...briefElements(open)]);
- if(ended.length)parts.push([heading(`上次以来结束（${ended.length}）`),...lines(ended.map(m=>`#${m.id} ${m.title}\n  ${endReason(m)}`))]);
+ const urgent=open.filter(m=>m.urgency==='high'),rest=open.filter(m=>m.urgency!=='high'),listed=listedEnded(ended);
+ if(open.length)parts.push([heading(`仍未结束（${open.length}）`),...briefElements(urgent),...rest.length?[plain(counted(rest))]:[]]);
+ if(ended.length)parts.push([heading(`上次以来结束（${ended.length}）`),...lines([...listed.map(m=>`#${m.id} ${m.title}\n  ${endReason(m)}`),
+  ...ended.length>listed.length?[`另有 ${ended.length-listed.length} 个也结束了，没有列出`]:[]])]);
  return cards(parts.flatMap((p,i)=>i?[rule(),...p]:p),{title:`管家汇总 · ${time(at)}`,
   summary:`新事项 ${fresh.length} 个 · 仍未结束 ${open.length} 个 · 已结束 ${ended.length} 个`});
 }
