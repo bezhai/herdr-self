@@ -2,16 +2,27 @@
 // applies what the model makes of them (new matters, messages attached to open ones, matters that have ended). It
 // assembles context and checks the answer; what is a matter, what belongs to it, how urgent it is and whether it has
 // ended is the model's call. Messages that could not be processed stay pending and go again on the next round, with
-// one exception: a message the model cannot handle by itself (see #round) is skipped after a few tries. Every few
-// hours a round ends with a review of all open matters (see review.mjs and #review).
+// one exception: a message the model cannot handle by itself (see #round) is skipped after a few tries. Once a day,
+// and whenever my notes change, a round's batches are followed by a new 关于TA (see profile.mjs and #profile), and
+// every few hours, or when 关于TA or my notes have changed, a round ends with a review of all open matters (see
+// review.mjs and #review). Batches and reviews are told 关于TA and my notes.
 import {composePrompt,readReply} from './prompt.mjs';
 import {review} from './review.mjs';
+import {writeProfile} from './profile.mjs';
 
 // contextMessages and matterMessages: how many of a chat's and of a matter's latest messages come along, in a batch
 // for the chats of its messages and the open matters there, in a review for every open matter and its chats.
-export const DEFAULTS={everyMs:600_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,textChars:1500,skipAfter:3,reviewEveryMs:10_800_000};
+// profileMessages: how many of my latest messages 关于TA is written from at most, more than fit one prompt (the
+// newest that fit go).
+export const DEFAULTS={everyMs:600_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,textChars:1500,skipAfter:3,
+ reviewEveryMs:10_800_000,profileEveryMs:86_400_000,profileMessages:1000};
 const message=e=>e?.message??String(e);
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
+// Whether what is done every everyMs is due: it has never been done (last has no at), or that long ago.
+const due=(last,everyMs,now)=>!(now-last?.at<everyMs);
+// What a profile or a review was made with, to tell when they are out of date: my notes by their numbers (see
+// matters.mjs), and for a review the profile by when it was written.
+const numbers=notes=>notes.map(n=>n.id),same=(a=[],b=[])=>a.length===b.length&&a.every((x,i)=>x===b[i]);
 
 export class Processor{
  #limit;#cycle;#timers=[];#halting=false;
@@ -76,22 +87,50 @@ export class Processor{
    if(r.answered&&r.batch.length===1&&!aside.size){aside.set(r.batch[0].id,r.error);continue;}
    failed=true;break;
   }
-  // A round that ended on a failure leaves the review for later: the model is not there.
-  const result={runs,failures,review:!this.#halting&&!failed&&this.#reviewDue()?await this.#review():undefined};
+  // A round that ended on a failure leaves the profile and the review for later: the model is not there.
+  const go=()=>!this.#halting&&!failed;
+  const profile=go()&&this.#profileDue()?await this.#profile():undefined;
+  const result={runs,failures,profile,review:go()&&this.#reviewDue()?await this.#review():undefined};
   this.#beat({lastRoundAt:this.now()});
   return result;
  }
- // The review, after a round's batches, so that it sees what they made. It is due once reviewEveryMs have passed
- // since the last one done, and at once when there has been none: the first round after deployment reviews, and so
- // does the first after a start when the last review is that old. One that fails, or is cut short by a stop, is not
- // done: the next round tries again, never this one. The meta review: {at, reviewed, closed} of the last one done,
- // and {failedAt, error} of a failure since.
- #reviewDue(){return !(this.now()-this.store.meta('review')?.at<this.options.reviewEveryMs);}
- async #review(){
-  const last=this.store.meta('review')??{};
+ // What batches and reviews are told of me: 关于TA (the meta profile) and my notes.
+ #about(){return {profile:this.store.meta('profile'),notes:this.matters.notes()};}
+ // 关于TA, after a round's batches and before its review, which then judges by it. It is due when none has been
+ // written (the first round after deployment writes it), once profileEveryMs have passed since the last one, and
+ // when my notes are no longer those it was written with. One that fails is recorded and goes again on the next
+ // round; it holds up no message, and the review goes on with what there is. The meta profile: {text, at, notes
+ // (their numbers), messages (how many of mine it was written from)} of the last one written, and {failedAt, error}
+ // of a failure since.
+ #profileDue(){const p=this.store.meta('profile');return due(p,this.options.profileEveryMs,this.now())||!same(p?.notes,numbers(this.matters.notes()));}
+ async #profile(){
+  const last=this.store.meta('profile')??{},notes=this.matters.notes();
   try{
-   const r=await review({store:this.store,matters:this.matters,model:this.model,options:this.options,now:this.now,stopped:()=>this.#halting});
-   if(r.complete)this.store.setMeta('review',{at:this.now(),reviewed:r.reviewed,closed:r.closed});
+   const r=await writeProfile({matters:this.matters,model:this.model,options:this.options,notes,now:this.now});
+   if(r)this.store.setMeta('profile',{text:r.text,at:this.now(),notes:numbers(notes),messages:r.messages});
+   return r;
+  }catch(e){
+   this.store.addError('加工',`写「关于TA」没有完成，下一轮再试：${message(e)}`);
+   this.store.setMeta('profile',{...last,failedAt:this.now(),error:message(e)});
+   return {error:message(e)};
+  }
+ }
+ // The review, after a round's batches and its profile, so that it sees what they made. It is due once
+ // reviewEveryMs have passed since the last one done, at once when there has been none (the first round after
+ // deployment reviews, and so does the first after a start when the last review is that old), and when 关于TA or
+ // my notes are not those it judged by: a new profile, or a note added or removed, re-judges the open matters at
+ // once. One that fails, or is cut short by a stop, is not done: the next round tries again, never this one. The meta
+ // review: {at, reviewed, closed, profileAt, notes} of the last one done (profileAt and notes: what it judged by), and
+ // {failedAt, error} of a failure since.
+ #reviewDue(){
+  const v=this.store.meta('review'),about=this.#about();
+  return due(v,this.options.reviewEveryMs,this.now())||v?.profileAt!==about.profile?.at||!same(v?.notes,numbers(about.notes));
+ }
+ async #review(){
+  const last=this.store.meta('review')??{},about=this.#about();
+  try{
+   const r=await review({store:this.store,matters:this.matters,model:this.model,options:this.options,now:this.now,stopped:()=>this.#halting,about});
+   if(r.complete)this.store.setMeta('review',{at:this.now(),reviewed:r.reviewed,closed:r.closed,profileAt:about.profile?.at,notes:numbers(about.notes)});
    return r;
   }catch(e){
    this.store.addError('加工',`整理事项没有完成，下一轮再试：${message(e)}`);
@@ -109,9 +148,9 @@ export class Processor{
  // The batch and its prompt. A prompt over maxPromptBytes is retried with the older half of the batch and, down to
  // one message, with the newer half of its context. exclude: messages to keep out of the context.
  #compose(pending,open,exclude){
-  let batch=pending,context=this.#context(batch,open).filter(r=>!exclude.has(r.id));
+  let batch=pending,context=this.#context(batch,open).filter(r=>!exclude.has(r.id));const about=this.#about();
   for(;;){
-   const composed=composePrompt({now:this.now(),me:this.matters.me(),batch,context,openMatters:open,textChars:this.options.textChars});
+   const composed=composePrompt({now:this.now(),me:this.matters.me(),batch,context,openMatters:open,textChars:this.options.textChars,about});
    if(Buffer.byteLength(composed.prompt)<=this.options.maxPromptBytes||batch.length===1&&!context.length)return {batch,...composed};
    if(batch.length>1){batch=batch.slice(0,Math.ceil(batch.length/2));context=this.#context(batch,open).filter(r=>!exclude.has(r.id));}
    else context=context.slice(Math.ceil(context.length/2));
@@ -127,21 +166,21 @@ export class Processor{
   for(const matter of open)if(matter.chatIds.some(c=>chats.has(c)))for(const id of matter.messageIds.slice(-this.options.matterMessages))add(this.matters.visible(id));
   return [...out.values()];
  }
- // One model run. A failure keeps the batch pending and halves the next one: a batch too big or too slow for the
- // model gets through in smaller parts, and a success restores the size. answered: the model gave an answer that
- // could not be used (as opposed to giving none).
+ // One model run, recorded in model_runs. A failure keeps the batch pending and halves the next one: a batch too big
+ // or too slow for the model gets through in smaller parts, and a success restores the size. answered: the model gave
+ // an answer that could not be used (as opposed to giving none).
  async #run({batch,system,prompt,refs},open){
-  const runId=this.matters.startRun({messages:batch.length,matters:open.length,promptBytes:Buffer.byteLength(prompt)});let output,answered=false;
+  let answered=false;
   try{
-   try{output=await this.model.ask({system,prompt});}catch(e){answered=e?.answered===true;throw e;}
-   let reply;try{reply=readReply(output,{refs,matterIds:new Set(open.map(m=>m.id))});}catch(e){answered=true;throw e;}
-   this.matters.apply({runId,created:reply.created,updated:reply.updated,processedIds:batch.map(m=>m.id)});
-   this.matters.finishRun(runId,{ok:true,output});
-   for(const p of reply.problems)this.store.addError('加工',`模型回复里没有采纳的部分：${p}`);
+   await this.matters.recordRun({model:this.model,kind:'batch',messages:batch.length,matters:open.length,system,prompt,now:this.now},(output,runId)=>{
+    let reply;try{reply=readReply(output,{refs,matterIds:new Set(open.map(m=>m.id))});}catch(e){answered=true;throw e;}
+    this.matters.apply({runId,created:reply.created,updated:reply.updated,processedIds:batch.map(m=>m.id)});
+    for(const p of reply.problems)this.store.addError('加工',`模型回复里没有采纳的部分：${p}`);
+   });
    this.#limit=this.options.maxMessages;this.#beat({lastSuccessAt:this.now()});
    return {ok:true,batch};
   }catch(e){
-   this.matters.finishRun(runId,{ok:false,error:message(e),output});
+   answered||=e?.answered===true;
    this.store.addError('加工',`${batch.length} 条消息这次没有加工成，下次再试：${message(e)}`);
    this.#limit=Math.max(1,Math.ceil(batch.length/2));
    return {ok:false,batch,answered,error:message(e)};

@@ -26,7 +26,7 @@ function setup(t,{answer,options}={}){
  const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer);
  // A matter as a batch would have made it, from messages already processed.
  const made=(title,ids,urgency='normal')=>matters.apply({created:[{title,who:'陈帆',ask:`处理${title}`,due:null,urgency,messageIds:ids}],processedIds:ids,now:min(100)})[0];
- const run=(extra={},stopped)=>review({store,matters,model,options:{...DEFAULTS,...options,...extra},now:()=>NOW,stopped});
+ const run=(extra={},stopped,about)=>review({store,matters,model,options:{...DEFAULTS,...options,...extra},now:()=>NOW,stopped,about});
  return {store,matters,model,made,run};
 }
 
@@ -133,4 +133,14 @@ test('model runs recorded before reviews existed count as batches',async t=>{
  const store=new Store(file,{linkBase:LINK_BASE});t.after(()=>store.close());
  const [old]=new Matters(store).runs();
  assert.deepEqual([old.kind,old.messages,old.matters],['batch',12,undefined]);
+});
+
+test('every part is judged by 关于TA and my notes',async t=>{
+ const {store,model,made,run}=setup(t,{options:{maxPromptBytes:5000}});
+ for(let i=0;i<4;i++)made(`事项${i}`,[post(store,{chat:`c${i}`,text:`${i}${'长'.repeat(700)}`,at:min(i)})]);
+ await run({},undefined,{profile:{text:'通常不归TA：审批',at:T0},notes:[{id:1,text:'审批不归我管',at:T0}]});
+ assert.ok(model.calls.length>1);
+ for(const c of model.calls)assert.deepEqual([c.data.profile,c.data.notes],['通常不归TA：审批',['审批不归我管']]);
+ await run();
+ assert.deepEqual([model.calls.at(-1).data.profile,model.calls.at(-1).data.notes],[null,[]],'none given: none shown');
 });

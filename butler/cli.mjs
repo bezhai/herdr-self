@@ -1,6 +1,7 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-// butler's command line: runs the collector and the processor (with the bot), shows their status, what they collected
-// and the matters made of it, keeps the watched-group and ignored-sender lists, and creates the bot's Feishu app.
+// butler's command line: runs the collector and the processor (with the bot), shows their status, what they collected,
+// the matters made of it and 关于TA, keeps the watched-group and ignored-sender lists, and creates the bot's Feishu
+// app.
 import {parseArgs} from 'node:util';
 import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
@@ -33,10 +34,12 @@ const HELP=`用法：butler [--config 配置文件] <命令>
   watch list                       关注群名单
   watch add <群名或 id>...          加入关注名单，从加入时开始收集这个群的全部消息
   watch remove <群名或 id>...       移出关注名单
-  process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每 3 小时把未结束的
-                                   事项交给模型整理一遍；配置了机器人时也运行机器人：定时汇总、私聊对话；
-                                   --once 只运行一轮（处理完积压，到了时间也整理事项）就退出，不运行机器人
+  process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每天根据我发的消息
+                                   写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍；配置了机器人时也
+                                   运行机器人：定时汇总、私聊对话；--once 只运行一轮（处理完积压，到了时间也写
+                                   「关于TA」、整理事项）就退出，不运行机器人
   matters [--all] [--json]         未结束的事项，紧急的在前；--all 连同已结束的
+  profile [--json]                 「关于TA」（管家归纳的我的工作：哪些事归我）和我在私聊里让管家记下的说明
   ignore list                      忽略名单：这些发送方的消息不交给模型
   ignore add <发送方名称或 id>...    加入忽略名单
   ignore remove <发送方名称或 id>... 移出忽略名单
@@ -76,6 +79,9 @@ function printStatus(s){
  const v=s.review;
  lines.push(`整理：${v.at?`上次 ${time(v.at)}（${v.reviewed} 个未结束的事项，关掉 ${v.closed} 个）`:'还没有整理过'}${v.failedAt?`；${time(v.failedAt)} 没有完成，下一轮再试：${v.error}`
   :v.at?`，下一次在 ${time(v.at+v.everyMs)} 之后`:'，加工端的下一轮就整理'}`);
+ const a=s.profile;
+ lines.push(`关于TA：${a.at?`写于 ${time(a.at)}（${a.text.length} 字，${about(a)}）`:'还没有写过'}${a.failedAt?`；${time(a.failedAt)} 没有写成，下一轮再试：${a.error}`
+  :a.at?`，下一次在 ${time(a.at+a.everyMs)} 之后，说明有变化时也重写`:'，加工端的下一轮就写'}`);
  const b=s.bot,processing=p.heartbeatAt&&!p.stoppedAt&&Date.now()-p.heartbeatAt<3*PROCESSOR.heartbeatMs;
  lines.push(!b.configured?'机器人：没有配置（butler bot create 创建它的飞书应用）':!processing?'机器人：未运行（加工端未运行）'
   :b.state==='connected'?`机器人：已连接（连接于 ${time(b.connectedAt)}）`:b.state==='reconnecting'?`机器人：正在重连（上次连接于 ${time(b.connectedAt)}）`
@@ -87,6 +93,14 @@ function printStatus(s){
  lines.push(s.errors.length?'最近的错误：':'最近的错误：无');
  for(const err of s.errors)lines.push(`  ${time(err.at)}  ${err.source}：${err.message}`);
  console.log(lines.join('\n'));
+}
+
+// What 关于TA was written from.
+const about=p=>`根据 ${p.messages} 条我发的消息和 ${p.notes?.length??0} 条说明`;
+function printProfile(profile,notes){
+ console.log(profile?.at?`关于TA（写于 ${time(profile.at)}，${about(profile)}）：\n${profile.text}`:'还没有写过「关于TA」：加工端运行时会根据我发过的消息写出来');
+ console.log(notes.length?`\n说明（${notes.length} 条，在私聊里对管家说可以增删）：\n${notes.map(n=>`#${n.id} ${n.text}（${time(n.at)}）`).join('\n')}`
+  :'\n还没有说明。在私聊里告诉管家哪些事不归我管（比如「审批不归我管」），它会记成说明');
 }
 
 function printRecords(records){
@@ -151,11 +165,15 @@ async function main(argv){
   switch(command){
    case 'status':{
     const s={...store.status(),processing:{...store.meta('processor'),pending:matters.pendingCount(),skipped:matters.skippedCount(),openMatters:matters.list().length},
-     review:{...store.meta('review'),everyMs:config.reviewEveryMs??PROCESSOR.reviewEveryMs},
+     review:{...store.meta('review'),everyMs:config.reviewEveryMs??PROCESSOR.reviewEveryMs},profile:{...store.meta('profile'),everyMs:config.profileEveryMs??PROCESSOR.profileEveryMs},
      bot:{configured:Boolean(config.bot),...store.meta('bot')},digest:digestStatus({store,matters,schedule:config.schedule})};
     if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;
    }
    case 'matters':{const list=matters.list({all:values.all});if(values.json)console.log(JSON.stringify(list,null,1));else printMatters(list,values.all);return 0;}
+   case 'profile':{
+    const profile=store.meta('profile')??null,notes=matters.notes();
+    if(values.json)console.log(JSON.stringify({profile,notes},null,1));else printProfile(profile,notes);return 0;
+   }
    case 'ignore':{
     const [action,...queries]=rest;
     if(action==='list'||action===undefined){
@@ -219,19 +237,21 @@ async function main(argv){
  }finally{store.close();}
 }
 
-// The processor, as a service or (once) for one round: the backlog, and the review of the open matters when one is
-// due, as a round of the service would. As a service it also runs the bot, when one is configured: digests and the
-// conversation, whose turns share the model with the batches and reviews (see model-queue.mjs).
+// The processor, as a service or (once) for one round: the backlog, and 关于TA and the review of the open matters when
+// they are due, as a round of the service would. As a service it also runs the bot, when one is configured: digests
+// and the conversation, whose turns share the model with the batches and reviews (see model-queue.mjs).
 async function processCommand(config,once){
  const machine=requireModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
  const model=new ModelQueue(new HerdrModel({machine,cwd:config.modelCwd,command:[config.herdr],log:m=>console.error(m)}));
- const processor=new Processor({store,matters,model,options:config.reviewEveryMs?{reviewEveryMs:config.reviewEveryMs}:{},log:m=>console.log(m)});
+ const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
+ const processor=new Processor({store,matters,model,options,log:m=>console.log(m)});
  if(once){
   try{
    await processor.start({periodic:false});const r=await processor.runOnce();await processor.stop();
+   const p=r.profile,profiled=!p?'':p.error?`「关于TA」没有写成：${p.error}；`:`写了「关于TA」（${p.text.length} 字）；`;
    const v=r.review,reviewed=!v?'':v.error?`整理没有完成：${v.error}；`:`整理了 ${v.reviewed} 个未结束的事项，关掉 ${v.closed} 个；`;
-   console.log(`加工完成：模型运行 ${r.runs} 次，失败 ${r.failures} 次；${reviewed}待加工 ${matters.pendingCount()} 条，未结束的事项 ${matters.list().length} 个`);
-   return r.failures||v?.error?1:0;
+   console.log(`加工完成：模型运行 ${r.runs} 次，失败 ${r.failures} 次；${profiled}${reviewed}待加工 ${matters.pendingCount()} 条，未结束的事项 ${matters.list().length} 个`);
+   return r.failures||p?.error||v?.error?1:0;
   }finally{store.close();}
  }
  let bot,digests,conversation;

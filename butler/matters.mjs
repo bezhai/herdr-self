@@ -1,10 +1,11 @@
-// The processor's own tables in butler's store: the ignore list, which messages have been processed, the matters and
-// their source messages, and the model runs. The collector's tables (messages, chats, …) are only read here; the
-// processor is a separate process on the same SQLite file (WAL, busy timeout). The bot, in the processor's process,
-// edits the ignore list and closes and reopens matters through this same class.
+// The processor's own tables in butler's store: the ignore list, my notes, which messages have been processed, the
+// matters and their source messages, and the model runs. The collector's tables (messages, chats, …) are only read
+// here; the processor is a separate process on the same SQLite file (WAL, busy timeout). The bot, in the processor's
+// process, edits the ignore list and my notes and closes and reopens matters through this same class.
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS ignored_senders(sender_id TEXT PRIMARY KEY, name TEXT, since INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS processed(
  message_id TEXT PRIMARY KEY REFERENCES messages(id), outcome TEXT NOT NULL, run_id INTEGER, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS matters(
@@ -21,9 +22,9 @@ CREATE TABLE IF NOT EXISTS model_runs(
  ok INTEGER, error TEXT, output TEXT, kind TEXT NOT NULL DEFAULT 'batch', matters INTEGER);
 `;
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
-// judged the matter ended) or owner (I closed it in the conversation). A model run's kind: batch (of new messages)
-// or review (of the open matters, see review.mjs); runs from before reviews were batches. Its matters: how many open
-// matters it was shown, unknown for runs from before.
+// judged the matter ended) or owner (I closed it in the conversation). A model run's kind: batch (of new messages),
+// review (of the open matters, see review.mjs) or profile (关于TA, see profile.mjs); runs from before reviews were
+// batches. Its matters: how many open matters it was shown, unknown for runs from before.
 const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
@@ -54,6 +55,14 @@ export class Matters{
   return Number(this.#run(`INSERT INTO processed(message_id,outcome,at) SELECT m.id,'ignored',? FROM messages m WHERE ${UNPROCESSED} AND NOT (${NOT_IGNORED})`,now).changes);
  }
 
+ // ---- my notes: corrections in my own words to what butler takes as mine (see profile.mjs), oldest first. A note
+ // is never changed, only added or removed, and its number is never given again: the numbers of the notes stand for
+ // them, so the processor can tell what a profile or a review was made with (see processor.mjs).
+ notes(){return this.#all('SELECT * FROM notes ORDER BY id').map(r=>({id:r.id,text:r.text,at:r.at}));}
+ addNote(text,now=Date.now()){return Number(this.#run('INSERT INTO notes(text,at) VALUES(?,?)',text,now).lastInsertRowid);}
+ // Returns the note removed, if there was one.
+ removeNote(id){const note=this.notes().find(n=>n.id===id);if(note)this.#run('DELETE FROM notes WHERE id=?',id);return note;}
+
  // ---- what the model is given
  #records(ids){return ids.map(r=>this.store.message(r.id)).filter(Boolean);}
  // Unprocessed messages, oldest first, ignored senders and exclude (ids) left out.
@@ -63,6 +72,8 @@ export class Matters{
  before(feedId,t,limit){
   return this.#records(this.#all(`SELECT id FROM messages m WHERE feed_id=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at DESC,id DESC LIMIT ?`,feedId,t,limit)).reverse();
  }
+ // My own latest messages, newest first.
+ mine(limit){return this.#records(this.#all('SELECT id FROM messages WHERE is_mine=1 ORDER BY created_at DESC,id DESC LIMIT ?',limit));}
  // One message for the model, unless it is unknown or its sender is ignored.
  visible(id){return this.#get(`SELECT id FROM messages m WHERE id=? AND ${NOT_IGNORED}`,id)?this.store.message(id):undefined;}
  // My name as my own messages carry it.
@@ -133,6 +144,14 @@ export class Matters{
   return Number(this.#run('INSERT INTO model_runs(started_at,kind,messages,matters,prompt_bytes) VALUES(?,?,?,?,?)',now,kind,messages,matters??null,promptBytes).lastInsertRowid);
  }
  finishRun(id,{ok,error,output,now=Date.now()}){this.#run('UPDATE model_runs SET finished_at=?,ok=?,error=?,output=? WHERE id=?',now,ok?1:0,error??null,output??null,id);}
+ // One model run, recorded: model.ask({system, prompt}), and its reply to use(output, runId), which throws when it
+ // cannot use it. A failure, the model's or use's, is recorded with the reply if there was one, and passes on.
+ // Resolves with what use returns. now: the clock.
+ async recordRun({model,kind,messages,matters,system,prompt,now=Date.now},use){
+  const runId=this.startRun({kind,messages,matters,promptBytes:Buffer.byteLength(prompt),now:now()});let output;
+  try{output=await model.ask({system,prompt});const r=await use(output,runId);this.finishRun(runId,{ok:true,output,now:now()});return r;}
+  catch(e){this.finishRun(runId,{ok:false,error:e?.message??String(e),output,now:now()});throw e;}
+ }
  runs(limit=1000){
   return this.#all('SELECT * FROM (SELECT * FROM model_runs ORDER BY id DESC LIMIT ?) ORDER BY id',limit)
    .map(r=>({id:r.id,kind:r.kind,startedAt:r.started_at,finishedAt:r.finished_at,messages:r.messages,matters:r.matters??undefined,promptBytes:r.prompt_bytes,ok:r.ok===null?undefined:Boolean(r.ok),error:r.error,output:r.output}));

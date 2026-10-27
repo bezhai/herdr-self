@@ -19,13 +19,17 @@ function fakeModel(answer){
 const messagesOf=data=>data.chats.flatMap(c=>c.messages);
 const ref=(data,text)=>{const m=messagesOf(data).find(m=>m.text.includes(text));assert.ok(m,`message in prompt: ${text}`);return m.ref;};
 const none={new:[],updates:[]};
-// now: the processor's clock. reviewed: a review of the open matters has just been done, so a round runs only its
-// batches (a store without one reviews in its first round).
-function setup(t,{answer,options,now,reviewed=true}={}){
+// now: the processor's clock. profiled: 关于TA has just been written (with no note), and reviewed: a review of the open
+// matters has just been done (by that profile, if there is one), so a round runs only its batches (a store without a
+// profile writes one in its first round, and one without a review reviews).
+const PROFILE='角色：GEO 服务的后端';
+function setup(t,{answer,options,now,profiled=true,reviewed=true}={}){
  const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??(()=>none));
  const processor=new Processor({store,matters,model,options:{maxMessages:40,...options},...now&&{now}});
- if(reviewed)store.setMeta('review',{at:(now??Date.now)(),reviewed:0,closed:0});
- return {store,matters,model,processor};
+ const t0=(now??Date.now)();
+ if(profiled)store.setMeta('profile',{text:PROFILE,at:t0,notes:[],messages:1});
+ if(reviewed)store.setMeta('review',{at:t0,reviewed:0,closed:0,...profiled&&{profileAt:t0},notes:[]});
+ return {store,matters,model,processor,t0};
 }
 
 test('new messages become matters: the model decides, butler keeps the sources and makes the links',async t=>{
@@ -222,21 +226,21 @@ test('a message that gets through after failing loses its strikes',async t=>{
 });
 
 // ---- the review of the open matters (see review.mjs), which a round runs after its batches when it is due
-const isReview=c=>Boolean(c.data.matters);
-const kinds=model=>model.calls.map(c=>isReview(c)?'review':'batch');
-// A model that makes a matter of every new message, titled with its text, and answers reviews with review(data).
-const making=review=>d=>d.matters?review(d):{new:newTexts(d).map(text=>({title:text,who:'陈帆',ask:'处理',urgency:'normal',messages:[ref(d,text)]})),updates:[]};
+const kinds=model=>model.calls.map(c=>c.data.openMatters?'batch':c.data.matters?'review':'profile');
+// A model that makes a matter of every new message, titled with its text, answers reviews with review(data) and
+// writes 关于TA with profile(data).
+const making=(review,profile=()=>({profile:PROFILE}))=>d=>d.matters?review(d):d.openMatters?{new:newTexts(d).map(text=>({title:text,who:'陈帆',ask:'处理',urgency:'normal',messages:[ref(d,text)]})),updates:[]}:profile(d);
 
 test('a round reviews the open matters after its batches when there has been no review, and again reviewEveryMs after the last',async t=>{
  let clock=T0+3600e3;
- const {store,matters,model,processor}=setup(t,{reviewed:false,now:()=>clock,
+ const {store,matters,model,processor,t0}=setup(t,{reviewed:false,now:()=>clock,
   answer:making(d=>({updates:d.matters.filter(m=>m.title.includes('方案')).map(m=>({matter:m.matter,status:'closed',reason:'TA已经看过了'}))}))});
  post(store,{text:'@原智鸿 看下方案',at:min(1)});
  let r=await processor.runOnce();
  assert.deepEqual(kinds(model),['batch','review'],'the first round reviews, after its batch');
  assert.deepEqual(model.calls[1].data.matters.map(m=>m.title),['@原智鸿 看下方案'],'the review sees what the batch made');
  assert.deepEqual(r.review,{runs:1,reviewed:1,closed:1,complete:true});
- assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:1});
+ assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:1,profileAt:t0,notes:[]},'with what it judged by: 关于TA and my notes');
  const [ended]=matters.list({all:true});assert.deepEqual([ended.status,ended.closedBy,ended.reason],['closed','model','TA已经看过了']);
  post(store,{text:'在吗',at:min(2)});clock+=3600e3;
  r=await processor.runOnce();
@@ -244,7 +248,7 @@ test('a round reviews the open matters after its batches when there has been no 
  clock+=2*3600e3;
  r=await processor.runOnce();
  assert.equal(r.runs,0);assert.deepEqual(kinds(model).at(-1),'review','three hours on, a round reviews with nothing new to process');
- assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:0});
+ assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:0,profileAt:t0,notes:[]});
 });
 
 test('a failed review is on record and goes again on the next round, never twice in one; it holds up no message',async t=>{
@@ -263,15 +267,16 @@ test('a failed review is on record and goes again on the next round, never twice
  assert.deepEqual(kinds(model),['batch','review','batch','review'],'tried again on the next round');
  down=false;r=await processor.runOnce();
  assert.deepEqual(r.review,{runs:1,reviewed:2,closed:0,complete:true});
- const done=store.meta('review');assert.ok(done.at);assert.deepEqual(Object.keys(done).sort(),['at','closed','reviewed'],'the failure is cleared');
+ const done=store.meta('review');assert.ok(done.at);assert.deepEqual(Object.keys(done).sort(),['at','closed','notes','profileAt','reviewed'],'the failure is cleared');
 });
 
-test('no review after a round whose batch failed: the model is not there',async t=>{
- const {store,matters,model,processor}=setup(t,{reviewed:false,answer:()=>{throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');}});
+test('no profile and no review after a round whose batch failed: the model is not there',async t=>{
+ const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,answer:()=>{throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');}});
  const id=post(store,{text:'旧事',at:min(0)});matters.apply({created:[{title:'旧事',who:'陈帆',ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id]});
- post(store,{text:'在吗',at:min(1)});
+ post(store,{text:'在吗',at:min(1)});matters.addNote('审批不归我管');
  const r=await processor.runOnce();
- assert.equal(r.failures,1);assert.equal(r.review,undefined);assert.deepEqual(kinds(model),['batch']);assert.equal(store.meta('review'),undefined);
+ assert.equal(r.failures,1);assert.equal(r.review,undefined);assert.equal(r.profile,undefined);assert.deepEqual(kinds(model),['batch']);
+ assert.equal(store.meta('review'),undefined);assert.equal(store.meta('profile'),undefined);
 });
 
 test('a review cut short by stopping is not recorded as done',async t=>{
@@ -283,4 +288,62 @@ test('a review cut short by stopping is not recorded as done',async t=>{
  const stopping=processor.stop();release();await stopping;
  const r=await round;
  assert.equal(r.review.complete,false);assert.equal(model.calls.length,1,'no part after the stop');assert.equal(store.meta('review'),undefined);
+});
+
+// ---- 关于TA (see profile.mjs), which a round writes after its batches and before its review when it is due
+test('a round with no 关于TA yet writes it after its batches, and the review that follows and later batches judge by it',async t=>{
+ let clock=T0+3600e3;
+ const {store,matters,model,processor}=setup(t,{profiled:false,now:()=>clock,answer:making(()=>({updates:[]}),()=>({profile:'角色：GEO 服务的后端\n通常不归TA：审批'}))});
+ post(store,{mine:true,text:'GEO 的接口我来看',at:min(0)});post(store,{text:'@原智鸿 帮忙审批一下',at:min(1)});
+ const note=matters.addNote('审批不归我管',min(2));
+ const r=await processor.runOnce();
+ assert.deepEqual(kinds(model),['batch','profile','review'],'after the batch, before the review, which the new profile makes due');
+ assert.deepEqual([model.calls[0].data.profile,model.calls[0].data.notes],[null,['审批不归我管']],'no profile for the first batch yet, but my notes');
+ assert.deepEqual(messagesOf(model.calls[1].data).map(m=>m.text),['GEO 的接口我来看']);assert.deepEqual(model.calls[1].data.notes,['审批不归我管']);
+ const profile=store.meta('profile');
+ assert.deepEqual(profile,{text:'角色：GEO 服务的后端\n通常不归TA：审批',at:clock,notes:[note],messages:1});
+ assert.deepEqual(r.profile,{text:profile.text,messages:1});
+ assert.deepEqual([model.calls[2].data.profile,model.calls[2].data.notes],[profile.text,['审批不归我管']]);
+ assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:0,profileAt:clock,notes:[note]});
+ const [,run]=matters.runs();assert.deepEqual([run.kind,run.ok,run.messages],['profile',true,1]);
+ post(store,{text:'在吗',at:min(3)});clock+=600e3;
+ await processor.runOnce();
+ assert.deepEqual(kinds(model).slice(3),['batch'],'neither again so soon');assert.equal(model.calls[3].data.profile,profile.text);
+});
+
+test('关于TA is written again once profileEveryMs have passed and whenever my notes change, and each new one re-judges the open matters at once',async t=>{
+ let clock=T0+3600e3,version=0;
+ const {store,matters,model,processor}=setup(t,{now:()=>clock,options:{reviewEveryMs:7*86400e3},answer:making(()=>({updates:[]}),()=>({profile:`第${++version}版`}))});
+ const id=post(store,{text:'旧事',at:min(0)}),mine=post(store,{mine:true,text:'我负责 GEO',at:min(1)});
+ matters.apply({created:[{title:'旧事',who:'陈帆',ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id,mine]});
+ clock+=23*3600e3;await processor.runOnce();
+ assert.deepEqual(kinds(model),[],'not within a day');
+ clock+=3600e3;await processor.runOnce();
+ assert.deepEqual(kinds(model),['profile','review'],'a day on it is written again, and the open matters are judged by it');
+ assert.deepEqual([store.meta('profile').text,model.calls[1].data.profile],['第1版','第1版']);
+ const note=matters.addNote('审批不归我管',clock);clock+=60e3;await processor.runOnce();
+ assert.deepEqual(kinds(model).slice(2),['profile','review'],'a new note: at once');
+ assert.deepEqual(model.calls[2].data.notes,['审批不归我管']);assert.deepEqual([model.calls[3].data.profile,model.calls[3].data.notes],['第2版',['审批不归我管']]);
+ assert.deepEqual(store.meta('profile').notes,[note]);
+ clock+=60e3;await processor.runOnce();assert.equal(model.calls.length,4,'and once');
+ matters.removeNote(note);clock+=60e3;await processor.runOnce();
+ assert.deepEqual(kinds(model).slice(4),['profile','review'],'a note removed: the same');assert.deepEqual([model.calls[4].data.notes,model.calls[5].data.notes],[[],[]]);
+});
+
+test('a profile that fails is on record and goes again on the next round, never twice in one; it holds up no message, and the review goes on',async t=>{
+ let down=true;
+ const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,answer:making(()=>({updates:[]}),()=>down?'我说不清TA是做什么的':{profile:'角色：后端'})});
+ post(store,{mine:true,text:'我负责 GEO',at:min(0)});post(store,{text:'@原智鸿 看下',at:min(1)});
+ let r=await processor.runOnce();
+ assert.equal(r.failures,0);assert.match(r.profile.error,/不是 JSON/);assert.deepEqual(kinds(model),['batch','profile','review']);
+ assert.equal(matters.pendingCount(),0);assert.equal(matters.list().length,1);assert.deepEqual(r.review,{runs:1,reviewed:1,closed:0,complete:true});
+ const failed=store.meta('profile');
+ assert.equal(failed.at,undefined);assert.ok(failed.failedAt);assert.match(failed.error,/不是 JSON/);
+ assert.ok(store.errors().some(e=>e.source==='加工'&&/关于TA.*下一轮再试.*不是 JSON/.test(e.message)));
+ assert.deepEqual(matters.runs().map(x=>[x.kind,x.ok]),[['batch',true],['profile',false],['review',true]]);
+ r=await processor.runOnce();
+ assert.deepEqual(kinds(model).slice(3),['profile'],'tried again on the next round');
+ down=false;r=await processor.runOnce();
+ assert.deepEqual(kinds(model).slice(4),['profile','review'],'and once written, the open matters are judged by it');
+ assert.deepEqual(Object.keys(store.meta('profile')).sort(),['at','messages','notes','text'],'the failure is cleared');
 });

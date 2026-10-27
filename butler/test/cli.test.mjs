@@ -155,6 +155,29 @@ test('status shows the last review of the open matters and when the next is due;
  r=await cli(writeConfig(dir,lark,0o600,'BUTLER_REVIEW_EVERY=3 hours\n'),'status');assert.equal(r.code,1);assert.match(r.stderr,/整理事项的间隔的格式不对/);
 });
 
+test('status shows 关于TA in one line and profile prints it with my notes; BUTLER_PROFILE_EVERY sets how often it is written',async t=>{
+ const {lark,store,dir}=await setup(t),config=writeConfig(dir,lark);
+ let r=await cli(config,'status');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/关于TA：还没有写过，加工端的下一轮就写/);
+ r=await cli(config,'profile');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/还没有写过「关于TA」/);assert.match(r.stdout,/还没有说明/);
+ const at=Date.parse('2026-10-27T12:00:00+08:00'),time=ms=>new Date(ms).toLocaleString('sv-SE'),text='角色：GEO 服务的后端\n通常不归TA：审批';
+ const matters=new Matters(store),note=matters.addNote('审批不归我管',at-3600e3);
+ store.setMeta('profile',{text,at,notes:[note],messages:243});
+ const line=out=>out.split('\n').find(l=>l.startsWith('关于TA：'));
+ r=await cli(config,'status');
+ assert.equal(line(r.stdout),`关于TA：写于 ${time(at)}（${text.length} 字，根据 243 条我发的消息和 1 条说明），下一次在 ${time(at+86400e3)} 之后，说明有变化时也重写`);
+ const every=writeConfig(dir,lark,0o600,'BUTLER_PROFILE_EVERY=12h\n');
+ r=await cli(every,'status');assert.ok(line(r.stdout).includes(`下一次在 ${time(at+12*3600e3)} 之后`),r.stdout);
+ assert.equal(JSON.parse((await cli(every,'status','--json')).stdout).profile.everyMs,12*3600e3);
+ store.setMeta('profile',{text,at,notes:[note],messages:243,failedAt:at+3600e3,error:'模型的回复不是 JSON：x'});
+ r=await cli(every,'status');assert.ok(line(r.stdout).endsWith(`；${time(at+3600e3)} 没有写成，下一轮再试：模型的回复不是 JSON：x`),r.stdout);
+ r=await cli(every,'profile');assert.equal(r.code,0,r.stderr);
+ assert.ok(r.stdout.includes(`关于TA（写于 ${time(at)}，根据 243 条我发的消息和 1 条说明）：\n${text}`),r.stdout);
+ assert.ok(r.stdout.includes(`#${note} 审批不归我管（${time(at-3600e3)}）`),r.stdout);
+ const j=JSON.parse((await cli(every,'profile','--json')).stdout);
+ assert.equal(j.profile.text,text);assert.deepEqual(j.notes.map(n=>[n.id,n.text]),[[note,'审批不归我管']]);
+ r=await cli(writeConfig(dir,lark,0o600,'BUTLER_PROFILE_EVERY=1 day\n'),'status');assert.equal(r.code,1);assert.match(r.stderr,/写「关于TA」的间隔的格式不对/);
+});
+
 test('bot create refuses to replace a configured bot',async t=>{
  const {lark,dir}=await setup(t);
  const config=writeConfig(dir,lark,0o600,'BUTLER_BOT_APP_ID=cli_a1b2c3d4e5f6\nBUTLER_BOT_APP_SECRET=s\nBUTLER_BOT_OWNER=ou_owner0000000000000000000000001\n');

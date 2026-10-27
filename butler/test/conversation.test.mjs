@@ -134,6 +134,8 @@ test('reading the model\'s turn',()=>{
  assert.deepEqual(r.actions,[{do:'watch',group:'GEO 小分队'}]);assert.equal(r.reply,'');assert.equal(r.problems.length,3);
  assert.equal(readTurn(JSON.stringify({actions:Array.from({length:30},()=>({do:'list'}))})).actions.length,20,'a bounded number of actions per turn');
  assert.deepEqual(readTurn('只是一句话 www.example.com'),{actions:[],reply:'只是一句话 [链接]',problems:[]},'prose is an answer');
+ assert.deepEqual(readTurn(JSON.stringify({actions:[{do:'note',text:'  审批  不归我管，见 https://x.example/z '},{do:'unnote',note:'#3'},{do:'note'},{do:'unnote',note:'x'}],reply:''})),
+  {actions:[{do:'note',text:'审批 不归我管，见 [链接]'},{do:'unnote',note:3}],reply:'',problems:['note 没有给出说明的内容，没有执行','unnote 没有给出说明编号，没有执行']});
 });
 
 test('receipt is acknowledged at once, and a turn waits only for the model run under way, ahead of the next batch',async t=>{
@@ -150,8 +152,9 @@ test('receipt is acknowledged at once, and a turn waits only for the model run u
  assert.match(shown(bot.replies[0].input),/整理/,'saying what it waits for');
  model.gate=undefined;open();
  await round;await conversation.idle();
- // The round ends with its review of the open matters (there has been none in this store).
- assert.deepEqual(model.calls.map(c=>c.data.said!==undefined?'turn':c.data.matters?'review':'batch'),['batch','turn','batch','review'],'the turn goes before the next batch');
+ // The round ends with 关于TA (this store has none, and my message to write it from) and its review of the open
+ // matters (there has been none in this store).
+ assert.deepEqual(model.calls.map(c=>c.data.said!==undefined?'turn':c.data.matters?'review':c.data.openMatters?'batch':'profile'),['batch','turn','batch','profile','review'],'the turn goes before the next batch');
  assert.equal(model.overlapped,false,'one model run at a time');
  assert.match(shown(bot.replies.at(-1).input),/在的。/);
 });
@@ -165,4 +168,28 @@ test('a failed model run is reported, and a message Feishu delivers twice is han
  assert.equal(model.calls.length,calls);assert.equal(bot.replies.length,replies);
  const empty=await say('',undefined);
  assert.match(empty.ack,/文字/,'nothing to read: no model run');assert.equal(model.calls.length,calls);
+});
+
+test('the owner\'s corrections become notes in TA\'s own words, kept and removed by number; the model answers from 关于TA and the notes',async t=>{
+ const {store,matters,model,say,ids:[meego]}=setup(t);
+ store.setMeta('profile',{text:'角色：GEO 服务的后端\n通常不归TA：审批',at:T-3600e3,notes:[],messages:12});
+ let r=await say('审批不归我管',{actions:[{do:'note',text:'审批不归我管'}],reply:''});
+ assert.deepEqual([r.data.profile,r.data.notes],[{text:'角色：GEO 服务的后端\n通常不归TA：审批',written:'10-23 14:00'},[]]);
+ const system=model.calls[0].system;
+ for(const p of [/note 把TA/,/unnote/,/profile 是管家根据TA自己发过的消息归纳的「关于TA」/,/关掉事项时说的理由只写进 close 的 reason，不要另记说明/])assert.match(system,p);
+ assert.doesNotMatch(system,/\n/);assert.doesNotMatch(system,/[他她]/);
+ const [note]=matters.notes();
+ assert.equal(note.text,'审批不归我管');assert.match(r.reply,new RegExp(`已记下说明 #${note.id}：审批不归我管`));assert.match(r.reply,/关于TA/,'saying when it takes effect');
+ r=await say('记一下，审批不归我管',{actions:[{do:'note',text:'审批不归我管'}],reply:''});
+ assert.equal(matters.notes().length,1);assert.match(r.reply,/已经记过/);
+ r=await say('你觉得我负责什么',{actions:[],reply:'按我的理解，你负责 GEO 服务的后端，审批不归你管。'});
+ assert.deepEqual(r.data.notes,[{note:note.id,text:'审批不归我管',time:'10-23 15:00'}]);assert.equal(r.reply,'按我的理解，你负责 GEO 服务的后端，审批不归你管。');
+ r=await say(`#${meego} 关掉吧，这种通知不用我管`,{actions:[{do:'close',matter:meego,reason:'这种通知不用我管'}],reply:''});
+ assert.equal(matters.matter(meego).status,'closed');assert.equal(matters.notes().length,1,'a reason for closing a matter is no note');
+ r=await say('删掉那条说明',{actions:[{do:'unnote',note:`#${note.id}`}],reply:''});
+ assert.deepEqual(matters.notes(),[]);assert.match(r.reply,new RegExp(`已删除说明 #${note.id}：审批不归我管`));
+ r=await say('删掉说明 9',{actions:[{do:'unnote',note:9}],reply:''});
+ assert.match(r.reply,/没有说明 #9/);
+ store.setMeta('profile',{failedAt:T,error:'x'});
+ r=await say('你觉得我负责什么',{actions:[],reply:'还没有写出来。'});assert.equal(r.data.profile,null,'none written yet');
 });

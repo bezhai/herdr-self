@@ -44,8 +44,9 @@ export function loadConfig(file=process.env.BUTLER_CONFIG||defaultConfigPath()){
   dataDir:path.resolve(home(v.BUTLER_DATA_DIR||path.join(process.env.XDG_DATA_HOME||'~/.local/share','butler'))),
   // The processor's model: a saved herdr machine (its label), a directory there, and the local herdr executable.
   modelMachine:v.BUTLER_MODEL_MACHINE||undefined,modelCwd:v.BUTLER_MODEL_CWD||undefined,herdr:home(v.BUTLER_HERDR||'herdr'),
-  // How often the processor reviews the open matters; undefined: its default.
-  reviewEveryMs:v.BUTLER_REVIEW_EVERY?duration(v.BUTLER_REVIEW_EVERY,'整理事项的间隔'):undefined};
+  // How often the processor reviews the open matters and writes 关于TA; undefined: its defaults.
+  reviewEveryMs:v.BUTLER_REVIEW_EVERY?duration(v.BUTLER_REVIEW_EVERY,'整理事项的间隔'):undefined,
+  profileEveryMs:v.BUTLER_PROFILE_EVERY?duration(v.BUTLER_PROFILE_EVERY,'写「关于TA」的间隔'):undefined};
 }
 export function requireToken(config){
  if(!config.token)throw Error(`配置文件 ${config.file} 没有 BUTLER_OPEN_LARK_TOKEN（open-lark 的只读 token）`);
