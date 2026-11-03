@@ -171,6 +171,7 @@ impl Fixture {
                         state,
                         visible_blocker: state == AgentState::Blocked,
                         visible_working: state == AgentState::Working,
+                        input_open: false,
                         process_exited: false,
                         observed_at: Instant::now(),
                     });

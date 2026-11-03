@@ -783,6 +783,7 @@ async fn completion_guard_endpoint_pairs_runtime_completions_with_snapshots() {
                 state,
                 visible_blocker: false,
                 visible_working: state == crate::detect::AgentState::Working,
+                input_open: false,
                 process_exited: false,
                 observed_at: Instant::now(),
             });
@@ -7063,6 +7064,7 @@ fn startup_idle_does_not_forward_completion() {
             state: crate::detect::AgentState::Idle,
             visible_blocker: false,
             visible_working: false,
+            input_open: false,
             process_exited: false,
             observed_at: Instant::now(),
         })

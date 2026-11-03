@@ -6,8 +6,11 @@
 //! the target's turn ends, with or without a reply, or when the target goes
 //! away, and it reports each wait for input on the way. Every outcome becomes
 //! a notice: a one-line message that is submitted to the calling agent once
-//! it has stayed idle for [`CALL_NOTICE_SETTLE`] without a request of its own
-//! pending, one notice per idle period, in the order they were produced.
+//! it has stayed ready for input for [`CALL_NOTICE_SETTLE`] without a request
+//! of its own pending, one notice per ready period, in the order they were
+//! produced. A caller is ready when it is idle, or when its screen shows its
+//! live prompt while only background work, such as subagents, keeps it
+//! working.
 //! Notices point at the target and at the commands that read its reply or
 //! requests; they never carry reply or request content.
 //!
@@ -31,17 +34,18 @@ pub(crate) const CALL_REPLY_GRACE: Duration = Duration::from_secs(10);
 /// report a request before it reports that a person has to answer.
 pub(crate) const CALL_REQUEST_SETTLE: Duration = Duration::from_secs(2);
 
-/// How long a calling agent has to stay idle, without a request of its own
-/// pending, before it receives a notice.
+/// How long a calling agent has to stay ready for input, without a request
+/// of its own pending, before it receives a notice.
 ///
 /// A notice is typed into the caller's terminal and submitted with Enter. A
-/// caller that reads idle only for a moment, for example while the screen
-/// of a dialog changes, would get the notice typed into the dialog and the
-/// dialog answered. Screen detection reads an identified agent every 300 ms,
-/// so the idle state has to survive ten readings. The period is longer than
-/// [`CALL_REQUEST_SETTLE`], the time a hook's request report may trail the
-/// screen, and as long as Herdr waits before it trusts the idle screen of an
-/// agent it launched. A caller that has been idle for longer is not delayed.
+/// caller that reads ready only for a moment, for example while the screen
+/// of a dialog changes or before a starting turn shows on its screen, would
+/// get the notice typed into the dialog or the turn. Screen detection reads
+/// an identified agent every 300 ms, so readiness has to survive ten
+/// readings. The period is longer than [`CALL_REQUEST_SETTLE`], the time a
+/// hook's request report may trail the screen, and as long as Herdr waits
+/// before it trusts the idle screen of an agent it launched. A caller that
+/// has been ready for longer is not delayed.
 pub(crate) const CALL_NOTICE_SETTLE: Duration = Duration::from_secs(3);
 
 /// The parties of a new call and how it treats the target's requests.
@@ -141,10 +145,10 @@ struct CallerNotices {
     /// The calling agent; notices are dropped when another agent runs in its pane.
     agent: Agent,
     pending: VecDeque<CallNotice>,
-    /// The caller's state change seq when the previous notice was submitted.
-    /// The next one waits until that seq changes: the caller left idle for
-    /// the previous notice and came back.
-    submitted_at_seq: Option<Option<u64>>,
+    /// The caller's readiness when the previous notice was submitted. The
+    /// next one waits until it changes: the caller left it for the previous
+    /// notice and came back.
+    submitted_at: Option<Readiness>,
     /// The first notice could not be submitted; it waits at least until then.
     retry_at: Option<Instant>,
     requests: CallerRequests,
@@ -162,6 +166,41 @@ enum CallerRequests {
     EndedAt(Instant),
 }
 
+/// Which period of readiness for input a calling agent is in. A new period
+/// starts when its state changes, and when its screen input opens again
+/// after it closed: a caller that background work keeps working stays
+/// working while it takes a notice and comes back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Readiness {
+    state_change_seq: Option<u64>,
+    input_open_since: Option<Instant>,
+}
+
+impl Readiness {
+    fn of(terminal: &crate::terminal::TerminalState) -> Self {
+        Self {
+            state_change_seq: terminal.last_agent_state_change_seq,
+            input_open_since: terminal.input_open_since(),
+        }
+    }
+}
+
+/// Since when the agent in `terminal` has been ready to take typed input:
+/// it is idle, or it is working while its screen shows its live prompt. The
+/// later of its last state change and the opening of its input counts: a
+/// caller that starts a turn reads working before its screen shows the turn,
+/// so a prompt that opened earlier does not make it ready.
+fn ready_since(terminal: &crate::terminal::TerminalState) -> Option<Instant> {
+    let changed_at = terminal.last_agent_state_change_at?;
+    let opened_at = terminal.input_open_since();
+    let ready = match terminal.state {
+        AgentState::Idle => true,
+        AgentState::Working => opened_at.is_some(),
+        AgentState::Blocked | AgentState::Unknown => false,
+    };
+    ready.then(|| opened_at.map_or(changed_at, |opened_at| opened_at.max(changed_at)))
+}
+
 /// What the first notice of a calling agent waits for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NoticeWait {
@@ -170,7 +209,8 @@ enum NoticeWait {
     /// The caller took the last notice; nothing is left to wait for.
     Spent,
     /// A change of the caller: to be detected, to take the previous notice,
-    /// to finish starting, to become idle, or to end its pending request.
+    /// to finish starting, to become ready for input, or to end its pending
+    /// request.
     Caller,
     /// The notice goes out at this time unless the caller changes first.
     Until(Instant),
@@ -187,7 +227,7 @@ impl CallerNotices {
         Self {
             agent,
             pending: VecDeque::new(),
-            submitted_at_seq: None,
+            submitted_at: None,
             retry_at: None,
             requests: CallerRequests::None,
         }
@@ -204,11 +244,12 @@ impl CallerNotices {
 
     /// What the first notice waits for while the caller is in `terminal`.
     ///
-    /// The notice goes to an idle caller only, and only once it has stayed
-    /// idle for [`CALL_NOTICE_SETTLE`] since its last state change: a caller
-    /// that reads idle for a moment may still be showing a dialog that the
-    /// notice's Enter would answer. A pending request of the caller's own
-    /// holds the notice for the same reason.
+    /// The notice goes to a caller that is ready for input (see
+    /// [`ready_since`]), and only once it has stayed ready for
+    /// [`CALL_NOTICE_SETTLE`]: a caller that reads ready for a moment may
+    /// still be showing a dialog that the notice's Enter would answer. A
+    /// pending request of the caller's own holds the notice for the same
+    /// reason.
     fn wait(&self, terminal: &crate::terminal::TerminalState) -> NoticeWait {
         let Some(agent) = terminal.effective_known_agent() else {
             // Not detected yet, for example right after a live handoff.
@@ -218,8 +259,8 @@ impl CallerNotices {
             return NoticeWait::Replaced;
         }
         let took_previous = self
-            .submitted_at_seq
-            .is_none_or(|seq| seq != terminal.last_agent_state_change_seq);
+            .submitted_at
+            .is_none_or(|readiness| readiness != Readiness::of(terminal));
         if self.pending.is_empty() {
             return if took_previous {
                 NoticeWait::Spent
@@ -228,18 +269,17 @@ impl CallerNotices {
             };
         }
         if !took_previous
-            || terminal.state != AgentState::Idle
             || terminal.managed_agent_launch_pending()
             || !terminal.agent_requests().is_empty()
         {
             return NoticeWait::Caller;
         }
-        let Some(changed_at) = terminal.last_agent_state_change_at else {
+        let Some(ready_since) = ready_since(terminal) else {
             return NoticeWait::Caller;
         };
         let quiet_since = match self.requests {
-            CallerRequests::EndedAt(ended_at) => changed_at.max(ended_at),
-            CallerRequests::None | CallerRequests::Pending => changed_at,
+            CallerRequests::EndedAt(ended_at) => ready_since.max(ended_at),
+            CallerRequests::None | CallerRequests::Pending => ready_since,
         };
         let settled_at = quiet_since + CALL_NOTICE_SETTLE;
         NoticeWait::Until(
@@ -641,12 +681,12 @@ impl AppState {
 
     /// The first notice of `caller_pane` was submitted.
     pub(crate) fn agent_call_notice_submitted(&mut self, caller_pane: PaneId) {
-        let seq = self
+        let readiness = self
             .agent_call_pane(caller_pane)
-            .and_then(|(_, terminal)| terminal.last_agent_state_change_seq);
+            .map(|(_, terminal)| Readiness::of(terminal));
         if let Some(queue) = self.agent_calls.notices.get_mut(&caller_pane) {
             queue.pending.pop_front();
-            queue.submitted_at_seq = Some(seq);
+            queue.submitted_at = Some(readiness.unwrap_or_default());
             queue.retry_at = None;
         }
     }
@@ -1021,15 +1061,51 @@ mod tests {
     }
 
     fn set_state(state: &mut AppState, pane_id: PaneId, agent: Agent, agent_state: AgentState) {
+        detect(state, pane_id, agent, agent_state, false, Instant::now());
+    }
+
+    /// Screen detection of the agent in `pane_id` at `observed_at`: its
+    /// state, and whether its screen shows the live input prompt.
+    fn detect(
+        state: &mut AppState,
+        pane_id: PaneId,
+        agent: Agent,
+        agent_state: AgentState,
+        input_open: bool,
+        observed_at: Instant,
+    ) {
         state.handle_app_event(AppEvent::StateChanged {
             pane_id,
             agent: Some(agent),
             state: agent_state,
             visible_blocker: agent_state == AgentState::Blocked,
             visible_working: agent_state == AgentState::Working,
+            input_open,
             process_exited: false,
-            observed_at: Instant::now(),
+            observed_at,
         });
+    }
+
+    /// A working Claude caller's screen shows the live prompt from now on,
+    /// or stops showing it, while background work keeps it working.
+    fn set_input_open(state: &mut AppState, caller: PaneId, open: bool) {
+        detect(
+            state,
+            caller,
+            Agent::Claude,
+            AgentState::Working,
+            open,
+            Instant::now(),
+        );
+    }
+
+    /// When the input of the agent in `pane_id` has stayed open, without a
+    /// state change, for the settle period.
+    fn input_settled(state: &mut AppState, pane_id: PaneId) -> Instant {
+        let opened_at = terminal_mut(state, pane_id)
+            .input_open_since()
+            .expect("the input is open");
+        opened_at.max(changed_at(state, pane_id)) + CALL_NOTICE_SETTLE
     }
 
     fn call(state: &mut AppState, caller: PaneId, callee: PaneId, answer_requests: bool) -> u64 {
@@ -1549,6 +1625,126 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn a_working_caller_whose_input_is_open_gets_its_notice_after_the_settle_period() {
+        let (mut state, caller) = caller_with_a_notice();
+        // The caller's turn ended; background work keeps its title busy.
+        set_input_open(&mut state, caller, true);
+        let settled = input_settled(&mut state, caller);
+
+        assert!(state
+            .ready_agent_call_notices(settled - Duration::from_millis(1))
+            .is_empty());
+        assert_eq!(
+            state.next_agent_call_deadline(),
+            Some(settled),
+            "the loop wakes when the input has stayed open for the settle period"
+        );
+        let ready = state.ready_agent_call_notices(settled);
+        assert_eq!(ready.len(), 1, "{ready:?}");
+        assert_eq!(ready[0].caller_pane, caller);
+        assert!(ready[0].text.contains(" blocked: "), "{ready:?}");
+    }
+
+    #[test]
+    fn a_caller_in_a_foreground_turn_gets_no_notice_until_its_input_stays_open() {
+        let (mut state, caller) = caller_with_a_notice();
+        let later = Instant::now() + CALL_NOTICE_SETTLE * 10;
+        assert!(
+            state.ready_agent_call_notices(later).is_empty(),
+            "the caller's turn runs on its screen"
+        );
+        assert_eq!(state.next_agent_call_deadline(), None);
+
+        // The input opens for a moment; a turn starts before it settles.
+        set_input_open(&mut state, caller, true);
+        let glimpse_settled = input_settled(&mut state, caller);
+        set_input_open(&mut state, caller, false);
+        assert!(state.ready_agent_call_notices(glimpse_settled).is_empty());
+        assert!(state.ready_agent_call_notices(later).is_empty());
+        assert_eq!(state.next_agent_call_deadline(), None);
+
+        // The turn ended: the settle period starts over.
+        set_input_open(&mut state, caller, true);
+        let settled = input_settled(&mut state, caller);
+        assert_eq!(state.next_agent_call_deadline(), Some(settled));
+        assert!(state
+            .ready_agent_call_notices(settled - Duration::from_millis(1))
+            .is_empty());
+        assert_eq!(state.ready_agent_call_notices(settled).len(), 1);
+    }
+
+    #[test]
+    fn a_caller_that_starts_working_with_its_input_still_open_settles_again() {
+        let (mut state, caller) = caller_with_a_notice();
+        let opened_at = Instant::now() - Duration::from_secs(1);
+        detect(
+            &mut state,
+            caller,
+            Agent::Claude,
+            AgentState::Idle,
+            true,
+            opened_at,
+        );
+        // A turn starts: the title turns busy before the turn shows on the
+        // screen, which still shows the prompt that opened earlier.
+        set_input_open(&mut state, caller, true);
+        let started_at = changed_at(&mut state, caller);
+        assert_eq!(
+            terminal_mut(&mut state, caller).input_open_since(),
+            Some(opened_at)
+        );
+
+        assert!(state
+            .ready_agent_call_notices(opened_at + CALL_NOTICE_SETTLE)
+            .is_empty());
+        assert_eq!(
+            state.next_agent_call_deadline(),
+            Some(started_at + CALL_NOTICE_SETTLE)
+        );
+    }
+
+    #[test]
+    fn notices_to_a_caller_that_stays_working_go_out_one_per_opening_of_its_input() {
+        let (mut state, caller, callee) = two_agents();
+        set_state(&mut state, caller, Agent::Claude, AgentState::Working);
+        let id = call(&mut state, caller, callee, false);
+        set_state(&mut state, callee, Agent::Codex, AgentState::Working);
+        set_state(&mut state, callee, Agent::Codex, AgentState::Blocked);
+        set_state(&mut state, callee, Agent::Codex, AgentState::Idle);
+        reply(&mut state, callee, 1).unwrap();
+        assert_eq!(notices(&state, caller).len(), 2);
+
+        set_input_open(&mut state, caller, true);
+        let at = input_settled(&mut state, caller);
+        let ready = state.ready_agent_call_notices(at);
+        assert_eq!(ready.len(), 1, "{ready:?}");
+        assert_eq!(ready[0].call_id, id);
+        assert!(ready[0].text.contains(" blocked: "), "{ready:?}");
+        state.agent_call_notice_submitted(caller);
+        let later = at + CALL_NOTICE_SETTLE * 10;
+        assert!(
+            state.ready_agent_call_notices(later).is_empty(),
+            "the caller has not taken the first notice yet"
+        );
+        assert_eq!(state.next_agent_call_deadline(), None);
+
+        // The caller takes the notice: a turn runs on its screen, and its
+        // input opens again after the turn, while the title stays busy.
+        set_input_open(&mut state, caller, false);
+        assert!(state.ready_agent_call_notices(later).is_empty());
+        set_input_open(&mut state, caller, true);
+        let at = input_settled(&mut state, caller);
+        assert!(state
+            .ready_agent_call_notices(at - Duration::from_millis(1))
+            .is_empty());
+        let ready = state.ready_agent_call_notices(at);
+        assert_eq!(ready.len(), 1, "{ready:?}");
+        assert!(ready[0].text.contains(" finished: "), "{ready:?}");
+        state.agent_call_notice_submitted(caller);
+        assert!(notices(&state, caller).is_empty());
     }
 
     #[test]

@@ -88,6 +88,14 @@ fn write_local_codex(content: &str) {
     reload_manifests();
 }
 
+/// Writes a local override with synthetic `rules` for `agent`.
+fn write_local_manifest(agent: Agent, rules: &str) {
+    let path = override_path(agent).unwrap();
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, format!("id = \"{}\"\n\n{rules}", agent_label(agent))).unwrap();
+    reload_manifests();
+}
+
 #[test]
 fn known_agent_no_match_defaults_to_idle_fallback() {
     with_manifest_dirs("no-match", || {
@@ -479,6 +487,112 @@ regex = ['^progress-marker$']
             },
         );
         assert!(swapped.matched_rule.is_none());
+    });
+}
+
+#[test]
+fn the_input_is_open_under_rules_that_report_background_work() {
+    with_manifest_dirs("input-open", || {
+        let rules = r#"
+[[rules]]
+id = "busy_title"
+state = "working"
+priority = 1100
+region = "osc_title"
+visible_working = true
+regex = ['^busy ']
+
+[[rules]]
+id = "dialog"
+state = "blocked"
+priority = 980
+visible_blocker = true
+contains = ["dialog-marker"]
+
+[[rules]]
+id = "turn"
+state = "working"
+priority = 970
+visible_working = true
+contains = ["turn-marker"]
+
+[[rules]]
+id = "background_helpers_working"
+state = "working"
+priority = 965
+visible_working = true
+contains = ["waiting-marker"]
+
+[[rules]]
+id = "idle_progress"
+state = "idle"
+priority = 960
+region = "osc_progress"
+visible_idle = true
+regex = ['^idle$']
+
+[[rules]]
+id = "prompt"
+state = "idle"
+priority = 950
+visible_idle = true
+contains = ["prompt-marker"]
+"#;
+        // Claude's title and its `background_` rules report background
+        // work; no rule of Codex does. Both only key the synthetic rules.
+        write_local_manifest(Agent::Claude, rules);
+        write_local_manifest(Agent::Codex, rules);
+        let detect = |agent, screen, osc_title, osc_progress| {
+            detect_with_osc(
+                agent,
+                DetectionInput {
+                    screen,
+                    osc_title,
+                    osc_progress,
+                },
+            )
+        };
+
+        // The turn ended; background work keeps the title busy and shows
+        // on the screen.
+        for screen in ["prompt-marker", "waiting-marker prompt-marker"] {
+            for osc_title in ["busy session", ""] {
+                let background = detect(Agent::Claude, screen, osc_title, "");
+                assert!(background.input_open, "{screen:?} {osc_title:?}");
+            }
+        }
+        let background = detect(Agent::Claude, "waiting-marker prompt-marker", "", "");
+        assert_eq!(background.state, AgentState::Working);
+        let idle = detect(Agent::Claude, "prompt-marker", "", "");
+        assert_eq!(idle.state, AgentState::Idle);
+        assert!(idle.input_open);
+
+        for (screen, osc_progress, why) in [
+            ("turn-marker prompt-marker", "", "a turn runs on the screen"),
+            (
+                "waiting-marker turn-marker prompt-marker",
+                "",
+                "a turn runs beside background work",
+            ),
+            ("dialog-marker prompt-marker", "", "a dialog is open"),
+            ("prompt-marker", "idle", "OSC progress is not the screen"),
+            ("", "", "no prompt is on the screen"),
+        ] {
+            let detection = detect(Agent::Claude, screen, "busy session", osc_progress);
+            assert!(!detection.input_open, "{why}");
+        }
+
+        // For an agent whose rules report only its own turns, a working
+        // rule keeps the input closed.
+        for (screen, osc_title) in [
+            ("prompt-marker", "busy session"),
+            ("waiting-marker prompt-marker", ""),
+        ] {
+            let codex = detect(Agent::Codex, screen, osc_title, "");
+            assert_eq!(codex.state, AgentState::Working);
+            assert!(!codex.input_open, "{screen:?} {osc_title:?}");
+        }
+        assert!(detect(Agent::Codex, "prompt-marker", "", "").input_open);
     });
 }
 

@@ -75,6 +75,9 @@ pub enum AppEvent {
         state: AgentState,
         visible_blocker: bool,
         visible_working: bool,
+        /// The screen shows the agent's live input prompt; see
+        /// [`crate::detect::AgentDetection::input_open`].
+        input_open: bool,
         process_exited: bool,
         observed_at: Instant,
     },

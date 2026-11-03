@@ -14,6 +14,7 @@ fn set_state(
             state,
             visible_blocker: false,
             visible_working: state == crate::detect::AgentState::Working,
+            input_open: false,
             process_exited: false,
             observed_at: Instant::now(),
         });

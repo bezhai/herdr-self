@@ -36,6 +36,12 @@ pub struct AgentDetection {
     /// activity is the normal working authority; this remains diagnostic
     /// metadata and for non-PTY fallback paths.
     pub visible_working: bool,
+    /// True when the screen shows the agent's live input prompt: once the
+    /// rules that report background work are set aside (see
+    /// [`rule_reports_background_work`]), the matched rule of highest
+    /// priority is idle chrome on the screen. The input can be open while
+    /// background work keeps the agent working.
+    pub input_open: bool,
 }
 
 /// Which agent we detected running in a pane.
@@ -308,6 +314,7 @@ pub fn detect_agent_with_osc(
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            input_open: false,
         };
     };
     manifest::detect_with_osc(
@@ -334,6 +341,29 @@ pub(crate) fn full_lifecycle_hook_authority(source: &str, agent_label: &str) -> 
             | ("herdr:kilo", "kilo")
             | ("herdr:kimi", "kimi")
     )
+}
+
+/// Whether a detection rule of `agent` with `rule_id` reading `region`
+/// reports work that goes on after the agent's own turn ended, such as
+/// subagents or MCP tasks. Such a rule keeps the agent working, but the
+/// agent takes typed input meanwhile, so it is set aside when deciding
+/// whether the input is open; see [`AgentDetection::input_open`].
+///
+/// Claude's OSC title stays busy while its background work runs, and its
+/// manifests name the screen rules for that work `background_*`, for
+/// example `background_agents_working` for "Waiting for 1 background agent
+/// to finish" above the prompt. Its turns show their own chrome on the
+/// screen. A renamed rule is no longer set aside, which keeps the input
+/// closed as before.
+///
+/// Other agents report nothing here: for some of them the title is the main
+/// signal of their own turns. An agent belongs here only once live reads
+/// show that every turn of its own keeps turn chrome on its screen.
+pub(crate) fn rule_reports_background_work(agent: Agent, rule_id: &str, region: &str) -> bool {
+    match agent {
+        Agent::Claude => region.trim() == "osc_title" || rule_id.starts_with("background_"),
+        _ => false,
+    }
 }
 
 pub(crate) fn session_identity_only_integration(source: &str, agent_label: &str) -> bool {

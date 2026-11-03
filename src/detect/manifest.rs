@@ -34,6 +34,8 @@ pub struct DetectionExplain {
     pub visible_idle: bool,
     pub visible_blocker: bool,
     pub visible_working: bool,
+    /// See [`AgentDetection::input_open`].
+    pub input_open: bool,
     pub skip_state_update: bool,
     pub skipped_update_reason: Option<String>,
     pub fallback_reason: Option<String>,
@@ -401,6 +403,7 @@ pub fn explain_for_label(agent_label: &str, screen_content: &str) -> DetectionEx
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            input_open: false,
             skip_state_update: false,
             skipped_update_reason: None,
             fallback_reason: Some("unknown_agent".to_string()),
@@ -441,6 +444,7 @@ impl DetectionExplain {
             visible_idle: self.visible_idle,
             visible_blocker: self.visible_blocker,
             visible_working: self.visible_working,
+            input_open: self.input_open,
         }
     }
 }
@@ -452,6 +456,9 @@ fn evaluate_loaded_manifest(
     include_update_status: bool,
 ) -> DetectionExplain {
     let mut matched: Option<(&ManifestRule, String)> = None;
+    // The rule that tells whether the input is open: the same choice as
+    // `matched`, without the rules that report background work.
+    let mut input_rule: Option<&ManifestRule> = None;
     let mut evaluated_rules = Vec::new();
 
     for (rule, compiled_rule) in loaded
@@ -478,6 +485,11 @@ fn evaluate_loaded_manifest(
             continue;
         }
 
+        if input_rule.is_none_or(|previous| previous.priority < rule.priority)
+            && !super::rule_reports_background_work(agent, &rule.id, &rule.region)
+        {
+            input_rule = Some(rule);
+        }
         match matched {
             Some((previous, _)) if previous.priority >= rule.priority => {}
             _ => matched = Some((rule, rule.region.clone())),
@@ -518,6 +530,7 @@ fn evaluate_loaded_manifest(
         visible_idle: rule.visible_idle && state == AgentState::Idle,
         visible_blocker: rule.visible_blocker && state == AgentState::Blocked,
         visible_working: rule.visible_working && state == AgentState::Working,
+        input_open: input_rule.is_some_and(shows_idle_prompt),
         skip_state_update: rule.skip_state_update,
         skipped_update_reason,
         fallback_reason: None,
@@ -575,6 +588,7 @@ fn fallback_explain(
         visible_idle: false,
         visible_blocker: false,
         visible_working: false,
+        input_open: false,
         skip_state_update: false,
         skipped_update_reason: None,
         fallback_reason: known_agent.then(|| DEFAULT_KNOWN_AGENT_IDLE_FALLBACK.to_string()),
@@ -1288,6 +1302,14 @@ fn compiled_gate_matches(gate: &CompiledGate, text: &str, lower_text: &str) -> b
     }
 
     true
+}
+
+/// Whether a matched rule is idle chrome on the screen: a live prompt, not an
+/// OSC signal.
+fn shows_idle_prompt(rule: &ManifestRule) -> bool {
+    rule.state == Some(ManifestState::Idle)
+        && rule.visible_idle
+        && !matches!(rule.region.trim(), "osc_title" | "osc_progress")
 }
 
 fn region<'a>(input: DetectionInput<'a>, spec: &str) -> &'a str {

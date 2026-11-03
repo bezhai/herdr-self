@@ -18,6 +18,7 @@ pub(super) struct DetectionPublishState {
     pub(super) visible_idle: bool,
     pub(super) visible_blocker: bool,
     pub(super) visible_working: bool,
+    pub(super) input_open: bool,
 }
 
 #[derive(Debug, Default)]
@@ -148,6 +149,7 @@ pub(super) fn should_publish_detection_update(
         || next.visible_idle != previous.visible_idle
         || next.visible_blocker != previous.visible_blocker
         || next.visible_working != previous.visible_working
+        || next.input_open != previous.input_open
         || agent_changed
         || process_exited
         || (stable_visible_signal_refresh_due && next.visible_blocker && previous.visible_blocker)
@@ -218,6 +220,7 @@ pub(super) enum DetectionPublishDecision {
         visible_idle: bool,
         visible_blocker: bool,
         visible_working: bool,
+        input_open: bool,
         process_exited: bool,
     },
 }
@@ -228,6 +231,7 @@ pub(super) struct ScreenDetectionPublishInput {
     pub(super) last_visible_idle: bool,
     pub(super) last_visible_blocker: bool,
     pub(super) last_visible_working: bool,
+    pub(super) last_input_open: bool,
     pub(super) last_visible_signal_refresh: Option<std::time::Instant>,
     pub(super) screen_detection: AgentDetection,
     pub(super) process_exited: bool,
@@ -244,18 +248,21 @@ pub(super) fn decide_screen_detection_publish(
     let visible_idle = detection.visible_idle && new_state == AgentState::Idle;
     let visible_blocker = detection.visible_blocker && new_state == AgentState::Blocked;
     let visible_working = detection.visible_working && new_state == AgentState::Working;
+    let input_open = detection.input_open;
 
     let previous_publish = DetectionPublishState {
         state: input.current_state,
         visible_idle: input.last_visible_idle,
         visible_blocker: input.last_visible_blocker,
         visible_working: input.last_visible_working,
+        input_open: input.last_input_open,
     };
     let next_publish = DetectionPublishState {
         state: new_state,
         visible_idle,
         visible_blocker,
         visible_working,
+        input_open,
     };
     let stable_refresh_due = stable_visible_signal_refresh_due(
         previous_publish,
@@ -281,6 +288,7 @@ pub(super) fn decide_screen_detection_publish(
             visible_idle,
             visible_blocker,
             visible_working,
+            input_open,
             process_exited: input.process_exited,
         },
     }
@@ -309,6 +317,7 @@ pub(super) fn detection_update_for_publish_with_osc(
             visible_idle: true,
             visible_blocker: false,
             visible_working: false,
+            input_open: false,
         });
     }
 
@@ -336,6 +345,7 @@ mod tests {
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            input_open: false,
         }
     }
 
@@ -346,6 +356,7 @@ mod tests {
             visible_idle: state == AgentState::Idle,
             visible_blocker: false,
             visible_working: state == AgentState::Working,
+            input_open: false,
         }
     }
 
@@ -359,6 +370,7 @@ mod tests {
             last_visible_idle: false,
             last_visible_blocker: false,
             last_visible_working: false,
+            last_input_open: false,
             last_visible_signal_refresh: None,
             screen_detection,
             process_exited: false,
@@ -506,6 +518,7 @@ mod tests {
                 visible_idle: false,
                 visible_blocker: false,
                 visible_working: true,
+                input_open: false,
                 process_exited: false,
             }
         );
@@ -526,8 +539,36 @@ mod tests {
                 visible_idle: true,
                 visible_blocker: false,
                 visible_working: false,
+                input_open: false,
                 process_exited: false,
             }
+        );
+    }
+
+    #[test]
+    fn screen_publish_follows_the_input_while_the_state_stays() {
+        let now = std::time::Instant::now();
+        let mut pending_idle = PendingIdleConfirmation::default();
+        let mut detection = screen_detection(AgentState::Working);
+        detection.input_open = true;
+        let mut input = screen_publish_input(AgentState::Working, detection, now);
+        input.last_visible_working = true;
+
+        assert_eq!(
+            decide_screen_detection_publish(input, &mut pending_idle),
+            DetectionPublishDecision::Publish {
+                state: AgentState::Working,
+                visible_idle: false,
+                visible_blocker: false,
+                visible_working: true,
+                input_open: true,
+                process_exited: false,
+            }
+        );
+        input.last_input_open = true;
+        assert_eq!(
+            decide_screen_detection_publish(input, &mut pending_idle),
+            DetectionPublishDecision::NoPublish
         );
     }
 

@@ -140,6 +140,9 @@ pub struct TerminalState {
     pub fallback_state: AgentState,
     fallback_visible_blocker: bool,
     fallback_observed_at: Option<Instant>,
+    /// When screen detection first saw the live input prompt that it still
+    /// sees; see [`TerminalState::input_open_since`].
+    fallback_input_open_since: Option<Instant>,
     pub hook_authority: Option<HookAuthority>,
     pub agent_metadata: HashMap<String, AgentMetadata>,
     pub metadata_tokens: crate::metadata_tokens::MetadataTokens,
@@ -189,6 +192,7 @@ impl TerminalState {
             fallback_state: AgentState::Unknown,
             fallback_visible_blocker: false,
             fallback_observed_at: None,
+            fallback_input_open_since: None,
             hook_authority: None,
             agent_metadata: HashMap::new(),
             metadata_tokens: crate::metadata_tokens::MetadataTokens::default(),
@@ -235,6 +239,7 @@ impl TerminalState {
         let mutation = self.set_detected_state_with_screen_signals_at(
             Some(agent),
             AgentState::Unknown,
+            false,
             false,
             false,
             false,
@@ -324,6 +329,7 @@ impl TerminalState {
             false,
             false,
             false,
+            false,
             Instant::now(),
         )
     }
@@ -343,6 +349,7 @@ impl TerminalState {
             visible_blocker,
             false,
             false,
+            false,
             process_exited,
             Instant::now(),
         )
@@ -356,6 +363,7 @@ impl TerminalState {
         visible_blocker: bool,
         _visible_idle: bool,
         _visible_working: bool,
+        input_open: bool,
         process_exited: bool,
         now: Instant,
     ) -> TerminalStateMutation {
@@ -435,6 +443,11 @@ impl TerminalState {
         }
         self.fallback_state = fallback_state;
         self.fallback_visible_blocker = visible_blocker && fallback_state == AgentState::Blocked;
+        if !input_open {
+            self.fallback_input_open_since = None;
+        } else if self.fallback_input_open_since.is_none() {
+            self.fallback_input_open_since = Some(now);
+        }
         self.fallback_observed_at = Some(now);
         if process_exited {
             if let Some(agent) = agent {
@@ -1839,6 +1852,7 @@ impl TerminalState {
             self.fallback_state = AgentState::Unknown;
             self.fallback_visible_blocker = false;
             self.fallback_observed_at = None;
+            self.fallback_input_open_since = None;
             self.clear_agent_name();
         }
         self.hook_authority = None;
@@ -1899,6 +1913,19 @@ impl TerminalState {
             state,
             presentation,
         }
+    }
+
+    /// Since when the screen has shown the agent's live input prompt, without
+    /// a break; see [`crate::detect::AgentDetection::input_open`]. The prompt
+    /// can be open while the agent reads working, when only background work
+    /// keeps it working. None while a hook decides the agent's state: screen
+    /// detection then pauses or does not decide, so its view may be stale.
+    pub fn input_open_since(&self) -> Option<Instant> {
+        let hook_decides = self
+            .hook_authority
+            .as_ref()
+            .is_some_and(|authority| self.hook_authority_is_effective(authority));
+        self.fallback_input_open_since.filter(|_| !hook_decides)
     }
 
     pub fn full_lifecycle_hook_authority_active(&self) -> bool {
@@ -2133,6 +2160,7 @@ impl TerminalState {
         self.fallback_state = AgentState::Unknown;
         self.fallback_visible_blocker = false;
         self.fallback_observed_at = None;
+        self.fallback_input_open_since = None;
         self.hook_authority = None;
         self.persisted_agent_session = None;
         self.agent_metadata.clear();
@@ -2481,6 +2509,48 @@ mod tests {
             .after(None)
             .map(|reply| (reply.seq, reply.text.clone()))
             .collect()
+    }
+
+    #[test]
+    fn screen_input_counts_from_its_opening_while_the_screen_decides_the_state() {
+        let mut terminal = test_terminal();
+        let detect = |terminal: &mut TerminalState, input_open: bool, at: Instant| {
+            terminal.set_detected_state_with_screen_signals_at(
+                Some(Agent::Claude),
+                AgentState::Working,
+                false,
+                false,
+                true,
+                input_open,
+                false,
+                at,
+            );
+        };
+        let opened_at = Instant::now();
+        detect(&mut terminal, true, opened_at);
+        detect(&mut terminal, true, opened_at + Duration::from_secs(1));
+        assert_eq!(terminal.input_open_since(), Some(opened_at));
+
+        terminal.set_hook_authority(
+            "custom:claude".into(),
+            "claude".into(),
+            AgentState::Working,
+            None,
+            None,
+        );
+        assert_eq!(
+            terminal.input_open_since(),
+            None,
+            "a hook decides the state, not the screen"
+        );
+        terminal.clear_hook_authority(Some("custom:claude"), None);
+        assert_eq!(terminal.input_open_since(), Some(opened_at));
+
+        detect(&mut terminal, false, opened_at + Duration::from_secs(2));
+        assert_eq!(terminal.input_open_since(), None);
+        let reopened_at = opened_at + Duration::from_secs(3);
+        detect(&mut terminal, true, reopened_at);
+        assert_eq!(terminal.input_open_since(), Some(reopened_at));
     }
 
     #[test]
@@ -3061,6 +3131,7 @@ mod tests {
                     false,
                     false,
                     false,
+                    false,
                     process_exited,
                     Instant::now(),
                 )
@@ -3183,6 +3254,7 @@ mod tests {
             visible_idle: false,
             visible_blocker: false,
             visible_working: false,
+            input_open: false,
         };
 
         assert_eq!(stabilize_agent_detection(detection), AgentState::Idle);
@@ -3292,6 +3364,7 @@ mod tests {
             terminal.set_detected_state_with_screen_signals_at(
                 Some(agent),
                 AgentState::Working,
+                false,
                 false,
                 false,
                 false,
@@ -3749,6 +3822,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             now + Duration::from_millis(1),
         );
@@ -3828,6 +3902,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             process_exit_seen_at,
         );
@@ -3840,11 +3915,13 @@ mod tests {
             false,
             false,
             false,
+            false,
             fresh_process_seen_at,
         );
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Unknown,
+            false,
             false,
             false,
             false,
@@ -3905,6 +3982,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             now + Duration::from_millis(1),
         );
@@ -3956,6 +4034,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             now + Duration::from_millis(5),
         );
 
@@ -3991,6 +4070,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             now + Duration::from_millis(1),
         );
@@ -3999,6 +4079,7 @@ mod tests {
             AgentState::Idle,
             false,
             true,
+            false,
             false,
             false,
             now + Duration::from_millis(2),
@@ -4019,6 +4100,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             now + Duration::from_millis(4),
         );
@@ -4027,6 +4109,7 @@ mod tests {
             AgentState::Idle,
             false,
             true,
+            false,
             false,
             false,
             now + Duration::from_millis(5),
@@ -4066,6 +4149,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             process_exit_at,
         );
@@ -4077,6 +4161,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             process_exit_at + Duration::from_millis(1),
         );
         terminal.set_detected_state_with_screen_signals_at(
@@ -4084,6 +4169,7 @@ mod tests {
             AgentState::Idle,
             false,
             true,
+            false,
             false,
             false,
             process_exit_at + Duration::from_millis(2),
@@ -4121,6 +4207,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             now + Duration::from_millis(1),
         );
@@ -4145,11 +4232,13 @@ mod tests {
             false,
             false,
             false,
+            false,
             now + Duration::from_millis(3),
         );
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Unknown,
+            false,
             false,
             false,
             false,
@@ -4190,6 +4279,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             now + Duration::from_millis(1),
         );
@@ -4214,11 +4304,13 @@ mod tests {
             false,
             false,
             false,
+            false,
             now + Duration::from_millis(3),
         );
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Unknown,
+            false,
             false,
             false,
             false,
@@ -4314,6 +4406,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             now + Duration::from_millis(1),
         );
@@ -4336,11 +4429,13 @@ mod tests {
             false,
             false,
             false,
+            false,
             now + Duration::from_millis(2),
         );
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Omp),
             AgentState::Unknown,
+            false,
             false,
             false,
             false,
@@ -4522,6 +4617,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             now + Duration::from_secs(10),
         );
 
@@ -4557,6 +4653,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             now + Duration::from_secs(10),
         );
 
@@ -4585,6 +4682,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             now + Duration::from_millis(1),
         );
@@ -4623,6 +4721,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             now + Duration::from_millis(1),
         );
 
@@ -4660,6 +4759,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             now + Duration::from_millis(1),
         );
 
@@ -4678,6 +4778,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             now,
         );
@@ -4714,6 +4815,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             now,
         );
         terminal.set_hook_authority_at(
@@ -4734,6 +4836,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             now + Duration::from_millis(2000),
         );
@@ -4875,6 +4978,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             now + Duration::from_millis(1),
         );
 
@@ -4963,6 +5067,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             observed,
         );
         terminal.set_hook_authority_at(
@@ -4982,6 +5087,7 @@ mod tests {
             true,
             false,
             false,
+            false,
             observed,
         );
 
@@ -4995,6 +5101,7 @@ mod tests {
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Idle,
+            false,
             false,
             false,
             false,
@@ -5014,6 +5121,7 @@ mod tests {
         let mutation = terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Idle,
+            false,
             false,
             false,
             false,
@@ -5052,12 +5160,14 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             observed + Duration::from_millis(1),
         );
         terminal.set_detected_state_with_screen_signals_at(
             None,
             AgentState::Unknown,
+            false,
             false,
             false,
             false,
@@ -5087,6 +5197,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             observed + Duration::from_millis(3),
         );
         assert!(terminal
@@ -5107,6 +5218,7 @@ mod tests {
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Codex),
             AgentState::Working,
+            false,
             false,
             false,
             false,
@@ -5135,6 +5247,7 @@ mod tests {
         terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Codex),
             AgentState::Idle,
+            false,
             false,
             false,
             false,
@@ -6201,6 +6314,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             now,
         );
 
@@ -6444,6 +6558,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             now,
         );
@@ -6482,6 +6597,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             now,
         );
@@ -6492,6 +6608,7 @@ mod tests {
         terminal.set_detected_state_with_screen_signals_at(
             None,
             AgentState::Unknown,
+            false,
             false,
             false,
             false,
@@ -6713,6 +6830,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             std::time::Instant::now(),
         );
@@ -6743,6 +6861,7 @@ mod tests {
         let mutation = terminal.set_detected_state_with_screen_signals_at(
             Some(Agent::Pi),
             AgentState::Idle,
+            false,
             false,
             false,
             false,
@@ -6794,6 +6913,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             true,
             now,
         );
@@ -6808,6 +6928,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             now + Duration::from_secs(4),
         );
