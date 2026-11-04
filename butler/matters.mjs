@@ -1,13 +1,16 @@
-// The processor's own tables in butler's store: the ignore list, my notes, which messages have been processed, the
-// matters and their source messages, and the model runs. The collector's tables (messages, chats, …) are only read
-// here; the processor is a separate process on the same SQLite file (WAL, busy timeout). The bot, in the processor's
-// process, edits the ignore list and my notes and closes and reopens matters through this same class.
+// The processor's own tables in butler's store: the ignore list, my notes, which messages and which of my reactions
+// have been processed, the matters and their source messages, and the model runs. The collector's tables (messages,
+// chats, owner_reactions, …) are only read here; the processor is a separate process on the same SQLite file (WAL,
+// busy timeout). The bot, in the processor's process, edits the ignore list and my notes and closes and reopens
+// matters through this same class.
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS ignored_senders(sender_id TEXT PRIMARY KEY, name TEXT, since INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS processed(
  message_id TEXT PRIMARY KEY REFERENCES messages(id), outcome TEXT NOT NULL, run_id INTEGER, at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS processed_reactions(
+ message_id TEXT NOT NULL REFERENCES messages(id), key TEXT NOT NULL, outcome TEXT NOT NULL, run_id INTEGER, at INTEGER NOT NULL, PRIMARY KEY(message_id,key));
 CREATE TABLE IF NOT EXISTS matters(
  id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL, who TEXT NOT NULL, ask TEXT NOT NULL, due TEXT, urgency TEXT NOT NULL,
  status TEXT NOT NULL, reason TEXT, opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, closed_at INTEGER, closed_by TEXT);
@@ -29,6 +32,12 @@ const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT N
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
 const NOT_IN='m.id NOT IN (SELECT value FROM json_each(?))';
+const IN_LIST=column=>`${column} IN (SELECT value FROM json_each(?))`;
+// My reactions (owner_reactions o, on messages m) not processed yet.
+const REACTION_UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed_reactions pr WHERE pr.message_id=o.message_id AND pr.key=o.key)';
+// One of them waits for the model only once its message has been processed: until then the message's own facts show it.
+const REACTION_PENDING=`${REACTION_UNPROCESSED} AND NOT (${UNPROCESSED}) AND ${NOT_IGNORED}`;
+const REACTIONS='owner_reactions o JOIN messages m ON m.id=o.message_id';
 
 export class Matters{
  constructor(store){
@@ -49,9 +58,10 @@ export class Matters{
  ignoredSenders(){return this.#all('SELECT * FROM ignored_senders ORDER BY since,name').map(r=>({senderId:r.sender_id,name:r.name??'',since:r.since}));}
  ignore(senderId,name,now=Date.now()){this.#run('INSERT INTO ignored_senders(sender_id,name,since) VALUES(?,?,?) ON CONFLICT(sender_id) DO UPDATE SET name=excluded.name',senderId,name??null,now);}
  unignore(senderId){this.#run('DELETE FROM ignored_senders WHERE sender_id=?',senderId);}
- // Messages of ignored senders count as processed when they are passed by, so taking a sender off the list later
- // does not hand the model everything it sent while it was on it.
+ // Messages of ignored senders, and my reactions on them, count as processed when they are passed by, so taking a sender
+ // off the list later does not hand the model everything it sent while it was on it.
  skipIgnored(now=Date.now()){
+  this.#run(`INSERT INTO processed_reactions(message_id,key,outcome,at) SELECT o.message_id,o.key,'ignored',? FROM ${REACTIONS} WHERE ${REACTION_UNPROCESSED} AND NOT (${NOT_IGNORED})`,now);
   return Number(this.#run(`INSERT INTO processed(message_id,outcome,at) SELECT m.id,'ignored',? FROM messages m WHERE ${UNPROCESSED} AND NOT (${NOT_IGNORED})`,now).changes);
  }
 
@@ -67,10 +77,27 @@ export class Matters{
  #records(ids){return ids.map(r=>this.store.message(r.id)).filter(Boolean);}
  // Unprocessed messages, oldest first, ignored senders and exclude (ids) left out.
  pending(limit,exclude=[]){return this.#records(this.#all(`SELECT id FROM messages m WHERE ${UNPROCESSED} AND ${NOT_IGNORED} AND ${NOT_IN} ORDER BY created_at,id LIMIT ?`,JSON.stringify(exclude),limit));}
- pendingCount(){return this.#get(`SELECT count(*) n FROM messages m WHERE ${UNPROCESSED} AND ${NOT_IGNORED}`).n;}
+ // Messages that wait for the model, and reactions of mine that do (see REACTION_PENDING).
+ pendingCount(){return this.#get(`SELECT count(*) n FROM messages m WHERE ${UNPROCESSED} AND ${NOT_IGNORED}`).n+this.#get(`SELECT count(*) n FROM ${REACTIONS} WHERE ${REACTION_PENDING}`).n;}
+ // My reactions that wait for the model, in the order butler saw them: {kind: 'reaction', messageId, key, at, chatId}.
+ pendingReactions(limit){
+  return this.#all(`SELECT o.message_id,o.key,o.at,m.feed_id FROM ${REACTIONS} WHERE ${REACTION_PENDING} ORDER BY o.at,o.message_id,o.key LIMIT ?`,limit)
+   .map(r=>({kind:'reaction',messageId:r.message_id,key:r.key,at:r.at,chatId:r.feed_id}));
+ }
+ // My reactions on these messages not processed yet, as owner reaction records ({messageId, key, at}).
+ reactionsOn(ids){
+  return this.#all(`SELECT o.message_id,o.key,o.at FROM owner_reactions o WHERE ${IN_LIST('o.message_id')} AND ${REACTION_UNPROCESSED} ORDER BY o.at`,JSON.stringify(ids))
+   .map(r=>({messageId:r.message_id,key:r.key,at:r.at}));
+ }
  // The latest messages of a chat before a time, oldest first, ignored senders left out.
  before(feedId,t,limit){
   return this.#records(this.#all(`SELECT id FROM messages m WHERE feed_id=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at DESC,id DESC LIMIT ?`,feedId,t,limit)).reverse();
+ }
+ // What I did in these chats from since to before until: my latest messages and the latest messages that carry a
+ // reaction of mine, oldest first, ignored senders left out.
+ responses(feedIds,since,until,limit){
+  return this.#records(this.#all(`SELECT id FROM messages m WHERE ${IN_LIST('feed_id')} AND created_at>=? AND created_at<? AND ${NOT_IGNORED}
+   AND (is_mine=1 OR EXISTS(SELECT 1 FROM json_each(m.reactions) j WHERE j.value->>'isMine')) ORDER BY created_at DESC,id DESC LIMIT ?`,JSON.stringify(feedIds),since,until,limit)).reverse();
  }
  // My own latest messages, newest first.
  mine(limit){return this.#records(this.#all('SELECT id FROM messages WHERE is_mine=1 ORDER BY created_at DESC,id DESC LIMIT ?',limit));}
@@ -78,6 +105,8 @@ export class Matters{
  visible(id){return this.#get(`SELECT id FROM messages m WHERE id=? AND ${NOT_IGNORED}`,id)?this.store.message(id):undefined;}
  // My name as my own messages carry it.
  me(){return this.#get('SELECT sender_name FROM messages WHERE is_mine=1 AND sender_name IS NOT NULL ORDER BY created_at DESC LIMIT 1')?.sender_name??'我';}
+ // My user id, the same way; undefined before I have sent anything.
+ meId(){return this.#get('SELECT sender_id FROM messages WHERE is_mine=1 AND sender_id IS NOT NULL ORDER BY created_at DESC LIMIT 1')?.sender_id;}
 
  // ---- matters
  #matter(row){
@@ -107,8 +136,10 @@ export class Matters{
   return Number(this.#run(`UPDATE matters SET status='open',reason=NULL,closed_at=NULL,closed_by=NULL,updated_at=? WHERE id=? AND status='closed'`,now,id).changes)>0;
  }
  // A model answer (see prompt.mjs readReply) and the messages it covered, in one transaction. outcome: how the
- // messages were processed (model, or context for my own messages that needed no model).
- apply({runId=null,created=[],updated=[],processedIds=[],outcome='model',now=Date.now()}){
+ // messages were processed (model, or context for my own messages that needed no model). reactions: my reactions it
+ // covered, each with its own outcome: model (the model was shown it), covered (its message was shown with it among its
+ // reactions), context (nothing was open that it could end), unshown (its message could not be shown).
+ apply({runId=null,created=[],updated=[],processedIds=[],reactions=[],outcome='model',now=Date.now()}){
   return this.#tx(()=>{
    const link=this.db.prepare('INSERT OR IGNORE INTO matter_messages(matter_id,message_id,added_at) VALUES(?,?,?)'),ids=[];
    for(const m of created){
@@ -124,6 +155,8 @@ export class Matters{
    }
    const done=this.db.prepare('INSERT OR IGNORE INTO processed(message_id,outcome,run_id,at) VALUES(?,?,?,?)');
    for(const id of processedIds)done.run(id,outcome,runId,now);
+   const reacted=this.db.prepare('INSERT OR IGNORE INTO processed_reactions(message_id,key,outcome,run_id,at) VALUES(?,?,?,?,?)');
+   for(const r of reactions)reacted.run(r.messageId,r.key,r.outcome,runId,now);
    return ids;
   });
  }

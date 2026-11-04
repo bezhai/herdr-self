@@ -15,7 +15,7 @@ export async function writeProfile({matters,model,options,notes,now=Date.now}){
  if(!mine.length&&!notes.length)return undefined;
  // Each of mine with what it answered: the message it replied to, or the one before it in its chat.
  const shown=mine.map(m=>[m,(m.parentId&&matters.visible(m.parentId))||matters.before(m.chatId,m.createdAt,1)[0]].filter(Boolean));
- const compose=n=>composeProfile({now:now(),me:matters.me(),records:shown.slice(0,n).flat(),notes,textChars:options.textChars});
+ const compose=n=>composeProfile({now:now(),me:matters.me(),meId:matters.meId(),records:shown.slice(0,n).flat(),notes,textChars:options.textChars});
  const fits=n=>Buffer.byteLength(compose(n).prompt)<=options.maxPromptBytes;
  // The newest n that fit: all of them, or the most a binary search finds (one at least).
  let n=mine.length;

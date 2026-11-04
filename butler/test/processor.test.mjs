@@ -116,6 +116,83 @@ test('only my own messages and nothing open: no model run',async t=>{
  assert.equal(model.calls.length,2,'with a matter open, my messages go to the model: they may end it');
 });
 
+// ---- my reactions (the collector records the first time it sees one of mine on a message, see store.mjs)
+const GET=[{key:'Get',count:1,isMine:true,userNames:['原智鸿']}];
+const actionsOf=data=>messagesOf(data).filter(m=>m.reaction);
+const asking=text=>d=>({new:[{title:text,who:'陈帆',ask:text,urgency:'normal',messages:[ref(d,text)]}],updates:[]});
+
+test('a reaction of mine on a message already processed reaches the model once, as an action on that message, and may end its matter',async t=>{
+ const {store,matters,model,processor}=setup(t,{answer:(d,n)=>n===1?asking('周五前给下排期')(d)
+  :{new:[],updates:[{matter:d.openMatters[0].matter,status:'closed',reason:'TA已回应：加了 Get'}]}});
+ post(store,{chat:'d1',mine:true,text:'早',at:min(0)});
+ const ask=post(store,{text:'@原智鸿 周五前给下排期',at:min(1),parts:[{kind:'at',refId:'me',text:'@原智鸿'},{kind:'text',text:' 周五前给下排期'}]});
+ await processor.runOnce();
+ assert.deepEqual(messagesOf(model.calls[0].data).find(m=>m.text.includes('排期')).mentions,['TA'],'@ of me, known from my own messages');
+ store.setReactions(ask,GET);
+ assert.equal(matters.pendingCount(),1,'the reaction waits to be processed');
+ await processor.runOnce();
+ assert.equal(model.calls.length,2);const d=model.calls[1].data;
+ const shown=messagesOf(d).find(m=>m.text?.includes('排期'));
+ assert.ok(!shown.new,'the message is context');assert.deepEqual(shown.myReactions,['Get']);
+ assert.deepEqual(actionsOf(d),[{new:true,time:actionsOf(d)[0].time,mine:true,reaction:'Get',on:shown.ref}]);
+ assert.deepEqual(d.openMatters[0].messages,[shown.ref]);
+ const [m]=matters.list({all:true});assert.deepEqual([m.status,m.reason],['closed','TA已回应：加了 Get']);
+ assert.equal(matters.pendingCount(),0);assert.equal((await processor.runOnce()).runs,0,'once');
+ store.setReactions(ask,[]);store.setReactions(ask,GET);assert.equal(matters.pendingCount(),0,'taken back and added again is nothing new');
+});
+
+test('a reaction of mine on a message not processed yet comes with that message\'s facts, not as an item of its own',async t=>{
+ const {store,matters,model,processor}=setup(t,{answer:asking('帮忙看下')});
+ post(store,{text:'帮忙看下',at:min(1),reactions:GET});
+ await processor.runOnce();
+ assert.equal(model.calls.length,1);assert.deepEqual(actionsOf(model.calls[0].data),[]);
+ assert.deepEqual(messagesOf(model.calls[0].data)[0].myReactions,['Get']);
+ assert.equal(matters.pendingCount(),0);assert.equal((await processor.runOnce()).runs,0);
+});
+
+test('a reaction of mine seen while its message is with the model comes in a later batch',async t=>{
+ let ask;
+ const {store,model,processor}=setup(t,{answer:(d,n)=>{if(n===1){store.setReactions(ask,GET);return asking('帮忙看下')(d);}return none;}});
+ ask=post(store,{text:'帮忙看下',at:min(1)});
+ await processor.runOnce();
+ assert.equal(model.calls.length,2,'the same round takes it once its message is done');
+ assert.deepEqual(actionsOf(model.calls[1].data).map(a=>a.reaction),['Get']);
+});
+
+test('reactions and messages go in one time order, and with nothing open my reactions need no model run',async t=>{
+ const {store,matters,model,processor}=setup(t,{options:{maxMessages:1},answer:(d,n)=>n===1?asking('早先的事')(d):none});
+ const a=post(store,{text:'早先的事',at:min(1)});
+ await processor.runOnce();
+ store.setReactions(a,GET);const later=post(store,{text:'后来的消息',at:Date.now()+60e3});
+ await processor.runOnce();
+ assert.deepEqual(model.calls.slice(1).map(c=>[actionsOf(c.data).length,newTexts(c.data)]),[[1,[]],[0,['后来的消息']]],'the reaction, seen first, goes first');
+ assert.ok(later);
+ const {store:s2,matters:m2,model:model2,processor:p2}=setup(t);
+ const b=post(s2,{text:'通知',at:min(1)}),z=post(s2,{sender:'zebra',name:'Zebra',type:'bot',text:'投放完成',at:min(2)});m2.ignore('zebra','Zebra');
+ await p2.runOnce();assert.equal(model2.calls.length,1);
+ s2.setReactions(b,GET);s2.setReactions(z,GET);
+ await p2.runOnce();assert.equal(model2.calls.length,1,'nothing open: no run');assert.equal(m2.pendingCount(),0);
+ m2.apply({created:[{title:'通知',who:'陈帆',ask:'看',urgency:'low',messageIds:[b]}]});
+ s2.setReactions(z,[...GET,{key:'DONE',count:1,isMine:true,userNames:[]}]);
+ await p2.runOnce();assert.equal(model2.calls.length,1,'a reaction on an ignored sender\'s message is never shown');assert.equal(m2.pendingCount(),0);
+});
+
+test('an open matter comes with my latest messages and reactions in its chat since it started, past the chat\'s latest messages',async t=>{
+ const {store,matters,model,processor}=setup(t,{options:{contextMessages:3,ownerMessages:2}});
+ const done=[post(store,{mine:true,text:'事项之前我说的',at:min(0)}),post(store,{text:'@原智鸿 帮忙排查下',at:min(1)}),
+  post(store,{mine:true,text:'最早的回应',at:min(2)}),post(store,{text:'日志在这',at:min(3),reactions:GET}),post(store,{mine:true,text:'我在看了',at:min(4)})];
+ for(let i=0;i<5;i++)done.push(post(store,{text:`闲聊${i}`,at:min(10+i)}));
+ const elsewhere=[post(store,{chat:'g2',text:'别的群的事',at:min(1)}),post(store,{chat:'g2',mine:true,text:'别的群里我说的',at:min(2)})];
+ matters.apply({created:[{title:'排查',who:'陈帆',ask:'排查',urgency:'normal',messageIds:[done[1]]},{title:'别的',who:'陈帆',ask:'看',urgency:'normal',messageIds:[elsewhere[0]]}],
+  processedIds:[...done,...elsewhere]});
+ post(store,{text:'新消息',at:min(20)});
+ await processor.runOnce();
+ const shown=messagesOf(model.calls[0].data),texts=shown.map(m=>m.text);
+ for(const x of ['@原智鸿 帮忙排查下','日志在这','我在看了','闲聊2','闲聊3','闲聊4','新消息'])assert.ok(texts.includes(x),x);
+ for(const x of ['事项之前我说的','最早的回应','闲聊1','别的群里我说的'])assert.ok(!texts.includes(x),`not ${x}`);
+ assert.deepEqual(shown.find(m=>m.text==='日志在这').myReactions,['Get']);
+});
+
 test('when the model cannot be reached the messages wait, and a later run takes them in smaller batches until one succeeds',async t=>{
  let down=true;
  const {store,matters,model,processor}=setup(t,{options:{maxMessages:4},answer:()=>{if(down)throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');return none;}});
@@ -169,7 +246,7 @@ test('a second processor on the same store refuses to start while the first runs
 
 // A model that cannot use one message: whenever that message is among the new ones it answers, but not with the
 // asked-for JSON; everything else it handles. failOthers: what it does with the rest instead (a function that may throw).
-const newTexts=d=>messagesOf(d).filter(m=>m.new).map(m=>m.text);
+const newTexts=d=>messagesOf(d).filter(m=>m.new&&!m.reaction).map(m=>m.text);
 function poisoned(text,failOthers){return (d,n)=>{if(newTexts(d).some(x=>x.includes(text)))return '我没法处理这条';return failOthers?failOthers(d,n):none;};}
 
 test('a message that alone keeps getting an unusable answer is skipped after three such failures, and the rest is not held up',async t=>{

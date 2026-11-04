@@ -1,5 +1,6 @@
 // The processor: every few minutes it hands the messages that came in since to the model, one batch at a time, and
-// applies what the model makes of them (new matters, messages attached to open ones, matters that have ended). It
+// applies what the model makes of them (new matters, messages attached to open ones, matters that have ended). My own
+// reactions the collector saw on messages processed before go in the same batches, in time order (see #pending). It
 // assembles context and checks the answer; what is a matter, what belongs to it, how urgent it is and whether it has
 // ended is the model's call. Messages that could not be processed stay pending and go again on the next round, with
 // one exception: a message the model cannot handle by itself (see #round) is skipped after a few tries. Once a day,
@@ -12,9 +13,11 @@ import {writeProfile} from './profile.mjs';
 
 // contextMessages and matterMessages: how many of a chat's and of a matter's latest messages come along, in a batch
 // for the chats of its messages and the open matters there, in a review for every open matter and its chats.
+// ownerMessages: how many of my latest messages, and messages I reacted to, in such a matter's chats since it started
+// come along too, so that my answer shows even when the chat has moved on past its latest messages.
 // profileMessages: how many of my latest messages 关于TA is written from at most, more than fit one prompt (the
 // newest that fit go).
-export const DEFAULTS={everyMs:600_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,textChars:1500,skipAfter:3,
+export const DEFAULTS={everyMs:600_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,ownerMessages:5,textChars:1500,skipAfter:3,
  reviewEveryMs:10_800_000,profileEveryMs:86_400_000,profileMessages:1000};
 const message=e=>e?.message??String(e);
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
@@ -23,6 +26,9 @@ const due=(last,everyMs,now)=>!(now-last?.at<everyMs);
 // What a profile or a review was made with, to tell when they are out of date: my notes by their numbers (see
 // matters.mjs), and for a review the profile by when it was written.
 const numbers=notes=>notes.map(n=>n.id),same=(a=[],b=[])=>a.length===b.length&&a.every((x,i)=>x===b[i]);
+// A batch holds messages (store records) and my reactions (see Matters.pendingReactions); a reaction is timed by when
+// butler saw it.
+const isReaction=x=>x.kind==='reaction',timeOf=x=>isReaction(x)?x.at:x.createdAt;
 
 export class Processor{
  #limit;#cycle;#timers=[];#halting=false;
@@ -71,20 +77,24 @@ export class Processor{
   let runs=0,failures=0,failed=false;const aside=new Map(),counted=new Set();// aside: id → error, until a successful run counts it
   this.matters.skipIgnored();
   while(!this.#halting){
-   const pending=this.matters.pending(this.#limit,[...aside.keys(),...counted]);if(!pending.length)break;
+   const pending=this.#pending([...aside.keys(),...counted]);if(!pending.length)break;
    const open=this.matters.list();
-   // My own messages only add context; with nothing open there is nothing they could end.
-   if(!open.length&&pending.every(m=>m.isMine)){this.matters.apply({processedIds:pending.map(m=>m.id),outcome:'context'});continue;}
-   const struck=this.matters.struck(),i=pending.findIndex(m=>struck.has(m.id));
+   // What I did myself, my messages and my reactions, only adds context; with nothing open there is nothing it could end.
+   if(!open.length&&pending.every(x=>isReaction(x)||x.isMine)){
+    const messages=pending.filter(x=>!isReaction(x));
+    this.matters.apply({processedIds:messages.map(m=>m.id),reactions:[...pending.filter(isReaction).map(x=>({...x,outcome:'context'})),...this.#covered(messages)],outcome:'context'});
+    continue;
+   }
+   const struck=this.matters.struck(),i=pending.findIndex(x=>!isReaction(x)&&struck.has(x.id));
    const candidates=i===0?pending.slice(0,1):i>0?pending.slice(0,i):pending;
    runs+=1;const r=await this.#run(this.#compose(candidates,open,new Set([...struck,...aside.keys()])),open);
    if(r.ok){
-    this.matters.clearStrikes(r.batch.map(m=>m.id));
+    this.matters.clearStrikes(r.batch.filter(x=>!isReaction(x)).map(m=>m.id));
     for(const [id,error] of aside){this.#strike(id,error);counted.add(id);}
     aside.clear();continue;
    }
    failures+=1;
-   if(r.answered&&r.batch.length===1&&!aside.size){aside.set(r.batch[0].id,r.error);continue;}
+   if(r.answered&&r.batch.length===1&&!isReaction(r.batch[0])&&!aside.size){aside.set(r.batch[0].id,r.error);continue;}
    failed=true;break;
   }
   // A round that ended on a failure leaves the profile and the review for later: the model is not there.
@@ -145,36 +155,58 @@ export class Processor{
   this.store.addError('加工',`跳过消息 ${id}（${m.chatName??m.chatId} · ${m.senderName??m.senderId} · ${at}：${m.text.replace(/\s+/g,' ').slice(0,80)}）：模型单独处理它 ${this.options.skipAfter} 次都没有给出可用的回答，别的消息同时处理正常。最后一次：${error}`);
  }
 
- // The batch and its prompt. A prompt over maxPromptBytes is retried with the older half of the batch and, down to
- // one message, with the newer half of its context. exclude: messages to keep out of the context.
+ // Pending messages and my reactions that wait for the model, in one time order, up to the batch size. exclude:
+ // messages to leave out.
+ #pending(exclude){
+  return [...this.matters.pending(this.#limit,exclude),...this.matters.pendingReactions(this.#limit)].sort((a,b)=>timeOf(a)-timeOf(b)).slice(0,this.#limit);
+ }
+ // My reactions on these messages that their records show (the collector writes a reaction of mine and the message's
+ // updated_at together), so that they are processed with them; one it records later goes on its own.
+ #covered(messages){
+  const byId=new Map(messages.map(m=>[m.id,m]));
+  return this.matters.reactionsOn([...byId.keys()]).filter(r=>r.at<=byId.get(r.messageId).updatedAt).map(r=>({...r,outcome:'covered'}));
+ }
+ // The batch and its prompt, and how each of my reactions it covers is processed (see Matters.apply). A prompt over
+ // maxPromptBytes is retried with the older half of the batch and, down to one item, with the newer half of its
+ // context. A reaction is shown when the message it is on is (its message may be one to exclude, or cut for size).
+ // exclude: messages to keep out of the context.
  #compose(pending,open,exclude){
-  let batch=pending,context=this.#context(batch,open).filter(r=>!exclude.has(r.id));const about=this.#about();
+  let batch=pending,context=this.#context(batch,open,exclude);const about=this.#about(),me=this.matters.me(),meId=this.matters.meId();
   for(;;){
-   const composed=composePrompt({now:this.now(),me:this.matters.me(),batch,context,openMatters:open,textChars:this.options.textChars,about});
-   if(Buffer.byteLength(composed.prompt)<=this.options.maxPromptBytes||batch.length===1&&!context.length)return {batch,...composed};
-   if(batch.length>1){batch=batch.slice(0,Math.ceil(batch.length/2));context=this.#context(batch,open).filter(r=>!exclude.has(r.id));}
+   const messages=batch.filter(x=>!isReaction(x)),reactions=batch.filter(isReaction),shown=new Set(context.map(r=>r.id));
+   const actions=reactions.filter(x=>shown.has(x.messageId));
+   const composed=composePrompt({now:this.now(),me,meId,batch:messages,reactions:actions,context,openMatters:open,textChars:this.options.textChars,about});
+   if(Buffer.byteLength(composed.prompt)<=this.options.maxPromptBytes||batch.length===1&&!context.length)
+    return {batch,...composed,reactions:[...actions.map(x=>({...x,outcome:'model'})),...reactions.filter(x=>!shown.has(x.messageId)).map(x=>({...x,outcome:'unshown'})),...this.#covered(messages)]};
+   if(batch.length>1){batch=batch.slice(0,Math.ceil(batch.length/2));context=this.#context(batch,open,exclude);}
    else context=context.slice(Math.ceil(context.length/2));
   }
  }
  // What helps reading the batch: the latest earlier messages of each chat, the thread roots and the messages replied
- // to, and the latest messages of the open matters in these chats.
- #context(batch,open){
-  const fresh=new Set(batch.map(m=>m.id)),out=new Map(),add=r=>{if(r&&!fresh.has(r.id))out.set(r.id,r);};
-  const chats=new Set(batch.map(m=>m.chatId));
-  for(const chat of chats)for(const r of this.matters.before(chat,Math.min(...batch.filter(m=>m.chatId===chat).map(m=>m.createdAt)),this.options.contextMessages))add(r);
-  for(const m of batch){if(m.rootId&&m.rootId!==m.id)add(this.matters.visible(m.rootId));if(m.parentId)add(this.matters.visible(m.parentId));}
-  for(const matter of open)if(matter.chatIds.some(c=>chats.has(c)))for(const id of matter.messageIds.slice(-this.options.matterMessages))add(this.matters.visible(id));
+ // to, the messages my reactions are on, and for the open matters in these chats their latest messages and what I did
+ // there since they started (my messages, messages I reacted to), up to the newest of the batch. exclude: messages to
+ // leave out.
+ #context(batch,open,exclude){
+  const messages=batch.filter(x=>!isReaction(x)),fresh=new Set(messages.map(m=>m.id)),out=new Map(),add=r=>{if(r&&!fresh.has(r.id)&&!exclude.has(r.id))out.set(r.id,r);};
+  const chats=new Set(batch.map(x=>x.chatId)),until=Math.max(...batch.map(timeOf))+1;
+  for(const chat of chats)for(const r of this.matters.before(chat,Math.min(...batch.filter(x=>x.chatId===chat).map(timeOf)),this.options.contextMessages))add(r);
+  for(const m of messages){if(m.rootId&&m.rootId!==m.id)add(this.matters.visible(m.rootId));if(m.parentId)add(this.matters.visible(m.parentId));}
+  for(const x of batch.filter(isReaction))add(this.matters.visible(x.messageId));
+  for(const matter of open)if(matter.chatIds.some(c=>chats.has(c))){
+   for(const id of matter.messageIds.slice(-this.options.matterMessages))add(this.matters.visible(id));
+   for(const r of this.matters.responses(matter.chatIds,matter.since,until,this.options.ownerMessages))add(r);
+  }
   return [...out.values()];
  }
  // One model run, recorded in model_runs. A failure keeps the batch pending and halves the next one: a batch too big
  // or too slow for the model gets through in smaller parts, and a success restores the size. answered: the model gave
  // an answer that could not be used (as opposed to giving none).
- async #run({batch,system,prompt,refs},open){
+ async #run({batch,system,prompt,refs,reactions},open){
   let answered=false;
   try{
    await this.matters.recordRun({model:this.model,kind:'batch',messages:batch.length,matters:open.length,system,prompt,now:this.now},(output,runId)=>{
     let reply;try{reply=readReply(output,{refs,matterIds:new Set(open.map(m=>m.id))});}catch(e){answered=true;throw e;}
-    this.matters.apply({runId,created:reply.created,updated:reply.updated,processedIds:batch.map(m=>m.id)});
+    this.matters.apply({runId,created:reply.created,updated:reply.updated,processedIds:batch.filter(x=>!isReaction(x)).map(m=>m.id),reactions});
     for(const p of reply.problems)this.store.addError('加工',`模型回复里没有采纳的部分：${p}`);
    });
    this.#limit=this.options.maxMessages;this.#beat({lastSuccessAt:this.now()});

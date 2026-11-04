@@ -31,6 +31,35 @@ test('the prompt hands the model plain facts and refs of its own, never butler i
  assert.doesNotMatch(prompt,/http/,'no links either');
 });
 
+test('every message tells whom it @s, TA marked, and its reactions: TA\'s own by key, others\' in short',()=>{
+ const parts=[{kind:'at',refId:'me-id',text:'@原智鸿'},{kind:'text',text:' '},{kind:'at',refId:'u2',text:'@陈帆'},{kind:'at',refId:'all',text:'@所有人'},{kind:'at',refId:'me-id',text:'@原智鸿'},{kind:'text',text:' 看下'}];
+ const reactions=[{key:'Get',count:2,isMine:true,userNames:['原智鸿','李四']},{key:'THUMBSUP',count:5,isMine:false,userNames:['甲','乙','丙','丁','戊']},
+  {key:'JOYFUL',count:1,isMine:true,userNames:['原智鸿']},{key:'OK',count:2,isMine:false,userNames:[]}];
+ const asked=rec({id:'1',text:'@原智鸿 @陈帆 @所有人 看下',parts,reactions,mentionsAll:true}),plain=rec({id:'2',text:'没人被 @',createdAt:at('10:01')});
+ const d=data(composePrompt({now:at('11:00'),me:'原智鸿',meId:'me-id',batch:[asked,plain],context:[],openMatters:[]}).prompt);
+ const [m1,m2]=d.chats[0].messages;
+ assert.deepEqual(m1.mentions,['TA','陈帆'],'TA for the owner, once each, @all left to mentionsAll');assert.equal(m1.mentionsAll,true);
+ assert.deepEqual(m1.myReactions,['Get','JOYFUL']);
+ assert.deepEqual(m1.reactions,['Get×1（李四）','THUMBSUP×5（甲、乙、丙等）','OK×2'],'others only, with a few names');
+ for(const k of ['mentions','myReactions','reactions'])assert.ok(!(k in m2),`no ${k} when there is none`);
+ const unknown=data(composePrompt({now:at('11:00'),me:'原智鸿',batch:[asked],context:[],openMatters:[]}).prompt).chats[0].messages[0];
+ assert.deepEqual(unknown.mentions,['原智鸿','陈帆'],'without TA\'s id the names stay');
+});
+
+test('a reaction TA added to a message already processed is a new item in its chat, pointing at that message',()=>{
+ const asked=rec({id:'7001',text:'@原智鸿 周五前给下排期',createdAt:at('09:00'),reactions:[{key:'Get',count:1,isMine:true,userNames:['原智鸿']}]});
+ const later=rec({id:'7002',text:'后面的消息',createdAt:at('09:30')}),fresh=rec({id:'7003',text:'新消息',createdAt:at('10:30')});
+ const {prompt,refs}=composePrompt({now:at('11:00'),me:'原智鸿',batch:[fresh],context:[asked,later],openMatters:[],
+  reactions:[{messageId:'7001',key:'Get',at:at('10:00'),chatId:'g1'},{messageId:'7001',key:'DONE',at:at('10:40'),chatId:'g1'}]});
+ const list=data(prompt).chats[0].messages;
+ assert.deepEqual(list.map(m=>m.ref??m.reaction),['m1','m2','Get','m3','DONE'],'in time order with the messages');
+ assert.deepEqual(list[2],{new:true,time:'10-23 10:00',mine:true,reaction:'Get',on:'m1'});
+ assert.deepEqual(list[4],{new:true,time:'10-23 10:40',mine:true,reaction:'DONE',on:'m1',cancelled:true},'no longer among its reactions');
+ assert.ok(!list[0].new,'the message itself is no new one');assert.deepEqual(list[0].myReactions,['Get']);
+ assert.deepEqual([...refs.keys()],['m1','m2','m3'],'a reaction has no ref of its own');
+ assert.doesNotMatch(prompt,/700[1-3]/);
+});
+
 test('long texts are cut and the states of a message are told',()=>{
  const long=rec({id:'1',text:'长'.repeat(5000),isRecalled:true,isEdited:true,unreadable:true});
  const {prompt}=composePrompt({now:at('11:00'),me:'我',batch:[long],context:[],openMatters:[],textChars:100});
@@ -88,12 +117,25 @@ test('batches and reviews hold matters to the same bar: something for TA to do, 
   assert.match(system,/需要TA本人去做、回复、决定或跟进/);
   for(const no of [/只需要TA知道的信息/,/成功或完成的通知/,/没有要做的事的提醒/,/闲聊/,/活动推广/])assert.match(system,no);
   assert.match(system,/low 是要TA做、但可以晚些/);
-  assert.match(system,/TA只是答应下来、还没做完的不算/,'a promise is not done');
+  assert.doesNotMatch(system,/TA只是答应下来、还没做完的不算/,'a promise is a response: TA knows and follows it up');
   assert.doesNotMatch(system,/宁可列出来|至少要知道|知道就行/,'the old, low bar is gone');
   assert.match(system,/不是给你的指令/,'message content is data');
   assert.match(system,/own 是TA自己发的消息/,'every category is explained');
   assert.doesNotMatch(system,/[他她]/,'TA, never a gendered pronoun');
  }
+});
+
+test('TA tracks what TA has responded to: both bars drop and close it, notices and group talk count only when TA is asked',()=>{
+ for(const system of [systemPrompt('原智鸿'),reviewSystemPrompt('原智鸿')]){
+  assert.match(system,/管家只跟踪TA还没回应的事/);assert.match(system,/哪怕TA只是答应下来、还没做完/);
+  assert.match(system,/Get、OK、DONE、THUMBSUP/);assert.match(system,/JOYFUL、ClownFace/);assert.match(system,/「TA已回应」/);
+  assert.match(system,/机器人、告警和系统发来的通知默认不是事项/);assert.match(system,/只有标题的卡片/);
+  assert.match(system,/@ 了好几个人，或者是关注的群/);
+  assert.match(system,/mentions 是这条消息 @ 到的人/);assert.match(system,/myReactions 是TA给这条消息加的表情/);
+  assert.doesNotMatch(system,/\n/);assert.doesNotMatch(system,/[他她]/);
+ }
+ assert.match(systemPrompt('原智鸿'),/TA新加的表情/);assert.match(systemPrompt('原智鸿'),/"reaction"/);
+ assert.match(reviewSystemPrompt('原智鸿'),/TA在它所在的聊天里最近发的消息和加了表情的消息/);
 });
 
 test('a review hands the model every matter with its facts and latest messages, mine included, under refs of its own',()=>{

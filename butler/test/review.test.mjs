@@ -73,6 +73,20 @@ test('the latest few messages: of each matter, and of each of its chats',async t
  assert.deepEqual(messagesOf(model.calls[0].data).map(m=>m.text),['事项消息4','事项消息5','后来的2','后来的3','后来的4']);
 });
 
+test('each matter comes with my latest messages and reactions in its chats since it started, past their latest messages',async t=>{
+ const {store,model,made,run}=setup(t,{options:{matterMessages:1,contextMessages:2,ownerMessages:2}});
+ post(store,{mine:true,text:'事项之前我说的',at:min(0)});
+ const ask=post(store,{text:'@原智鸿 帮忙排查下',at:min(1)});
+ post(store,{mine:true,text:'最早的回应',at:min(2)});post(store,{text:'日志在这',at:min(3),reactions:[{key:'Get',count:1,isMine:true,userNames:['原智鸿']}]});
+ post(store,{mine:true,text:'我在看了',at:min(4)});for(let i=0;i<4;i++)post(store,{text:`闲聊${i}`,at:min(10+i)});
+ post(store,{chat:'g2',mine:true,text:'别的群里我说的',at:min(5)});
+ made('排查',[ask]);
+ await run();
+ const shown=messagesOf(model.calls[0].data),texts=shown.map(m=>m.text);
+ assert.deepEqual(texts,['@原智鸿 帮忙排查下','日志在这','我在看了','闲聊2','闲聊3']);
+ assert.deepEqual(shown[1].myReactions,['Get']);assert.equal(shown[2].mine,true);
+});
+
 test('a reply that would make a matter, or points elsewhere, has those parts left out and on record',async t=>{
  const {store,matters,made,run}=setup(t,{answer:d=>({new:[{title:'冒出来的',who:'x',ask:'y',urgency:'low',messages:['m1']}],
   updates:[{matter:999,status:'closed',reason:'r'},{matter:d.matters[0].matter,status:'closed'}]})});
