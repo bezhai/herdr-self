@@ -63,6 +63,46 @@ test('a store from before own keeps my earlier messages as own too',async t=>{
  assert.deepEqual(cats(store,'1'),['dm','own']);assert.deepEqual(cats(store,'2'),['dm']);
 });
 
+const reactionsOf=(store,id)=>store.message(id)?.reactions;
+const keys=(store,id)=>store.ownerReactions(id).map(r=>r.key);
+
+test('reactions are kept on stored messages without who exactly reacted, and one of mine becomes an owner reaction once',async t=>{
+ const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});
+ const c=await running();const v=lark.post(dm,{text:'帮忙看下'});await waitFor(()=>store.message(v.id));
+ assert.deepEqual(reactionsOf(store,v.id),[]);assert.deepEqual(store.ownerReactions(v.id),[]);
+ // open-lark stores them without any event here; the next read of the chat by position brings them.
+ lark.react(v.id,'THUMBSUP',{name:'李四',event:false});lark.react(v.id,'THUMBSUP',{name:'王五',event:false});lark.react(v.id,'Get',{mine:true,event:false});
+ lark.post(dm,{text:'下一条'},{event:'none'});const before=Date.now();await c.reconcile('periodic');
+ assert.deepEqual(reactionsOf(store,v.id),[{key:'THUMBSUP',count:2,isMine:false,userNames:['李四','王五']},{key:'Get',count:1,isMine:true,userNames:['我']}]);
+ const [own]=store.ownerReactions(v.id);
+ assert.deepEqual([own.messageId,own.key],[v.id,'Get']);assert.ok(own.at>=before,'when butler saw it');
+ lark.post(dm,{text:'再一条'},{event:'none'});await c.reconcile('periodic');
+ assert.deepEqual(keys(store,v.id),['Get'],'reading it again is no new reaction of mine');
+});
+
+test('reaction.updated refreshes the reactions of a message butler holds once per burst, from open-lark\'s own store',async t=>{
+ const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'}),group=lark.chat({name:'不关注的群'});
+ const c=await running();const v=lark.post(dm,{text:'方案发你了'}),other=lark.post(group,{text:'和我无关'});
+ await waitFor(()=>store.message(v.id));
+ const asked=id=>lark.requests.filter(r=>r.path===`/agent/v1/messages/${id}/reactions`).length;
+ // A burst: several reactions on one message, and one on a message butler does not hold.
+ lark.react(v.id,'OK',{name:'李四'});lark.react(v.id,'Get',{mine:true});lark.react(v.id,'OK',{name:'王五'});lark.react(other.id,'Get',{mine:true});
+ await waitFor(()=>reactionsOf(store,v.id).length===2,{message:'reactions after the event'});await sleep(50);
+ assert.deepEqual(reactionsOf(store,v.id),[{key:'OK',count:2,isMine:false,userNames:['李四','王五']},{key:'Get',count:1,isMine:true,userNames:['我']}]);
+ assert.equal(asked(v.id),1,'one read for the burst');assert.equal(asked(other.id),0,'none for a message butler does not hold');
+ assert.equal(store.message(other.id),undefined);
+ assert.ok(!lark.requests.some(r=>r.path===`/agent/v1/messages/${v.id}`),'not GET /messages/:id, which asks Lark about the chat');
+ assert.deepEqual(keys(store,v.id),['Get']);
+ // Taking it back only changes the current reactions; adding it again is not a second reaction of mine.
+ lark.react(v.id,'Get',{mine:true,cancel:true});
+ await waitFor(()=>reactionsOf(store,v.id).length===1,{message:'the cancel'});
+ assert.deepEqual(reactionsOf(store,v.id),[{key:'OK',count:2,isMine:false,userNames:['李四','王五']}]);assert.deepEqual(keys(store,v.id),['Get']);
+ lark.react(v.id,'Get',{mine:true});await waitFor(()=>reactionsOf(store,v.id).length===2,{message:'added again'});
+ lark.react(v.id,'DONE',{mine:true});await waitFor(()=>reactionsOf(store,v.id).length===3,{message:'another key'});
+ assert.deepEqual(keys(store,v.id),['Get','DONE']);
+ await c.idle();assert.deepEqual(store.errors(100),[]);
+});
+
 test('a message pushed twice is stored once; edits and recalls update that record',async t=>{
  const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'});await running();
  const v=lark.post(dm,{text:'原文'});lark.emit({type:'message.upserted',feedId:dm,messageId:v.id,message:v});
@@ -396,7 +436,8 @@ test('a store from the previous version is upgraded, and a chat it left at curso
  old.exec(`CREATE TABLE messages(id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, chat_kind TEXT NOT NULL, sender_id TEXT, sender_name TEXT, sender_type TEXT,
   created_at INTEGER NOT NULL, position TEXT, thread_role TEXT NOT NULL, root_id TEXT, parent_id TEXT, reply_to_sender_id TEXT, text TEXT NOT NULL, parts TEXT NOT NULL,
   unreadable INTEGER NOT NULL, is_mine INTEGER NOT NULL, mentions_all INTEGER NOT NULL, is_recalled INTEGER NOT NULL, is_edited INTEGER NOT NULL,
-  first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);old.close();
+  first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+ old.prepare(`INSERT INTO messages VALUES('7100000000000000777',?,'direct','u','同事','user',?,'1','none',NULL,NULL,NULL,'旧消息','[]',0,0,0,0,0,?,?)`).run(dm,Date.now(),Date.now(),Date.now());old.close();
  const store=new Store(file,{linkBase:'http://127.0.0.1:3333'}),c=new Collector({store,url:lark.url,token:lark.token,options:FAST});
  t.after(async()=>{await c.stop();await lark.close();store.close();fs.rmSync(dir,{recursive:true,force:true});});
  await c.start();await waitFor(()=>c.connected);await c.idle();
@@ -405,6 +446,7 @@ test('a store from the previous version is upgraded, and a chat it left at curso
  assert.ok(reads.length>=1);assert.equal(reads[0].query.tail,'1','read from the tail, not forward from 0');assert.ok(!reads.some(r=>r.query.afterPosition==='0'));
  assert.deepEqual(cats(store,v.id),['dm']);assert.equal(store.chat(dm).cursor,Number(v.position));
  assert.equal(store.chat(dm).dirty,false);assert.equal(store.chat(dm).name,'张三');assert.deepEqual(store.errors(100),[]);
+ assert.deepEqual(store.message('7100000000000000777').reactions,[],'a message from before reactions has none');
 });
 
 
@@ -437,6 +479,8 @@ test('the collector only reads: no write route and never the pins route',async t
  const root=lark.post(group,{mine:true,text:'讨论'});lark.post(group,{thread:root.id,text:'回复'},{event:'root-only'});
  lark.post(dm,{text:'私聊'},{event:'bare'});lark.post(topic,{atMe:true,text:'@我'},{event:'none',touch:false});
  const t1=lark.post(topic,{text:'话题'});lark.post(topic,{thread:t1.id,mine:true,text:'我回'});
+ await waitFor(()=>store.message(root.id));lark.react(root.id,'Get',{mine:true});
+ await waitFor(()=>lark.requests.some(r=>r.path===`/agent/v1/messages/${root.id}/reactions`),{message:'the reactions read'});
  await c.reconcile('manual');await c.idle();
  assert.ok(lark.requests.length>10);
  assert.deepEqual(lark.writes(),[]);assert.deepEqual(lark.requests.filter(r=>r.path.includes('/pins')),[]);

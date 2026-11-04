@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
-import {CATEGORIES,messageLink} from './rules.mjs';
+import {CATEGORIES,messageLink,reactionsOf} from './rules.mjs';
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS messages(
@@ -12,13 +12,16 @@ CREATE TABLE IF NOT EXISTS messages(
  thread_role TEXT NOT NULL, root_id TEXT, parent_id TEXT, reply_to_sender_id TEXT,
  text TEXT NOT NULL, parts TEXT NOT NULL, unreadable INTEGER NOT NULL, is_mine INTEGER NOT NULL, mentions_all INTEGER NOT NULL,
  is_recalled INTEGER NOT NULL, is_edited INTEGER NOT NULL, first_seen_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
- is_ephemeral INTEGER NOT NULL DEFAULT 0);
+ is_ephemeral INTEGER NOT NULL DEFAULT 0, reactions TEXT NOT NULL DEFAULT '[]');
 CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS messages_root ON messages(root_id);
 CREATE INDEX IF NOT EXISTS messages_feed ON messages(feed_id);
 CREATE TABLE IF NOT EXISTS message_categories(
  message_id TEXT NOT NULL REFERENCES messages(id), category TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(message_id,category));
 CREATE INDEX IF NOT EXISTS categories_by_time ON message_categories(category,created_at);
+CREATE TABLE IF NOT EXISTS owner_reactions(
+ message_id TEXT NOT NULL REFERENCES messages(id), key TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(message_id,key));
+CREATE INDEX IF NOT EXISTS owner_reactions_by_time ON owner_reactions(at);
 CREATE TABLE IF NOT EXISTS chats(
  feed_id TEXT PRIMARY KEY, name TEXT, chat_mode TEXT, member_count INTEGER, is_muted INTEGER, last_active_at INTEGER,
  cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, read_retries INTEGER NOT NULL DEFAULT 0);
@@ -33,7 +36,8 @@ CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEG
 `;
 // Columns added after a store was first created, added to an older store when it is opened.
 const ADDED_COLUMNS=[['chats','read_retries','INTEGER NOT NULL DEFAULT 0'],['threads','announced_count','INTEGER NOT NULL DEFAULT 0'],
- ['threads','attempts','INTEGER NOT NULL DEFAULT 0'],['threads','last_error','TEXT'],['messages','is_ephemeral','INTEGER NOT NULL DEFAULT 0']];
+ ['threads','attempts','INTEGER NOT NULL DEFAULT 0'],['threads','last_error','TEXT'],['messages','is_ephemeral','INTEGER NOT NULL DEFAULT 0'],
+ ['messages','reactions',"TEXT NOT NULL DEFAULT '[]'"]];
 const KEEP_ERRORS=100;
 const order=c=>CATEGORIES.indexOf(c);
 
@@ -62,21 +66,36 @@ export class Store{
  // ---- messages
  // Inserts or updates one record; categories only accumulate. Recalled and edited are sticky, and a view that is less
  // recalled or less edited than the stored record (a page fetched before the edit arrived) does not replace its content.
+ // Reactions (JSON, see rules.mjs recordOf) are the view's when it has them, and each of mine is an owner reaction.
  upsertMessage(r,categories,now=Date.now()){
   this.#tx(()=>{
-   this.#run(`INSERT INTO messages(id,feed_id,chat_kind,sender_id,sender_name,sender_type,created_at,position,thread_role,root_id,parent_id,reply_to_sender_id,text,parts,unreadable,is_mine,mentions_all,is_recalled,is_edited,is_ephemeral,first_seen_at,updated_at)
-    VALUES($id,$feedId,$chatKind,$senderId,$senderName,$senderType,$createdAt,$position,$threadRole,$rootId,$parentId,$replyToSenderId,$text,$parts,$unreadable,$isMine,$mentionsAll,$isRecalled,$isEdited,$isEphemeral,$now,$now)
+   this.#run(`INSERT INTO messages(id,feed_id,chat_kind,sender_id,sender_name,sender_type,created_at,position,thread_role,root_id,parent_id,reply_to_sender_id,text,parts,unreadable,is_mine,mentions_all,is_recalled,is_edited,is_ephemeral,reactions,first_seen_at,updated_at)
+    VALUES($id,$feedId,$chatKind,$senderId,$senderName,$senderType,$createdAt,$position,$threadRole,$rootId,$parentId,$replyToSenderId,$text,$parts,$unreadable,$isMine,$mentionsAll,$isRecalled,$isEdited,$isEphemeral,COALESCE($reactions,'[]'),$now,$now)
     ON CONFLICT(id) DO UPDATE SET chat_kind=excluded.chat_kind,sender_name=excluded.sender_name,sender_type=excluded.sender_type,position=excluded.position,
      thread_role=excluded.thread_role,root_id=excluded.root_id,parent_id=excluded.parent_id,reply_to_sender_id=excluded.reply_to_sender_id,
      text=CASE WHEN excluded.is_recalled<messages.is_recalled OR excluded.is_edited<messages.is_edited THEN messages.text ELSE excluded.text END,
      parts=CASE WHEN excluded.is_recalled<messages.is_recalled OR excluded.is_edited<messages.is_edited THEN messages.parts ELSE excluded.parts END,
      unreadable=CASE WHEN excluded.is_recalled<messages.is_recalled OR excluded.is_edited<messages.is_edited THEN messages.unreadable ELSE excluded.unreadable END,
-     mentions_all=excluded.mentions_all,is_recalled=MAX(messages.is_recalled,excluded.is_recalled),is_edited=MAX(messages.is_edited,excluded.is_edited),is_ephemeral=excluded.is_ephemeral,updated_at=excluded.updated_at`,
-    {...r,unreadable:r.unreadable?1:0,isMine:r.isMine?1:0,mentionsAll:r.mentionsAll?1:0,isRecalled:r.isRecalled?1:0,isEdited:r.isEdited?1:0,isEphemeral:r.isEphemeral?1:0,now});
+     mentions_all=excluded.mentions_all,is_recalled=MAX(messages.is_recalled,excluded.is_recalled),is_edited=MAX(messages.is_edited,excluded.is_edited),is_ephemeral=excluded.is_ephemeral,reactions=COALESCE($reactions,messages.reactions),updated_at=excluded.updated_at`,
+    {...r,unreadable:r.unreadable?1:0,isMine:r.isMine?1:0,mentionsAll:r.mentionsAll?1:0,isRecalled:r.isRecalled?1:0,isEdited:r.isEdited?1:0,isEphemeral:r.isEphemeral?1:0,reactions:r.reactions??null,now});
    const add=this.db.prepare('INSERT OR IGNORE INTO message_categories(message_id,category,created_at) VALUES(?,?,?)');
    for(const c of categories)add.run(r.id,c,r.createdAt);
+   if(r.reactions!=null)this.#ownerReacted(r.id,JSON.parse(r.reactions),now);
   });
  }
+ // The current reactions of a message butler holds, as open-lark lists them (GET /messages/:id/reactions).
+ setReactions(id,list,now=Date.now()){
+  const reactions=reactionsOf(list)??[];
+  this.#tx(()=>{if(Number(this.#run('UPDATE messages SET reactions=?,updated_at=? WHERE id=?',JSON.stringify(reactions),now,id).changes))this.#ownerReacted(id,reactions,now);});
+ }
+ // A reaction of mine is recorded when butler first sees it, once per message and key: taking it back changes only the
+ // message's current reactions, and adding it again is nothing new.
+ #ownerReacted(id,reactions,now){
+  const add=this.db.prepare('INSERT OR IGNORE INTO owner_reactions(message_id,key,at) VALUES(?,?,?)');
+  for(const r of reactions)if(r.isMine)add.run(id,r.key,now);
+ }
+ // My reactions to a message, in the order butler saw them.
+ ownerReactions(messageId){return this.#all('SELECT * FROM owner_reactions WHERE message_id=? ORDER BY at,rowid',messageId).map(r=>({messageId:r.message_id,key:r.key,at:r.at}));}
  markRecalled(id,now=Date.now()){this.#run('UPDATE messages SET is_recalled=1,updated_at=? WHERE id=?',now,id);}
  hasMessage(id){return Boolean(this.#get('SELECT 1 FROM messages WHERE id=?',id));}
  hasMessagesIn(feedId){return Boolean(this.#get('SELECT 1 FROM messages WHERE feed_id=? LIMIT 1',feedId));}
@@ -99,7 +118,7 @@ export class Store{
   const record={id:row.id,chatId:row.feed_id,chatName:row.chat_name??null,chatKind:row.chat_mode??row.chat_kind,senderId:row.sender_id,senderName:row.sender_name,
    senderType:row.sender_type,createdAt:row.created_at,position:row.position,threadRole:row.thread_role,rootId:row.root_id,parentId:row.parent_id,
    replyToSenderId:row.reply_to_sender_id,text:row.text,parts:JSON.parse(row.parts),unreadable:Boolean(row.unreadable),isMine:Boolean(row.is_mine),
-   mentionsAll:Boolean(row.mentions_all),isRecalled:Boolean(row.is_recalled),isEdited:Boolean(row.is_edited),
+   mentionsAll:Boolean(row.mentions_all),isRecalled:Boolean(row.is_recalled),isEdited:Boolean(row.is_edited),reactions:JSON.parse(row.reactions??'[]'),
    categories:(row.categories??'').split(',').filter(Boolean).sort((a,b)=>order(a)-order(b)),firstSeenAt:row.first_seen_at,updatedAt:row.updated_at};
   record.link=messageLink(this.linkBase,{feedId:row.feed_id,id:row.id,position:row.position,threadRole:row.thread_role,rootId:row.root_id,rootPosition:row.root_position});
   return record;

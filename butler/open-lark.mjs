@@ -6,7 +6,7 @@
 // checks they are all there.
 export const REQUIRED_ROUTES=['GET /agent/v1/events','GET /agent/v1/me','GET /agent/v1/sync/status','GET /agent/v1/conversations',
  'GET /agent/v1/conversations/:feedId','GET /agent/v1/conversations/:feedId/messages','GET /agent/v1/messages/:messageId',
- 'GET /agent/v1/messages/:messageId/thread','GET /agent/v1/threads/feed','POST /agent/v1/search/mention-history'];
+ 'GET /agent/v1/messages/:messageId/thread','GET /agent/v1/messages/:messageId/reactions','GET /agent/v1/threads/feed','POST /agent/v1/search/mention-history'];
 const READ_POSTS=new Set(['/search/mention-history']);
 
 // Throws unless method + path (relative to /agent/v1) is a read butler may make.
@@ -58,6 +58,9 @@ export class OpenLark{
   return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}/messages`,{query:{afterPosition,beforePosition,aroundPosition,tail:tail?1:undefined,limit}});
  }
  async message(id){return (await this.#request('GET',`/messages/${encodeURIComponent(id)}`)).item;}
+ // A message's reactions from open-lark's own store (repository.reactionsForMessage). Unlike GET /messages/:id it
+ // does not check the chat with Lark first.
+ async reactions(id){return (await this.#request('GET',`/messages/${encodeURIComponent(id)}/reactions`))?.items??[];}
  thread(rootId,{beforePosition,limit=100}={}){return this.#request('GET',`/messages/${encodeURIComponent(rootId)}/thread`,{query:{beforePosition,limit}});}
  threadFeed({cursor,limit=50}={}){return this.#request('GET','/threads/feed',{query:{cursor,limit}});}
  // Unix seconds; a paged request must repeat the window it started with (the cursor does not encode it).

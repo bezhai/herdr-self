@@ -60,10 +60,20 @@ export function messageLink(base,{feedId,id,position,threadRole,rootId,rootPosit
  return url.toString();
 }
 
-// The stored form of a message view.
+// A message's reactions as butler keeps them: one per key, with how many reacted, whether I am among them and their
+// names. open-lark's identities and English names of each user are left out. undefined when the view has no reaction
+// list, so that a view without one leaves the stored reactions as they are.
+export function reactionsOf(list){
+ if(!Array.isArray(list))return undefined;
+ return list.filter(r=>r?.key).map(r=>({key:String(r.key),count:Number(r.count)||0,isMine:Boolean(r.isMine),userNames:Array.isArray(r.userNames)?r.userNames.map(String):[]}));
+}
+
+// The stored form of a message view. reactions: JSON, or null when the view has none to tell (see reactionsOf).
 export function recordOf(v,chatKind){
+ const reactions=reactionsOf(v.reactions);
  return {id:v.id,feedId:v.feedId,chatKind,senderId:v.senderId??null,senderName:v.senderName??null,senderType:v.senderType??null,
   createdAt:Date.parse(v.createdAt),position:v.position??null,threadRole:v.threadMessageType??'none',rootId:threadRootOf(v)??null,parentId:v.parentId??null,
   replyToSenderId:v.replyTo?.senderId??null,text:plainText(v),parts:JSON.stringify(v.parts??[]),unreadable:isUnreadable(v),isMine:Boolean(v.isMine),
-  mentionsAll:Boolean(v.isAtAll),isRecalled:Boolean(v.isRecalled),isEdited:Boolean(v.isEdited),isEphemeral:Boolean(v.isEphemeral)};
+  mentionsAll:Boolean(v.isAtAll),isRecalled:Boolean(v.isRecalled),isEdited:Boolean(v.isEdited),isEphemeral:Boolean(v.isEphemeral),
+  reactions:reactions?JSON.stringify(reactions):null};
 }

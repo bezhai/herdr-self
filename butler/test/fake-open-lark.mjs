@@ -4,7 +4,8 @@
 // - message pages plan their window like planMessageWindow (5 positions of redundancy), thread replies of a normal
 //   group have position <= 0 and are mixed into pages by time, replies of a topic group have main positions;
 // - /events is a WebSocket without cursor or replay; message.upserted may come without `message`, twice, as the
-//   `sync:complete` sentinel, and a thread root is sent again when its reply count changes;
+//   `sync:complete` sentinel, and a thread root is sent again when its reply count changes; a reaction added or
+//   cancelled sends reaction.updated with nothing but the message id;
 // - open-lark can write messages without any event (the tests choose per message).
 // Every request is logged in `requests` so tests can assert that butler only reads.
 import http from 'node:http';
@@ -19,6 +20,7 @@ export const CATALOG = [
  'GET /agent/v1/conversations/:feedId','GET /agent/v1/conversations/:feedId/messages','POST /agent/v1/conversations/:feedId/messages',
  'GET /agent/v1/conversations/:feedId/pins','GET /agent/v1/conversations/:feedId/threads','GET /agent/v1/messages/:messageId',
  'PATCH /agent/v1/messages/:messageId','DELETE /agent/v1/messages/:messageId','GET /agent/v1/messages/:messageId/thread',
+ 'GET /agent/v1/messages/:messageId/reactions','POST /agent/v1/messages/:messageId/reactions','DELETE /agent/v1/messages/:messageId/reactions/:key',
  'POST /agent/v1/messages/:messageId/replies','GET /agent/v1/threads/feed','POST /agent/v1/search/mention-history',
 ].map(r=>{const [method,path]=r.split(' ');return {method,path};});
 const READ_POSTS=new Set(['/agent/v1/search/mention-history']);
@@ -119,6 +121,17 @@ export class FakeOpenLark{
  // Lark deleted or removed the message: open-lark keeps it with isDeleted, leaves it out of every page (they filter
  // isDeleted) and still answers GET /messages/:id with it (repository.message does not).
  remove(id){this.messages.get(id).isDeleted=true;}
+ // A reaction added (or, with cancel, taken back) by me or by someone else, as open-lark stores it from Lark's push
+ // (packet-dispatcher.ts): one summary per key with every reacting user's name, mine or not, and their identities.
+ // event: whether reaction.updated is sent; it carries only the message id (no feed, no content).
+ react(id,key,{mine=false,name=mine?'我':'同事',cancel=false,event=true}={}){
+  const v=this.messages.get(id);let r=v.reactions.find(x=>x.key===key);
+  if(!r){r={count:0,isMine:false,key,userNames:[],userEnNames:[],userIdentities:[]};v.reactions.push(r);}
+  if(cancel){r.userNames=r.userNames.filter(n=>n!==name);if(mine)r.isMine=false;}
+  else if(!r.userNames.includes(name)){r.userNames.push(name);r.userEnNames.push(`${name} en`);r.userIdentities.push({displayName:name,enName:`${name} en`,i18nDisplayNames:{},i18nNames:{}});if(mine)r.isMine=true;}
+  r.count=r.userNames.length;if(!r.count)v.reactions=v.reactions.filter(x=>x!==r);
+  if(event)this.emit({type:'reaction.updated',messageId:id});
+ }
  recall(id,{event=true}={}){
   const v=this.messages.get(id);v.isRecalled=true;v.parts=[];v.textPreview='';
   if(event)this.emit({type:'message.recalled',feedId:v.feedId,messageId:id});
@@ -189,6 +202,8 @@ export class FakeOpenLark{
    case 'GET /agent/v1/conversations/:feedId/pins':return send(200,{items:[]});
    case 'GET /agent/v1/messages/:messageId':{const v=this.messages.get(parts[1]);return v&&!this.notStored.has(v.id)?send(200,{item:clone(v),attachments:[]}):error(404,'MESSAGE_NOT_FOUND','Message not found');}
    case 'GET /agent/v1/messages/:messageId/thread':return send(200,this.#thread(parts[1],q));
+   // From open-lark's own store, without asking Lark (repository.reactionsForMessage); an unknown message has none.
+   case 'GET /agent/v1/messages/:messageId/reactions':return send(200,{items:clone(this.messages.get(parts[1])?.reactions??[])});
    case 'GET /agent/v1/threads/feed':return send(200,this.#threadFeed(q));
    case 'POST /agent/v1/search/mention-history':return send(200,this.#mentions(body));
    default:return send(200,{ok:true});

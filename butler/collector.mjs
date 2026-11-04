@@ -7,12 +7,12 @@ import {Recorder} from './recorder.mjs';
 import {Reconciler} from './reconcile.mjs';
 
 export const DEFAULTS={cycleMs:60_000,threadFeedEveryMs:600_000,mentionsEveryMs:600_000,slackMs:900_000,mentionOverlapMs:600_000,
- reconnectMinMs:1000,reconnectMaxMs:30_000,connectTimeoutMs:30_000,startupRetryMs:60_000,heartbeatMs:5000,requestGapMs:100,threadFetchDelayMs:1000,
+ reconnectMinMs:1000,reconnectMaxMs:30_000,connectTimeoutMs:30_000,startupRetryMs:60_000,heartbeatMs:5000,requestGapMs:100,threadFetchDelayMs:1000,reactionDelayMs:2000,
  maxChatsPerCycle:50,chatPages:5,readAttempts:5,maxThreadsPerCycle:30,threadAttempts:10};
 const message=e=>e?.message??String(e);
 
 export class Collector{
- #tail=Promise.resolve();#queued;#timers=[];#wake;#followUp;#work={threads:new Set(),chats:new Set()};
+ #tail=Promise.resolve();#queued;#timers=[];#wake;#followUp;#work={threads:new Set(),chats:new Set()};#reacted=new Set();#reactionTimer;
  // log: where connection changes go (the service's journal); errors go to the store, which logs them too.
  constructor({store,url,token,options={},log=()=>{}}){
   this.store=store;this.options={...DEFAULTS,...options};this.connected=false;this.stopped=true;this.log=log;
@@ -44,7 +44,7 @@ export class Collector{
  }
  async stop(){
   if(this.stopped&&!this.#timers.length)return;
-  this.stopped=true;this.#wake?.();for(const t of this.#timers)clearInterval(t);this.#timers=[];clearTimeout(this.#followUp);
+  this.stopped=true;this.#wake?.();for(const t of this.#timers)clearInterval(t);this.#timers=[];clearTimeout(this.#followUp);clearTimeout(this.#reactionTimer);
   this.events.stop();this.connected=false;this.eventState.connected=false;
   await this.idle();this.flushStatus({stoppedAt:Date.now()});
  }
@@ -90,6 +90,12 @@ export class Collector{
     // The flag at once; then the record follows open-lark's view of the recalled message (content only if it kept it).
     if(!this.store.hasMessage(e.messageId))return;
     this.store.markRecalled(e.messageId);this.#fetch(e.messageId);return;
+   case 'reaction.updated':
+    // A reaction added or taken back: the event says nothing but the message. Only a message butler holds matters, and
+    // a burst of them (open-lark sends one for each change it hears of) is read once, a moment later.
+    if(!e.messageId||!this.store.hasMessage(e.messageId))return;
+    this.#reacted.add(e.messageId);this.#reactionTimer??=setTimeout(()=>this.#readReactions(),this.options.reactionDelayMs);
+    return;
    case 'sync.upstream':{
     const was=this.store.meta('sync');this.store.setMeta('sync',{state:e.state,mode:e.mode,checkedAt:Date.now()});
     if(isHealthy(e)&&!isHealthy(was))this.reconcile('sync-live');
@@ -97,6 +103,12 @@ export class Collector{
    }
    default:return;
   }
+ }
+ // From open-lark's own store (see OpenLark.reactions); a reaction event during the read is read again after it.
+ #readReactions(){
+  this.#reactionTimer=undefined;const ids=[...this.#reacted];this.#reacted.clear();
+  for(const id of ids)this.openLark.reactions(id).then(items=>{if(!this.stopped)this.store.setReactions(id,items);},
+   err=>{if(!this.stopped&&err.status!==404)this.store.addError('推送',`${id} 的表情回复：${message(err)}`);});
  }
  #fetch(id){this.openLark.message(id).then(v=>{if(!this.stopped)this.#record([v]);},err=>{if(!this.stopped&&err.status!==404)this.store.addError('推送',`${id}：${message(err)}`);});}
  #record(views){
