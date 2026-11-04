@@ -1,7 +1,8 @@
 // What a message is to butler, decided from the message alone and a few facts the caller looks up. Pure functions.
 
-// In the order a record lists them.
-export const CATEGORIES=['mention','dm','reply','thread','watched'];
+// In the order a record lists them. own: a message I sent, in any chat the collector reads; what I answered, and where,
+// shows what I already took care of.
+export const CATEGORIES=['mention','dm','reply','thread','watched','own'];
 
 // The root of the thread a message belongs to. Every message carries a threadId (its own id or the root of its reply
 // chain), so only threadMessageType says whether it is in a thread.
@@ -29,6 +30,7 @@ export function categoriesOf(v,ctx){
  if(!v.isMine&&(v.replyTo?.senderId===ctx.me||ctx.parentIsMine))out.push('reply');
  if(ctx.participatedSince!==undefined&&t>=ctx.participatedSince&&threadRootOf(v))out.push('thread');
  if(ctx.watchSince!==undefined&&t>=ctx.watchSince)out.push('watched');
+ if(v.isMine)out.push('own');
  return out;
 }
 

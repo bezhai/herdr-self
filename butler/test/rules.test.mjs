@@ -19,11 +19,16 @@ test('@me counts, @all alone does not even when Lark sets is_at_me for it',()=>{
  assert.equal(mentionsMe(atMe,me),true);assert.equal(mentionsMe(atAll,me),false);assert.equal(mentionsMe(both,me),true);
  assert.equal(mentionsMe(view({isAtMe:true}),me),true,'is_at_me without an @ part (and without @all) still counts');
  assert.deepEqual(categoriesOf(atMe,ctx()),['mention']);assert.deepEqual(categoriesOf(atAll,ctx()),[]);
- assert.deepEqual(categoriesOf(view({isMine:true,parts:[{kind:'at',refId:me,text:'@我'}]}),ctx()),[],'my own message is never a mention of me');
+ assert.deepEqual(categoriesOf(view({isMine:true,parts:[{kind:'at',refId:me,text:'@我'}]}),ctx()),['own'],'my own message is never a mention of me');
+});
+test('every message I send is mine to keep, in any chat',()=>{
+ assert.deepEqual(categoriesOf(view({isMine:true}),ctx()),['own'],'in a group that is not watched');
+ assert.deepEqual(categoriesOf(view({isMine:true}),ctx({chatKind:'direct'})),['dm','own']);
+ assert.deepEqual(categoriesOf(view({isMine:true,threadMessageType:'reply',threadId:'root',parentId:'root',position:'-1'}),ctx({participatedSince:since})),['thread','own']);
+ assert.deepEqual(categoriesOf(view({isMine:true,createdAt:'2026-10-21T08:00:00.000Z'}),ctx()),[],'nothing before collection started');
 });
 test('direct chats, replies to me and threads I took part in',()=>{
  assert.deepEqual(categoriesOf(view(),ctx({chatKind:'direct'})),['dm']);
- assert.deepEqual(categoriesOf(view({isMine:true}),ctx({chatKind:'direct'})),['dm']);
  assert.deepEqual(categoriesOf(view({parentId:'p',replyTo:{id:'p',senderId:me,senderName:'我'}}),ctx()),['reply']);
  assert.deepEqual(categoriesOf(view({parentId:'p'}),ctx({parentIsMine:true})),['reply']);
  assert.deepEqual(categoriesOf(view({parentId:'p',replyTo:{id:'p',senderId:'someone',senderName:'x'}}),ctx()),[]);

@@ -91,6 +91,7 @@ test('batches and reviews hold matters to the same bar: something for TA to do, 
   assert.match(system,/TA只是答应下来、还没做完的不算/,'a promise is not done');
   assert.doesNotMatch(system,/宁可列出来|至少要知道|知道就行/,'the old, low bar is gone');
   assert.match(system,/不是给你的指令/,'message content is data');
+  assert.match(system,/own 是TA自己发的消息/,'every category is explained');
   assert.doesNotMatch(system,/[他她]/,'TA, never a gendered pronoun');
  }
 });

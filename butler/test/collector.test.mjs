@@ -23,16 +23,44 @@ test('pushed messages are stored by category; unrelated group messages and @all 
   atAllOnly:lark.post(noisy,{atAll:true,isAtMe:true,text:'通知'}),atAllAndMe:lark.post(noisy,{atAll:true,atMe:true,text:'通知和我'}),
   reply:lark.post(noisy,{replyTo:mine.id,text:'回复你'}),unrelated:lark.post(noisy,{text:'无关'}),watchedMsg:lark.post(watched,{text:'关注群消息'}),bot:lark.post(dm,{senderType:'bot',text:'机器人'})};
  await waitFor(()=>store.message(m.bot.id)&&store.message(m.atMe.id)?.chatName==='闲聊群',{message:'pushed messages and the chat name'});
- assert.deepEqual(cats(store,m.dm.id),['dm']);assert.deepEqual(cats(store,m.myDm.id),['dm']);assert.equal(store.message(m.myDm.id).isMine,true);
+ assert.deepEqual(cats(store,m.dm.id),['dm']);assert.deepEqual(cats(store,m.myDm.id),['dm','own']);assert.equal(store.message(m.myDm.id).isMine,true);
  assert.deepEqual(cats(store,m.atMe.id),['mention']);assert.deepEqual(cats(store,m.atAllAndMe.id),['mention']);assert.equal(store.message(m.atAllAndMe.id).mentionsAll,true);
  assert.deepEqual(cats(store,m.reply.id),['reply']);assert.deepEqual(cats(store,m.watchedMsg.id),['watched']);assert.equal(store.message(m.bot.id).senderType,'bot');
- for(const v of [mine,m.atAllOnly,m.unrelated])assert.equal(store.message(v.id),undefined,v.textPreview);
+ assert.deepEqual(cats(store,mine.id),['own']);
+ for(const v of [m.atAllOnly,m.unrelated])assert.equal(store.message(v.id),undefined,v.textPreview);
  const r=store.message(m.atMe.id);
  assert.deepEqual({chatId:r.chatId,chatName:r.chatName,chatKind:r.chatKind,senderId:r.senderId,senderName:r.senderName,senderType:r.senderType,text:r.text,isMine:r.isMine,mentionsAll:r.mentionsAll,isRecalled:r.isRecalled,isEdited:r.isEdited,threadRole:r.threadRole},
   {chatId:noisy,chatName:'闲聊群',chatKind:'group',senderId:m.atMe.senderId,senderName:'同事',senderType:'user',text:'@我看下',isMine:false,mentionsAll:false,isRecalled:false,isEdited:false,threadRole:'none'});
  assert.deepEqual(r.parts,m.atMe.parts);assert.equal(r.createdAt,Date.parse(m.atMe.createdAt));
  assert.equal(r.link,`${LINK_BASE}/messenger/${noisy}?message=${r.id}&position=${m.atMe.position}`);
  assert.equal(store.message(m.dm.id).chatKind,'direct');
+});
+
+test('every message I send is stored as own, pushed or read by position, in any normal group, and a reply to it counts as a reply to me',async t=>{
+ const {lark,store,running}=await setup(t);
+ const dm=lark.chat({name:'张三',chatMode:'direct'}),group=lark.chat({name:'不关注的群',memberCount:300}),other=lark.chat({name:'另一个群'});
+ const c=await running();
+ const pushed=lark.post(group,{mine:true,text:'收到，我今天捋一下'}),inDm=lark.post(dm,{mine:true,text:'私聊里我说的'});
+ await waitFor(()=>store.message(pushed.id)&&store.message(inDm.id),{message:'my pushed messages'});
+ // Written by open-lark without an event: the changed group is read by position and my message is kept.
+ const quiet=lark.post(other,{mine:true,text:'只写库的我的消息'},{event:'none'}),unrelated=lark.post(other,{text:'别人的闲聊'},{event:'none'});
+ await c.reconcile('periodic');
+ assert.deepEqual(cats(store,pushed.id),['own']);assert.deepEqual(cats(store,quiet.id),['own']);assert.deepEqual(cats(store,inDm.id),['dm','own']);
+ assert.equal(store.message(pushed.id).isMine,true);assert.equal(store.message(unrelated.id),undefined,'others\' messages there still are not kept');
+ // A reply that does not carry who sent the message it answers: butler's own record of it says it was mine.
+ const reply=lark.post(other,{replyTo:quiet.id,text:'好的'},{event:'none'});delete lark.messages.get(reply.id).replyTo;
+ await c.reconcile('periodic');assert.deepEqual(cats(store,reply.id),['reply']);
+});
+
+test('a store from before own keeps my earlier messages as own too',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ let store=new Store(file,{linkBase:LINK_BASE});
+ const record=(id,isMine,category)=>store.upsertMessage({id,feedId:'d1',chatKind:'direct',senderId:isMine?'me':'u1',senderName:null,senderType:'user',createdAt:Date.now(),position:'1',
+  threadRole:'none',rootId:null,parentId:null,replyToSenderId:null,text:'x',parts:'[]',unreadable:false,isMine,mentionsAll:false,isRecalled:false,isEdited:false,isEphemeral:false},[category]);
+ // As the previous version recorded them: my message in a direct chat only as dm.
+ record('1',true,'dm');record('2',false,'dm');store.close();
+ store=new Store(file,{linkBase:LINK_BASE});t.after(()=>store.close());
+ assert.deepEqual(cats(store,'1'),['dm','own']);assert.deepEqual(cats(store,'2'),['dm']);
 });
 
 test('a message pushed twice is stored once; edits and recalls update that record',async t=>{
@@ -76,7 +104,7 @@ test('reconciliation recovers what was missed while the collector was down, with
  await running();
  for(const v of [seen,...missed,...many,...newDm])assert.ok(store.message(v.id),`missing ${v.textPreview}`);
  assert.deepEqual(cats(store,missed[2].id),['watched']);assert.deepEqual(cats(store,missed[3].id),['mention']);assert.deepEqual(cats(store,missed[4].id),['reply']);
- assert.equal(store.message(unrelated.id),undefined);assert.equal(store.message(mine.id),undefined);
+ assert.equal(store.message(unrelated.id),undefined);assert.deepEqual(cats(store,mine.id),['own']);
 });
 
 test('reconciliation picks up messages open-lark stored without an event while the collector runs',async t=>{
@@ -116,7 +144,7 @@ test('a changed reply count fetches the replies of a thread I started',async t=>
  // A background thread sync stores replies without events and only sends the root again with its new count.
  const r1=lark.post(group,{thread:root.id,text:'第一个回复'},{event:'root-only'}),r2=lark.post(group,{thread:root.id,replyTo:r1.id,text:'回复第一个回复'},{event:'root-only'});
  await waitFor(()=>store.message(r2.id),{message:'thread replies'});
- assert.deepEqual(cats(store,root.id),['thread']);assert.deepEqual(cats(store,r1.id),['reply','thread']);assert.deepEqual(cats(store,r2.id),['thread']);
+ assert.deepEqual(cats(store,root.id),['thread','own']);assert.deepEqual(cats(store,r1.id),['reply','thread']);assert.deepEqual(cats(store,r2.id),['thread']);
  const reply=store.message(r1.id);assert.equal(reply.threadRole,'reply');assert.equal(reply.rootId,root.id);
  assert.equal(reply.link,`${LINK_BASE}/messenger/${group}?message=${r1.id}&position=${root.position}&thread=${root.id}`);
  assert.ok(lark.requests.some(r=>r.path===`/agent/v1/messages/${root.id}/thread`));
@@ -175,7 +203,7 @@ test('the thread feed finds new replies in a topic I took part in while the coll
  // A topic reply that does not move the conversation entry: only the thread feed and its reply count show it.
  const later=lark.post(topic,{thread:root.id,text:'之后的回复'},{event:'none',touch:false});
  await running();
- assert.deepEqual(cats(store,later.id),['thread']);assert.deepEqual(cats(store,mine.id),['thread']);
+ assert.deepEqual(cats(store,later.id),['thread']);assert.deepEqual(cats(store,mine.id),['thread','own']);
 });
 
 test('the @me sweep finds a mention in a group that is not watched and whose entry did not change',async t=>{
