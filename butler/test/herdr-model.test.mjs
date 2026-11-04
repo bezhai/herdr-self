@@ -32,6 +32,7 @@ test('each prompt goes to a fresh claude without tools in a workspace of its own
  assert.equal(start[start.indexOf('--kind')+1],'claude');assert.equal(start[start.indexOf('--pane')+1],'w1:p1');
  assert.deepEqual(claude.slice(0,4),['--tools','','--strict-mcp-config','--disable-slash-commands'],'no built-in tools and no MCP servers');
  assert.equal(claude[claude.indexOf('--system-prompt')+1],SYSTEM);
+ assert.equal(claude[claude.indexOf('--effort')+1],'low','low effort: the default high one runs past the reply timeout');
  const prompt=c[2];assert.equal(prompt[5],PROMPT,'the prompt arrives as it was, quotes and all');assert.ok(prompt.includes('--wait'));
  assert.equal(prompt[4],start[4],'the prompt goes to the agent just started');
  assert.deepEqual(state().workspaces,{},'nothing is left on the model machine');

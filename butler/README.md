@@ -132,7 +132,7 @@ open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启
 模型是另一台机器（cpu1）上的 claude，经 herdr 调用，claude 访问的网关 token 不离开那台机器。`BUTLER_MODEL_MACHINE` 是 herdr 保存的机器（`herdr machine list`），它指向那台机器上专给管家用的 herdr session，不是我自己用的默认 session。每一批（整理的每一部分也一样）这样运行：
 
 1. `herdr --machine <机器> workspace create --cwd <BUTLER_MODEL_CWD> --label butler-model --no-focus`；
-2. 在它的第一个 pane 里 `herdr --machine <机器> agent start <名字> --kind claude -- --tools "" --strict-mcp-config --disable-slash-commands --system-prompt <说明>`：没有内置工具，没有 MCP 服务器，没有技能和斜杠命令，模型只能回答；
+2. 在它的第一个 pane 里 `herdr --machine <机器> agent start <名字> --kind claude -- --tools "" --strict-mcp-config --disable-slash-commands --effort low --system-prompt <说明>`：没有内置工具，没有 MCP 服务器，没有技能和斜杠命令，模型只能回答；推理强度用 low，因为默认的 high 下 cpu1 网关后面的模型要推理几千个 token，40 条消息的一批会超过回复的时限，而 low 给出同样的事项、token 少一半（网关只接受 low、high、xhigh 和 max，不接受 medium）；
 3. `agent prompt <名字> <数据> --wait`，等这一轮结束；
 4. `agent replies <名字>` 取它最后的回复（由 claude 的 Stop hook 报给 herdr，可能比状态变化晚一点到，所以最多再等 15 秒）；
 5. 不管成功与否，`workspace close` 关掉这个工作区，claude 随之退出。

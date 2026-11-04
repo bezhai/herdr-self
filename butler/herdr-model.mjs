@@ -5,8 +5,11 @@ import {execFile} from 'node:child_process';
 
 // No built-in tools (an empty --tools list), no MCP servers (--strict-mcp-config without --mcp-config), no skills or
 // slash commands: whatever the messages say, the model can only answer. --no-session-persistence would be welcome
-// too, but claude accepts it only with --print, and herdr drives the interactive claude.
-export const CLAUDE_ARGS=['--tools','','--strict-mcp-config','--disable-slash-commands'];
+// too, but claude accepts it only with --print, and herdr drives the interactive claude. Low effort: at claude's
+// default (high) the model behind cpu1's gateway reasons for thousands of tokens and a batch of 40 messages ran past
+// the reply timeout, while low gave the same matters in about half the tokens (the gateway takes low, high, xhigh and
+// max, not medium).
+export const CLAUDE_ARGS=['--tools','','--strict-mcp-config','--disable-slash-commands','--effort','low'];
 // herdr agent prompt takes the prompt only as a command-line argument of the local herdr CLI (no stdin or file), and
 // Linux caps a single argument at 128 KiB.
 const MAX_ARG_BYTES=120_000;
