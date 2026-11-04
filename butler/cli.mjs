@@ -242,7 +242,7 @@ async function main(argv){
 // and the conversation, whose turns share the model with the batches and reviews (see model-queue.mjs).
 async function processCommand(config,once){
  const machine=requireModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
- const model=new ModelQueue(new HerdrModel({machine,cwd:config.modelCwd,command:[config.herdr],log:m=>console.error(m)}));
+ const model=new ModelQueue(new HerdrModel({machine,cwd:config.modelCwd,name:config.modelName,command:[config.herdr],log:m=>console.error(m)}));
  const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
  const processor=new Processor({store,matters,model,options,log:m=>console.log(m)});
  if(once){

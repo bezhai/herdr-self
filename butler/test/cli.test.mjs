@@ -119,6 +119,22 @@ test('process --once turns the backlog into matters through herdr; matters lists
  r=await cli(config,'status');assert.match(r.stdout,/加工：/);assert.match(r.stdout,/待加工 0 条/);assert.match(r.stdout,/未结束的事项 0 个/);assert.match(r.stdout,/跳过 0 条/);
 });
 
+test('BUTLER_MODEL_NAME picks the model claude is asked for, and each run records the name',async t=>{
+ const {lark,store,dir}=await setup(t),NAME='auto_model/alwaysday1_max';
+ const herdr=fakeHerdr(dir,{});
+ const machine=`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`;
+ const starts=()=>fs.readFileSync(path.join(dir,'herdr','calls.jsonl'),'utf8').trim().split('\n').map(l=>JSON.parse(l))
+  .filter(a=>a[2]==='agent'&&a[3]==='start').map(a=>a.slice(a.indexOf('--')+1));
+ post(store,{text:'在吗'});
+ let r=await cli(writeConfig(dir,lark,0o600,`${machine}BUTLER_MODEL_NAME=${NAME}\n`),'process','--once');assert.equal(r.code,0,r.stderr);
+ let [args]=starts();
+ assert.equal(args[args.indexOf('--model')+1],NAME);assert.deepEqual(JSON.parse(args[args.indexOf('--settings')+1]),{availableModels:[NAME]});
+ post(store,{text:'还在吗'});
+ r=await cli(writeConfig(dir,lark,0o600,`${machine}BUTLER_MODEL_NAME=\n`),'process','--once');assert.equal(r.code,0,r.stderr);
+ args=starts()[1];assert.ok(!args.includes('--model')&&!args.includes('--settings'),'empty: claude\'s default model');
+ assert.deepEqual(new Matters(store).runs().map(x=>[x.kind,x.model]),[['batch',NAME],['batch',undefined]]);
+});
+
 test('status shows the bot connection, the last digest and the next one when one is due',async t=>{
  const {lark,store,dir}=await setup(t);
  let r=await cli(writeConfig(dir,lark),'status');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/机器人：没有配置/);

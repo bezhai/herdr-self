@@ -41,6 +41,21 @@ test('each prompt goes to a fresh claude without tools in a workspace of its own
  assert.equal(new Set(names).size,2,'a new agent for every prompt');assert.ok(names.every(n=>/^[a-z][a-z0-9_-]{0,31}$/.test(n)));
 });
 
+test('a configured model is asked for by name and allowed by settings of its own; with none, claude keeps its default',async t=>{
+ const NAME='auto_model/alwaysday1_max';
+ const claudeArgs=calls=>{const start=calls().find(a=>a[2]==='agent'&&a[3]==='start');return start.slice(start.indexOf('--')+1);};
+ const named=setup(t,{},{name:NAME});await named.model.ask({system:SYSTEM,prompt:'x'});
+ const args=claudeArgs(named.calls);
+ assert.equal(args[args.indexOf('--model')+1],NAME);
+ assert.deepEqual(JSON.parse(args[args.indexOf('--settings')+1]),{availableModels:[NAME]},'one argument of JSON that allows the model');
+ assert.equal(args[args.indexOf('--system-prompt')+1],SYSTEM);assert.equal(args[args.indexOf('--effort')+1],'low');
+ assert.equal(named.model.name,NAME);
+ const plain=setup(t);await plain.model.ask({system:SYSTEM,prompt:'x'});
+ const none=claudeArgs(plain.calls);
+ assert.ok(!none.includes('--model')&&!none.includes('--settings'),`no model asked for: ${JSON.stringify(none)}`);
+ assert.equal(plain.model.name,undefined);
+});
+
 test('the workspace is closed whatever goes wrong, and the error says what',async t=>{
  const cases=[
   [{fail:{'agent start':{code:1,stderr:'{"error":{"code":"timeout","message":"timed out waiting for agent startup"},"id":"cli:agent:start"}\n'}}},/agent start.*timed out waiting for agent startup/],

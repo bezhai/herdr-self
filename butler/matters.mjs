@@ -22,13 +22,14 @@ CREATE TABLE IF NOT EXISTS message_failures(
  message_id TEXT PRIMARY KEY REFERENCES messages(id), strikes INTEGER NOT NULL, last_error TEXT, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS model_runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, finished_at INTEGER, messages INTEGER NOT NULL, prompt_bytes INTEGER NOT NULL,
- ok INTEGER, error TEXT, output TEXT, kind TEXT NOT NULL DEFAULT 'batch', matters INTEGER);
+ ok INTEGER, error TEXT, output TEXT, kind TEXT NOT NULL DEFAULT 'batch', matters INTEGER, model TEXT);
 `;
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
 // judged the matter ended) or owner (I closed it in the conversation). A model run's kind: batch (of new messages),
 // review (of the open matters, see review.mjs) or profile (关于TA, see profile.mjs); runs from before reviews were
-// batches. Its matters: how many open matters it was shown, unknown for runs from before.
-const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER']];
+// batches. Its matters: how many open matters it was shown, unknown for runs from before. Its model: the name of the
+// model claude was asked for (BUTLER_MODEL_NAME), unknown for claude's default and for runs from before.
+const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER'],['model_runs','model','TEXT']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
 const NOT_IN='m.id NOT IN (SELECT value FROM json_each(?))';
@@ -172,21 +173,22 @@ export class Matters{
  skippedCount(){return this.#get(`SELECT count(*) n FROM processed WHERE outcome='failed'`).n;}
 
  // ---- model runs, kept with the raw reply so a decision can be looked into later
- // messages: the new messages it was given to process (none for a review); matters: the open matters it was shown.
- startRun({kind='batch',messages,matters,promptBytes,now=Date.now()}){
-  return Number(this.#run('INSERT INTO model_runs(started_at,kind,messages,matters,prompt_bytes) VALUES(?,?,?,?,?)',now,kind,messages,matters??null,promptBytes).lastInsertRowid);
+ // messages: the new messages it was given to process (none for a review); matters: the open matters it was shown;
+ // model: the name of the model asked, undefined for claude's default.
+ startRun({kind='batch',messages,matters,model,promptBytes,now=Date.now()}){
+  return Number(this.#run('INSERT INTO model_runs(started_at,kind,messages,matters,model,prompt_bytes) VALUES(?,?,?,?,?,?)',now,kind,messages,matters??null,model??null,promptBytes).lastInsertRowid);
  }
  finishRun(id,{ok,error,output,now=Date.now()}){this.#run('UPDATE model_runs SET finished_at=?,ok=?,error=?,output=? WHERE id=?',now,ok?1:0,error??null,output??null,id);}
- // One model run, recorded: model.ask({system, prompt}), and its reply to use(output, runId), which throws when it
- // cannot use it. A failure, the model's or use's, is recorded with the reply if there was one, and passes on.
- // Resolves with what use returns. now: the clock.
+ // One model run, recorded with model.name: model.ask({system, prompt}), and its reply to use(output, runId), which
+ // throws when it cannot use it. A failure, the model's or use's, is recorded with the reply if there was one, and
+ // passes on. Resolves with what use returns. now: the clock.
  async recordRun({model,kind,messages,matters,system,prompt,now=Date.now},use){
-  const runId=this.startRun({kind,messages,matters,promptBytes:Buffer.byteLength(prompt),now:now()});let output;
+  const runId=this.startRun({kind,messages,matters,model:model.name,promptBytes:Buffer.byteLength(prompt),now:now()});let output;
   try{output=await model.ask({system,prompt});const r=await use(output,runId);this.finishRun(runId,{ok:true,output,now:now()});return r;}
   catch(e){this.finishRun(runId,{ok:false,error:e?.message??String(e),output,now:now()});throw e;}
  }
  runs(limit=1000){
   return this.#all('SELECT * FROM (SELECT * FROM model_runs ORDER BY id DESC LIMIT ?) ORDER BY id',limit)
-   .map(r=>({id:r.id,kind:r.kind,startedAt:r.started_at,finishedAt:r.finished_at,messages:r.messages,matters:r.matters??undefined,promptBytes:r.prompt_bytes,ok:r.ok===null?undefined:Boolean(r.ok),error:r.error,output:r.output}));
+   .map(r=>({id:r.id,kind:r.kind,startedAt:r.started_at,finishedAt:r.finished_at,messages:r.messages,matters:r.matters??undefined,model:r.model??undefined,promptBytes:r.prompt_bytes,ok:r.ok===null?undefined:Boolean(r.ok),error:r.error,output:r.output}));
  }
 }

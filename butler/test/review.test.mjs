@@ -139,14 +139,16 @@ test('with nothing open there is no model run',async t=>{
  assert.deepEqual(await run(),{runs:0,reviewed:0,closed:0,complete:true});assert.equal(model.calls.length,0);
 });
 
-test('model runs recorded before reviews existed count as batches',async t=>{
+test('model runs recorded before reviews existed count as batches, of no known model; the store records models from then on',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const db=new DatabaseSync(file);
  db.exec('CREATE TABLE model_runs(id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, finished_at INTEGER, messages INTEGER NOT NULL, prompt_bytes INTEGER NOT NULL, ok INTEGER, error TEXT, output TEXT)');
  db.prepare('INSERT INTO model_runs(started_at,messages,prompt_bytes,ok) VALUES(?,?,?,1)').run(T0,12,3000);db.close();
  const store=new Store(file,{linkBase:LINK_BASE});t.after(()=>store.close());
- const [old]=new Matters(store).runs();
- assert.deepEqual([old.kind,old.messages,old.matters],['batch',12,undefined]);
+ const matters=new Matters(store),[old]=matters.runs();
+ assert.deepEqual([old.kind,old.messages,old.matters,old.model],['batch',12,undefined,undefined]);
+ await matters.recordRun({model:{name:'auto_model/alwaysday1_max',ask:async()=>'{}'},kind:'review',messages:0,matters:0,system:'s',prompt:'p'},()=>{});
+ assert.equal(matters.runs()[1].model,'auto_model/alwaysday1_max');
 });
 
 test('every part is judged by 关于TA and my notes',async t=>{

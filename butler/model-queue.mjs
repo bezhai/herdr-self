@@ -4,6 +4,8 @@
 export class ModelQueue{
  #waiting=[];#running;
  constructor(model){this.model=model;}
+ // The name of the model it asks, for the run records (see Matters.recordRun).
+ get name(){return this.model.name;}
  ask(input){return this.run(model=>model.ask(input));}
  cleanup(){return this.model.cleanup?.();}
  // fn(model) runs when its turn comes, holding the model until it settles. first: ahead of the batches; what: what
