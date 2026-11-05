@@ -3,10 +3,12 @@
 // reactions the collector saw on messages processed before go in the same batches, in time order (see #pending). It
 // assembles context and checks the answer; what is a matter, what belongs to it, how urgent it is and whether it has
 // ended is the model's call. Messages that could not be processed stay pending and go again on the next round, with
-// one exception: a message the model cannot handle by itself (see #round) is skipped after a few tries. Once a day,
-// and whenever my notes change, a round's batches are followed by a new 关于TA (see profile.mjs and #profile), and
-// every few hours, or when 关于TA or my notes have changed, a round ends with a review of all open matters (see
-// review.mjs and #review). Batches and reviews are told 关于TA and my notes.
+// one exception: a message the model cannot handle by itself (see #round) is skipped after a few tries. Something of
+// mine that could end an open matter (my message or reaction in its chat) does not wait for the next round: it starts
+// one within seconds (see checkOwner). Once a day, and whenever my notes change, a round's batches are followed by a
+// new 关于TA (see profile.mjs and #profile), and every few hours, or when 关于TA or my notes have changed, a round ends
+// with a review of all open matters (see review.mjs and #review). Batches and reviews are told 关于TA and my notes.
+// Whoever shows the matters is told when a batch or a review has changed them (onMattersChanged).
 import {composePrompt,readReply} from './prompt.mjs';
 import {review} from './review.mjs';
 import {writeProfile} from './profile.mjs';
@@ -16,8 +18,8 @@ import {writeProfile} from './profile.mjs';
 // ownerMessages: how many of my latest messages, and messages I reacted to, in such a matter's chats since it started
 // come along too, so that my answer shows even when the chat has moved on past its latest messages.
 // profileMessages: how many of my latest messages 关于TA is written from at most, more than fit one prompt (the
-// newest that fit go).
-export const DEFAULTS={everyMs:600_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,ownerMessages:5,textChars:1500,skipAfter:3,
+// newest that fit go). ownerCheckMs: how often to look for something of mine that could end an open matter.
+export const DEFAULTS={everyMs:600_000,ownerCheckMs:15_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,ownerMessages:5,textChars:1500,skipAfter:3,
  reviewEveryMs:10_800_000,profileEveryMs:86_400_000,profileMessages:1000};
 const message=e=>e?.message??String(e);
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
@@ -31,13 +33,14 @@ const numbers=notes=>notes.map(n=>n.id),same=(a=[],b=[])=>a.length===b.length&&a
 const isReaction=x=>x.kind==='reaction',timeOf=x=>isReaction(x)?x.at:x.createdAt;
 
 export class Processor{
- #limit;#cycle;#timers=[];#halting=false;
+ #limit;#cycle;#timers=[];#halting=false;#failed=false;
  // model: {ask({system,prompt}) → reply text, cleanup?()}; ask throws when there is no usable answer, with
  // answered: true when the model did answer (one too long, say). pid: this process (another one may hold the store).
- // now: the clock.
- constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now}){
+ // now: the clock. onMattersChanged: called once a batch or a part of a review has made, changed or closed matters;
+ // what it throws or rejects with is recorded and changes nothing else.
+ constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now,onMattersChanged=()=>{}}){
   this.store=store;this.matters=matters;this.model=model;this.options={...DEFAULTS,...options};this.log=log;this.pid=pid;this.now=now;
-  this.#limit=this.options.maxMessages;
+  this.onMattersChanged=onMattersChanged;this.#limit=this.options.maxMessages;
  }
 
  // Claims the store (one processor at a time, so batches never overlap), closes what a crashed run left on the model
@@ -49,7 +52,10 @@ export class Processor{
   this.#halting=false;this.startedAt=this.now();this.#beat({stoppedAt:undefined});
   this.#timers.push(setInterval(()=>this.#beat(),this.options.heartbeatMs));
   try{const n=await this.model.cleanup?.();if(n)this.log(`关闭了上次留在模型机器上的 ${n} 个工作区`);}catch(e){this.store.addError('加工',`清理模型机器上的工作区失败：${message(e)}`);}
-  if(periodic){this.#timers.push(setInterval(()=>this.runOnce(),this.options.everyMs));this.runOnce();}
+  if(!periodic)return;
+  this.#timers.push(setInterval(()=>this.runOnce(),this.options.everyMs));
+  this.#timers.push(setInterval(()=>{try{this.checkOwner();}catch(e){this.store.addError('加工',`查看我有没有回应事项时出错：${message(e)}`);}},this.options.ownerCheckMs));
+  this.runOnce();
  }
  // Waits for the model run under way, if any; no further batch starts.
  async stop(){
@@ -64,6 +70,15 @@ export class Processor{
  runOnce(){
   this.#cycle??=this.#round().finally(()=>{this.#cycle=undefined;});
   return this.#cycle;
+ }
+ // Starts a round now when something of mine waits that could end an open matter (see Matters.ownerWaiting): my
+ // answer closes a matter within seconds of it, not on the next cycle. Others' messages alone wait for the cycle. The
+ // round is the usual one, taking along whatever else waits. Returns it, or undefined when none starts: none is
+ // needed, one is running (it goes on to what waits), or the last round failed somewhere (a model run, 关于TA or the
+ // review), when only the cycle tries again, as it would have anyway.
+ checkOwner(){
+  if(this.#cycle||this.#halting||this.#failed||!this.matters.ownerWaiting())return undefined;
+  return this.runOnce();
  }
  // A failed run normally ends the round: the model, its machine or herdr is not there. One failure lets the round go
  // on: a message alone in its batch (failures halve the batch until it is) that got an answer, just not a usable one.
@@ -101,6 +116,7 @@ export class Processor{
   const go=()=>!this.#halting&&!failed;
   const profile=go()&&this.#profileDue()?await this.#profile():undefined;
   const result={runs,failures,profile,review:go()&&this.#reviewDue()?await this.#review():undefined};
+  this.#failed=failures>0||Boolean(profile?.error||result.review?.error);
   this.#beat({lastRoundAt:this.now()});
   return result;
  }
@@ -139,7 +155,7 @@ export class Processor{
  async #review(){
   const last=this.store.meta('review')??{},about=this.#about();
   try{
-   const r=await review({store:this.store,matters:this.matters,model:this.model,options:this.options,now:this.now,stopped:()=>this.#halting,about});
+   const r=await review({store:this.store,matters:this.matters,model:this.model,options:this.options,now:this.now,stopped:()=>this.#halting,about,changed:()=>this.#changed()});
    if(r.complete)this.store.setMeta('review',{at:this.now(),reviewed:r.reviewed,closed:r.closed,profileAt:about.profile?.at,notes:numbers(about.notes)});
    return r;
   }catch(e){
@@ -147,6 +163,10 @@ export class Processor{
    this.store.setMeta('review',{...last,failedAt:this.now(),error:message(e)});
    return {error:message(e)};
   }
+ }
+ #changed(){
+  const failed=e=>this.store.addError('加工',`事项有变化，但通知出错：${message(e)}`);
+  try{Promise.resolve(this.onMattersChanged()).catch(failed);}catch(e){failed(e);}
  }
  #strike(id,error){
   if(this.matters.strike(id,error)<this.options.skipAfter)return;
@@ -202,14 +222,16 @@ export class Processor{
  // or too slow for the model gets through in smaller parts, and a success restores the size. answered: the model gave
  // an answer that could not be used (as opposed to giving none).
  async #run({batch,system,prompt,refs,reactions},open){
-  let answered=false;
+  let answered=false,changed=false;
   try{
    await this.matters.recordRun({model:this.model,kind:'batch',messages:batch.length,matters:open.length,system,prompt,now:this.now},(output,runId)=>{
     let reply;try{reply=readReply(output,{refs,matterIds:new Set(open.map(m=>m.id))});}catch(e){answered=true;throw e;}
     this.matters.apply({runId,created:reply.created,updated:reply.updated,processedIds:batch.filter(x=>!isReaction(x)).map(m=>m.id),reactions});
+    changed=reply.created.length+reply.updated.length>0;
     for(const p of reply.problems)this.store.addError('加工',`模型回复里没有采纳的部分：${p}`);
    });
    this.#limit=this.options.maxMessages;this.#beat({lastSuccessAt:this.now()});
+   if(changed)this.#changed();
    return {ok:true,batch};
   }catch(e){
    answered||=e?.answered===true;

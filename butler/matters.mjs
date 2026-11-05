@@ -85,6 +85,16 @@ export class Matters{
   return this.#all(`SELECT o.message_id,o.key,o.at,m.feed_id FROM ${REACTIONS} WHERE ${REACTION_PENDING} ORDER BY o.at,o.message_id,o.key LIMIT ?`,limit)
    .map(r=>({kind:'reaction',messageId:r.message_id,key:r.key,at:r.at,chatId:r.feed_id}));
  }
+ // Whether something of mine waits that could end an open matter: in the chat of one, since the earliest open one
+ // started, a message of mine not processed yet, a message not processed yet that carries a reaction of mine, or a
+ // reaction of mine that waits for the model. The processor asks every few seconds (see processor.mjs checkOwner).
+ ownerWaiting(){
+  return this.#get(`WITH sources AS (SELECT m.feed_id,m.created_at FROM matters x JOIN matter_messages mm ON mm.matter_id=x.id JOIN messages m ON m.id=mm.message_id WHERE x.status='open'),
+   chats AS (SELECT DISTINCT feed_id FROM sources),since AS (SELECT min(created_at) t FROM sources)
+   SELECT EXISTS(SELECT 1 FROM messages m WHERE m.created_at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${UNPROCESSED} AND ${NOT_IGNORED}
+     AND (m.is_mine=1 OR EXISTS(SELECT 1 FROM owner_reactions o WHERE o.message_id=m.id)))
+    OR EXISTS(SELECT 1 FROM ${REACTIONS} WHERE o.at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${REACTION_PENDING}) waiting`).waiting===1;
+ }
  // My reactions on these messages not processed yet, as owner reaction records ({messageId, key, at}).
  reactionsOn(ids){
   return this.#all(`SELECT o.message_id,o.key,o.at FROM owner_reactions o WHERE ${IN_LIST('o.message_id')} AND ${REACTION_UNPROCESSED} ORDER BY o.at`,JSON.stringify(ids))

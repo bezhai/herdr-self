@@ -23,13 +23,14 @@ const none={new:[],updates:[]};
 // matters has just been done (by that profile, if there is one), so a round runs only its batches (a store without a
 // profile writes one in its first round, and one without a review reviews).
 const PROFILE='角色：GEO 服务的后端';
+// changes: how often the processor said the matters changed (onMattersChanged).
 function setup(t,{answer,options,now,profiled=true,reviewed=true}={}){
- const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??(()=>none));
- const processor=new Processor({store,matters,model,options:{maxMessages:40,...options},...now&&{now}});
+ const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??(()=>none)),changes=[];
+ const processor=new Processor({store,matters,model,options:{maxMessages:40,...options},...now&&{now},onMattersChanged:()=>changes.push(model.calls.length)});
  const t0=(now??Date.now)();
  if(profiled)store.setMeta('profile',{text:PROFILE,at:t0,notes:[],messages:1});
  if(reviewed)store.setMeta('review',{at:t0,reviewed:0,closed:0,...profiled&&{profileAt:t0},notes:[]});
- return {store,matters,model,processor,t0};
+ return {store,matters,model,processor,t0,changes};
 }
 
 test('new messages become matters: the model decides, butler keeps the sources and makes the links',async t=>{
@@ -423,4 +424,93 @@ test('a profile that fails is on record and goes again on the next round, never 
  down=false;r=await processor.runOnce();
  assert.deepEqual(kinds(model).slice(4),['profile','review'],'and once written, the open matters are judged by it');
  assert.deepEqual(Object.keys(store.meta('profile')).sort(),['at','messages','notes','text'],'the failure is cleared');
+});
+
+// ---- what I do about an open matter is processed within seconds, not on the next cycle
+// An open matter in g1, made from a message already processed; returns that message.
+const opened=(store,matters,text='@原智鸿 帮忙看下日志')=>{
+ const id=post(store,{text,at:min(1)});matters.apply({created:[{title:text,who:'陈帆',ask:'看日志',urgency:'normal',messageIds:[id]}],processedIds:[id]});return id;
+};
+
+test('my message or reaction in the chat of an open matter starts a round at once; others\' messages, and mine elsewhere, wait for the cycle',async t=>{
+ const {store,matters,model,processor}=setup(t);
+ post(store,{chat:'d1',mine:true,text:'还没有事项时我说的',at:min(0)});
+ assert.equal(processor.checkOwner(),undefined,'nothing open: nothing of mine can end anything');
+ const ask=opened(store,matters);
+ post(store,{text:'日志在群文件里',at:min(2)});post(store,{chat:'g2',mine:true,text:'别的群里我说的',at:min(3)});
+ assert.equal(processor.checkOwner(),undefined,'others\' messages, and mine in a chat with nothing open, wait');
+ assert.equal(model.calls.length,0);
+ post(store,{mine:true,text:'我看下',at:min(4)});
+ let r=await processor.checkOwner();
+ assert.equal(r.runs,1);
+ assert.deepEqual(newTexts(model.calls[0].data).sort(),['还没有事项时我说的','日志在群文件里','别的群里我说的','我看下'].sort(),'a normal round: whatever waits goes, in the usual batches');
+ assert.equal(matters.pendingCount(),0);assert.equal(processor.checkOwner(),undefined,'and then nothing waits');
+ store.setReactions(ask,GET);
+ r=await processor.checkOwner();
+ assert.equal(r.runs,1);assert.deepEqual(actionsOf(model.calls[1].data).map(a=>a.reaction),['Get'],'a reaction of mine on a message processed before');
+ post(store,{text:'也看下这个',at:min(5),reactions:GET});
+ r=await processor.checkOwner();
+ assert.equal(r.runs,1);assert.deepEqual(newTexts(model.calls[2].data),['也看下这个'],'a new message that carries a reaction of mine');
+ matters.ignore('u9','广告机器人');post(store,{sender:'u9',name:'广告机器人',type:'bot',text:'广告',at:min(6),reactions:GET});
+ assert.equal(processor.checkOwner(),undefined,'not my reaction on an ignored sender\'s message');
+});
+
+test('the quick check starts no round while one runs; the round under way takes my message along',async t=>{
+ let release;const gate=new Promise(r=>{release=r;});
+ const {store,matters,model,processor}=setup(t,{answer:async()=>{await gate;return none;}});
+ opened(store,matters);post(store,{text:'在吗',at:min(2)});
+ const round=processor.runOnce();await waitFor(()=>model.calls.length===1,{message:'a batch with the model'});
+ post(store,{mine:true,text:'我在',at:min(3)});
+ assert.equal(processor.checkOwner(),undefined,'a round is running');
+ release();const r=await round;
+ assert.equal(r.runs,2,'the round goes on to my message');assert.equal(model.overlapped,false);assert.equal(matters.pendingCount(),0);
+});
+
+test('after a round that failed, the quick check waits until a round of the cycle gets through: a failing model is not asked every few seconds',async t=>{
+ let down=true;
+ const {store,matters,model,processor}=setup(t,{answer:()=>{if(down)throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');return none;}});
+ opened(store,matters);post(store,{mine:true,text:'我看下',at:min(2)});
+ assert.equal((await processor.checkOwner()).failures,1);
+ post(store,{mine:true,text:'看完了',at:min(3)});
+ assert.equal(processor.checkOwner(),undefined,'not again before the cycle');assert.equal(model.calls.length,1);
+ assert.equal((await processor.runOnce()).failures,1,'the cycle tries as before');
+ assert.equal(processor.checkOwner(),undefined);
+ down=false;assert.equal((await processor.runOnce()).failures,0);
+ post(store,{mine:true,text:'好了',at:min(4)});
+ assert.equal((await processor.checkOwner()).runs,1,'once a round gets through, at once again');
+ // A review that fails counts the same: the next quick round would try it again.
+ const s=setup(t,{reviewed:false,answer:making(()=>{throw Error('herdr agent prompt：timed out waiting for agent status（timeout）');})});
+ opened(s.store,s.matters);post(s.store,{mine:true,text:'我看下',at:min(2)});
+ const r=await s.processor.checkOwner();assert.equal(r.failures,0);assert.match(r.review.error,/timeout/);
+ post(s.store,{mine:true,text:'看完了',at:min(3)});
+ assert.equal(s.processor.checkOwner(),undefined);
+});
+
+test('a running processor checks for what I did every ownerCheckMs',async t=>{
+ const {store,matters,model,processor}=setup(t,{options:{everyMs:3600e3,ownerCheckMs:20}});
+ opened(store,matters);
+ await processor.start();t.after(()=>processor.stop());
+ post(store,{text:'在吗',at:min(2)});await new Promise(r=>setTimeout(r,100));
+ assert.equal(model.calls.length,0,'others\' messages wait for the cycle');
+ post(store,{mine:true,text:'我在',at:min(3)});
+ await waitFor(()=>matters.pendingCount()===0,{message:'a round for my message'});
+ assert.deepEqual(newTexts(model.calls[0].data),['在吗','我在']);
+ await processor.stop();
+});
+
+test('the processor says when a batch or a review has made, changed or closed matters, and not otherwise',async t=>{
+ const {store,model,processor,changes}=setup(t,{reviewed:false,answer:d=>d.matters?{updates:d.matters.map(m=>({matter:m.matter,status:'closed',reason:'TA已经看过了'}))}
+  :{new:newTexts(d).filter(x=>x.includes('方案')).map(text=>({title:text,who:'陈帆',ask:'看',urgency:'normal',messages:[ref(d,text)]})),updates:[]}});
+ post(store,{text:'@原智鸿 看下方案',at:min(1)});
+ await processor.runOnce();
+ assert.deepEqual(kinds(model),['batch','review']);
+ assert.deepEqual(changes,[1,2],'after the batch that made a matter, and after the review that closed it');
+ post(store,{text:'中午吃啥',at:min(2)});post(store,{chat:'d1',mine:true,text:'我说的',at:min(3)});
+ await processor.runOnce();
+ assert.equal(model.calls.length,3);assert.deepEqual(changes,[1,2],'a batch that changed nothing says nothing');
+ const thrown=[];
+ const p=new Processor({store,matters:new Matters(store),model:fakeModel(asking('新的方案')),onMattersChanged:()=>{thrown.push(1);throw Error('卡片坏了');}});
+ post(store,{text:'新的方案',at:min(4)});
+ const r=await p.runOnce();
+ assert.deepEqual([r.failures,thrown.length],[0,1],'a hook that throws breaks nothing');assert.ok(store.errors().some(e=>/卡片坏了/.test(e.message)));
 });

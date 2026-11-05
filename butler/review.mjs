@@ -10,15 +10,16 @@ import {composeReview,readReview} from './prompt.mjs';
 
 // options: maxPromptBytes, textChars, matterMessages, contextMessages, ownerMessages (see processor.mjs DEFAULTS);
 // now: the clock; stopped: whether to start no further part; about: 关于TA and my notes, the same for every part (see
-// prompt.mjs aboutMe). Resolves with the runs, the matters reviewed and closed, and whether every open matter was reviewed; a
-// part that fails is recorded as a failed run and rejects, the parts before it staying applied.
-export async function review({store,matters,model,options,now=Date.now,stopped=()=>false,about}){
+// prompt.mjs aboutMe); changed: called after each part that changed or closed matters. Resolves with the runs, the
+// matters reviewed and closed, and whether every open matter was reviewed; a part that fails is recorded as a failed
+// run and rejects, the parts before it staying applied.
+export async function review({store,matters,model,options,now=Date.now,stopped=()=>false,about,changed=()=>{}}){
  // Matters of one chat follow one another, so that a part holds them side by side (one may supersede another).
  let rest=[...Map.groupBy(matters.list(),m=>m.chatIds[0]).values()].flat(),runs=0,reviewed=0,closed=0;
  while(rest.length){
   if(stopped())return {runs,reviewed,closed,complete:false};
   const part=compose(rest,{matters,options,now,about});
-  runs+=1;closed+=await run(part,{store,matters,model,now});
+  runs+=1;closed+=await run(part,{store,matters,model,now,changed});
   reviewed+=part.matters.length;rest=rest.slice(part.matters.length);
  }
  return {runs,reviewed,closed,complete:true};
@@ -47,11 +48,13 @@ function compose(rest,{matters,options,now,about}){
  }
 }
 // One part through the model, recorded in model_runs like a batch; resolves with how many matters it closed.
-function run({matters:list,system,prompt,refs},{store,matters,model,now}){
- return matters.recordRun({model,kind:'review',messages:0,matters:list.length,system,prompt,now},(output,runId)=>{
+async function run({matters:list,system,prompt,refs},{store,matters,model,now,changed}){
+ const updated=await matters.recordRun({model,kind:'review',messages:0,matters:list.length,system,prompt,now},(output,runId)=>{
   const reply=readReview(output,{refs,matterIds:new Set(list.map(m=>m.id))});
   matters.apply({runId,updated:reply.updated,now:now()});
   for(const p of reply.problems)store.addError('加工',`整理事项时模型回复里没有采纳的部分：${p}`);
-  return reply.updated.filter(u=>u.close).length;
+  return reply.updated;
  });
+ if(updated.length)changed();
+ return updated.filter(u=>u.close).length;
 }
