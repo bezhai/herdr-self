@@ -17,6 +17,8 @@ function setup(t,script={},extra={}){
  const seed=s=>fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify(s));
  return {model,calls,state,write,seed};
 }
+// What claude itself is started with: the arguments after -- of the first agent start.
+const claudeArgs=calls=>{const start=calls().find(a=>a[2]==='agent'&&a[3]==='start');return start.slice(start.indexOf('--')+1);};
 const SYSTEM='你在帮「原智鸿」整理飞书消息。只输出 JSON。';
 const PROMPT='数据：\n{"me":"原智鸿","chats":[{"chat":"项目群","messages":[{"ref":"m1","text":"它说 \'引号\' \\"双引号\\" $HOME `x` ; rm -rf /"}]}]}';
 
@@ -32,7 +34,6 @@ test('each prompt goes to a fresh claude without tools in a workspace of its own
  assert.equal(start[start.indexOf('--kind')+1],'claude');assert.equal(start[start.indexOf('--pane')+1],'w1:p1');
  assert.deepEqual(claude.slice(0,4),['--tools','','--strict-mcp-config','--disable-slash-commands'],'no built-in tools and no MCP servers');
  assert.equal(claude[claude.indexOf('--system-prompt')+1],SYSTEM);
- assert.equal(claude[claude.indexOf('--effort')+1],'low','low effort: the default high one runs past the reply timeout');
  const prompt=c[2];assert.equal(prompt[5],PROMPT,'the prompt arrives as it was, quotes and all');assert.ok(prompt.includes('--wait'));
  assert.equal(prompt[4],start[4],'the prompt goes to the agent just started');
  assert.deepEqual(state().workspaces,{},'nothing is left on the model machine');
@@ -43,17 +44,26 @@ test('each prompt goes to a fresh claude without tools in a workspace of its own
 
 test('a configured model is asked for by name and allowed by settings of its own; with none, claude keeps its default',async t=>{
  const NAME='auto_model/alwaysday1_max';
- const claudeArgs=calls=>{const start=calls().find(a=>a[2]==='agent'&&a[3]==='start');return start.slice(start.indexOf('--')+1);};
  const named=setup(t,{},{name:NAME});await named.model.ask({system:SYSTEM,prompt:'x'});
  const args=claudeArgs(named.calls);
  assert.equal(args[args.indexOf('--model')+1],NAME);
  assert.deepEqual(JSON.parse(args[args.indexOf('--settings')+1]),{availableModels:[NAME]},'one argument of JSON that allows the model');
- assert.equal(args[args.indexOf('--system-prompt')+1],SYSTEM);assert.equal(args[args.indexOf('--effort')+1],'low');
+ assert.equal(args[args.indexOf('--system-prompt')+1],SYSTEM);
  assert.equal(named.model.name,NAME);
  const plain=setup(t);await plain.model.ask({system:SYSTEM,prompt:'x'});
  const none=claudeArgs(plain.calls);
  assert.ok(!none.includes('--model')&&!none.includes('--settings'),`no model asked for: ${JSON.stringify(none)}`);
  assert.equal(plain.model.name,undefined);
+});
+
+test('a configured effort is asked of claude; with none, claude keeps its default effort',async t=>{
+ const high=setup(t,{},{effort:'high'});await high.model.ask({system:SYSTEM,prompt:'x'});
+ const args=claudeArgs(high.calls);
+ assert.deepEqual(args.filter(a=>a==='--effort'),['--effort'],`one effort: ${JSON.stringify(args)}`);assert.equal(args[args.indexOf('--effort')+1],'high');
+ assert.equal(args[args.indexOf('--system-prompt')+1],SYSTEM);
+ const plain=setup(t);await plain.model.ask({system:SYSTEM,prompt:'x'});
+ const none=claudeArgs(plain.calls);
+ assert.ok(!none.includes('--effort'),`no effort asked for: ${JSON.stringify(none)}`);
 });
 
 test('the workspace is closed whatever goes wrong, and the error says what',async t=>{

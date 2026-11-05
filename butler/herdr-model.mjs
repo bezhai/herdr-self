@@ -5,17 +5,20 @@ import {execFile} from 'node:child_process';
 
 // No built-in tools (an empty --tools list), no MCP servers (--strict-mcp-config without --mcp-config), no skills or
 // slash commands: whatever the messages say, the model can only answer. --no-session-persistence would be welcome
-// too, but claude accepts it only with --print, and herdr drives the interactive claude. Low effort: at claude's
-// default (high) the model behind cpu1's gateway reasons for thousands of tokens and a batch of 40 messages ran past
-// the reply timeout, while low gave the same matters in about half the tokens (the gateway takes low, high, xhigh and
-// max, not medium).
-export const CLAUDE_ARGS=['--tools','','--strict-mcp-config','--disable-slash-commands','--effort','low'];
+// too, but claude accepts it only with --print, and herdr drives the interactive claude.
+export const CLAUDE_ARGS=['--tools','','--strict-mcp-config','--disable-slash-commands'];
 // The model claude is asked for, when one is named; otherwise claude's default. --model alone is not enough: on cpu1,
 // ~/.claude/settings.json allows only another model (availableModels), and claude then warns that the model is
 // restricted by the organization's settings and keeps asking for the allowed one. --settings adds a settings source
 // whose availableModels lists only this model, and that is enough: with it claude 2.1.318 on cpu1 asked for the named
 // model (the session transcript and the usage it reported show no other model).
 const modelArgs=name=>name?['--model',name,'--settings',JSON.stringify({availableModels:[name]})]:[];
+// The levels claude's --effort takes. The effort is asked for only when one is configured; otherwise claude uses its
+// default (high), as the owner wants for ark/seed-evolving on cpu1. Low was once fixed here for deepseek behind
+// cpu1's gateway: at high it reasoned for thousands of tokens and a batch of 40 messages ran past the reply timeout,
+// while low gave the same matters in about half the tokens. That gateway rejects medium for deepseek.
+export const EFFORTS=['low','medium','high','xhigh','max'];
+const effortArgs=effort=>effort?['--effort',effort]:[];
 // herdr agent prompt takes the prompt only as a command-line argument of the local herdr CLI (no stdin or file), and
 // Linux caps a single argument at 128 KiB.
 const MAX_ARG_BYTES=120_000;
@@ -36,10 +39,11 @@ function failure(args,error,stderr){
 
 export class HerdrModel{
  // machine: the saved herdr machine (label); cwd: an existing absolute directory there (herdr falls back to home for
- // anything else, silently); name: the model claude is asked for, undefined for claude's default; command: the herdr
- // executable and any leading arguments; label: of the workspaces.
- constructor({machine,cwd,name,command=['herdr'],label='butler-model',startTimeoutMs=90_000,replyTimeoutMs=900_000,replyGraceMs=15_000,replyPollMs=1000,log=()=>{}}){
-  Object.assign(this,{machine,cwd,name,command,label,startTimeoutMs,replyTimeoutMs,replyGraceMs,replyPollMs,log});
+ // anything else, silently); name: the model claude is asked for, undefined for claude's default; effort: one of
+ // EFFORTS, undefined for claude's default; command: the herdr executable and any leading arguments; label: of the
+ // workspaces.
+ constructor({machine,cwd,name,effort,command=['herdr'],label='butler-model',startTimeoutMs=90_000,replyTimeoutMs=900_000,replyGraceMs=15_000,replyPollMs=1000,log=()=>{}}){
+  Object.assign(this,{machine,cwd,name,effort,command,label,startTimeoutMs,replyTimeoutMs,replyGraceMs,replyPollMs,log});
  }
  #herdr(args,timeoutMs=60_000){
   const [bin,...lead]=this.command,what=`herdr ${args.slice(0,2).join(' ')}`;
@@ -56,7 +60,7 @@ export class HerdrModel{
   const workspace=created.result.workspace.workspace_id,pane=created.result.root_pane.pane_id;
   try{
    const name=`butler-${Date.now().toString(36)}${Math.random().toString(36).slice(2,6)}`;
-   await this.#herdr(['agent','start',name,'--kind','claude','--pane',pane,'--timeout',String(this.startTimeoutMs),'--',...CLAUDE_ARGS,...modelArgs(this.name),'--system-prompt',system],this.startTimeoutMs+60_000);
+   await this.#herdr(['agent','start',name,'--kind','claude','--pane',pane,'--timeout',String(this.startTimeoutMs),'--',...CLAUDE_ARGS,...modelArgs(this.name),...effortArgs(this.effort),'--system-prompt',system],this.startTimeoutMs+60_000);
    const prompted=await this.#herdr(['agent','prompt',name,prompt,'--wait','--timeout',String(this.replyTimeoutMs)],this.replyTimeoutMs+60_000);
    if(prompted.result?.agent?.agent_status==='blocked')throw Error('模型停在了等待确认的界面（blocked）');
    return await this.#reply(name);

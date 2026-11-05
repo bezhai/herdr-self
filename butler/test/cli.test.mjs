@@ -100,6 +100,9 @@ function fakeHerdr(dir,script){
  const bin=path.join(dir,'herdr.sh'),fake=fileURLToPath(new URL('./fake-herdr.mjs',import.meta.url));
  fs.writeFileSync(bin,`#!/bin/sh\nexec "${process.execPath}" "${fake}" "${state}" "$@"\n`,{mode:0o755});return bin;
 }
+// What claude was started with in each agent start the fake herdr saw: the arguments after --.
+const agentStarts=dir=>fs.readFileSync(path.join(dir,'herdr','calls.jsonl'),'utf8').trim().split('\n').map(l=>JSON.parse(l))
+ .filter(a=>a[2]==='agent'&&a[3]==='start').map(a=>a.slice(a.indexOf('--')+1));
 
 test('process --once turns the backlog into matters through herdr; matters lists them with links',async t=>{
  const {lark,store,dir}=await setup(t);
@@ -123,8 +126,7 @@ test('BUTLER_MODEL_NAME picks the model claude is asked for, and each run record
  const {lark,store,dir}=await setup(t),NAME='auto_model/alwaysday1_max';
  const herdr=fakeHerdr(dir,{});
  const machine=`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`;
- const starts=()=>fs.readFileSync(path.join(dir,'herdr','calls.jsonl'),'utf8').trim().split('\n').map(l=>JSON.parse(l))
-  .filter(a=>a[2]==='agent'&&a[3]==='start').map(a=>a.slice(a.indexOf('--')+1));
+ const starts=()=>agentStarts(dir);
  post(store,{text:'在吗'});
  let r=await cli(writeConfig(dir,lark,0o600,`${machine}BUTLER_MODEL_NAME=${NAME}\n`),'process','--once');assert.equal(r.code,0,r.stderr);
  let [args]=starts();
@@ -133,6 +135,20 @@ test('BUTLER_MODEL_NAME picks the model claude is asked for, and each run record
  r=await cli(writeConfig(dir,lark,0o600,`${machine}BUTLER_MODEL_NAME=\n`),'process','--once');assert.equal(r.code,0,r.stderr);
  args=starts()[1];assert.ok(!args.includes('--model')&&!args.includes('--settings'),'empty: claude\'s default model');
  assert.deepEqual(new Matters(store).runs().map(x=>[x.kind,x.model]),[['batch',NAME],['batch',undefined]]);
+});
+
+test('BUTLER_MODEL_EFFORT sets the effort claude is asked for, and only one claude knows',async t=>{
+ const {lark,store,dir}=await setup(t);
+ const herdr=fakeHerdr(dir,{});
+ const machine=`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`;
+ post(store,{text:'在吗'});
+ let r=await cli(writeConfig(dir,lark,0o600,`${machine}BUTLER_MODEL_EFFORT=xhigh\n`),'process','--once');assert.equal(r.code,0,r.stderr);
+ let [args]=agentStarts(dir);assert.equal(args[args.indexOf('--effort')+1],'xhigh');
+ post(store,{text:'还在吗'});
+ r=await cli(writeConfig(dir,lark,0o600,`${machine}BUTLER_MODEL_EFFORT=\n`),'process','--once');assert.equal(r.code,0,r.stderr);
+ args=agentStarts(dir)[1];assert.ok(!args.includes('--effort'),'empty: claude\'s default effort');
+ r=await cli(writeConfig(dir,lark,0o600,`${machine}BUTLER_MODEL_EFFORT=medium-high\n`),'status');assert.equal(r.code,1);
+ assert.match(r.stderr,/BUTLER_MODEL_EFFORT/);assert.match(r.stderr,/low、medium、high、xhigh 或 max/);assert.match(r.stderr,/medium-high/);
 });
 
 test('status shows the bot connection, the last digest and the next one when one is due',async t=>{

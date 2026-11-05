@@ -136,12 +136,14 @@ open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启
 模型是另一台机器（cpu1）上的 claude，经 herdr 调用，claude 访问的网关 token 不离开那台机器。`BUTLER_MODEL_MACHINE` 是 herdr 保存的机器（`herdr machine list`），它指向那台机器上专给管家用的 herdr session，不是我自己用的默认 session。每一批（整理的每一部分也一样）这样运行：
 
 1. `herdr --machine <机器> workspace create --cwd <BUTLER_MODEL_CWD> --label butler-model --no-focus`；
-2. 在它的第一个 pane 里 `herdr --machine <机器> agent start <名字> --kind claude -- --tools "" --strict-mcp-config --disable-slash-commands --effort low [--model <模型> --settings '{"availableModels":["<模型>"]}'] --system-prompt <说明>`：没有内置工具，没有 MCP 服务器，没有技能和斜杠命令，模型只能回答；推理强度用 low，因为默认的 high 下 cpu1 网关后面的模型要推理几千个 token，40 条消息的一批会超过回复的时限，而 low 给出同样的事项、token 少一半（网关只接受 low、high、xhigh 和 max，不接受 medium）；
+2. 在它的第一个 pane 里 `herdr --machine <机器> agent start <名字> --kind claude -- --tools "" --strict-mcp-config --disable-slash-commands [--model <模型> --settings '{"availableModels":["<模型>"]}'] [--effort <强度>] --system-prompt <说明>`：没有内置工具，没有 MCP 服务器，没有技能和斜杠命令，模型只能回答；
 3. `agent prompt <名字> <数据> --wait`，等这一轮结束；
 4. `agent replies <名字>` 取它最后的回复（由 claude 的 Stop hook 报给 herdr，可能比状态变化晚一点到，所以最多再等 15 秒）；
 5. 不管成功与否，`workspace close` 关掉这个工作区，claude 随之退出。
 
 配置了 `BUTLER_MODEL_NAME` 时才带 `--model` 和 `--settings`（JSON 是一个参数），没有配置时都不带，用 claude 默认的模型。只带 `--model` 不够：cpu1 的 `~/.claude/settings.json` 用 `availableModels` 只允许另一个模型，claude 会提示这个模型被组织的设置限制，然后照样请求允许的那个。`--settings` 再加一份设置，里面的 `availableModels` 只列这个模型，这样就够了：claude 2.1.318 在 cpu1 上实测，会话记录里的请求用的都是这个模型。
+
+配置了 `BUTLER_MODEL_EFFORT` 时才带 `--effort <强度>`，没有配置时不带，用 claude 默认的推理强度（high）。它只能是 claude 的 `--effort` 接受的 low、medium、high、xhigh 或 max，别的值让配置加载失败。以前这里固定带 `--effort low`：那时 cpu1 网关后面是 deepseek，默认的 high 下它要推理几千个 token，40 条消息的一批会超过回复的时限，而 low 给出同样的事项、token 少一半；那个网关对 deepseek 不接受 medium。现在模型换成了 ark/seed-evolving，用它默认的推理强度，所以不再固定。
 
 加工端启动时关掉以前被打断、没来得及关的 `butler-model` 工作区。同一个存储同时只能有一个加工端，第二个会拒绝启动，所以批次和整理不会重叠。
 
@@ -238,6 +240,7 @@ grep '^OPEN_LARK_AGENT_READ_TOKEN=' ~/.config/open-lark/app.env | sed 's/^OPEN_L
 | `BUTLER_MODEL_MACHINE` | 无，加工端必填 | herdr 保存的模型机器的名称（见上面「第一次设置」） |
 | `BUTLER_MODEL_CWD` | 无（herdr 用远端的主目录） | 模型在那台机器上运行的目录，绝对路径 |
 | `BUTLER_MODEL_NAME` | 无（claude 默认的模型） | 那台机器上的 claude 用哪个模型，如 `auto_model/alwaysday1_max`；运行记录里记下它（见上面「模型在哪里」） |
+| `BUTLER_MODEL_EFFORT` | 无（claude 默认的推理强度） | 那台机器上的 claude 用哪个推理强度：low、medium、high、xhigh 或 max（见上面「模型在哪里」） |
 | `BUTLER_HERDR` | `herdr` | 本机 herdr 可执行文件。systemd 用户服务的 PATH 里通常没有 `~/.local/bin`，服务里写完整路径 |
 | `BUTLER_BOT_APP_ID`、`BUTLER_BOT_APP_SECRET`、`BUTLER_BOT_OWNER` | 无 | 管家机器人的应用和主人的 open_id，由 `bot create` 写入；三个要么都有，要么都没有 |
 | `BUTLER_BOT_DOMAIN` | `feishu` | `feishu`（open.feishu.cn）或 `lark`（open.larksuite.com），由 `bot create` 写入 |
@@ -397,11 +400,11 @@ npm test
 - 忽略名单上的发送方的消息不交给模型，也不出现在上下文里；移出名单后，以前跳过的消息不会再交给模型。只有我自己的消息、又没有未结束的事项时不调用模型。
 - 模型连不上时消息保持未处理并记错误，之后批次减半，成功一次后恢复；回复不是要求的 JSON 时同样，原始回复留在运行记录里。一条消息单独成批时回答总是用不了、而别的消息正常：它放到一边，后面的消息照常处理，它也不再作为它们的上下文；它每轮试一次，3 次后跳过并记一条写明这条消息的错误。模型整体出问题（连不上、没有回复、对什么都回答用不了的内容、放到一边后紧接着的运行也失败）时一条都不跳过，每轮最多多运行一次。单独成批成功一次的消息清掉记录。批次一次一个、从早到晚；提示超过上限时拆小批次和上下文。同一个存储上的第二个加工端拒绝启动。
 - 提示：交给模型的是事实和这一次的编号，没有消息 id 和链接；@ 了谁（我写成「TA」，同一个人只写一次，@所有人 不在里面）、我加的表情和别人加的表情（人数不算我，名字最多 3 个）；我新加的表情按时间排在所在的聊天里，指向它所在的消息，没有自己的编号，取消了的带标记；两份说明都写明管家只跟踪我还没回应的事，回应了的（包括只是答应下来、加了表示收到的表情）不新建、已有的关掉，机器人和告警的通知、只有标题的卡片、@ 了好几个人的消息和关注群里的讨论只有明确要我做什么时才算；说明是一行（herdr 不接受参数里的控制字符）；长消息截断。读回复：代码块包着的 JSON 也能读，不是 JSON 或缺少 `new` 和 `updates` 时报错；引用不存在的消息或事项、只引用旧消息或我自己的消息的新事项、没有理由的关闭都不采纳；网址被替换；文字长度有上限。
-- herdr 调用层：每一批在自己的工作区里开一个新的、没有工具的 claude，命令都带 `--machine`，提示原样送到；配置了模型时带上 `--model` 和只允许它的 `--settings`，没有配置时都不带；出任何错（claude 起不来、超时、没有回复、回复被截断、停在确认界面）都关掉工作区并说明原因，其中只有回复被截断算模型回答了；回复晚到一点也能取到；机器连不上时直接报出 herdr 的错误；提示超过一个命令行参数的上限时什么都不启动；清理只关 `butler-model` 工作区。
+- herdr 调用层：每一批在自己的工作区里开一个新的、没有工具的 claude，命令都带 `--machine`，提示原样送到；配置了模型时带上 `--model` 和只允许它的 `--settings`，没有配置时都不带；配置了推理强度时带上 `--effort`，没有配置时不带；出任何错（claude 起不来、超时、没有回复、回复被截断、停在确认界面）都关掉工作区并说明原因，其中只有回复被截断算模型回答了；回复晚到一点也能取到；机器连不上时直接报出 herdr 的错误；提示超过一个命令行参数的上限时什么都不启动；清理只关 `butler-model` 工作区。
 - 整理：全部未结束的事项连同它们的事实、最近的来源消息和所在聊天最新的消息（包括我发的）交给模型，忽略名单上的发送方和已结束的事项不出现，没有 id 和链接；模型关掉的事项记下理由、记为模型关掉，改动的字段生效；回复里的新事项、引用不存在的事项、没有理由的关闭都不采纳并记错误；提示放不下时分几部分，每部分在上限内，同一聊天的事项排在一起，每个事项只整理一次；某一部分失败时前面的结果保留，后面的不再运行；停止时不再开始新的一部分；没有未结束的事项时不调用模型；整理的运行也记在 `model_runs` 里，旧存储里的运行记录算作批次、模型未知，之后的运行记下模型。批次和整理的说明用同一个事项标准。
 - 什么时候整理：还没有整理过时第一轮就整理，在这一轮的批次之后，看得到批次刚开的事项；间隔之内不再整理，过了间隔、没有新消息也整理；「关于TA」写出来或重写了、说明加了或删了时马上整理；失败时记错误，下一轮再试，同一轮里不重试，消息照常处理；批次失败的一轮不整理；被停止打断的整理不算完成。
 - 「关于TA」：交给模型的是我发的消息，每条带着它回复的那条、没有就带着它前面的那条，忽略名单上的发送方不出现，还有我的说明；放不下时给放得下的最新的那些，比减半留下的多；只有说明时只用说明，什么都没有时不调用模型；模型的回复里网址被替换、保留分行、长度有上限，不是要求的 JSON 时这次运行记为失败；运行记在 `model_runs` 里。什么时候写：还没有时第一轮在批次之后、整理之前写，紧接着的整理和之后的批次都带上它；一天之内不重写，过了一天重写；说明加了或删了时下一轮重写；写失败时记错误、下一轮再试，消息照常处理，整理照常进行；批次失败的一轮不写。说明按编号增删，编号不重复使用。批次和整理的提示里，「关于TA」和说明在数据里，不在系统提示里；两份说明里都写明发给我、@我不等于是我的事，说明优先于「关于TA」。
-- 命令行的 `ignore`、`process --once`（经假的 herdr，包括这一轮的整理）、`matters`、`profile` 和 `status` 里加工端、整理和「关于TA」的三行，以及 `BUTLER_REVIEW_EVERY`、`BUTLER_PROFILE_EVERY` 和 `BUTLER_MODEL_NAME`（交给 claude 的参数和运行记录里的模型）。
+- 命令行的 `ignore`、`process --once`（经假的 herdr，包括这一轮的整理）、`matters`、`profile` 和 `status` 里加工端、整理和「关于TA」的三行，以及 `BUTLER_REVIEW_EVERY`、`BUTLER_PROFILE_EVERY`、`BUTLER_MODEL_NAME`（交给 claude 的参数和运行记录里的模型）和 `BUTLER_MODEL_EFFORT`（交给 claude 的参数，不认识的强度让配置加载失败）。
 
 机器人的测试用假的飞书通道（`test/fake-channel.mjs`，按 SDK 0.7.1 `LarkChannel` 的形状：注册事件、连接、发送、断开，测试可以让它送来消息、连接失败或发送失败）和可控的时钟。覆盖：
 
