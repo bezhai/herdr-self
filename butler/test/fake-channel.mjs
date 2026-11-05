@@ -1,6 +1,7 @@
 // A stand-in for @larksuite/channel's LarkChannel, as the bot uses it: createLarkChannel(options) returns it, the bot
 // registers its handlers with on(), connects, sends, updates the cards it sent and disconnects. The test makes Feishu
-// deliver messages (receive) and connection events (emit), and makes connecting fail.
+// deliver messages (receive), card clicks (click, which resolves to the answer that goes back to Feishu) and connection
+// events (emit), and makes connecting fail.
 export const OWNER='ou_owner0000000000000000000000001';
 let seq=0;
 
@@ -20,6 +21,8 @@ export function fakeChannel({failConnects=0}={}){
   mentionAll:false,mentionedBot:false,createTime:Date.now(),...o});
  f.receive=async o=>{const m=f.message(o);await f.handlers.message?.(m);return m;};
  f.emit=(name,...args)=>f.handlers[name]?.(...args);
+ // A click as the SDK normalizes it (CardActionEvent): by default the owner's, on a button.
+ f.click=async(o={})=>f.handlers.cardAction?.({messageId:'om_out1',chatId:'oc_dm_owner',operator:{openId:OWNER},action:{tag:'button',value:{}},...o});
  f.factory=options=>{f.options=options;return channel;};
  return f;
 }

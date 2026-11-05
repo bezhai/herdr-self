@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS model_runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, finished_at INTEGER, messages INTEGER NOT NULL, prompt_bytes INTEGER NOT NULL,
  ok INTEGER, error TEXT, output TEXT, kind TEXT NOT NULL DEFAULT 'batch', matters INTEGER, model TEXT);
 `;
+// The reason of a matter I closed as not mine (on a card, or in the conversation in those words).
+export const NOT_MINE='不归我';
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
 // judged the matter ended) or owner (I closed it in the conversation). A model run's kind: batch (of new messages),
 // review (of the open matters, see review.mjs) or profile (关于TA, see profile.mjs); runs from before reviews were
@@ -141,6 +143,11 @@ export class Matters{
  // I closed an open matter myself, with my reason if I gave one; returns whether it was open.
  close(id,reason,now=Date.now()){
   return Number(this.#run(`UPDATE matters SET status='closed',reason=?,closed_at=?,closed_by='owner',updated_at=? WHERE id=? AND status='open'`,reason||null,now,now,id).changes)>0;
+ }
+ // The matters I closed as not mine and have not reopened, the latest first: the model is shown them as what is not
+ // mine (see prompt.mjs).
+ notMine(limit){
+  return this.#all("SELECT * FROM matters WHERE status='closed' AND closed_by='owner' AND reason=? ORDER BY closed_at DESC,id DESC LIMIT ?",NOT_MINE,limit).map(r=>this.#matter(r));
  }
  // An ended matter is open again; returns whether it had ended.
  reopen(id,now=Date.now()){

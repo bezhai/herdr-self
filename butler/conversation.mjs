@@ -8,8 +8,8 @@
 // tens of seconds to minutes.
 import {clean,parse,prose} from './prompt.mjs';
 import {find} from './lookup.mjs';
-import {cards,plain,heading} from './cards.mjs';
-import {endReason,matterRow,ordered} from './digest.mjs';
+import {cards,plain} from './cards.mjs';
+import {endReason,listCards} from './digest.mjs';
 
 // One row per message of mine: what I said, butler's reply, and the model's raw answer for looking into it later.
 const SCHEMA=`
@@ -103,7 +103,7 @@ export class Conversation{
   await this.#reply(msg,{text:ahead?`收到。前面还有 ${ahead} 条消息${batch?'和一批正在整理的新消息':''}，按顺序处理。`
    :batch?'收到。模型正在整理一批新消息，整理完就处理这条，可能要几分钟。':'收到，正在处理，一般要十几秒到一分钟。'});
   const turn=this.model.run(model=>this.#turn(model,msg.messageId,said),{first:true,what:'turn'})
-   .then(elements=>this.#reply(msg,...cards(elements,{summary:'管家的回复'}).map(card=>({card}))),async e=>{
+   .then(replies=>this.#reply(msg,...replies.map(card=>({card}))),async e=>{
     this.store.addError('对话',`处理私聊消息失败：${e?.message??e}`);await this.#reply(msg,{text:`这次没有处理成：${e?.message??e}`});
    });
   this.#turns.add(turn);turn.finally(()=>this.#turns.delete(turn));
@@ -133,18 +133,18 @@ export class Conversation{
    senders:senders.filter(s=>!ignoredIds.has(s.senderId)).slice(0,300).map(s=>({name:s.name,type:s.type,messages:s.messages})),
    watched:watches.map(w=>w.name??'（名称未知的群）'),groups:this.store.groups().filter(g=>!watched.has(g.feedId)&&g.name).slice(0,60).map(g=>g.name)};
  }
- // One turn, holding the model: ask it, carry out what it chose, and return the reply's card elements.
+ // One turn, holding the model: ask it, carry out what it chose, and return the reply's cards: what butler did and the
+ // model's answer, then the list of the open matters when it was asked for.
  async #turn(model,messageId,said){
-  const now=this.now();let output;
+  const now=this.now(),say=text=>cards([plain(text)],{summary:'管家的回复'});let output;
   try{output=await model.ask(composeTurn({now,me:this.matters.me(),said,history:this.#history(messageId),...this.#facts()}));}
-  catch(e){const reply=`这次没有处理成：${e?.message??e}`;this.#finish(messageId,{reply,error:reply});return [plain(reply)];}
+  catch(e){const reply=`这次没有处理成：${e?.message??e}`;this.#finish(messageId,{reply,error:reply});return say(reply);}
   const turn=readTurn(output),done=[],extra=[];
   for(const p of turn.problems)this.store.addError('对话',`模型要的动作没有执行：${p}`);
-  for(const a of turn.actions){const r=this.#do(a,now);done.push(...r.lines??[]);extra.push(...r.elements??[]);}
+  for(const a of turn.actions){const r=this.#do(a,now);done.push(...r.lines??[]);extra.push(...r.cards??[]);}
   const text=[...done,...turn.problems].join('\n'),reply=[text,turn.reply].filter(Boolean).join('\n\n');
   this.#finish(messageId,{reply:[reply,extra.length?'（附上了没结束的事项）':''].filter(Boolean).join('\n'),output});
-  const elements=[...reply?[plain(reply)]:[],...extra];
-  return elements.length?elements:[plain('我没有明白你的意思，换个说法试试？')];
+  return reply||extra.length?[...reply?say(reply):[],...extra]:say('我没有明白你的意思，换个说法试试？');
  }
  #do(a,now){
   const m=a.matter&&this.matters.matter(a.matter);
@@ -178,8 +178,8 @@ export class Conversation{
     if(!this.matters.reopen(m.id,now))return {lines:[`#${m.id} 没有结束，不用重新打开`]};
     this.onMattersChanged();return {lines:[`已重新打开 #${m.id} ${m.title}`]};
    case 'list':{
-    const open=ordered(this.matters.list());
-    return open.length?{elements:[heading(`没结束的事项（${open.length}）`),...open.map(x=>matterRow(x,{at:now}))]}:{lines:['现在没有没结束的事项']};
+    const list=listCards(this.matters,now);
+    return list.length?{cards:list}:{lines:['现在没有没结束的事项']};
    }
    case 'note':{
     if(this.matters.notes().some(n=>n.text===a.text))return {lines:[`这条说明已经记过了：${a.text}`]};

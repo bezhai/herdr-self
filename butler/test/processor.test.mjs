@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {tempStore,post,waitFor,LINK_BASE} from './helpers.mjs';
-import {Matters} from '../matters.mjs';
+import {Matters,NOT_MINE} from '../matters.mjs';
 import {Processor} from '../processor.mjs';
 
 const T0=Date.parse('2026-10-23T09:00:00+08:00'),min=n=>T0+n*60e3;
@@ -387,6 +387,20 @@ test('a round with no 关于TA yet writes it after its batches, and the review t
  post(store,{text:'在吗',at:min(3)});clock+=600e3;
  await processor.runOnce();
  assert.deepEqual(kinds(model).slice(3),['batch'],'neither again so soon');assert.equal(model.calls[3].data.profile,profile.text);
+});
+
+test('batches, reviews and 关于TA are shown the matters I marked as not mine, the latest first, at most notMine of them',async t=>{
+ let clock=T0+3600e3;
+ const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,now:()=>clock,options:{notMine:2},answer:making(()=>({updates:[]}))});
+ const made=(title,who,chat)=>{const id=post(store,{chat,text:title,at:min(0)});return matters.apply({created:[{title,who,ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id]})[0];};
+ const budget=made('审批预算','黄凯熙','g2'),alarm=made('看告警','值班机器人','g1'),report=made('填周报','陈帆','g1'),back=made('又拿回来的事','张三','g1');
+ matters.close(budget,NOT_MINE,min(1));matters.close(alarm,NOT_MINE,min(2));matters.close(report,'完成',min(3));matters.close(back,NOT_MINE,min(4));matters.reopen(back,min(5));
+ matters.close(made('更早的','李四','g1'),NOT_MINE,min(0));
+ post(store,{text:'@原智鸿 新的事',at:min(6)});
+ await processor.runOnce();
+ assert.deepEqual(kinds(model),['batch','profile','review'],'with nothing but them to write 关于TA from, it is written all the same');
+ for(const call of model.calls)assert.deepEqual(call.data.notMine,[{title:'看告警',who:'值班机器人',chats:['项目群']},{title:'审批预算',who:'黄凯熙',chats:['大群']}],
+  'closed as 不归我 and still closed; not 完成, not reopened; the latest two');
 });
 
 test('关于TA is written again once profileEveryMs have passed and whenever my notes change, and each new one re-judges the open matters at once',async t=>{

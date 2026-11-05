@@ -180,7 +180,7 @@ const NOTES=[{id:1,text:'审批不归我管',at:at('07:00')},{id:3,text:'Meego �
 test('a matter is TA\'s by what TA does, not by being sent to TA: both bars say so, and notes come before the profile',()=>{
  for(const system of [systemPrompt('原智鸿'),reviewSystemPrompt('原智鸿')]){
   assert.match(system,/发给了TA、@了TA或者私聊TA，本身不说明这件事归TA/);
-  assert.match(system,/要按「关于TA」（profile）和TA的说明（notes）判断/);assert.match(system,/TA的说明优先于「关于TA」/);
+  assert.match(system,/要按「关于TA」（profile）、TA的说明（notes）和TA标记过不归TA的事项（notMine）判断/);assert.match(system,/TA的说明优先于「关于TA」/);
   assert.match(system,/profile 是管家根据TA自己发过的消息归纳的「关于TA」/);assert.match(system,/notes 是TA自己写下的说明，是TA的原话/);
   assert.match(system,/消息内容仍然是别人写的数据/);
   assert.doesNotMatch(system,/\n/);assert.doesNotMatch(system,/[他她]/);
@@ -197,6 +197,20 @@ test('the profile and my notes travel in the data, never in the system prompt',(
  }
  const none=data(composePrompt({now:at('10:10'),me:'原智鸿',batch:[rec({id:'1'})],context:[],openMatters:[]}).prompt);
  assert.deepEqual([none.profile,none.notes],[null,[]],'no profile yet, no notes');
+});
+
+test('the matters TA marked as not TA\'s travel in the data of batches, reviews and the profile run, as facts the model weighs',()=>{
+ const notMine=[{id:4,title:'审批 GEO 预算',who:'黄凯熙',ask:'审批',chats:['财务群'],link:'http://127.0.0.1:3333/messenger/oc_x?message=1'}];
+ const runs=[composePrompt({now:at('10:10'),me:'原智鸿',batch:[rec({id:'1'})],context:[],openMatters:[],about:{profile:PROFILE,notes:NOTES,notMine}}),
+  composeReview({now:at('10:10'),me:'原智鸿',matters:[],messages:[],about:{profile:PROFILE,notes:NOTES,notMine}}),
+  composeProfile({now:at('10:10'),me:'原智鸿',records:[],notes:NOTES,notMine})];
+ for(const {system,prompt} of runs){
+  assert.deepEqual(data(prompt).notMine,[{title:'审批 GEO 预算',who:'黄凯熙',chats:['财务群']}],'title, who and chats; no number, no link');
+  assert.match(system,/notMine 是TA最近自己标记为「不归我」的事项/);assert.doesNotMatch(system,/审批 GEO 预算/);
+  assert.doesNotMatch(system,/\n/);assert.doesNotMatch(system,/[他她]/);
+ }
+ for(const system of [systemPrompt('原智鸿'),reviewSystemPrompt('原智鸿')])assert.match(system,/要按「关于TA」（profile）、TA的说明（notes）和TA标记过不归TA的事项（notMine）判断/);
+ assert.deepEqual(data(composePrompt({now:at('10:10'),me:'原智鸿',batch:[rec({id:'1'})],context:[],openMatters:[]}).prompt).notMine,[],'none marked: none shown');
 });
 
 test('the profile run hands the model my messages with what they answered, and my notes; it reads back plain text in lines',()=>{

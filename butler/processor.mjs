@@ -7,7 +7,8 @@
 // mine that could end an open matter (my message or reaction in its chat) does not wait for the next round: it starts
 // one within seconds (see checkOwner). Once a day, and whenever my notes change, a round's batches are followed by a
 // new 关于TA (see profile.mjs and #profile), and every few hours, or when 关于TA or my notes have changed, a round ends
-// with a review of all open matters (see review.mjs and #review). Batches and reviews are told 关于TA and my notes.
+// with a review of all open matters (see review.mjs and #review). Batches and reviews are told 关于TA, my notes and
+// the matters I marked as not mine.
 // Whoever shows the matters is told when a batch or a review has changed them (onMattersChanged).
 import {composePrompt,readReply} from './prompt.mjs';
 import {review} from './review.mjs';
@@ -18,9 +19,10 @@ import {writeProfile} from './profile.mjs';
 // ownerMessages: how many of my latest messages, and messages I reacted to, in such a matter's chats since it started
 // come along too, so that my answer shows even when the chat has moved on past its latest messages.
 // profileMessages: how many of my latest messages 关于TA is written from at most, more than fit one prompt (the
-// newest that fit go). ownerCheckMs: how often to look for something of mine that could end an open matter.
+// newest that fit go). ownerCheckMs: how often to look for something of mine that could end an open matter. notMine:
+// how many of the matters I marked as not mine, the latest, batches, reviews and 关于TA are shown.
 export const DEFAULTS={everyMs:600_000,ownerCheckMs:15_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,ownerMessages:5,textChars:1500,skipAfter:3,
- reviewEveryMs:10_800_000,profileEveryMs:86_400_000,profileMessages:1000};
+ reviewEveryMs:10_800_000,profileEveryMs:86_400_000,profileMessages:1000,notMine:20};
 const message=e=>e?.message??String(e);
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
 // Whether what is done every everyMs is due: it has never been done (last has no at), or that long ago.
@@ -120,8 +122,8 @@ export class Processor{
   this.#beat({lastRoundAt:this.now()});
   return result;
  }
- // What batches and reviews are told of me: 关于TA (the meta profile) and my notes.
- #about(){return {profile:this.store.meta('profile'),notes:this.matters.notes()};}
+ // What batches and reviews are told of me: 关于TA (the meta profile), my notes and the matters I marked as not mine.
+ #about(){return {profile:this.store.meta('profile'),notes:this.matters.notes(),notMine:this.matters.notMine(this.options.notMine)};}
  // 关于TA, after a round's batches and before its review, which then judges by it. It is due when none has been
  // written (the first round after deployment writes it), once profileEveryMs have passed since the last one, and
  // when my notes are no longer those it was written with. One that fails is recorded and goes again on the next

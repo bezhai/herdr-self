@@ -92,6 +92,10 @@ test('the owner talks freely: the model picks the actions, butler carries them o
  const titles=r.cards.flatMap(c=>c.body.elements).filter(e=>e.tag==='column_set').map(e=>shown({card:e.columns[1]}).split('\n')[0]);
  assert.deepEqual(titles,['给黄凯熙加权限','评审接口方案','查看 Meego 状态变更通知'],'most urgent first');
  assert.ok(r.cards.some(c=>JSON.stringify(c).includes(JSON.stringify(matters.matter(perm).link))),'with butler\'s links');
+ assert.match(shown({card:r.cards[0]}),/^最急的是给黄凯熙加权限。$/,'the reply in a card of its own');
+ const rows=r.cards.slice(1).flatMap(c=>c.body.elements).filter(e=>e.tag==='column_set');
+ assert.deepEqual(rows.map(e=>e.columns[2].elements[0].behaviors[0].value),[perm,review,meego].map(matter=>({act:'done',matter,card:'list',ids:[perm,review,meego],t:T})),
+  'then the list, whose buttons say which matters its card shows');
 
  const before=JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.watches()]);
  r=await say('今天最急的是什么？',{actions:[],reply:'最急的是给黄凯熙加权限，今天要处理。'});

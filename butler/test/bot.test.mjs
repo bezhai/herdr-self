@@ -57,6 +57,23 @@ test('the bot writes to the owner\'s direct chat and replies to the owner\'s mes
  assert.throws(()=>bot.updateCard('om_out1',card),/没有连上飞书/);
 });
 
+test('a click on a card button reaches the card handler only when it is the owner\'s, and its answer goes back to Feishu; anyone else gets an error toast',async t=>{
+ const {store,feishu,bot}=setup(t),clicks=[];
+ bot.onCardAction=evt=>{clicks.push(evt);return {toast:{type:'success',content:'已完成'}};};
+ await bot.start();
+ assert.equal(feishu.options.safety.chatQueue.cardActions,'separate','a click never waits behind a message, as Feishu wants an answer within 3 seconds');
+ const value={act:'done',matter:1,card:'digest',t:1};
+ assert.deepEqual(await feishu.click({action:{tag:'button',value}}),{toast:{type:'success',content:'已完成'}});
+ assert.deepEqual(clicks.map(c=>c.action.value),[value]);
+ const refused={toast:{type:'error',content:'只有管家的主人能操作这张卡片'}};
+ assert.deepEqual(await feishu.click({operator:{openId:'ou_someone_else000000000000000002'},action:{tag:'button',value}}),refused,'a card forwarded to someone else');
+ assert.deepEqual(await feishu.click({operator:undefined}),refused);
+ assert.equal(clicks.length,1);
+ bot.onCardAction=()=>{throw Error('database is locked');};
+ assert.deepEqual(await feishu.click({action:{tag:'button',value}}),{toast:{type:'error',content:'这次没有处理成，稍后再试'}});
+ assert.ok(store.errors().some(e=>e.source==='机器人'&&/database is locked/.test(e.message)));
+});
+
 test('a failed connection is retried and shown in the store; reconnects are tracked; stop disconnects',async t=>{
  const {store,feishu,bot}=setup(t,{failConnects:2});
  const started=bot.start();
@@ -121,4 +138,12 @@ test('wired as in the service: the owner gets an acknowledgement and an answer, 
  await digests.tick();
  const digest=feishu.sent[2];
  assert.equal(digest.to,OWNER);assert.deepEqual(digest.opts,{});assert.match(shown(digest.input),/管家待办/);assert.match(shown(digest.input),/再看一个/);
+ bot.onCardAction=evt=>digests.click(evt);
+ const done=digest.input.card.body.elements.find(e=>e.tag==='column_set').columns[2].elements[0];
+ const answer=await feishu.click({messageId:'om_out3',action:{tag:'button',value:done.behaviors[0].value}});
+ assert.equal(answer.toast.content,'已完成');assert.equal(matters.matter(2).closedBy,'owner');
+ assert.match(shown({card:answer.card.data}),/现在没有要你处理的事/,'the clicked card, as it is now');
+ assert.deepEqual(await feishu.click({messageId:'om_out3',operator:{openId:'ou_someone_else000000000000000002'},action:{tag:'button',value:done.behaviors[0].value}}),
+  {toast:{type:'error',content:'只有管家的主人能操作这张卡片'}});
+ await digests.stop();
 });

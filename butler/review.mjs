@@ -9,10 +9,10 @@
 import {composeReview,readReview} from './prompt.mjs';
 
 // options: maxPromptBytes, textChars, matterMessages, contextMessages, ownerMessages (see processor.mjs DEFAULTS);
-// now: the clock; stopped: whether to start no further part; about: 关于TA and my notes, the same for every part (see
-// prompt.mjs aboutMe); changed: called after each part that changed or closed matters. Resolves with the runs, the
-// matters reviewed and closed, and whether every open matter was reviewed; a part that fails is recorded as a failed
-// run and rejects, the parts before it staying applied.
+// now: the clock; stopped: whether to start no further part; about: 关于TA, my notes and the matters I marked as not
+// mine, the same for every part (see prompt.mjs aboutMe); changed: called after each part that changed or closed
+// matters. Resolves with the runs, the matters reviewed and closed, and whether every open matter was reviewed; a part
+// that fails is recorded as a failed run and rejects, the parts before it staying applied.
 export async function review({store,matters,model,options,now=Date.now,stopped=()=>false,about,changed=()=>{}}){
  // Matters of one chat follow one another, so that a part holds them side by side (one may supersede another).
  let rest=[...Map.groupBy(matters.list(),m=>m.chatIds[0]).values()].flat(),runs=0,reviewed=0,closed=0;

@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {tempStore,post,sleep} from './helpers.mjs';
-import {shown,componentsOf} from './fake-channel.mjs';
-import {Matters} from '../matters.mjs';
+import {shown,componentsOf,OWNER} from './fake-channel.mjs';
+import {Matters,NOT_MINE} from '../matters.mjs';
 import {DEFAULT_SCHEDULE} from '../schedule.mjs';
-import {cards,heading,MAX_COMPONENTS} from '../cards.mjs';
-import {todoOf,digestCard,matterRow,Digests,CARD_BYTES} from '../digest.mjs';
+import {MAX_COMPONENTS} from '../cards.mjs';
+import {todoOf,digestCard,matterRow,listCards,Digests,CARD_BYTES} from '../digest.mjs';
 
 process.env.TZ='Asia/Shanghai';
 const at=(day,hm)=>Date.parse(`2026-10-${day}T${hm}:00+08:00`),fri=hm=>at(23,hm);
@@ -52,7 +52,8 @@ test('the todo card: a row for every open matter, urgent first and then by when 
  const link=matters.matter(high).link;
  assert.deepEqual(rows[1],{dot:'red',title:{tag:'plain_text',content:'今天要批的权限'},
   facts:{tag:'plain_text',content:'黄凯熙 · 大群 · 期限 10-23 18:00',text_size:'notation',text_color:'grey'},url:link,
-  done:{text:'完成',value:{act:'done',matter:high}},more:{options:[['不归我','not_mine'],['打开原消息',link]],value:{matter:high}}});
+  done:{text:'完成',value:{act:'done',matter:high,card:'digest',t:fri('10:00')}},more:{options:[['不归我','not_mine'],['打开原消息',link]],value:{matter:high,card:'digest',t:fri('10:00')}}},
+  'the buttons say which matter, on which card, and when it was made');
  assert.equal(rows[2].facts.content,'陈帆 · 项目群 · 10-22 15:59','no due date: when it started, with the date on another day');
  assert.equal(rows[3].facts.content,'陈帆 · 项目群 · 今天 09:39');
  const text=textOf(card);
@@ -111,7 +112,7 @@ test('text from the model, the chats and the people is shown as plain text: mark
  const id=made(store,matters,{title:'**加急** [点这里](https://evil.example/x) <text_tag color=\'red\'>假</text_tag>',who:'<at id=all></at>',ask:'看 `代码` 和 # 标题',
   due:'<font color=red>今天</font>',t:fri('09:00'),chat:'[链接](https://x.example)'});
  const gone=made(store,matters,{title:'[也是链接](https://evil.example/y)',t:fri('09:01')});endByModel(matters,gone,'**理由** <at id=all></at>',fri('09:30'));
- const all=[digestAt(matters,fri('10:00')),cards([heading('没结束的事项（1）'),...matters.list().map(m=>matterRow(m,{at:fri('10:00')}))],{summary:'管家的回复'})];
+ const all=[digestAt(matters,fri('10:00')),...listCards(matters,fri('10:00'))];
  const link=matters.matter(id).link;
  for(const c of componentsOf(all)){
   assert.notEqual(c.tag,'lark_md');
@@ -144,13 +145,23 @@ test('a digest is one card that always fits: at most ten open matters and fewer 
  assert.match(textOf(big),new RegExp(`另有 ${20-listed} 件没有列出（${20-listed} 件紧急）`));
 });
 
-test('the conversation\'s list of every open matter uses the same rows, split into cards that each fit',t=>{
+test('the conversation\'s list comes in cards of at most ten rows, each with how many are open and buttons that say which matters the card shows',t=>{
  const {store}=tempStore(t),matters=new Matters(store);
- const ids=[];for(let i=0;i<60;i++)ids.push(made(store,matters,{title:`事项${i}`,ask:'很长的说明'.repeat(30),t:fri('09:00')+i*1000}));
- const split=cards([heading('没结束的事项（60）'),...matters.list().map(m=>matterRow(m,{at:fri('10:00')}))],{summary:'管家的回复'});
- assert.ok(split.length>1);
+ const ids=[];for(let i=0;i<23;i++)ids.push(made(store,matters,{title:`事项${i}`,t:fri('09:00')+i*60e3}));
+ const list=listCards(matters,fri('10:00'));
+ assert.deepEqual(list.map(c=>rowsOf(c).map(idOf)),[ids.slice(0,10),ids.slice(10,20),ids.slice(20)],'each once, in order');
+ for(const [i,c] of list.entries()){
+  assert.equal(c.config.update_multi,true);assert.match(shown({card:c}),/^\*\*没结束的事项（23）\*\*/);
+  for(const r of rowsOf(c))assert.deepEqual(r.more.value,{matter:idOf(r),card:'list',ids:ids.slice(10*i,10*i+10),t:fri('10:00')});
+ }
+ assert.deepEqual(listCards(new Matters(tempStore(t).store),fri('10:00')),[],'nothing open: no list');
+ const long=new Matters(tempStore(t).store),s2=long.store;
+ for(let i=0;i<10;i++)made(s2,long,{title:`很长的标题${i}`.repeat(6),who:'人'.repeat(60),due:'期'.repeat(40),urgency:'high',t:fri('09:00')+i*1000,chat:`${'很长的群名'.repeat(20)}${i}`});
+ for(const m of long.list())for(let k=0;k<8;k++){const id=post(s2,{chat:`${'另一个很长的群名'.repeat(12)}${m.id}-${k}`,at:fri('09:30')});long.apply({updated:[{matterId:m.id,messageIds:[id],changes:{}}],processedIds:[id]});}
+ const split=listCards(long,fri('10:00'));
+ assert.ok(split.length>1,'fewer rows when they do not fit');
  for(const c of split){assert.ok(size(c)<=CARD_BYTES,`${size(c)} bytes`);assert.ok(count(c)<=MAX_COMPONENTS,`${count(c)} components`);}
- assert.deepEqual(split.flatMap(rowsOf).map(idOf).sort((a,b)=>a-b),ids,'each once');
+ assert.equal(split.flatMap(rowsOf).length,10);
 });
 
 // A bot that records what it sends to the owner and the cards it updates, in one log, and can be made to fail, to go
@@ -168,9 +179,9 @@ function fakeBot(){
   }};
 }
 function setup(t,{schedule=DEFAULT_SCHEDULE,start,refreshDelayMs=10}={}){
+ let digests;t.after(()=>digests.stop());// before the store closes: after-hooks run in order
  const {store}=tempStore(t),matters=new Matters(store),bot=fakeBot(),clock={t:start};
- const digests=new Digests({store,matters,bot,schedule,now:()=>clock.t,retryMs:300e3,refreshDelayMs});
- t.after(()=>digests.stop());
+ digests=new Digests({store,matters,bot,schedule,now:()=>clock.t,retryMs:300e3,refreshDelayMs});
  return {store,matters,bot,clock,digests,made:o=>made(store,matters,o),
   async tickAt(when){clock.t=when;const before=bot.sent.length;await digests.tick();return bot.sent.slice(before).map(shown).join('\n');}};
 }
@@ -283,4 +294,73 @@ test('refresh() does nothing without a digest or a connection, records a failure
  assert.equal(bot.log.length,4,'Feishu no longer updates a message sent 14 days ago');
  await digests.stop();clock.t=fri('11:10');store.setMeta('digest',{...store.meta('digest'),at:fri('11:00')});await digests.refresh();
  assert.equal(bot.log.length,4,'stopped');
+});
+
+// ---- the buttons: what a click does (the bot hands on only the owner's clicks, see bot.mjs)
+// A click on button, as the bot hands it on: on message messageId, with the button's value, and for ⋯ the option chosen.
+const click=(digests,messageId,button,option)=>digests.click({messageId,chatId:'oc_dm',operator:{openId:OWNER},
+ action:{tag:button.tag,value:button.behaviors[0].value,...button.tag==='overflow'&&{option}}});
+// The buttons on the row of matter id in a card.
+function buttonsOf(card,id){
+ const [done,more]=card.body.elements.find(e=>e.tag==='column_set'&&e.columns[2].elements[0].behaviors[0].value.matter===id).columns[2].elements;
+ return {done,more};
+}
+
+test('完成 closes the matter as mine and 不归我 closes it as not mine, each answered at once with a toast and the clicked card as it is now; the digest follows',async t=>{
+ const {matters,bot,clock,digests,tickAt,made}=setup(t);
+ const a=made({title:'填开发进展文档',urgency:'high',t:fri('09:00')}),b=made({title:'看 GEO 数据',t:fri('09:10')}),c=made({title:'审批预算',t:fri('09:20')});
+ await tickAt(fri('10:00'));const sent=lastCard(bot);
+ clock.t=fri('10:20');
+ const r=click(digests,'om1',buttonsOf(sent,a).done);
+ assert.deepEqual(r.toast,{type:'success',content:'已完成'});
+ const m=matters.matter(a);
+ assert.deepEqual([m.status,m.closedBy,m.reason,m.closedAt],['closed','owner','完成',fri('10:20')],'closed as closing it in the conversation does');
+ assert.equal(r.card.type,'raw');
+ const now=r.card.data;
+ assert.deepEqual(rowsOf(now).map(idOf),[b,c]);assert.equal(now.header.subtitle.content,'更新于 10:20');assert.equal(now.header.template,'blue');
+ assert.equal(textOf(panelOf(now).elements),'填开发进展文档 — 你关掉的：完成');
+ assert.notDeepEqual(buttonsOf(now,b).done.behaviors[0].value,buttonsOf(sent,b).done.behaviors[0].value,
+  'its buttons are new ones: the SDK drops the same click on the same message for 12 hours, and the matter may be reopened');
+ await digests.refresh();
+ assert.deepEqual(bot.log.slice(-1),['update om1'],'the latest digest follows');assert.deepEqual(rowsOf(bot.updated.at(-1).card).map(idOf),[b,c]);
+ clock.t=fri('10:30');
+ const r2=click(digests,'om1',buttonsOf(now,b).more,'not_mine');
+ assert.deepEqual(r2.toast,{type:'success',content:'已标记为不归你，之后判断时会参考'});
+ assert.deepEqual([matters.matter(b).closedBy,matters.matter(b).reason],['owner',NOT_MINE]);
+ assert.deepEqual(rowsOf(r2.card.data).map(idOf),[c]);assert.match(textOf(panelOf(r2.card.data).elements),/看 GEO 数据 — 你关掉的：不归我/);
+ assert.deepEqual(matters.notMine(20).map(x=>x.id),[b],'what the model is shown as not mine');
+ matters.reopen(b,fri('10:40'));assert.deepEqual(matters.notMine(20),[],'reopened: no longer');
+});
+
+test('a click on a matter that has ended or is unknown changes nothing; 打开原消息 needs no answer; a click on an older digest leaves it superseded',async t=>{
+ const {matters,bot,clock,digests,tickAt,made}=setup(t);
+ const a=made({title:'早上的事',t:fri('09:00')}),b=made({title:'另一件事',t:fri('09:10')});
+ await tickAt(fri('10:00'));const first=lastCard(bot);
+ endByModel(matters,a,'对方说不用了',fri('10:10'));clock.t=fri('10:15');bot.log.length=0;
+ const r=click(digests,'om1',buttonsOf(first,a).done);
+ assert.deepEqual(r.toast,{type:'info',content:'这件事已经结束了'});
+ assert.deepEqual([matters.matter(a).closedBy,matters.matter(a).reason],['model','对方说不用了'],'unchanged');
+ assert.deepEqual(rowsOf(r.card.data).map(idOf),[b],'the card catches up all the same');
+ const unknown=structuredClone(buttonsOf(first,b).done);unknown.behaviors[0].value.matter=999;
+ assert.deepEqual(click(digests,'om1',unknown).toast,{type:'info',content:'没有这件事了'});
+ assert.equal(click(digests,'om1',buttonsOf(first,b).more,undefined),undefined,'打开原消息 opens its link: nothing to answer');
+ for(const action of [{tag:'button',value:'x'},{tag:'button',value:{act:'toString',matter:b}},{tag:'overflow',value:{matter:b},option:'constructor'}])
+  assert.equal(digests.click({messageId:'om1',chatId:'oc_dm',operator:{openId:OWNER},action}),undefined,`a value butler never made: ${JSON.stringify(action)}`);
+ await sleep(30);assert.deepEqual(bot.log,[],'nothing changed: no update');
+ made({title:'新的事',t:fri('10:30')});await tickAt(fri('11:00'));
+ const old=click(digests,'om1',buttonsOf(first,b).done);
+ assert.equal(matters.matter(b).status,'closed','the owner meant it');assert.deepEqual(old.toast,{type:'success',content:'已完成'});
+ assert.equal(old.card.data.header.template,'grey','an older digest stays superseded');
+});
+
+test('a click on the conversation\'s list makes that card again with those of its matters still open',t=>{
+ const {matters,clock,digests,made}=setup(t);
+ const ids=[];for(let i=0;i<12;i++)ids.push(made({title:`事项${i}`,t:fri('09:00')+i*60e3}));
+ const list=listCards(matters,fri('10:00'));clock.t=fri('10:30');
+ const r=click(digests,'om_r2',buttonsOf(list[1],ids[11]).done);
+ assert.deepEqual(r.toast,{type:'success',content:'已完成'});assert.equal(matters.matter(ids[11]).status,'closed');
+ assert.deepEqual(rowsOf(r.card.data).map(idOf),[ids[10]],'only this card\'s matters');assert.match(shown({card:r.card.data}),/没结束的事项（11）/);
+ matters.close(ids[10],undefined,fri('10:31'));
+ const r2=click(digests,'om_r2',buttonsOf(r.card.data,ids[10]).done);
+ assert.deepEqual(r2.toast,{type:'info',content:'这件事已经结束了'});assert.match(shown({card:r2.card.data}),/这张卡片上的事项都结束了/);
 });

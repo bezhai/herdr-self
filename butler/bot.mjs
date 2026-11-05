@@ -1,7 +1,9 @@
 // The bot: butler's own Feishu app, on the SDK's long connection (a WebSocket the SDK keeps up and reconnects), held
 // by the processor's process. Only the owner can talk to it: the SDK takes direct messages only from the owner's
 // open_id, and the bot checks again that a message is the owner's and in the direct chat before handing it on (the
-// app has no scope for group messages anyway). It writes to the owner's direct chat by that open_id.
+// app has no scope for group messages anyway). Clicks on its cards' buttons come over the same connection (the app's
+// card.action.trigger callback, see bot-app.mjs); only the owner's are handed on, as a card can be forwarded. It
+// writes to the owner's direct chat by that open_id.
 import {createLarkChannel} from '@larksuite/channel';
 
 export const DOMAINS={feishu:'https://open.feishu.cn',lark:'https://open.larksuite.com'};
@@ -12,6 +14,9 @@ export class Bot{
  #channel;#state='idle';#stopped=false;#wake;
  // Gets every message of the owner's, in the direct chat.
  onMessage=()=>{};
+ // Gets every click of the owner's on a button of a card (the SDK's CardActionEvent) and returns the answer that goes
+ // back to Feishu (a toast, a card), or undefined for none.
+ onCardAction=()=>undefined;
  // owner: the owner's open_id for this app; the connection's state goes to the store (meta bot) for status.
  constructor({store,appId,appSecret,domain='feishu',owner,channelFactory=createLarkChannel,log=()=>{},retryMinMs=10_000,retryMaxMs=300_000}){
   Object.assign(this,{store,appId,appSecret,domain,owner,channelFactory,log,retryMinMs,retryMaxMs});
@@ -58,14 +63,21 @@ export class Bot{
   const channel=this.channelFactory({appId:this.appId,appSecret:this.appSecret,domain:DOMAINS[this.domain],source:'herdr-butler',
    httpTimeoutMs:10_000,connectTimeoutMs:15_000,resolveSenderNames:false,resolveChatMode:false,
    policy:{requireMention:true,respondToMentionAll:false,dmMode:'allowlist',dmAllowlist:[this.owner]},
-   // Each message on its own, at once: the conversation acknowledges it and queues the turn itself.
-   safety:{chatQueue:{enabled:true,mergeWhileBusy:false},batch:{text:{delayMs:0},media:{delayMs:0}}},
+   // Each message on its own, at once: the conversation acknowledges it and queues the turn itself. Clicks take a queue
+   // of their own, so that one never waits behind a message: Feishu wants an answer within 3 seconds.
+   safety:{chatQueue:{enabled:true,mergeWhileBusy:false,cardActions:'separate'},batch:{text:{delayMs:0},media:{delayMs:0}}},
    // A send whose result is unknown is not repeated.
    outbound:{retry:{maxAttempts:1}},logger:quiet});
   const current=()=>this.#channel===channel;
   channel.on('message',msg=>{
    if(!current()||msg.chatType!=='p2p'||!msg.senderId||msg.senderId!==this.owner)return;
    return this.onMessage(msg);
+  });
+  channel.on('cardAction',evt=>{
+   if(!current())return undefined;
+   if(evt.operator?.openId!==this.owner)return {toast:{type:'error',content:'只有管家的主人能操作这张卡片'}};
+   try{return this.onCardAction(evt);}
+   catch(e){this.store.addError('机器人',`处理卡片上的点击失败：${message(e)}`);return {toast:{type:'error',content:'这次没有处理成，稍后再试'}};}
   });
   channel.on('reconnecting',()=>{if(current())this.#set('reconnecting');});
   channel.on('reconnected',()=>{if(current())this.#set('connected',{connectedAt:Date.now()});});

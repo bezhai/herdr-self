@@ -261,7 +261,7 @@ async function processCommand(config,once){
   bot=new Bot({store,...config.bot,log:m=>console.log(m)});
   digests=new Digests({store,matters,bot,schedule:config.schedule});
   conversation=new Conversation({store,matters,model,bot,onMattersChanged:()=>digests.refresh()});
-  bot.onMessage=msg=>conversation.handle(msg);
+  bot.onMessage=msg=>conversation.handle(msg);bot.onCardAction=evt=>digests.click(evt);
  }
  // The model run under way (a batch or a turn) is waited for, bounded; a turn cut off here goes unanswered.
  const stop=async()=>{
