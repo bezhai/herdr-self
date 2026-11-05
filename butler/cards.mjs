@@ -24,6 +24,10 @@ export const plain=(content,style={})=>({tag:'div',text:{tag:'plain_text',conten
 export const heading=text=>({tag:'markdown',content:`**${text}**`});
 // A dot in color, one of the card colors.
 export const dot=color=>({tag:'markdown',content:`<font color='${color}'>●</font>`});
+// A panel folded away until clicked, under a title of butler's: ▸ before it, turning to ▾ when it opens.
+export const panel=(title,elements)=>({tag:'collapsible_panel',expanded:false,
+ header:{title:{tag:'plain_text',content:title},icon:{tag:'standard_icon',token:'right-small-ccm_outlined',size:'16px 16px'},icon_position:'left',icon_expanded_angle:90},
+ border:{color:'grey',corner_radius:'5px'},elements});
 // Lines of plain text in as few elements as stay well within a card, each in style.
 export function lines(list,style={}){
  const out=[];let part=[];
@@ -49,4 +53,16 @@ export function cards(elements,{title,summary}){
   parts.at(-1).push(e);used+=cost;count+=n;
  }
  return parts.map((els,i)=>make(els,i+1,parts.length));
+}
+
+// Cards of up to most items each, fewer when that is what fits, in order; make(items) is the card for some items. For
+// cards whose buttons name the items on their own card, so that a click can make that card again.
+export function paged(items,make,most){
+ const out=[];
+ for(let i=0;i<items.length;){
+  let n=Math.min(most,items.length-i),card;
+  while(!fits(card=make(items.slice(i,i+n)))&&n>1)n--;
+  out.push(card);i+=n;
+ }
+ return out;
 }

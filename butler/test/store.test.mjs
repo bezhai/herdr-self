@@ -48,6 +48,23 @@ test('the model\'s level comes with when it last graded the chat, kept while I s
  store.setLevel('d1','instant',{by:'owner',now:min(8)});assert.equal(store.level('d1').modelAt,undefined,'never graded');
 });
 
+test('every change of a chat\'s level is on record: when, who made it, the level before and after and the reason; what changes nothing is not',t=>{
+ const {store}=tempStore(t);store.upsertChatInfo({feedId:'g1',name:'项目群',chatMode:'group'});
+ const history=since=>store.levelChanges(since).map(c=>[c.feedId,c.at,c.by,c.before&&`${c.before.level}/${c.before.by}`,c.after&&`${c.after.level}/${c.after.by}`,c.reason]);
+ store.setLevel('g1','store',{by:'model',reason:'多是转发',now:min(0)});
+ store.setLevel('g1','store',{by:'model',reason:'还是转发',now:min(1)});// graded again to the same level
+ store.setLevel('g1','instant',{by:'owner',reason:'我在跟这个项目',now:min(2)});
+ store.setLevel('g1','daily',{by:'model',reason:'项目讨论',now:min(3)});// the model's beside mine: mine stands
+ store.setLevel('g1','instant',{by:'owner',now:min(4)});// mine again, the same level
+ store.clearLevel('g1',min(5));store.clearLevel('g1',min(6));// the model's comes back; then there is nothing to clear
+ store.setLevel('d1','daily',{by:'owner',now:min(7)});store.clearLevel('d1',min(8));
+ assert.deepEqual(history(min(0)),[['g1',min(0),'model',undefined,'store/model','多是转发'],['g1',min(2),'owner','store/model','instant/owner','我在跟这个项目'],
+  ['g1',min(5),'owner','instant/owner','daily/model','项目讨论'],['d1',min(7),'owner',undefined,'daily/owner',null],['d1',min(8),'owner','daily/owner',undefined,null]]);
+ assert.deepEqual(history(min(5)).map(c=>c[1]),[min(5),min(7),min(8)],'since a time, the oldest first');
+ assert.deepEqual(store.levelChanges(min(0),min(5)).map(c=>c.at),[min(0),min(2)],'up to a time, not including it');
+ assert.deepEqual([store.levelChanges(min(0))[0].name,store.levelChanges(min(0))[0].chatMode],['项目群','group'],'with what butler knows of the chat');
+});
+
 test('a store from before grading times gains the column; its levels have none until the model grades them',t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const old=new DatabaseSync(file);
@@ -153,7 +170,8 @@ test('the queries that run often go through indexes: none reads every message, a
   ownerWaiting:()=>matters.ownerWaiting(),skipIgnored:()=>matters.skipIgnored(),before:()=>matters.before('g1',min(9),8),
   responses:()=>matters.responses(['g1'],min(0),min(9),5),visible:()=>matters.visible(ask),mine:()=>matters.mine(1000),me:()=>matters.me(),meId:()=>matters.meId(),
   senders:()=>matters.senders(),level:()=>store.level('g1'),chatsMissingInfo:()=>store.chatsMissingInfo(20),open:()=>new Store(file,{linkBase:LINK_BASE}).close(),
-  activity:()=>store.activity(min(0),min(1)),involvement:()=>store.involvement(min(0)),keptSince:()=>store.keptSince(),batchedByChat:()=>matters.batchedByChat(min(0))};
+  activity:()=>store.activity(min(0),min(1)),involvement:()=>store.involvement(min(0)),keptSince:()=>store.keptSince(),batchedByChat:()=>matters.batchedByChat(min(0)),
+  levelChanges:()=>store.levelChanges(min(0))};
  for(const [name,call] of Object.entries(calls))for(const {sql,plan} of plans(store.db,call)){
   const full=plan.filter(l=>FULL.test(l));
   assert.deepEqual(full,[],`${name} scans:\n${sql}\n${plan.join('\n')}`);
@@ -161,5 +179,7 @@ test('the queries that run often go through indexes: none reads every message, a
   // What I did in a matter's chats is read from my messages and my reactions, never from all that was said there.
   if(name==='ownerWaiting'||name==='responses')assert.ok(!plan.some(l=>/messages_by_chat/.test(l)),`${name} reads the chats:\n${sql}\n${plan.join('\n')}`);
   if(name==='chatsMissingInfo')assert.ok(!plan.some(l=>/^SCAN .*messages_by_chat/.test(l)),`${name} reads every message's chat:\n${plan.join('\n')}`);
+  // The level history only grows: a week of it is read by time.
+  if(name==='levelChanges')assert.ok(!plan.some(l=>/^SCAN/.test(l)),`${name} reads the whole history:\n${plan.join('\n')}`);
  }
 });

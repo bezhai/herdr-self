@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS chats(
  cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, read_retries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS chat_levels(
  feed_id TEXT PRIMARY KEY, level TEXT NOT NULL, reason TEXT, set_by TEXT NOT NULL, since INTEGER NOT NULL, model_level TEXT, model_reason TEXT, model_at INTEGER);
+CREATE TABLE IF NOT EXISTS level_changes(
+ id INTEGER PRIMARY KEY AUTOINCREMENT, feed_id TEXT NOT NULL, at INTEGER NOT NULL, changed_by TEXT NOT NULL,
+ before_level TEXT, before_by TEXT, after_level TEXT, after_by TEXT, reason TEXT);
+CREATE INDEX IF NOT EXISTS level_changes_by_time ON level_changes(at);
 CREATE TABLE IF NOT EXISTS threads(
  root_id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, reply_count INTEGER NOT NULL DEFAULT 0, announced_count INTEGER NOT NULL DEFAULT 0,
  root_position TEXT, participated_since INTEGER, stale INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, checked_at INTEGER);
@@ -199,7 +203,8 @@ export class Store{
  // that clearing mine brings it back and what I changed can be told from what the model said. since: when the chat got
  // this level, kept while the level stays the same (an instant chat's messages from then on are instant); reason: why,
  // the model's words or mine, if any. A chat with no row has no level yet and goes by rules.mjs ungradedLevel: a direct
- // chat is instant, a group store.
+ // chat is instant, a group store. Every change is kept in level_changes (see levelChanges), which only grows: the
+ // weekly card of what the model changed and the count of my corrections are read from it.
  static #level=r=>r&&{feedId:r.feed_id,level:r.level,reason:r.reason,by:r.set_by,since:r.since,modelLevel:r.model_level,modelReason:r.model_reason,modelAt:r.model_at??undefined};
  level(feedId){return Store.#level(this.#get('SELECT * FROM chat_levels WHERE feed_id=?',feedId));}
  instantSince(feedId){const l=this.level(feedId);return l?.level==='instant'?l.since:undefined;}
@@ -216,7 +221,7 @@ export class Store{
   return this.#tx(()=>{
    const before=this.level(feedId),model=by==='model'?{level,reason,at:now}:{level:before?.modelLevel??null,reason:before?.modelReason??null,at:before?.modelAt};
    this.#putLevel(feedId,by==='owner'||before?.by!=='owner'?{level,reason,by}:before,model,before,now);
-   return {before,after:this.level(feedId)};
+   return this.#changed(feedId,by,before,now);
   });
  }
  // My level of the chat goes: the model's applies again, or none. Returns the chat's level before and after.
@@ -226,8 +231,24 @@ export class Store{
    if(before?.by!=='owner')return {before,after:before};
    if(before.modelLevel==null)this.#run('DELETE FROM chat_levels WHERE feed_id=?',feedId);
    else{const model={level:before.modelLevel,reason:before.modelReason,at:before.modelAt};this.#putLevel(feedId,{...model,by:'model'},model,before,now);}
-   return {before,after:this.level(feedId)};
+   return this.#changed(feedId,'owner',before,now);
   });
+ }
+ // The chat's level before and after a change by by (owner or model), which goes on record when it is one: the level
+ // or who set it differs. The model grading a chat to the level it has, or beside a level of mine, changes nothing.
+ #changed(feedId,by,before,now){
+  const after=this.level(feedId);
+  if(before?.level!==after?.level||before?.by!==after?.by)this.#run(`INSERT INTO level_changes(feed_id,at,changed_by,before_level,before_by,after_level,after_by,reason) VALUES(?,?,?,?,?,?,?,?)`,
+   feedId,now,by,before?.level??null,before?.by??null,after?.level??null,after?.by??null,after?.reason??null);
+  return {before,after};
+ }
+ // The changes of chat levels from since up to until (ms, not included), the oldest first: each with the chat (and what
+ // butler knows of it), when, who made it (by: owner or model), the level before and after ({level, by}, undefined for
+ // none) and the reason the chat had after it. For the weekly card of changes and for counting my corrections.
+ levelChanges(since,until=Number.MAX_SAFE_INTEGER){
+  const side=(level,by)=>level==null?undefined:{level,by};
+  return this.#all(`SELECT h.*,c.name,c.chat_mode FROM level_changes h LEFT JOIN chats c ON c.feed_id=h.feed_id WHERE h.at>=? AND h.at<? ORDER BY h.at,h.id`,since,until)
+   .map(r=>({id:r.id,feedId:r.feed_id,name:r.name??undefined,chatMode:r.chat_mode??undefined,at:r.at,by:r.changed_by,before:side(r.before_level,r.before_by),after:side(r.after_level,r.after_by),reason:r.reason}));
  }
  #putLevel(feedId,{level,reason,by},model,before,now){
   this.#run(`INSERT INTO chat_levels(feed_id,level,reason,set_by,since,model_level,model_reason,model_at) VALUES(?,?,?,?,?,?,?,?)

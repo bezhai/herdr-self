@@ -2,7 +2,8 @@
 // local. Working time (by default weekdays 10:00–20:00) has slots, one every everyMs from its start up to its end
 // inclusive: a slot sends a digest when there is something new or ended, and passes over otherwise. A slot missed
 // (butler was down) still counts until the next slot, and is dropped after. Outside working time a digest goes out
-// only once offHoursNew new matters have come in, and no sooner than offHoursGapMs after the last digest.
+// only once offHoursNew new matters have come in, and no sooner than offHoursGapMs after the last digest. The weekly
+// card of level changes goes out at the first slot of the week (see weekSlot).
 
 // days: ISO weekdays (1 Monday … 7 Sunday); start, end: minutes after midnight.
 export const DEFAULT_SCHEDULE={days:[1,2,3,4,5],start:600,end:1200,everyMs:3600e3,offHoursNew:3,offHoursGapMs:7200e3};
@@ -69,6 +70,14 @@ export function decide({now,last={},fresh,ended,schedule:s}){
  if(slot!==undefined&&!(last.slot>=slot))return {send:fresh+ended>0,slot};
  if(!inWorkTime(now,s)&&fresh>=s.offHoursNew&&!(now-last.at<s.offHoursGapMs))return {send:true};
  return {send:false};
+}
+// The weekly slot t falls in: the first slot of the week's first working day (by default Monday 10:00), the latest at
+// or before t. Weekly cards go out at it (see levels.mjs), and one missed while butler was down goes out late, any time
+// within its week.
+export function weekSlot(t,s){
+ const d=new Date(t),first=d.getDate()-((d.getDay()||7)-s.days[0]);
+ const slot=new Date(d.getFullYear(),d.getMonth(),first,0,s.start).getTime();
+ return slot<=t?slot:new Date(d.getFullYear(),d.getMonth(),first-7,0,s.start).getTime();
 }
 // When the next digest goes out if nothing changes in between; undefined when there is nothing to send.
 export function nextDigest({now,last={},fresh,ended,schedule:s}){

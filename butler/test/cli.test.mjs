@@ -59,6 +59,22 @@ test('level commands: set by name or id, refuse ambiguous names and unknown leve
  assert.ok(a);assert.deepEqual(lark.writes(),[]);
 });
 
+test('level history lists the changes of levels, the latest first, with who made them and why; my corrections are counted',async t=>{
+ const {lark,store,dir}=await setup(t);const config=writeConfig(dir,lark),hour=3600e3,now=Date.now();
+ store.upsertChatInfo({feedId:'g1',name:'项目群',chatMode:'group'});
+ store.setLevel('g1','store',{by:'model',reason:'多是转发',now:now-3*hour});store.setLevel('g1','instant',{by:'owner',now:now-2*hour});
+ store.setLevel('g2','daily',{by:'model',reason:'有讨论',now:now-10*24*hour});
+ let r=await cli(config,'level','history');assert.equal(r.code,0,r.stderr);
+ const lines=r.stdout.trim().split('\n');
+ assert.match(lines[0],/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d  项目群：只存不看 → 即时（我定的）  我改的  g1$/);
+ assert.match(lines[1],/^\d{4}-.*  项目群：未分级（按只存不看） → 只存不看  模型改的  理由：多是转发  g1$/);
+ assert.equal(lines.at(-1),'最近 7 天共 2 次改动：我改了 1 次（其中纠正 1 次），模型改了 1 次');
+ assert.doesNotMatch(r.stdout,/有讨论/,'a week by default');
+ r=await cli(config,'level','history','--since','30d');assert.match(r.stdout,/g2：未分级（按只存不看） → 每日  模型改的  理由：有讨论/);assert.match(r.stdout,/^从 .* 起共 3 次改动/m);
+ r=await cli(config,'level','history','--since','1m');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/这段时间没有级别的改动/);
+ r=await cli(config,'--help');assert.match(r.stdout,/level history/);
+});
+
 test('status and list show what the collector recorded',async t=>{
  const {lark,store,dir,running}=await setup(t);const config=writeConfig(dir,lark);
  const group=lark.chat({name:'大群'}),dm=lark.chat({name:'张三',chatMode:'direct'});

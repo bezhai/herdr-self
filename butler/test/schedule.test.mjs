@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {DEFAULT_SCHEDULE,readSchedule,inWorkTime,decide,nextDigest} from '../schedule.mjs';
+import {DEFAULT_SCHEDULE,readSchedule,inWorkTime,decide,nextDigest,weekSlot} from '../schedule.mjs';
 
 process.env.TZ='Asia/Shanghai';// working time is local time
 
@@ -70,4 +70,14 @@ test('the schedule is configurable',()=>{
  assert.deepEqual(run(at(26,'10:00'),{at:at(26,'09:30'),slot:at(26,'09:30')},1,0,s),{send:true,slot:at(26,'10:00')},'every 30 minutes');
  for(const bad of [{days:'8'},{days:'周一'},{hours:'10-20'},{hours:'20:00-10:00'},{every:'0m'},{every:'1x'},{offHoursNew:'0'},{offHoursGap:'soon'}])
   assert.throws(()=>readSchedule(bad),Error,JSON.stringify(bad));
+});
+
+test('the weekly slot: the first slot of the week\'s first working day, Monday 10:00 by default, the latest at or before a time',()=>{
+ assert.equal(weekSlot(at(23,'12:00'),S),at(19,'10:00'),'Friday: since Monday');
+ assert.equal(weekSlot(at(25,'23:00'),S),at(19,'10:00'),'Sunday is the same week');
+ assert.equal(weekSlot(at(26,'09:59'),S),at(19,'10:00'),'Monday before the slot: the week before');
+ assert.equal(weekSlot(at(26,'10:00'),S),at(26,'10:00'));
+ const s=readSchedule({days:'3,5',hours:'09:30-18:00'});
+ assert.equal(weekSlot(at(23,'12:00'),s),at(21,'09:30'),'Wednesday is the first working day here');
+ assert.equal(weekSlot(at(20,'12:00'),s),at(14,'09:30'));
 });

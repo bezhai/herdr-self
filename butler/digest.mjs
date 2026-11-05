@@ -5,7 +5,7 @@
 // ended ones after those butler ended, but are no reason to send a digest: I know of them already. The list shows
 // the open matters in the same rows. A row's buttons close its matter, as done or as not mine (see Digests.click).
 import {decide,nextDigest} from './schedule.mjs';
-import {plain,heading,dot,lines,fits} from './cards.mjs';
+import {plain,heading,dot,lines,panel,paged,fits} from './cards.mjs';
 import {NOT_MINE} from './matters.mjs';
 export {CARD_BYTES} from './cards.mjs';
 
@@ -58,12 +58,8 @@ const OPEN_LISTED=10,ENDED_LISTED=10;
 const listedEnded=ended=>[...ended].sort((a,b)=>(a.closedBy==='owner')-(b.closedBy==='owner')||b.closedAt-a.closedAt||b.id-a.id).slice(0,ENDED_LISTED);
 function endedPanel(ended){
  const listed=listedEnded(ended),reason=m=>endReason(m);
- return {tag:'collapsible_panel',expanded:false,
-  header:{title:{tag:'plain_text',content:`今天结束了 ${ended.length} 件`},icon:{tag:'standard_icon',token:'right-small-ccm_outlined',size:'16px 16px'},
-   icon_position:'left',icon_expanded_angle:90},
-  border:{color:'grey',corner_radius:'5px'},
-  elements:lines([...listed.map(m=>`${m.title}${reason(m)?` — ${reason(m)}`:''}`),...ended.length>listed.length?[`另有 ${ended.length-listed.length} 件也结束了，没有列出`]:[]],
-   {text_color:'grey'})};
+ return panel(`今天结束了 ${ended.length} 件`,lines([...listed.map(m=>`${m.title}${reason(m)?` — ${reason(m)}`:''}`),
+  ...ended.length>listed.length?[`另有 ${ended.length-listed.length} 件也结束了，没有列出`]:[]],{text_color:'grey'}));
 }
 
 // The digest card, as of at, with what todoOf reports: for a digest sent at sentAt (at itself for a new one). The
@@ -91,13 +87,8 @@ function listCard(list,{at,total}){
 // The conversation's list of every open matter, made at at, in cards of up to ten rows, fewer when that is what fits;
 // none when nothing is open.
 export function listCards(matters,at){
- const open=ordered(matters.list()),out=[];
- for(let i=0;i<open.length;){
-  let n=Math.min(OPEN_LISTED,open.length-i),card;
-  while(!fits(card=listCard(open.slice(i,i+n),{at,total:open.length}))&&n>1)n--;
-  out.push(card);i+=n;
- }
- return out;
+ const open=ordered(matters.list());
+ return paged(open,list=>listCard(list,{at,total:open.length}),OPEN_LISTED);
 }
 // What an earlier digest turns into once a newer one is sent, so that it shows no todos that are out of date.
 export const supersededCard=()=>({schema:'2.0',config:{update_multi:true,summary:{content:'这份待办已经过时'}},
