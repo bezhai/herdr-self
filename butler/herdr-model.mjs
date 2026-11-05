@@ -22,6 +22,12 @@ const effortArgs=effort=>effort?['--effort',effort]:[];
 // herdr agent prompt takes the prompt only as a command-line argument of the local herdr CLI (no stdin or file), and
 // Linux caps a single argument at 128 KiB.
 const MAX_ARG_BYTES=120_000;
+// Invisible format characters (Unicode Cf) other than the zero-width joiner. claude's input does not submit a prompt
+// that holds them (bidi overrides U+202E/U+202D in a Feishu display name, in the userNames of a message's reactions,
+// did it): the turn never starts and herdr reports agent_prompt_stalled, for every batch that carries the name. The
+// joiner U+200D stays: it holds emoji sequences together and claude takes it.
+const FORMAT_CHARS=/(?!\u200D)\p{Cf}/gu;
+const visible=text=>text.replace(FORMAT_CHARS,'');
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 
 // A failed herdr call as the subcommand, its target, the exit status and the end of stderr. Never its arguments:
@@ -54,6 +60,7 @@ export class HerdrModel{
  }
 
  async ask({system,prompt}){
+  system=visible(system);prompt=visible(prompt);
   const size=Math.max(Buffer.byteLength(prompt),Buffer.byteLength(system));
   if(size>MAX_ARG_BYTES)throw Error(`提示太长（${size} 字节），超过一个命令行参数的上限`);
   const created=await this.#herdr(['workspace','create',...(this.cwd?['--cwd',this.cwd]:[]),'--label',this.label,'--no-focus']);

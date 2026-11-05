@@ -229,6 +229,8 @@ open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启
 4. `agent replies <名字>` 取它最后的回复（由 claude 的 Stop hook 报给 herdr，可能比状态变化晚一点到，所以最多再等 15 秒）；
 5. 不管成功与否，`workspace close` 关掉这个工作区，claude 随之退出。
 
+说明和数据交给 herdr 之前，去掉其中所有不可见的格式字符（Unicode 的 Cf 类），只留下零宽连接符 U+200D（它把多个 emoji 连成一个，claude 能正常接受）。claude 的输入框收到带这类字符的提示时不会提交，这一轮不开始，herdr 报 agent_prompt_stalled；实际遇到的是一个飞书昵称里的双向文本控制符 U+202E、U+202D，它出现在消息表情回复的 userNames 里，带着这个昵称的每一批都这样失败。所以模型看到的名字和文字里没有这些字符。
+
 配置了 `BUTLER_MODEL_NAME` 时才带 `--model` 和 `--settings`（JSON 是一个参数），没有配置时都不带，用 claude 默认的模型。只带 `--model` 不够：cpu1 的 `~/.claude/settings.json` 用 `availableModels` 只允许另一个模型，claude 会提示这个模型被组织的设置限制，然后照样请求允许的那个。`--settings` 再加一份设置，里面的 `availableModels` 只列这个模型，这样就够了：claude 2.1.318 在 cpu1 上实测，会话记录里的请求用的都是这个模型。
 
 配置了 `BUTLER_MODEL_EFFORT` 时才带 `--effort <强度>`，没有配置时不带，用 claude 默认的推理强度（high）。它只能是 claude 的 `--effort` 接受的 low、medium、high、xhigh 或 max，别的值让配置加载失败。以前这里固定带 `--effort low`：那时 cpu1 网关后面是 deepseek，默认的 high 下它要推理几千个 token，40 条消息的一批会超过回复的时限，而 low 给出同样的事项、token 少一半；那个网关对 deepseek 不接受 medium。现在模型换成了 ark/seed-evolving，用它默认的推理强度，所以不再固定。

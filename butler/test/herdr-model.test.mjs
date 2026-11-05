@@ -42,6 +42,18 @@ test('each prompt goes to a fresh claude without tools in a workspace of its own
  assert.equal(new Set(names).size,2,'a new agent for every prompt');assert.ok(names.every(n=>/^[a-z][a-z0-9_-]{0,31}$/.test(n)));
 });
 
+test('invisible format characters are dropped from the prompt and the system prompt; the emoji joiner, text, CJK and emoji stay',async t=>{
+ const {model,calls}=setup(t,{replies:[{text:'ok'}]});
+ // A Feishu display name with bidi overrides (U+202E, U+202D), an isolate (U+2066) and a byte order mark (U+FEFF);
+ // U+200D joins the family emoji.
+ const name='😭😭\u202E\u202D😭',family='👨\u200D👩\u200D👧';
+ const prompt=`表情：${name} 和 ${family}\u2066 isolated\u2069 \uFEFFdone`,system=`你替「原\u202E智鸿」整理消息 ${family}`;
+ assert.equal(await model.ask({system,prompt}),'ok');
+ const c=calls(),start=c.find(a=>a[2]==='agent'&&a[3]==='start'),sent=c.find(a=>a[2]==='agent'&&a[3]==='prompt');
+ assert.equal(sent[5],`表情：😭😭😭 和 ${family} isolated done`);
+ assert.equal(start[start.indexOf('--system-prompt')+1],`你替「原智鸿」整理消息 ${family}`);
+});
+
 test('a configured model is asked for by name and allowed by settings of its own; with none, claude keeps its default',async t=>{
  const NAME='auto_model/alwaysday1_max';
  const named=setup(t,{},{name:NAME});await named.model.ask({system:SYSTEM,prompt:'x'});
