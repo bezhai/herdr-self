@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import {tempStore,post,waitFor} from './helpers.mjs';
 import {Matters} from '../matters.mjs';
 import {Processor} from '../processor.mjs';
-import {ModelQueue} from '../model-queue.mjs';
 import {Grader,DEFAULTS,gradingSystemPrompt} from '../grader.mjs';
 
 process.env.TZ='Asia/Shanghai';
@@ -218,16 +217,16 @@ test('a chat whose answer can never be used ends up alone and holds up no other;
  assert.ok(s.model.calls.length<=10,`${s.model.calls.length} runs in five passes`);
 });
 
-test('grading runs on a model queue of its own: a pass goes through while a batch holds the processor\'s model',async t=>{
- let release;const gate=new Promise(r=>{release=r;});
- const {store,matters}=setup(t),busy=new ModelQueue({async ask(){await gate;return '{"new":[],"updates":[]}';}});
- const grader=new Grader({store,matters,model:new ModelQueue(fakeModel(every())),now:()=>day(2)});
+test('grading never waits for the processor: a pass goes through while a batch holds the model',async t=>{
+ let release,asked=false,settled=false;const gate=new Promise(r=>{release=r;});
+ const {store,matters}=setup(t),busy={async ask(){asked=true;await gate;return '{"new":[],"updates":[]}';}};
+ const grader=new Grader({store,matters,model:fakeModel(every()),now:()=>day(2)});
  const processor=new Processor({store,matters,model:busy});
  store.setMeta('profile',{text:'x',at:Date.now(),notes:[],messages:1});store.setMeta('review',{at:Date.now(),reviewed:0,closed:0,profileAt:store.meta('profile').at,notes:[]});
  post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:hour(20)});
- const round=processor.runOnce();await waitFor(()=>busy.state().running==='batch',{message:'a batch with the model'});
+ const round=processor.runOnce().finally(()=>{settled=true;});await waitFor(()=>asked,{message:'a batch with the model'});
  const r=await grader.check();
- assert.deepEqual(graded(r),['d1','g2']);assert.equal(busy.state().running,'batch','the batch is still with the model');
+ assert.deepEqual(graded(r),['d1','g2']);assert.equal(settled,false,'the batch is still with the model');
  release();assert.equal((await round).runs,1);
 });
 

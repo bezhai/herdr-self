@@ -9,8 +9,8 @@
 // new 关于TA (see profile.mjs and #profile), and every few hours, or when 关于TA or my notes have changed, a round ends
 // with a review of all open matters (see review.mjs and #review). Batches and reviews are told 关于TA, my notes and
 // the matters I marked as not mine.
-// Whoever shows the matters is told when a batch or a review has changed them (onMattersChanged), and whoever tells me
-// of 关于TA when one has been written (onProfile).
+// Whoever shows the matters is told when a batch or a review has changed them, and when the command line has (see
+// checkMark): onMattersChanged. Whoever tells me of 关于TA is told when one has been written (onProfile).
 import {composePrompt,readReply} from './prompt.mjs';
 import {review} from './review.mjs';
 import {writeProfile} from './profile.mjs';
@@ -20,10 +20,11 @@ import {writeProfile} from './profile.mjs';
 // ownerMessages: how many of my latest messages, and messages I reacted to, in such a matter's chats since it started
 // come along too, so that my answer shows even when the chat has moved on past its latest messages.
 // profileMessages: how many of my latest messages 关于TA is written from at most, more than fit one prompt (the
-// newest that fit go). ownerCheckMs: how often to look for something of mine that could end an open matter. notMine:
-// how many of the matters I marked as not mine, the latest, batches, reviews and 关于TA are shown. activeMs: how recent
-// a chat's messages make it active, involvementMs: the window of what I did in a chat, for 关于TA and grading alike
-// (see grader.mjs); profileChats: how many of the chats where I take part 关于TA is shown at most.
+// newest that fit go). ownerCheckMs: how often to look for something of mine that could end an open matter, and for
+// matters the command line changed. notMine: how many of the matters I marked as not mine, the latest, batches,
+// reviews and 关于TA are shown. activeMs: how recent a chat's messages make it active, involvementMs: the window of
+// what I did in a chat, for 关于TA and grading alike (see grader.mjs); profileChats: how many of the chats where I
+// take part 关于TA is shown at most.
 const DAY=86_400_000;
 export const DEFAULTS={everyMs:600_000,ownerCheckMs:15_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,ownerMessages:5,textChars:1500,skipAfter:3,
  reviewEveryMs:10_800_000,profileEveryMs:DAY,profileMessages:1000,notMine:20,activeMs:7*DAY,involvementMs:30*DAY,profileChats:60};
@@ -39,10 +40,11 @@ export const numbers=notes=>notes.map(n=>n.id),same=(a=[],b=[])=>a.length===b.le
 const isReaction=x=>x.kind==='reaction',timeOf=x=>isReaction(x)?x.at:x.createdAt;
 
 export class Processor{
- #limit;#cycle;#timers=[];#halting=false;#failed=false;
+ #limit;#cycle;#timers=[];#halting=false;#failed=false;#mark;
  // model: {ask({system,prompt}) → reply text, cleanup?()}; ask throws when there is no usable answer, with
  // answered: true when the model did answer (one too long, say). pid: this process (another one may hold the store).
- // now: the clock. onMattersChanged: called once a batch or a part of a review has made, changed or closed matters.
+ // now: the clock. onMattersChanged: called once a batch or a part of a review has made, changed or closed matters, and
+ // once the command line has closed or reopened some (see checkMark).
  // onProfile({text, added, at}): called once 关于TA has been written, with what the model says it newly inferred
  // compared with the last one (a list, possibly empty). What either throws or rejects with is recorded and changes
  // nothing else.
@@ -57,12 +59,13 @@ export class Processor{
   const other=this.store.meta('processor');
   if(other?.pid&&other.pid!==this.pid&&!other.stoppedAt&&this.now()-other.heartbeatAt<3*this.options.heartbeatMs&&alive(other.pid))
    throw Error(`另一个加工端已经在运行（pid ${other.pid}），同一个存储只能有一个`);
-  this.#halting=false;this.startedAt=this.now();this.#beat({stoppedAt:undefined});
+  this.#halting=false;this.startedAt=this.now();this.#beat({stoppedAt:undefined});this.#mark=this.matters.changeMark();
   this.#timers.push(setInterval(()=>this.#beat(),this.options.heartbeatMs));
   try{const n=await this.model.cleanup?.();if(n)this.log(`关闭了上次留在模型机器上的 ${n} 个工作区`);}catch(e){this.store.addError('加工',`清理模型机器上的工作区失败：${message(e)}`);}
   if(!periodic)return;
   this.#timers.push(setInterval(()=>this.runOnce(),this.options.everyMs));
-  this.#timers.push(setInterval(()=>{try{this.checkOwner();}catch(e){this.store.addError('加工',`查看我有没有回应事项时出错：${message(e)}`);}},this.options.ownerCheckMs));
+  const every=(what,check)=>setInterval(()=>{try{check();}catch(e){this.store.addError('加工',`${what}时出错：${message(e)}`);}},this.options.ownerCheckMs);
+  this.#timers.push(every('查看我有没有回应事项',()=>this.checkOwner()),every('查看命令行有没有改过事项',()=>this.checkMark()));
   this.runOnce();
  }
  // Waits for the model run under way, if any; no further batch starts.
@@ -87,6 +90,13 @@ export class Processor{
  checkOwner(){
   if(this.#cycle||this.#halting||this.#failed||!this.matters.ownerWaiting())return undefined;
   return this.runOnce();
+ }
+ // Tells whoever shows the matters (onMattersChanged) when the command line, another process, has closed or reopened
+ // some since the last look (see Matters.markChanged): the latest digest is the bot's, in this process, and follows
+ // within a check. A change from before the start is not news. Returns whether there was one.
+ checkMark(){
+  const mark=this.matters.changeMark();if(mark===this.#mark)return false;
+  this.#mark=mark;this.#changed();return true;
  }
  // A failed run normally ends the round: the model, its machine or herdr is not there. One failure lets the round go
  // on: a message alone in its batch (failures halve the batch until it is) that got an answer, just not a usable one.

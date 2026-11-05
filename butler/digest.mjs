@@ -1,11 +1,10 @@
-// The todo cards: the digest, one card in my direct chat with the bot, 管家待办, and the sender that checks every
-// minute whether one is due (see schedule.mjs), sends it, and keeps the latest one current in place; and the
-// conversation's list of the open matters. A digest lists the open matters, the most urgent first, one row each; the
-// matters that ended today are folded away in a panel, with the reason. Matters I closed myself are listed among the
-// ended ones after those butler ended, but are no reason to send a digest: I know of them already. The list shows
-// the open matters in the same rows. A row's buttons close its matter, as done or as not mine (see Digests.click).
+// The todo card: the digest, one card in my direct chat with the bot, 管家待办, and the sender that checks every
+// minute whether one is due (see schedule.mjs), sends it, and keeps the latest one current in place. A digest lists
+// the open matters, the most urgent first, one row each; the matters that ended today are folded away in a panel, with
+// the reason. Matters I closed myself are listed among the ended ones after those butler ended, but are no reason to
+// send a digest: I know of them already. A row's buttons close its matter, as done or as not mine (see Digests.click).
 import {decide,nextDigest} from './schedule.mjs';
-import {plain,heading,dot,lines,panel,paged,fits} from './cards.mjs';
+import {plain,dot,lines,panel,fits,AGENT_GROUP} from './cards.mjs';
 import {NOT_MINE} from './matters.mjs';
 export {CARD_BYTES} from './cards.mjs';
 
@@ -51,7 +50,7 @@ export function matterRow(m,{at,on={}}){
     behaviors:[{type:'callback',value}]}]}]};
 }
 // The open matters a digest does not list, counted by urgency in one line.
-const counted=rest=>`另有 ${rest.length} 件没有列出（${[...Map.groupBy(rest,m=>m.urgency)].map(([u,ms])=>`${ms.length} 件${URGENCY[u]??u}`).join('、')}），在私聊里说「现在有哪些事」可以看全部`;
+const counted=rest=>`另有 ${rest.length} 件没有列出（${[...Map.groupBy(rest,m=>m.urgency)].map(([u,ms])=>`${ms.length} 件${URGENCY[u]??u}`).join('、')}），到 ${AGENT_GROUP}里问管家可以看全部`;
 // The ended matters a digest lists: those butler ended before those I closed myself, which I know of already; the
 // latest to end first.
 const OPEN_LISTED=10,ENDED_LISTED=10;
@@ -76,19 +75,6 @@ export function digestCard({at,sentAt=at,open,ended}){
    ...open.length>n?[plain(counted(open.slice(n)),{text_size:'notation',text_color:'grey'})]:[],
    ...ended.length?[{tag:'hr'},endedPanel(ended)]:[]]}});
  for(let n=Math.min(open.length,OPEN_LISTED);;n--){const card=make(n);if(n===0||fits(card))return card;}
-}
-// A card of the conversation's list made at at: these open matters, under a heading with how many are open in all
-// (total). Its buttons carry the ids of its matters, so that a click can make it again (see Digests.click).
-function listCard(list,{at,total}){
- const on={card:'list',ids:list.map(m=>m.id)};
- return {schema:'2.0',config:{update_multi:true,summary:{content:`没结束的事项（${total}）`}},body:{vertical_spacing:'16px',elements:[heading(`没结束的事项（${total}）`),
-  ...list.length?list.map(m=>matterRow(m,{at,on})):[plain('这张卡片上的事项都结束了。')]]}};
-}
-// The conversation's list of every open matter, made at at, in cards of up to ten rows, fewer when that is what fits;
-// none when nothing is open.
-export function listCards(matters,at){
- const open=ordered(matters.list());
- return paged(open,list=>listCard(list,{at,total:open.length}),OPEN_LISTED);
 }
 // What an earlier digest turns into once a newer one is sent, so that it shows no todos that are out of date.
 export const supersededCard=()=>({schema:'2.0',config:{update_multi:true,summary:{content:'这份待办已经过时'}},
@@ -153,7 +139,7 @@ export class Digests{
   await this.#update(last.messageId,digestCard({at:now,sentAt:last.at,...todoOf(this.matters,now)}),'汇总');
  }
  // A click on a row's button (a CardActionEvent of the SDK; the bot hands on only mine, see bot.mjs): 完成 closes the
- // matter as mine, as closing it in the conversation does, and 不归我 closes it with that reason, which the model is
+ // matter as mine, as matters close on the command line does, and 不归我 closes it with that reason, which the model is
  // then shown as not mine (see Matters.notMine). Feishu wants an answer within 3 seconds: a toast, and the clicked card
  // made again as things are now, so that it changes at once; the latest digest follows (refresh). A matter that has
  // ended or is unknown changes nothing, and its card is made again all the same. Returns undefined, no answer, for a
@@ -169,18 +155,12 @@ export class Digests{
   const card=this.#clicked(messageId,v,now);
   return {toast,...card&&{card:{type:'raw',data:card}}};
  }
- // The card a click came from, made again at now: the latest digest as it is now, an older one superseded, a card of
- // the conversation's list with those of its matters still open.
+ // The digest a click came from, made again at now: the latest as it is now, an older one superseded. A click from a
+ // card of another kind gets its toast alone.
  #clicked(messageId,v,now){
-  if(v.card==='digest'){
-   const last=this.store.meta('digest')??{};
-   return messageId===last.messageId?digestCard({at:now,sentAt:last.at,...todoOf(this.matters,now)}):supersededCard();
-  }
-  if(v.card==='list'&&Array.isArray(v.ids)){
-   const list=v.ids.slice(0,OPEN_LISTED).map(id=>this.matters.matter(Number(id))).filter(m=>m?.status==='open');
-   return listCard(ordered(list),{at:now,total:this.matters.list().length});
-  }
-  return undefined;
+  if(v.card!=='digest')return undefined;
+  const last=this.store.meta('digest')??{};
+  return messageId===last.messageId?digestCard({at:now,sentAt:last.at,...todoOf(this.matters,now)}):supersededCard();
  }
  async #update(messageId,card,what){
   try{await this.bot.updateCard(messageId,card);}catch(e){this.store.addError('汇总',`${what}的卡片没有更新：${e?.message??e}`);}

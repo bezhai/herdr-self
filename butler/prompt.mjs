@@ -179,7 +179,7 @@ export function composeProfile({now,me,meId,records,notes,notMine=[],previous=nu
 // are replaced (the real ones are butler's, made from the source messages).
 export const LINKS=/(?:https?:\/\/|www\.)\S+/gi;
 export const clean=(v,max)=>typeof v==='string'?v.replace(LINKS,'[链接]').replace(/\s+/g,' ').trim().slice(0,max):'';
-// The same for text in lines (a reply in the conversation, 关于TA): each line tidied, blank lines kept to one.
+// The same for text in lines (关于TA): each line tidied, blank lines kept to one.
 export const prose=(v,max)=>typeof v==='string'?v.replace(LINKS,'[链接]').split('\n').map(l=>l.replace(/\s+/g,' ').trim()).join('\n').replace(/\n{3,}/g,'\n\n').trim().slice(0,max):'';
 const LIMITS={title:80,who:60,ask:400,due:40,reason:200};
 

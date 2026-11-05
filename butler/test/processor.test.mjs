@@ -577,6 +577,20 @@ test('a running processor checks for what I did every ownerCheckMs',async t=>{
  await processor.stop();
 });
 
+test('matters changed on the command line, another process, are told to whoever shows them at the next quick check, once; a change from before the start is not',async t=>{
+ const {store,matters,processor,changes}=setup(t);
+ const a=opened(store,matters);
+ matters.close(a,'不用管');matters.markChanged();
+ await processor.start({periodic:false});t.after(()=>processor.stop());
+ assert.equal(processor.checkMark(),false,'from before the start');assert.deepEqual(changes,[]);
+ matters.reopen(a);matters.markChanged();
+ assert.equal(processor.checkMark(),true);assert.equal(changes.length,1);
+ assert.equal(processor.checkMark(),false,'once');assert.equal(changes.length,1);
+ matters.markChanged();matters.markChanged();
+ assert.equal(processor.checkMark(),true,'changes in one millisecond count');assert.equal(changes.length,2);
+ await processor.stop();
+});
+
 test('the processor says when a batch or a review has made, changed or closed matters, and not otherwise',async t=>{
  const {store,model,processor,changes}=setup(t,{reviewed:false,answer:d=>d.matters?{updates:d.matters.map(m=>({matter:m.matter,status:'closed',reason:'TA已经看过了'}))}
   :{new:newTexts(d).filter(x=>x.includes('方案')).map(text=>({title:text,who:'陈帆',ask:'看',urgency:'normal',messages:[ref(d,text)]})),updates:[]}});

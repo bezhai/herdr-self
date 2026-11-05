@@ -4,8 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {setup,waitFor,post,LINK_BASE} from './helpers.mjs';
-import {Matters} from '../matters.mjs';
+import {setup,waitFor,sleep,post,LINK_BASE} from './helpers.mjs';
+import {Matters,NOT_MINE} from '../matters.mjs';
+import {Processor} from '../processor.mjs';
+import {Grader} from '../grader.mjs';
+import {Digests} from '../digest.mjs';
+import {DEFAULT_SCHEDULE} from '../schedule.mjs';
 
 const CLI=fileURLToPath(new URL('../cli.mjs',import.meta.url));
 // The CLI runs as its own process against the same store file; async so the in-process fake can answer it.
@@ -72,7 +76,10 @@ test('level history lists the changes of levels, the latest first, with who made
  assert.doesNotMatch(r.stdout,/有讨论/,'a week by default');
  r=await cli(config,'level','history','--since','30d');assert.match(r.stdout,/g2：未分级（按只存不看） → 每日  模型改的  理由：有讨论/);assert.match(r.stdout,/^从 .* 起共 3 次改动/m);
  r=await cli(config,'level','history','--since','1m');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/这段时间没有级别的改动/);
- r=await cli(config,'--help');assert.match(r.stdout,/level history/);
+ r=await cli(config,'level','history','--json');assert.equal(r.code,0,r.stderr);
+ assert.deepEqual(JSON.parse(r.stdout).map(c=>[c.feedId,c.name,c.by,c.before,c.after,c.reason,c.correction]),
+  [['g1','项目群','owner',{level:'store',by:'model'},{level:'instant',by:'owner'},null,true],['g1','项目群','model',null,{level:'store',by:'model'},'多是转发',false]],'the latest first, as in text');
+ r=await cli(config,'level','history','--since','1m','--json');assert.deepEqual(JSON.parse(r.stdout),[]);
 });
 
 test('status and list show what the collector recorded',async t=>{
@@ -114,18 +121,145 @@ test('ignore list commands: add senders by name or id, refuse ambiguous or unkno
  post(store,{sender:'6994621142325526532',name:'Zebra2.0自动化投放平台',type:'bot'});post(store,{sender:'7623741666586840285',name:'赤尾工具人',type:'bot'});
  post(store,{sender:'7000000000000000004',name:'赤尾',type:'bot'});post(store,{sender:'u1',name:'陈帆'});post(store,{mine:true,text:'我发的'});
  let r=await cli(config,'ignore','list');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/忽略名单是空的/);
+ r=await cli(config,'ignore','--json');assert.equal(r.code,0,r.stderr);assert.deepEqual(JSON.parse(r.stdout),[]);
  r=await cli(config,'ignore','add','Zebra2.0自动化投放平台','7623741666586840285');assert.equal(r.code,0,r.stderr);
- assert.match(r.stdout,/Zebra2\.0自动化投放平台/);assert.match(r.stdout,/赤尾工具人/);
+ assert.match(r.stdout,/^Zebra2\.0自动化投放平台（6994621142325526532）：没有忽略 → 忽略，之后它的消息不再交给模型$/m);assert.match(r.stdout,/赤尾工具人/);
  r=await cli(config,'ignore','add','赤');assert.equal(r.code,1);assert.match(r.stderr,/赤尾工具人/);assert.match(r.stderr,/7000000000000000004/);
- r=await cli(config,'ignore','add','赤尾');assert.equal(r.code,0,'an exact name is not ambiguous');
+ r=await cli(config,'ignore','add','赤尾','--json');assert.equal(r.code,0,'an exact name is not ambiguous');
+ let [x]=JSON.parse(r.stdout);assert.deepEqual([x.senderId,x.name,x.before,x.after.senderId,x.after.name,typeof x.after.since],['7000000000000000004','赤尾',null,'7000000000000000004','赤尾','number']);
+ r=await cli(config,'ignore','add','赤尾','--json');[x]=JSON.parse(r.stdout);assert.deepEqual(x.before,x.after,'on the list already: nothing changes');
+ r=await cli(config,'ignore','add','赤尾');assert.match(r.stdout,/^赤尾（7000000000000000004）：已经在忽略名单上，没有改动$/m);
  r=await cli(config,'ignore','add','王五');assert.equal(r.code,1);assert.match(r.stderr,/没有找到发送方/);
  r=await cli(config,'ignore','add','原智鸿');assert.equal(r.code,1,'I am not a sender to ignore');
  const matters=new Matters(store);
  assert.deepEqual(matters.ignoredSenders().map(s=>s.name).sort(),['Zebra2.0自动化投放平台','赤尾','赤尾工具人'].sort());
  r=await cli(config,'ignore','list');assert.match(r.stdout,/6994621142325526532/);assert.match(r.stdout,/赤尾工具人/);
- r=await cli(config,'ignore','remove','赤尾工具人');assert.equal(r.code,0,r.stderr);
+ r=await cli(config,'ignore','list','--json');assert.deepEqual(JSON.parse(r.stdout).map(s=>Object.keys(s).sort()),Array(3).fill(['name','senderId','since']));
+ r=await cli(config,'ignore','remove','赤尾工具人','--json');assert.equal(r.code,0,r.stderr);
+ [x]=JSON.parse(r.stdout);assert.deepEqual([x.senderId,x.before.name,x.after],['7623741666586840285','赤尾工具人',null]);
+ r=await cli(config,'ignore','remove','赤尾');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/^赤尾（7000000000000000004）：忽略 → 没有忽略，之后的新消息照常交给模型$/m);
+ r=await cli(config,'ignore','add','赤尾');assert.equal(r.code,0,r.stderr);
  assert.deepEqual(matters.ignoredSenders().map(s=>s.name).sort(),['Zebra2.0自动化投放平台','赤尾'].sort());
  assert.deepEqual(lark.writes(),[]);
+});
+
+test('level set takes my reason, kept with my level; level list, set and clear print what they show as JSON with --json',async t=>{
+ const {lark,store,dir}=await setup(t);const config=writeConfig(dir,lark);
+ store.upsertChatInfo({feedId:'g1',name:'项目群',chatMode:'group'});store.upsertChatInfo({feedId:'t1',name:'需求讨论',chatMode:'topic'});
+ store.setLevel('g1','store',{by:'model',reason:'多是转发'});
+ let r=await cli(config,'level','list','--json');assert.equal(r.code,0,r.stderr);
+ assert.deepEqual(JSON.parse(r.stdout).map(l=>[l.feedId,l.name,l.chatMode,l.level,l.by,l.reason]),[['g1','项目群','group','store','model','多是转发']]);
+ r=await cli(config,'level','set','daily','项目群','--reason','  我要每天\n看一眼 ');assert.equal(r.code,0,r.stderr);
+ assert.match(r.stdout,/^项目群：只存不看 → 每日（我定的），理由：我要每天 看一眼，从 /m);
+ assert.deepEqual([store.level('g1').level,store.level('g1').by,store.level('g1').reason,store.level('g1').modelReason],['daily','owner','我要每天 看一眼','多是转发']);
+ r=await cli(config,'level','set','daily','项目群');assert.equal(r.code,0,r.stderr);
+ assert.equal(r.stdout,'项目群：已经是我定的每日，没有改动\n');assert.equal(store.level('g1').reason,'我要每天 看一眼','my reason stays');
+ r=await cli(config,'level','set','daily','项目群','--reason','换个理由','--json');assert.equal(r.code,0,r.stderr);
+ let [x]=JSON.parse(r.stdout);
+ assert.deepEqual([x.feedId,x.name,x.chatMode,x.before.level,x.before.reason,x.after.level,x.after.by,x.after.reason,x.after.modelLevel],['g1','项目群','group','daily','我要每天 看一眼','daily','owner','换个理由','store']);
+ assert.equal(store.levelChanges(0).length,2,'a new reason alone is no change of level');
+ r=await cli(config,'level','set','instant','需求讨论','--json');[x]=JSON.parse(r.stdout);
+ assert.deepEqual([x.before,x.after.level,x.after.reason],[null,'instant',null]);assert.match(x.warning,/话题群/,'the topic-group caveat');
+ r=await cli(config,'level','set','store','项目群','--reason','');assert.equal(r.code,1);assert.match(r.stderr,/--reason/);
+ r=await cli(config,'level','set','store','项目群','--reason','长'.repeat(201));assert.equal(r.code,1);assert.match(r.stderr,/200/);
+ r=await cli(config,'level','clear','项目群','需求讨论','--json');assert.equal(r.code,0,r.stderr);
+ assert.deepEqual(JSON.parse(r.stdout).map(c=>[c.feedId,c.before.level,c.after?.level??null,c.after?.by??null]),[['g1','daily','store','model'],['t1','instant',null,null]]);
+ r=await cli(config,'level','--json');assert.deepEqual(JSON.parse(r.stdout).map(l=>[l.feedId,l.level,l.by]),[['g1','store','model']]);
+});
+
+// The rows of a digest card: the matters it lists.
+const listed=card=>card.body.elements.filter(e=>e.tag==='column_set').map(e=>e.columns[2].elements[0].behaviors[0].value.matter);
+
+test('matters close and reopen a matter by number as mine, saying what changed; the running processor brings the latest digest up to date within a quick check',async t=>{
+ const {lark,store,dir}=await setup(t),config=writeConfig(dir,lark),matters=new Matters(store),now=Date.now();
+ const made=(title,urgency)=>{const id=post(store,{text:title,at:now-600e3});return matters.apply({created:[{title,who:'陈帆',ask:title,urgency,messageIds:[id]}],processedIds:[id]})[0];};
+ const a=made('填开发进展文档','high'),b=made('看 GEO 数据','normal');
+ // The service as cli.mjs wires it: the processor tells the digests, which update the latest digest in place. 关于TA
+ // and the review are up to date, so no model is asked.
+ const bot={connected:true,updated:[],async toOwner(){return {messageId:'om_new'};},async updateCard(messageId,card){bot.updated.push({messageId,card});}};
+ store.setMeta('digest',{at:now-60e3,slot:now-60e3,sent:1,messageId:'om_digest'});
+ store.setMeta('profile',{text:'【工作】\n角色：后端',at:now,notes:[],messages:1});store.setMeta('review',{at:now,reviewed:2,closed:0,profileAt:now,notes:[]});
+ const digests=new Digests({store,matters,bot,schedule:DEFAULT_SCHEDULE,refreshDelayMs:10});
+ const processor=new Processor({store,matters,model:{async ask(){throw Error('no model run expected');}},options:{everyMs:3600e3,ownerCheckMs:20},onMattersChanged:()=>digests.refresh()});
+ await processor.start();t.after(async()=>{await processor.stop();await digests.stop();});
+
+ let r=await cli(config,'matters','close',String(a),'--reason','已经填完了');assert.equal(r.code,0,r.stderr);
+ assert.equal(r.stdout,`#${a} 填开发进展文档：未结束 → 已结束：你关掉的：已经填完了\n`);
+ assert.deepEqual([matters.matter(a).status,matters.matter(a).closedBy,matters.matter(a).reason],['closed','owner','已经填完了'],'closed by me, as the card\'s 完成 does');
+ await waitFor(()=>bot.updated.length===1,{message:'the latest digest brought up to date'});
+ assert.equal(bot.updated[0].messageId,'om_digest');assert.deepEqual(listed(bot.updated[0].card),[b]);
+ r=await cli(config,'matters','close',`#${a}`);assert.equal(r.code,0,r.stderr);
+ assert.equal(r.stdout,`#${a} 填开发进展文档：已经结束了（你关掉的：已经填完了），没有改动\n`);
+ await sleep(100);assert.equal(bot.updated.length,1,'nothing changed: no update');
+ r=await cli(config,'matters','reopen',String(a),'--json');assert.equal(r.code,0,r.stderr);
+ let j=JSON.parse(r.stdout);
+ assert.deepEqual([j.before.id,j.before.status,j.before.closedBy,j.before.reason,j.after.status,j.after.closedBy,j.after.reason],[a,'closed','owner','已经填完了','open',null,null]);
+ await waitFor(()=>bot.updated.length===2,{message:'the digest follows the reopened matter'});assert.deepEqual(listed(bot.updated[1].card),[a,b]);
+ r=await cli(config,'matters','reopen',String(a));assert.equal(r.stdout,`#${a} 填开发进展文档：没有结束，没有改动\n`);
+ r=await cli(config,'matters','close',String(b),'--reason',NOT_MINE,'--json');j=JSON.parse(r.stdout);
+ assert.deepEqual([j.before.status,j.after.status,j.after.closedBy,j.after.reason],['open','closed','owner',NOT_MINE]);
+ assert.deepEqual(matters.notMine(20).map(m=>m.id),[b],'closed as not mine, as the card\'s 不归我 does');
+ r=await cli(config,'matters','reopen',String(b));assert.equal(r.stdout,`#${b} 看 GEO 数据：已结束：你关掉的：不归我 → 未结束\n`);
+ r=await cli(config,'matters','list','--json');assert.deepEqual(JSON.parse(r.stdout).map(m=>m.id),[a,b]);
+ for(const args of [['close','99'],['reopen','99']]){r=await cli(config,'matters',...args);assert.equal(r.code,1);assert.match(r.stderr,/没有 #99 这个事项/);}
+ for(const args of [['close'],['close','abc'],['reopen']]){r=await cli(config,'matters',...args);assert.equal(r.code,1,args.join(' '));assert.match(r.stderr,/编号/);}
+ r=await cli(config,'matters','close',String(a),'--reason','长'.repeat(201));assert.equal(r.code,1);assert.match(r.stderr,/200/);assert.equal(matters.matter(a).status,'open');
+ r=await cli(config,'matters','finish',String(a));assert.equal(r.code,1);assert.match(r.stderr,/matters 没有这个操作/);
+ await processor.stop();await digests.stop();
+});
+
+test('notes: my notes in my words, listed, added and removed by number; one from the command line is what any note is: 关于TA is written again with it, the open matters are reviewed, and grading takes it in',async t=>{
+ const {lark,store,dir}=await setup(t),config=writeConfig(dir,lark),matters=new Matters(store),now=Date.now(),before=now-60e3;
+ // The processor and grading have seen my notes as they were (none); an open matter for the review to judge, and a
+ // message of mine to write 关于TA from once no note is left.
+ const id=post(store,{text:'@原智鸿 帮忙审批',at:before}),mine=post(store,{mine:true,text:'GEO 的接口我来看',at:before});
+ matters.apply({created:[{title:'审批预算',who:'陈帆',ask:'审批',urgency:'normal',messageIds:[id]}],processedIds:[id,mine]});
+ store.setMeta('profile',{text:'【工作】\n角色：后端',at:before,notes:[],messages:1});store.setMeta('review',{at:before,reviewed:1,closed:0,profileAt:before,notes:[]});
+ const calls=[],model={async ask({prompt}){const d=JSON.parse(prompt.slice(prompt.indexOf('{')));calls.push(d);return JSON.stringify(d.matters?{updates:[]}:{work:'角色：后端',interests:'',added:[]});}};
+ const kinds=()=>calls.map(d=>d.matters?'review':d.openMatters?'batch':'profile');
+ let clock=now;const processor=new Processor({store,matters,model}),grader=new Grader({store,matters,now:()=>clock});
+ grader.check();assert.deepEqual(store.meta('grading').notes,[]);
+
+ let r=await cli(config,'notes');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/还没有说明/);assert.match(r.stdout,/notes add/);
+ r=await cli(config,'notes','list','--json');assert.deepEqual(JSON.parse(r.stdout),[]);
+ r=await cli(config,'notes','add','审批不归我管');assert.equal(r.code,0,r.stderr);
+ const [note]=matters.notes();assert.equal(note.text,'审批不归我管');
+ assert.match(r.stdout,new RegExp(`^已记下说明 #${note.id}：审批不归我管。`));assert.match(r.stdout,/关于TA/);assert.match(r.stdout,/重新给聊天分级/);
+ r=await cli(config,'notes','add','审批不归我管','--json');assert.deepEqual(JSON.parse(r.stdout),{before:note,after:note},'the same words again: nothing new');
+ assert.equal(matters.notes().length,1);
+ await processor.runOnce();
+ assert.deepEqual(kinds(),['profile','review'],'关于TA written again with it, then the open matters reviewed by it');
+ assert.deepEqual([calls[0].notes,calls[1].notes],[['审批不归我管'],['审批不归我管']]);assert.deepEqual(store.meta('profile').notes,[note.id]);
+ grader.check();assert.deepEqual([store.meta('grading').notes,store.meta('grading').notesAt],[[note.id],now],'grading grades the chats again once the notes have stood');
+
+ r=await cli(config,'notes','add','值班群','都不看','--json');assert.equal(r.code,0,r.stderr);
+ const added=JSON.parse(r.stdout);assert.deepEqual([added.before,added.after.text,typeof added.after.id,typeof added.after.at],[null,'值班群 都不看','number','number']);
+ r=await cli(config,'notes');assert.match(r.stdout,new RegExp(`^#${note.id} 审批不归我管（`,'m'));assert.match(r.stdout,new RegExp(`^#${added.after.id} 值班群 都不看（`,'m'));
+ r=await cli(config,'notes','--json');assert.deepEqual(JSON.parse(r.stdout).map(n=>[n.id,n.text]),[[note.id,'审批不归我管'],[added.after.id,'值班群 都不看']]);
+ r=await cli(config,'notes','remove',`#${note.id}`);assert.equal(r.code,0,r.stderr);assert.match(r.stdout,new RegExp(`^已删除说明 #${note.id}：审批不归我管。`));
+ r=await cli(config,'notes','remove',String(added.after.id),'--json');assert.deepEqual(JSON.parse(r.stdout),{before:added.after,after:null});
+ assert.deepEqual(matters.notes(),[]);
+ calls.length=0;await processor.runOnce();
+ assert.deepEqual(kinds(),['profile','review'],'removing does the same');assert.deepEqual(calls[0].notes,[]);
+ clock=now+60e3;grader.check();assert.deepEqual([store.meta('grading').notes,store.meta('grading').notesAt],[[],now+60e3]);
+
+ r=await cli(config,'notes','remove','9');assert.equal(r.code,1);assert.match(r.stderr,/没有说明 #9/);
+ for(const args of [['add'],['add','  '],['remove'],['remove','x']]){r=await cli(config,'notes',...args);assert.equal(r.code,1,args.join(' '));}
+ r=await cli(config,'notes','add','长'.repeat(201));assert.equal(r.code,1);assert.match(r.stderr,/200/);
+ r=await cli(config,'notes','edit','1');assert.equal(r.code,1);assert.match(r.stderr,/notes 没有这个操作/);
+ r=await cli(config,'profile');assert.match(r.stdout,/notes add/,'where notes come from now');assert.doesNotMatch(r.stdout,/私聊/);
+});
+
+test('help lists every command and its flags, and nothing of a conversation in the direct chat',async t=>{
+ const {lark,dir}=await setup(t);
+ const r=await cli(writeConfig(dir,lark),'--help');assert.equal(r.code,0,r.stderr);
+ for(const usage of ['run','status [--json]','list [--category 类别] [--since 时间] [--until 时间] [--limit 条数] [--json]','groups [--search 文字] [--json]',
+  'level [list] [--json]','level set <级别> <聊天名或 id>... [--reason 文字] [--json]','level clear <聊天名或 id>... [--json]','level history [--since 时间] [--json]',
+  'level grade [<聊天名或 id>...] [--json]','process [--once]','matters [list] [--all] [--json]','matters close <编号> [--reason 文字] [--json]','matters reopen <编号> [--json]',
+  'notes [list] [--json]','notes add <文字> [--json]','notes remove <编号> [--json]','profile [--json]','ignore [list] [--json]','ignore add <发送方名称或 id>... [--json]',
+  'ignore remove <发送方名称或 id>... [--json]','bot create [--name 名称]','bot update','--config 配置文件'])
+  assert.ok(r.stdout.includes(usage),`help shows: ${usage}`);
+ assert.doesNotMatch(r.stdout,/私聊对话|私聊里让管家/);
 });
 
 // A herdr executable for the CLI: a shell script that runs the fake with its state directory.
@@ -195,7 +329,8 @@ test('level grade has the model grade the chats named, or every active chat whos
  assert.match(r.stdout,/分级：还没有分过；现在有 2 个聊天等着分级；模型定了级别的聊天 0 个/);
  r=await cli(writeConfig(dir,lark),'level','grade','项目群');assert.equal(r.code,1);assert.match(r.stderr,/BUTLER_MODEL_MACHINE/);
  const grade=(chat,level,reason)=>({text:JSON.stringify({chats:[{chat,level,reason}]})});
- const herdr=fakeHerdr(dir,{replies:[grade('c1','daily','项目讨论，和TA的工作有关'),{text:JSON.stringify({chats:[{chat:'c1',level:'store',reason:'项目讨论，TA只是旁观'},{chat:'c2',level:'ignore',reason:'闲聊'}]})},{text:'都挺重要的'}]});
+ const herdr=fakeHerdr(dir,{replies:[grade('c1','daily','项目讨论，和TA的工作有关'),{text:JSON.stringify({chats:[{chat:'c1',level:'store',reason:'项目讨论，TA只是旁观'},{chat:'c2',level:'ignore',reason:'闲聊'}]})},{text:'都挺重要的'},
+  grade('c1','store','新群，和TA的工作无关')]});
  const config=writeConfig(dir,lark,0o600,`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`);
  r=await cli(config,'level','grade','项目群');assert.equal(r.code,0,r.stderr);
  assert.match(r.stdout,/^项目群：未分级（按只存不看） → 每日：项目讨论，和TA的工作有关$/m);assert.match(r.stdout,/分了 1 个聊天里的 1 个，模型运行 1 次/);
@@ -211,7 +346,10 @@ test('level grade has the model grade the chats named, or every active chat whos
  post(store,{chat:'g4',sender:'u5',name:'王五',text:'新群',at:now-30*hour,categories:['stored']});
  r=await cli(config,'level','grade','g4');assert.equal(r.code,1);assert.match(r.stdout,/没有分级：g4（模型的回复不是 JSON/);
  r=await cli(config,'status');assert.match(r.stdout,/分级：上次 .*（1 个聊天，分了 0 个，没有分完：模型的回复不是 JSON/);assert.match(r.stdout,/现在有 1 个聊天等着分级，\d{4}-.* 之后再分/);
- assert.deepEqual(new Matters(store).runs().map(x=>[x.kind,x.ok]),[['grade',true],['grade',true],['grade',false]]);
+ r=await cli(config,'level','grade','g4','--json');assert.equal(r.code,0,r.stderr);
+ const j=JSON.parse(r.stdout);
+ assert.deepEqual([j.chats,j.runs,j.graded.map(g=>[g.feedId,g.name,g.before,g.after.level,g.after.by,g.after.modelReason]),j.left],[1,1,[['g4','g4',null,'store','model','新群，和TA的工作无关']],[]]);
+ assert.deepEqual(new Matters(store).runs().map(x=>[x.kind,x.ok]),[['grade',true],['grade',true],['grade',false],['grade',true]]);
  assert.deepEqual(lark.writes(),[]);
 });
 

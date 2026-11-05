@@ -1,8 +1,9 @@
 // The processor's own tables in butler's store: the ignore list, my notes, which messages and which of my reactions
 // have been processed, the matters and their source messages, the model runs and the exams (see grader.mjs). The
 // collector's tables (messages, chats, owner_reactions, …) are only read here, and so is what the model is shown of
-// chats (see chatFacts); the processor is a separate process on the same SQLite file (WAL, busy timeout). The bot, in
-// the processor's process, edits the ignore list and my notes and closes and reopens matters through this same class.
+// chats (see chatFacts); the processor is a separate process on the same SQLite file (WAL, busy timeout). The command
+// line edits the ignore list and my notes and closes and reopens matters through this same class, from a process of
+// its own; the buttons on the bot's cards close matters through it in the processor's process.
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS ignored_senders(sender_id TEXT PRIMARY KEY, name TEXT, since INTEGER NOT NULL);
@@ -29,14 +30,14 @@ CREATE TABLE IF NOT EXISTS exam_answers(
  PRIMARY KEY(exam_id,feed_id));
 `;
 const DAY=86400e3;
-// The reason of a matter I closed as not mine (on a card, or in the conversation in those words).
+// The reason of a matter I closed as not mine (on a card, or on the command line in those words).
 export const NOT_MINE='不归我';
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
-// judged the matter ended) or owner (I closed it in the conversation). A model run's kind: batch (of new messages),
-// review (of the open matters, see review.mjs), profile (关于TA, see profile.mjs), grade or exam (see grader.mjs);
-// runs from before reviews were batches. Its matters: how many open matters it was shown, unknown for runs from
-// before. Its model: the name of the model claude was asked for (BUTLER_MODEL_NAME), unknown for claude's default and
-// for runs from before.
+// judged the matter ended) or owner (I closed it, on a card or on the command line). A model run's kind: batch (of
+// new messages), review (of the open matters, see review.mjs), profile (关于TA, see profile.mjs), grade or exam (see
+// grader.mjs); runs from before reviews were batches. Its matters: how many open matters it was shown, unknown for
+// runs from before. Its model: the name of the model claude was asked for (BUTLER_MODEL_NAME), unknown for claude's
+// default and for runs from before.
 const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER'],['model_runs','model','TEXT']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
@@ -211,6 +212,13 @@ export class Matters{
  reopen(id,now=Date.now()){
   return Number(this.#run(`UPDATE matters SET status='open',reason=NULL,closed_at=NULL,closed_by=NULL,updated_at=? WHERE id=? AND status='closed'`,now,id).changes)>0;
  }
+ // The mark of changes made in another process: the command line closes and reopens matters, and only the processor's
+ // process shows them (the latest digest, see digest.mjs), so the command line counts its changes in meta matters and
+ // the processor looks at the count every few seconds (see Processor.checkMark). A count, not a time: two changes
+ // within a millisecond still differ, and the count goes up in one transaction, so two command lines at once never
+ // lose one.
+ markChanged(){this.#tx(()=>this.store.setMeta('matters',{changes:this.changeMark()+1}));}
+ changeMark(){return this.store.meta('matters')?.changes??0;}
  // A model answer (see prompt.mjs readReply) and the messages it covered, in one transaction. outcome: how the
  // messages were processed (model, or context for my own messages that needed no model). reactions: my reactions it
  // covered, each with its own outcome: model (the model was shown it), covered (its message was shown with it among its

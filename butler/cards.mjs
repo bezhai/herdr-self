@@ -1,8 +1,13 @@
 // The Feishu cards (JSON 2.0) butler sends. Text from the model, the chats and the people always goes in plain text,
-// so nothing in it is read as markdown or becomes a link; markdown is butler's own: headings it words and colored
-// dots. The only links are butler's, made from the source messages, and they go in components' link properties, never
-// in text. Feishu checks a 2.0 card strictly and refuses one with a property it does not know, at send time, so only
-// properties its card JSON 2.0 documentation lists are used.
+// so nothing in it is read as markdown or becomes a link; markdown is butler's own: colored dots. The only links are
+// butler's, made from the source messages, and they go in components' link properties, never in text. Feishu checks a
+// 2.0 card strictly and refuses one with a property it does not know, at send time, so only properties its card JSON
+// 2.0 documentation lists are used.
+
+// Where I talk to butler: a Feishu group that the herdr bridge binds to a Claude agent, which works butler through its
+// command line (see cli.mjs). The direct chat with the bot only carries cards, so what a card says I can do beyond its
+// buttons is done there.
+export const AGENT_GROUP='herdr bridge 里绑定了管家 agent 的飞书群';
 
 // Feishu refuses a card message whose request body exceeds 30 KB; the card travels serialized as a string inside
 // that body (see bridge/message-cards.mjs, which keeps 28000 bytes for the same reason).
@@ -20,8 +25,6 @@ export const fits=card=>size(card)<=CARD_BYTES&&components(card)<=MAX_COMPONENTS
 
 // style: the plain text's text_size and text_color.
 export const plain=(content,style={})=>({tag:'div',text:{tag:'plain_text',content:clip(content,PLAIN),...style}});
-// text: butler's own words, without markdown characters.
-export const heading=text=>({tag:'markdown',content:`**${text}**`});
 // A dot in color, one of the card colors.
 export const dot=color=>({tag:'markdown',content:`<font color='${color}'>●</font>`});
 // A panel folded away until clicked, under a title of butler's: ▸ before it, turning to ▾ when it opens.

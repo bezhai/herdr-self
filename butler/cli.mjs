@@ -1,7 +1,10 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-// butler's command line: runs the collector and the processor (with the bot and the grading), shows their status, what
-// they collected, the matters made of it and 关于TA, sets chat levels and has the model grade chats, keeps the
-// ignored-sender list, and creates and updates the bot's Feishu app.
+// butler's command line: runs the collector and the processor (with the bot and the grading), and is how the agent I
+// talk to butler through (see cards.mjs AGENT_GROUP) works butler, over ssh: it shows the status, what was collected,
+// the matters made of it, 关于TA and my notes; sets chat levels and has the model grade chats; closes and reopens
+// matters; keeps my notes and the ignored-sender list; and creates and updates the bot's Feishu app. Every command that
+// reads prints the store's records as JSON with --json, and every one that writes prints what it changed, before and
+// after, in words or with --json as JSON: the agent reads the one and tells me the other.
 import {parseArgs} from 'node:util';
 import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
@@ -9,10 +12,8 @@ import {CATEGORIES,LEVELS,LEVEL_NAMES} from './rules.mjs';
 import {Matters} from './matters.mjs';
 import {Processor,DEFAULTS as PROCESSOR} from './processor.mjs';
 import {HerdrModel} from './herdr-model.mjs';
-import {ModelQueue} from './model-queue.mjs';
 import {Grader} from './grader.mjs';
 import {find} from './lookup.mjs';
-import {Conversation} from './conversation.mjs';
 import {Digests,digestStatus,endReason} from './digest.mjs';
 import {levelName,LEVEL_EFFECT,isCorrection,LevelCards} from './levels.mjs';
 
@@ -25,31 +26,47 @@ const {Collector,DEFAULTS}=await import('./collector.mjs');
 // The Feishu SDK takes most of the command line's start-up time; only the commands that use it load it.
 const feishu=async()=>({...await import('./bot.mjs'),...await import('./bot-app.mjs')});
 
-const HELP=`用法：butler [--config 配置文件] <命令>
+const HELP=`用法：butler [--config 配置文件] <命令> [选项]
+
+读的命令加 --json 时输出存储里的记录（JSON）；写的命令打印改了什么（原来 → 现在），加 --json 时输出每个改动的
+before 和 after（没有时是 null）。
 
   run                              运行收集器（常驻，作为用户服务运行）
-  status [--json]                  收集器状态：推送、对账、open-lark 同步、各类消息数量、最近的错误
+  status [--json]                  收集器状态：推送、对账、open-lark 同步、各类消息数量，加工端、分级和机器人，最近的错误
   list [--category 类别] [--since 时间] [--until 时间] [--limit 条数] [--json]
                                    按类别和时间列出收到的消息，新的在前
                                    类别：${CATEGORIES.join(' ')}；时间：ISO 时间，或 30m、2h、7d 这样的相对时间
   groups [--search 文字] [--json]   列出我所在的群（级别、名称、人数、最近活跃）
-  level [list]                     有级别的聊天：级别、谁定的、从什么时候开始、理由
-  level set <级别> <聊天名或 id>...  由我定聊天的级别，模型不改我定的：instant 即时（全部消息交给模型）、
+  level [list] [--json]            有级别的聊天：级别、谁定的、从什么时候开始、理由
+  level set <级别> <聊天名或 id>... [--reason 文字] [--json]
+                                   由我定聊天的级别，模型不改我定的：instant 即时（全部消息交给模型）、
                                    daily 每日（存下，每日整理还没有做）、store 只存不看、ignore 忽略（不存）；
-                                   和我有关的消息不看级别，照旧收、照旧交给模型
-  level clear <聊天名或 id>...      取消我定的级别，回到模型的判断，还没有判断时私聊按即时、群按只存不看
-  level history [--since 时间]     级别的改动：什么时候、哪个聊天、原来和现在的级别、谁改的、理由；默认最近 7 天
-  level grade [<聊天名或 id>...]    让模型现在给这些聊天分级；不写聊天时是最近 7 天有消息、级别不是我定的全部聊天。
+                                   和我有关的消息不看级别，照旧收、照旧交给模型；--reason 是我的理由，和级别一起记下
+  level clear <聊天名或 id>... [--json]
+                                   取消我定的级别，回到模型的判断，还没有判断时私聊按即时、群按只存不看
+  level history [--since 时间] [--json]
+                                   级别的改动：什么时候、哪个聊天、原来和现在的级别、谁改的、理由；默认最近 7 天
+  level grade [<聊天名或 id>...] [--json]
+                                   让模型现在给这些聊天分级；不写聊天时是最近 7 天有消息、级别不是我定的全部聊天。
                                    加工端也会自己分级：新的活跃聊天、每周一次、说明变了以后，以及即时的聊天消息突然变多时
   process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每天根据我发的消息
                                    写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍，在另一条模型通道上
-                                   给活跃的聊天分级；配置了机器人时也运行机器人：定时汇总、分级的卡片、私聊对话；--once 只运行
+                                   给活跃的聊天分级；配置了机器人时也运行机器人：定时汇总、分级的卡片；--once 只运行
                                    一轮（处理完积压，到了时间也写「关于TA」、整理事项）就退出，不运行机器人，不分级
-  matters [--all] [--json]         未结束的事项，紧急的在前；--all 连同已结束的
-  profile [--json]                 「关于TA」（管家归纳的我的工作和兴趣）和我在私聊里让管家记下的说明
-  ignore list                      忽略名单：这些发送方的消息不交给模型
-  ignore add <发送方名称或 id>...    加入忽略名单
-  ignore remove <发送方名称或 id>... 移出忽略名单
+  matters [list] [--all] [--json]  未结束的事项，紧急的在前；--all 连同已结束的
+  matters close <编号> [--reason 文字] [--json]
+                                   由我关掉一个未结束的事项，和卡片上的「完成」一样记为我关掉的；--reason 是我的理由，
+                                   写「不归我」时和卡片上的「不归我」一样，模型以后判断哪些事归我时会参考
+  matters reopen <编号> [--json]    重新打开一个结束了的事项
+  notes [list] [--json]            我的说明：我的原话，写「关于TA」、整理事项和给聊天分级时都带上，以说明为准
+  notes add <文字> [--json]         按我的原话记下一条说明（比如「审批不归我管」）；同样的话记过时不再记
+  notes remove <编号> [--json]      删掉一条说明
+  profile [--json]                 「关于TA」（管家归纳的我的工作和兴趣）和我的说明
+  ignore [list] [--json]           忽略名单：这些发送方的消息不交给模型
+  ignore add <发送方名称或 id>... [--json]
+                                   加入忽略名单
+  ignore remove <发送方名称或 id>... [--json]
+                                   移出忽略名单
   bot create [--name 名称]          通过飞书的官方流程创建管家机器人的应用，凭证写进配置文件
   bot update                       通过飞书的官方流程给已经配置的应用加上它还没有的权限和回调（卡片上的按钮要用的回调）
 
@@ -59,6 +76,22 @@ class UsageError extends Error{}
 const time=ms=>ms?new Date(ms).toLocaleString('sv-SE'):'—';
 const ago=ms=>{const s=Math.round((Date.now()-ms)/1000);return s<60?`${s} 秒前`:s<3600?`${Math.round(s/60)} 分钟前`:`${Math.round(s/3600)} 小时前`;};
 const size=n=>n>=1048576?`${(n/1048576).toFixed(1)} MB`:`${Math.ceil(n/1024)} KB`;
+const json=v=>console.log(JSON.stringify(v,null,1));
+// My own words, a reason or a note, as the agent passes them on: one line, never empty, and short enough to go into
+// every prompt they are shown in. Cut, they would no longer be what I said, so a longer one is refused.
+const WORDS=200;
+function words(value,what){
+ const text=String(value??'').replace(/\s+/g,' ').trim(),n=[...text].length;
+ if(!n)throw new UsageError(`${what}不能是空的`);
+ if(n>WORDS)throw new UsageError(`${what}最长 ${WORDS} 字，这次有 ${n} 字`);
+ return text;
+}
+// A matter's or a note's number as I write it: 12 or #12.
+function number(value,what){
+ const m=/^#?(\d+)$/.exec(String(value??'').trim());
+ if(!m)throw new UsageError(`${what}要写编号，比如 12 或 #12${value===undefined?'':`，不是 ${value}`}`);
+ return Number(m[1]);
+}
 
 function parseTime(value,flag){
  if(value===undefined)return undefined;
@@ -112,11 +145,16 @@ function printStatus(s){
 
 // What 关于TA was written from.
 const about=p=>`根据 ${p.messages} 条我发的消息和 ${p.notes?.length??0} 条说明`;
-function printProfile(profile,notes){
- console.log(profile?.at?`关于TA（写于 ${time(profile.at)}，${about(profile)}）：\n${profile.text}`:'还没有写过「关于TA」：加工端运行时会根据我发过的消息写出来');
- console.log(notes.length?`\n说明（${notes.length} 条，在私聊里对管家说可以增删）：\n${notes.map(n=>`#${n.id} ${n.text}（${time(n.at)}）`).join('\n')}`
-  :'\n还没有说明。在私聊里告诉管家哪些事不归我管（比如「审批不归我管」），它会记成说明');
+function printNotes(notes){
+ console.log(notes.length?`说明（${notes.length} 条，butler notes add 和 notes remove 增删）：\n${notes.map(n=>`#${n.id} ${n.text}（${time(n.at)}）`).join('\n')}`
+  :'还没有说明。哪些事归不归我管（比如「审批不归我管」），用 butler notes add 按我的原话记下');
 }
+function printProfile(profile,notes){
+ console.log(profile?.at?`关于TA（写于 ${time(profile.at)}，${about(profile)}）：\n${profile.text}\n`:'还没有写过「关于TA」：加工端运行时会根据我发过的消息写出来\n');
+ printNotes(notes);
+}
+// What a note does once it is added or removed: the processor and grading find it in the store.
+const NOTE_EFFECT='加工端下一轮会按说明重写「关于TA」，再把未结束的事项整理一遍；说明一小时内不再变时，分级的模型重新给聊天分级';
 
 function printRecords(records){
  if(!records.length){console.log('没有符合条件的消息');return;}
@@ -140,6 +178,8 @@ const GROUPS={key:'feedId',noun:'群',missing:'butler groups 可以列出我所�
 const CHATS={...GROUPS,noun:'聊天',line:c=>`  ${c.name||'（无名）'}（${c.chatMode==='direct'?'私聊':`${c.memberCount??'?'} 人`}）  ${c.feedId}`};
 // A chat's level as the command line shows it: set by me, not by you (see levels.mjs levelName).
 const levelOf=(l,chatMode)=>levelName(l,chatMode,'我');
+// A chat as the JSON of a write names it.
+const chatOf=c=>({feedId:c.feedId,name:c.name||null,chatMode:c.chatMode??null});
 const SENDERS={key:'senderId',noun:'发送方',missing:'只能忽略存储里发过消息的发送方',line:s=>`  ${s.name}（${s.type??'?'}，${s.messages??'?'} 条消息）  ${s.senderId}`};
 function pick(items,query,{key,noun,missing,line}=GROUPS){
  const found=find(items,query,key);
@@ -163,9 +203,11 @@ function printMatters(list,all){
 async function main(argv){
  process.umask(0o077);
  const {values,positionals}=parseArgs({args:argv,allowPositionals:true,options:{config:{type:'string'},json:{type:'boolean'},once:{type:'boolean'},all:{type:'boolean'},category:{type:'string'},
-  since:{type:'string'},until:{type:'string'},limit:{type:'string'},search:{type:'string'},name:{type:'string'},help:{type:'boolean',short:'h'}}});
+  since:{type:'string'},until:{type:'string'},limit:{type:'string'},search:{type:'string'},name:{type:'string'},reason:{type:'string'},help:{type:'boolean',short:'h'}}});
  const [command,...rest]=positionals;
  if(values.help||!command){console.log(HELP);return 0;}
+ // A reason given where none is kept would be lost without a word.
+ if(values.reason!==undefined&&!(command==='level'&&rest[0]==='set'||command==='matters'&&rest[0]==='close'))throw new UsageError('--reason 只用于 level set 和 matters close');
  const config=loadConfig(values.config);
  const openLark=()=>new OpenLark({url:config.openLarkUrl,token:requireToken(config),gapMs:0});
  if(command==='run'){
@@ -191,30 +233,71 @@ async function main(argv){
     const grader=new Grader({store,matters});s.grading={...grader.status(),sampleDays:grader.options.sampleMs/86400e3};
     if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;
    }
-   case 'matters':{const list=matters.list({all:values.all});if(values.json)console.log(JSON.stringify(list,null,1));else printMatters(list,values.all);return 0;}
+   case 'matters':{
+    const [action,arg]=rest;
+    if(action==='list'||action===undefined){const list=matters.list({all:values.all});if(values.json)json(list);else printMatters(list,values.all);return 0;}
+    if(action!=='close'&&action!=='reopen')throw new UsageError(`matters 没有这个操作：${action}`);
+    // As the card's 完成 and 不归我 close it (see digest.mjs): closed by me, with my reason if I give one.
+    const id=number(arg,`matters ${action} `),before=matters.matter(id),reason=values.reason===undefined?undefined:words(values.reason,'--reason ');
+    if(!before)throw new UsageError(`没有 #${id} 这个事项（butler matters --all 列出全部事项）`);
+    const changed=action==='close'?matters.close(id,reason):matters.reopen(id),after=matters.matter(id);
+    // The latest digest is the processor's process's to update: it learns of the change from the mark.
+    if(changed)matters.markChanged();
+    if(values.json){json({before,after});return 0;}
+    const what=`#${id} ${before.title}`;
+    console.log(action==='close'?changed?`${what}：未结束 → 已结束：${endReason(after)}`:`${what}：已经结束了（${endReason(before)}），没有改动`
+     :changed?`${what}：已结束：${endReason(before)} → 未结束`:`${what}：没有结束，没有改动`);
+    return 0;
+   }
+   // My notes, my own words (see matters.mjs). What one does, the processor and grading take from the store: 关于TA is
+   // written again and the open matters reviewed on the next round, and the chats graded again once the notes stand.
+   case 'notes':{
+    const [action,...args]=rest;
+    if(action==='list'||action===undefined){const list=matters.notes();if(values.json)json(list);else printNotes(list);return 0;}
+    if(action==='add'){
+     const text=words(args.join(' '),'说明'),same=matters.notes().find(n=>n.text===text);
+     if(same){if(values.json)json({before:same,after:same});else console.log(`已经有这条说明 #${same.id}：${same.text}，没有改动`);return 0;}
+     const id=matters.addNote(text),after=matters.notes().find(n=>n.id===id);
+     if(values.json)json({before:null,after});else console.log(`已记下说明 #${id}：${text}。${NOTE_EFFECT}`);
+     return 0;
+    }
+    if(action==='remove'){
+     const id=number(args[0],'notes remove '),before=matters.removeNote(id);
+     if(!before)throw new UsageError(`没有说明 #${id}（butler notes 列出说明）`);
+     if(values.json)json({before,after:null});else console.log(`已删除说明 #${id}：${before.text}。${NOTE_EFFECT}`);
+     return 0;
+    }
+    throw new UsageError(`notes 没有这个操作：${action}`);
+   }
    case 'profile':{
     const profile=store.meta('profile')??null,notes=matters.notes();
-    if(values.json)console.log(JSON.stringify({profile,notes},null,1));else printProfile(profile,notes);return 0;
+    if(values.json)json({profile,notes});else printProfile(profile,notes);return 0;
    }
    case 'ignore':{
-    const [action,...queries]=rest;
+    const [action,...queries]=rest,ignored=id=>matters.ignoredSenders().find(s=>s.senderId===id)??null;
     if(action==='list'||action===undefined){
-     const list=matters.ignoredSenders();if(!list.length)console.log('忽略名单是空的（butler ignore add <发送方名称或 id>）');
+     const list=matters.ignoredSenders();
+     if(values.json){json(list);return 0;}
+     if(!list.length)console.log('忽略名单是空的（butler ignore add <发送方名称或 id>）');
      for(const s of list)console.log(`${s.name||'（无名）'}  ${s.senderId}  从 ${time(s.since)} 起忽略`);
      return 0;
     }
     if(!queries.length)throw new UsageError(`ignore ${action} 需要发送方名称或 id`);
+    // Each sender as the write names it, with its entry on the list (see Matters.ignoredSenders) before and after.
+    const out=[],say=(s,before,after,text)=>{out.push({senderId:s.senderId,name:s.name,before,after});if(!values.json)console.log(`${s.name||'（无名）'}（${s.senderId}）：${text}`);};
     if(action==='add'){
-     const picked=queries.map(q=>pick(matters.senders(),q,SENDERS));
-     for(const s of picked){matters.ignore(s.senderId,s.name);console.log(`已忽略：${s.name}（${s.senderId}），之后它的消息不再交给模型`);}
-     return 0;
-    }
-    if(action==='remove'){
-     const picked=queries.map(q=>pick(matters.ignoredSenders(),q,{...SENDERS,missing:'butler ignore list 列出忽略名单'}));
-     for(const s of picked){matters.unignore(s.senderId);console.log(`已移出忽略名单：${s.name||s.senderId}，之后的新消息照常交给模型`);}
-     return 0;
-    }
-    throw new UsageError(`ignore 没有这个操作：${action}`);
+     for(const s of queries.map(q=>pick(matters.senders(),q,SENDERS))){
+      const before=ignored(s.senderId);
+      if(before){say(s,before,before,'已经在忽略名单上，没有改动');continue;}
+      matters.ignore(s.senderId,s.name);say(s,null,ignored(s.senderId),'没有忽略 → 忽略，之后它的消息不再交给模型');
+     }
+    }else if(action==='remove'){
+     for(const s of queries.map(q=>pick(matters.ignoredSenders(),q,{...SENDERS,missing:'butler ignore list 列出忽略名单'}))){
+      matters.unignore(s.senderId);say(s,s,null,'忽略 → 没有忽略，之后的新消息照常交给模型');
+     }
+    }else throw new UsageError(`ignore 没有这个操作：${action}`);
+    if(values.json)json(out);
+    return 0;
    }
    case 'list':{
     if(values.category&&!CATEGORIES.includes(values.category))throw new UsageError(`没有这个类别：${values.category}（可选 ${CATEGORIES.join(' ')}）`);
@@ -232,7 +315,8 @@ async function main(argv){
    case 'level':{
     const [action,...args]=rest;
     if(action==='list'||action===undefined){
-     const list=store.levels();if(!list.length)console.log('还没有聊天有级别（butler level set <级别> <聊天名或 id>）；没有级别的私聊按即时：全部消息交给模型，群按只存不看：存下，不交给模型');
+     const list=store.levels();if(values.json){json(list);return 0;}
+     if(!list.length)console.log('还没有聊天有级别（butler level set <级别> <聊天名或 id>）；没有级别的私聊按即时：全部消息交给模型，群按只存不看：存下，不交给模型');
      for(const l of list)console.log(`${levelOf(l)}  ${l.name||'（无名）'}  从 ${time(l.since)} 起${l.reason?`  理由：${l.reason}`:''}${l.by==='owner'&&l.modelLevel?`  模型的判断：${LEVEL_NAMES[l.modelLevel]}`:''}  ${l.feedId}`);
      return 0;
     }
@@ -240,18 +324,30 @@ async function main(argv){
      const [level,...queries]=args;
      if(!LEVELS.includes(level))throw new UsageError(`level set 的第一个参数是级别：${LEVELS.join(' ')}${level?`，没有 ${level}`:''}`);
      if(!queries.length)throw new UsageError('level set 需要聊天名或 id');
+     const reason=values.reason===undefined?undefined:words(values.reason,'--reason ');
      // The store knows the chats seen so far, direct ones too; a group it cannot resolve uniquely is looked up in open-lark.
      if(queries.some(q=>find(store.chats(),q,'feedId').length!==1))await refreshGroups(store,openLark());
+     const out=[];
      for(const c of queries.map(q=>pick(store.chats(),q,CHATS))){
-      const {before,after}=store.setLevel(c.feedId,level,{by:'owner'});
-      console.log(`${c.name||c.feedId}：${levelOf(before,c.chatMode)} → ${levelOf(after,c.chatMode)}，从 ${time(after.since)} 起${LEVEL_EFFECT[level]}；和我有关的消息照旧收、照旧交给模型`);
-      if(level==='instant'&&c.chatMode==='topic')console.log(`注意：${c.name} 是话题群。butler 不按位置读话题群（open-lark 给话题群的消息窗口不可靠），这个群只能收到推送来的消息，收集器停机或断线期间的消息补不上；其中我参与的话题和 @我 的消息不受影响。`);
+      const name=c.name||c.feedId,was=store.level(c.feedId);
+      // Mine already, and no new reason: nothing changes, and the reason I gave before stays.
+      if(was?.by==='owner'&&was.level===level&&(reason===undefined||reason===was.reason)){
+       out.push({...chatOf(c),before:was,after:was});if(!values.json)console.log(`${name}：已经是我定的${LEVEL_NAMES[level]}，没有改动`);continue;
+      }
+      const {before,after}=store.setLevel(c.feedId,level,{by:'owner',reason:reason??null});
+      const warning=level==='instant'&&c.chatMode==='topic'?`注意：${name} 是话题群。butler 不按位置读话题群（open-lark 给话题群的消息窗口不可靠），这个群只能收到推送来的消息，收集器停机或断线期间的消息补不上；其中我参与的话题和 @我 的消息不受影响。`:undefined;
+      out.push({...chatOf(c),before:before??null,after,...warning&&{warning}});
+      if(values.json)continue;
+      console.log(`${name}：${levelOf(before,c.chatMode)} → ${levelOf(after,c.chatMode)}${after.reason?`，理由：${after.reason}`:''}，从 ${time(after.since)} 起${LEVEL_EFFECT[level]}；和我有关的消息照旧收、照旧交给模型`);
+      if(warning)console.log(warning);
      }
+     if(values.json)json(out);
      return 0;
     }
     // What changed, the latest first: every change of a level, mine and the model's (see Store.levelChanges).
     if(action==='history'){
      const since=parseTime(values.since,'--since')??Date.now()-7*86400e3,list=store.levelChanges(since);
+     if(values.json){json([...list].reverse().map(c=>({...c,before:c.before??null,after:c.after??null,correction:isCorrection(c)})));return 0;}
      if(!list.length){console.log('这段时间没有级别的改动');return 0;}
      for(const c of [...list].reverse())console.log(`${time(c.at)}  ${c.name||c.feedId}：${levelOf(c.before,c.chatMode)} → ${levelOf(c.after,c.chatMode)}  ${c.by==='owner'?'我改的':'模型改的'}${c.reason?`  理由：${c.reason}`:''}  ${c.feedId}`);
      const mine=list.filter(c=>c.by==='owner');
@@ -260,11 +356,12 @@ async function main(argv){
     }
     if(action==='clear'){
      if(!args.length)throw new UsageError('level clear 需要聊天名或 id');
-     const mine=store.levels().filter(l=>l.by==='owner').map(l=>({...l,name:l.name??''}));
+     const mine=store.levels().filter(l=>l.by==='owner').map(l=>({...l,name:l.name??''})),out=[];
      for(const c of args.map(q=>pick(mine,q,{...CHATS,missing:'只能取消我定的级别，butler level list 列出它们'}))){
-      const {before,after}=store.clearLevel(c.feedId);
-      console.log(`${c.name||c.feedId}：${levelOf(before,c.chatMode)} → ${levelOf(after,c.chatMode)}`);
+      const {before,after}=store.clearLevel(c.feedId);out.push({...chatOf(c),before,after:after??null});
+      if(!values.json)console.log(`${c.name||c.feedId}：${levelOf(before,c.chatMode)} → ${levelOf(after,c.chatMode)}`);
      }
+     if(values.json)json(out);
      return 0;
     }
     // The model grades now, here, through herdr, as the processor's grading does in the background; a level I set is
@@ -274,6 +371,11 @@ async function main(argv){
      for(const c of chats){const l=store.level(c.feedId);if(l?.by==='owner')throw new UsageError(`${c.name||c.feedId} 的级别是我定的（${LEVEL_NAMES[l.level]}），模型不改我定的级别；要让模型判断，先 butler level clear ${c.name||c.feedId}`);}
      const r=await new Grader({store,matters,model:herdrModel(config)}).grade(args.length?chats.map(c=>c.feedId):undefined);
      const named=id=>store.chat(id)?.name||id;
+     if(values.json){
+      json({chats:r.chats,runs:r.runs,graded:r.graded.map(g=>({feedId:g.feedId,name:g.name??null,before:g.before??null,after:g.after})),
+       left:r.left.map(feedId=>({feedId,name:store.chat(feedId)?.name??null})),...r.error&&{error:r.error}});
+      return r.left.length?1:0;
+     }
      if(!r.chats){console.log('没有要分级的聊天：最近 7 天有消息、级别不是我定的聊天一个都没有');return 0;}
      for(const {feedId,before,after} of r.graded){const mode=store.chat(feedId)?.chatMode;console.log(`${named(feedId)}：${levelOf(before,mode)} → ${levelOf(after,mode)}：${after.modelReason}`);}
      if(r.left.length)console.log(`没有分级：${r.left.map(named).join('、')}（${r.error??'模型的回复里没有它们，或者给的级别、理由不能用，见 butler status 里的错误'}）`);
@@ -288,17 +390,14 @@ async function main(argv){
 }
 
 // The processor, as a service or (once) for one round: the backlog, and 关于TA and the review of the open matters when
-// they are due, as a round of the service would. As a service it also grades the chats, on a model queue of its own
-// (two claudes may run at once, each in a herdr workspace of its own), and runs the bot, when one is configured:
-// digests, the level cards and the conversation, whose turns share the model with the batches and reviews (see
-// model-queue.mjs) and can have the grader grade chats again.
+// they are due, as a round of the service would. As a service it also grades the chats, on a timer of its own, and runs
+// the bot, when one is configured: digests and the level cards.
 async function processCommand(config,once){
- const herdr=herdrModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
- const model=new ModelQueue(herdr);
+ const model=herdrModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
  const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
- // The latest digest follows the matters: whatever a batch, a review or the conversation changes refreshes it. What the
+ // The latest digest follows the matters: whatever a batch, a review or the command line changes refreshes it. What the
  // model newly inferred about me when it wrote 关于TA goes to me (see levels.mjs).
- let bot,digests,conversation,levels;
+ let bot,digests,levels;
  const processor=new Processor({store,matters,model,options,log:m=>console.log(m),onMattersChanged:()=>digests?.refresh(),onProfile:p=>levels?.inferred(p)});
  if(once){
   try{
@@ -309,26 +408,25 @@ async function processCommand(config,once){
    return r.failures||p?.error||v?.error?1:0;
   }finally{store.close();}
  }
- // Grading's runs queue apart from the batches, the reviews, 关于TA and the turns: a pass of many runs holds none of them up.
- // After the first pass that graded chats, the level list goes to me.
- const background=new ModelQueue(herdr),grader=new Grader({store,matters,model:background,log:m=>console.log(m),onPass:p=>levels?.passed(p)});
+ // Grading runs beside the batches, the reviews and 关于TA, never behind them: a pass of many runs holds none of them up,
+ // and two claudes may run at once, each in a herdr workspace of its own. After the first pass that graded chats, the
+ // level list goes to me.
+ const grader=new Grader({store,matters,model,log:m=>console.log(m),onPass:p=>levels?.passed(p)});
  if(config.bot){
   const {Bot}=await feishu();
   bot=new Bot({store,...config.bot,log:m=>console.log(m)});
   digests=new Digests({store,matters,bot,schedule:config.schedule});
   levels=new LevelCards({store,bot,schedule:config.schedule,exams:n=>matters.exams(n)});
-  conversation=new Conversation({store,matters,model,bot,grader,onMattersChanged:()=>digests.refresh()});
   // A choice on a weekly card's ⋯ is the level cards'; any other click, the digests'.
-  bot.onMessage=msg=>conversation.handle(msg);bot.onCardAction=evt=>levels.click(evt)??digests.click(evt);
+  bot.onCardAction=evt=>levels.click(evt)??digests.click(evt);
  }
- // The model runs under way (a batch or a turn, and a grading) are waited for, bounded; a turn cut off here goes
- // unanswered, and a grading cut off is done again.
+ // The model runs under way (a batch, and a grading) are waited for, bounded; a grading cut off is done again.
  const stop=async()=>{
-  await Promise.race([Promise.all([processor.stop(),grader.stop(),digests?.stop(),levels?.stop(),conversation?.idle()]),new Promise(r=>setTimeout(r,20_000))]);
+  await Promise.race([Promise.all([processor.stop(),grader.stop(),digests?.stop(),levels?.stop()]),new Promise(r=>setTimeout(r,20_000))]);
   await Promise.race([bot?.stop(),new Promise(r=>setTimeout(r,5000))]);process.exit(0);
  };
  process.on('SIGTERM',stop);process.on('SIGINT',stop);
- console.log(`butler 加工端启动：模型在 herdr 机器 ${herdr.machine}，存储 ${store.file}`);
+ console.log(`butler 加工端启动：模型在 herdr 机器 ${model.machine}，存储 ${store.file}`);
  // The processor's start closes the workspaces a crashed process left on the model machine, grading's too (they have
  // one label); grading starts after it, so that none of its own is closed.
  await processor.start();grader.start();

@@ -1,19 +1,19 @@
 // A stand-in for @larksuite/channel's LarkChannel, as the bot uses it: createLarkChannel(options) returns it, the bot
 // registers its handlers with on(), connects, sends, updates the cards it sent and disconnects. The test makes Feishu
 // deliver messages (receive), card clicks (click, which resolves to the answer that goes back to Feishu) and connection
-// events (emit), and makes connecting fail.
+// events (emit), and makes connecting fail, and sending (failSends: how many sends to come fail).
 export const OWNER='ou_owner0000000000000000000000001';
 let seq=0;
 
 export function fakeChannel({failConnects=0}={}){
- const f={options:undefined,handlers:{},sent:[],updated:[],connects:0,disconnects:0,failConnects,state:'idle'};
+ const f={options:undefined,handlers:{},sent:[],updated:[],connects:0,disconnects:0,failConnects,failSends:0,state:'idle'};
  const channel={
   on(name,handler){f.handlers[name]=handler;return ()=>{if(f.handlers[name]===handler)delete f.handlers[name];};},
   async connect(){f.connects+=1;if(f.connects<=f.failConnects){f.state='error';throw Error('WebSocket connect failed: getaddrinfo ENOTFOUND open.feishu.cn');}f.state='open';},
   async disconnect(){f.disconnects+=1;f.state='closed';},
   rawWsClient:{close(){f.state='closed';}},
   getConnectionStatus(){return {state:f.state};},
-  async send(to,input,opts={}){f.sent.push({to,input,opts});return {messageId:`om_out${f.sent.length}`};},
+  async send(to,input,opts={}){if(f.failSends>0){f.failSends-=1;throw Error('飞书拒绝了这条消息：token invalid');}f.sent.push({to,input,opts});return {messageId:`om_out${f.sent.length}`};},
   async updateCard(messageId,card){f.updated.push({messageId,card});},
  };
  // A message as the SDK normalizes it: by default a direct message from the owner.

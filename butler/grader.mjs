@@ -1,6 +1,6 @@
 // Grading: the model gives each active chat a level (see rules.mjs LEVELS) and one sentence of why, by 关于TA and my
-// notes, on a model queue of its own (see model-queue.mjs and cli.mjs), so that a pass of many runs never holds up the
-// batches, the review, 关于TA or the conversation. A chat is active when the store has messages of it from the last
+// notes, on a timer of its own in the processor's process (see cli.mjs), so that a pass of many runs never holds up the
+// batches, the review or 关于TA, nor waits for them. A chat is active when the store has messages of it from the last
 // week, chats seen only through push included; an inactive chat is not graded. Nor is a chat whose level I set: the
 // model never changes mine, and shown mine it would see my answer. What the model is shown of a chat: what butler knows
 // of it (name, kind, members, whether I muted it), how busy it is and how much of it bots say, what I did there in the
@@ -10,8 +10,8 @@
 // its own, and the command line grades chats when I ask.
 // The exam: the chats whose level I set (the bank of corrections) are graded again as a pass would grade them, but
 // shown as ungraded, and each answer is compared with my level; the share right tells whether 关于TA has learnt what
-// I meant, and the wrong answers go into the next 关于TA (see profile.mjs). It runs on the same queue, after a new
-// 关于TA or a change of my notes (see #examDue).
+// I meant, and the wrong answers go into the next 关于TA (see profile.mjs). It runs on the same timer, one pass or exam
+// at a time, after a new 关于TA or a change of my notes (see #examDue).
 import {clean,parse,DATA,PROFILE} from './prompt.mjs';
 import {LEVELS} from './rules.mjs';
 import {DEFAULTS as PROCESSOR,numbers,same} from './processor.mjs';
@@ -107,10 +107,10 @@ const SAYS={grade:{problem:'模型回复里没有采纳的部分：',failed:'这
 
 export class Grader{
  #timer;#passes=new Set();#halting=false;#most=Infinity;#start;
- // model: {ask({system, prompt}) → reply text, name}: the background queue in the processor's process, herdr itself
- // on the command line. now: the clock. onPass({at, by, changed, graded, failed}): called after each pass that graded
+ // model: {ask({system, prompt}) → reply text, name}: herdr (see herdr-model.mjs), each run a claude of its own beside
+ // the processor's. now: the clock. onPass({at, by, changed, graded, failed}): called after each pass that graded
  // a chat: by says how the pass started, schedule for one check started (the chats that were due), request for one I
- // asked for (grade, from the command line or the conversation); changed lists the chats whose level from the model
+ // asked for (grade, from the command line); changed lists the chats whose level from the model
  // changed ({feedId, name, before: the model's level before, undefined when it had none, after, reason}); graded and
  // failed: how many chats it graded and how many it left. What it throws or rejects with is recorded and changes nothing
  // else.
@@ -139,7 +139,7 @@ export class Grader{
   return exam?this.#track(this.#exam(exam)):undefined;
  }
  // Grades these chats (feed ids) now, or every active chat, leaving out those whose level I set; whatever else runs.
- // For the command line, and the conversation. Resolves as a pass does (see #grade).
+ // For the command line. Resolves as a pass does (see #grade).
  grade(feedIds){
   const ids=(feedIds??this.store.activity(this.now()-this.options.activeMs).map(c=>c.feedId)).filter(id=>this.store.level(id)?.by!=='owner');
   return ids.length?this.#pass(ids,'request'):Promise.resolve({runs:0,chats:0,graded:[],left:[]});

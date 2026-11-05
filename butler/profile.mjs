@@ -1,4 +1,4 @@
-// 关于TA: a few lines in two parts, which the model writes and batches, reviews, the conversation and grading then judge
+// 关于TA: a few lines in two parts, which the model writes and batches, reviews and grading then judge
 // by (see prompt.mjs). Work: my role, team, the projects and systems I work on, the people I work with, what is mine
 // and what usually is not, so that a message sent to me is not mine to do by that alone. Interests: what I care about
 // outside my work, which grading weighs (see grader.mjs). The model gets my latest messages, each with the message it

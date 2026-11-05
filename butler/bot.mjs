@@ -1,19 +1,21 @@
 // The bot: butler's own Feishu app, on the SDK's long connection (a WebSocket the SDK keeps up and reconnects), held
-// by the processor's process. Only the owner can talk to it: the SDK takes direct messages only from the owner's
-// open_id, and the bot checks again that a message is the owner's and in the direct chat before handing it on (the
-// app has no scope for group messages anyway). Clicks on its cards' buttons come over the same connection (the app's
-// card.action.trigger callback, see bot-app.mjs); only the owner's are handed on, as a card can be forwarded. It
-// writes to the owner's direct chat by that open_id.
+// by the processor's process. It writes butler's cards to the owner's direct chat by the owner's open_id; clicks on
+// their buttons come over the same connection (the app's card.action.trigger callback, see bot-app.mjs), and only the
+// owner's are handed on, as a card can be forwarded. Talking to butler happens elsewhere (see cards.mjs AGENT_GROUP),
+// so a message of the owner's in the direct chat gets one fixed sentence that says where, and no model is asked. The
+// SDK takes direct messages only from the owner's open_id, and the bot checks again that a message is the owner's and
+// in the direct chat before it answers (the app has no scope for group messages anyway): no one else gets anything.
 import {createLarkChannel} from '@larksuite/channel';
+import {AGENT_GROUP} from './cards.mjs';
 
 export const DOMAINS={feishu:'https://open.feishu.cn',lark:'https://open.larksuite.com'};
+// The answer to each message of the owner's, whatever it holds: the sentence is the same for a picture as for words.
+export const ELSEWHERE=`这个私聊只用来发管家的卡片，要和管家说话，请到 ${AGENT_GROUP}里说。`;
 const quiet={debug(){},info(){},warn(){},error(){}};
 const message=e=>e?.message??String(e);
 
 export class Bot{
  #channel;#state='idle';#stopped=false;#wake;
- // Gets every message of the owner's, in the direct chat.
- onMessage=()=>{};
  // Gets every click of the owner's on a button of a card (the SDK's CardActionEvent) and returns the answer that goes
  // back to Feishu (a toast, a card), or undefined for none.
  onCardAction=()=>undefined;
@@ -63,15 +65,15 @@ export class Bot{
   const channel=this.channelFactory({appId:this.appId,appSecret:this.appSecret,domain:DOMAINS[this.domain],source:'herdr-butler',
    httpTimeoutMs:10_000,connectTimeoutMs:15_000,resolveSenderNames:false,resolveChatMode:false,
    policy:{requireMention:true,respondToMentionAll:false,dmMode:'allowlist',dmAllowlist:[this.owner]},
-   // Each message on its own, at once: the conversation acknowledges it and queues the turn itself. Clicks take a queue
-   // of their own, so that one never waits behind a message: Feishu wants an answer within 3 seconds.
+   // Each message on its own, at once, so that each gets its answer. Clicks take a queue of their own, so that one
+   // never waits behind a message: Feishu wants an answer within 3 seconds.
    safety:{chatQueue:{enabled:true,mergeWhileBusy:false,cardActions:'separate'},batch:{text:{delayMs:0},media:{delayMs:0}}},
    // A send whose result is unknown is not repeated.
    outbound:{retry:{maxAttempts:1}},logger:quiet});
   const current=()=>this.#channel===channel;
   channel.on('message',msg=>{
    if(!current()||msg.chatType!=='p2p'||!msg.senderId||msg.senderId!==this.owner)return;
-   return this.onMessage(msg);
+   return Promise.resolve().then(()=>this.reply(msg,{text:ELSEWHERE})).catch(e=>this.store.addError('机器人',`回复私聊消息失败：${message(e)}`));
   });
   channel.on('cardAction',evt=>{
    if(!current())return undefined;

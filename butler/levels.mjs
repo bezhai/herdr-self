@@ -1,21 +1,20 @@
 // The level cards in my direct chat with the bot, and how butler words a level. The level list shows every chat's
 // level and reason, a folded panel per level: it goes out once after the first scheduled grading pass that graded
-// chats, and in the conversation whenever I ask. The weekly card shows what the model changed in the week (and the
-// chats it graded for the first time), each chat with a ⋯ to set my own level, how many corrections I made that week
-// and how the model did when it last re-took my corrections (the exams, see grader.mjs): it goes out at the first slot
-// of the week, only when the model changed something. The last is a short card of what the model newly inferred about
-// me when it wrote 关于TA, so that I can correct it. Names and reasons come from the chats and the model: always plain
-// text.
+// chats. The weekly card shows what the model changed in the week (and the chats it graded for the first time), each
+// chat with a ⋯ to set my own level, how many corrections I made that week and how the model did when it last re-took
+// my corrections (the exams, see grader.mjs): it goes out at the first slot of the week, only when the model changed
+// something. The last is a short card of what the model newly inferred about me when it wrote 关于TA, so that I can
+// correct it. Names and reasons come from the chats and the model: always plain text.
 import {LEVELS,LEVEL_NAMES,ungradedLevel} from './rules.mjs';
 import {weekSlot} from './schedule.mjs';
 import {DEFAULTS as GRADING} from './grader.mjs';
-import {cards,plain,lines,panel,paged} from './cards.mjs';
+import {cards,plain,lines,panel,paged,AGENT_GROUP} from './cards.mjs';
 
 const GREY={text_size:'notation',text_color:'grey'};
 const day=ms=>new Date(ms).toLocaleString('sv-SE').slice(5,10);
 const message=e=>e?.message??String(e);
-// A chat's level as butler words it (see Store.level), mine marked as set by who (你 to me, 我 on the command line); a
-// chat without one, with the level it goes by until it is graded (see rules.mjs ungradedLevel).
+// A chat's level as butler words it (see Store.level), mine marked as set by who (你 on a card, 我 on the command
+// line); a chat without one, with the level it goes by until it is graded (see rules.mjs ungradedLevel).
 export const levelName=(l,chatMode,who='你')=>l?`${LEVEL_NAMES[l.level]}${l.by==='owner'?`（${who}定的）`:''}`:`未分级（按${LEVEL_NAMES[ungradedLevel(chatMode)]}）`;
 // What a level I set does from then on.
 export const LEVEL_EFFECT={instant:'它的全部消息交给模型',daily:'存下它的消息，每日的整理还没有做，现在和只存不看一样',store:'存下它的消息，不交给模型',ignore:'不再存它的消息'};
@@ -34,7 +33,7 @@ export function levelListCards(store,{at,activeMs=GRADING.activeMs}){
  const all=store.levels(),graded=new Set(all.map(l=>l.feedId));
  const groups=[...LEVELS.map(level=>[LEVEL_NAMES[level],all.filter(l=>l.level===level).map(l=>`${l.name||unnamed}${l.by==='owner'?'（你定的）':''}${l.reason?` — ${l.reason}`:''}`)]),
   ['还没有分级',store.activity(at-activeMs).filter(c=>!graded.has(c.feedId)).map(c=>`${c.name||unnamed}（按${LEVEL_NAMES[ungradedLevel(c.kind)]}）`)]].filter(([,rows])=>rows.length);
- const elements=[plain('你定的级别模型不改。想改哪个，在私聊里说「把 xx 改成每日」；问「xx 为什么是只存不看」可以问理由。',GREY)];
+ const elements=[plain(`你定的级别模型不改。想改哪个、问哪个为什么是这个级别，到 ${AGENT_GROUP}里说。`,GREY)];
  for(const [name,rows] of groups){
   const parts=[[]];let used=0;
   for(const row of rows){const n=Buffer.byteLength(row)+1;if(parts.at(-1).length&&used+n>PANEL_BYTES){parts.push([]);used=0;}parts.at(-1).push(row);used+=n;}
@@ -77,7 +76,7 @@ function weekCard(store,rows,{from,to,listed,at,week,exam}){
  return {schema:'2.0',config:{update_multi:true,summary:{content:`模型改了 ${n} 个聊天的级别，第一次分了 ${m} 个`}},
   header:{title:{tag:'plain_text',content:`分级变化（${day(from)} 至 ${day(to)}）`},template:'blue'},
   body:{vertical_spacing:'12px',elements:[plain(`${said.join('；')}。`,GREY),
-   plain(`点右边的 ⋯ 选一个级别，就改成你定的，模型以后不改它。${n+m>WEEK_LISTED?`只列出了 ${WEEK_LISTED} 个，其余的在私聊里说「列出分级」可以看到。`:''}`,GREY),
+   plain(`点右边的 ⋯ 选一个级别，就改成你定的，模型以后不改它。${n+m>WEEK_LISTED?`只列出了 ${WEEK_LISTED} 个，其余的到 ${AGENT_GROUP}里问管家。`:''}`,GREY),
    ...rows.map(c=>changeRow(c,{level:store.level(c.feedId),value}))]}};
 }
 // The weekly card for the week from from up to to, made at at, in cards of up to twelve chats; none when the model
@@ -92,7 +91,7 @@ export function weekCards(store,{from,to,listed,at,exams,ids}){
 
 // ---- what the model newly inferred about me
 export const inferredCards=added=>cards([plain('写「关于TA」时，模型从你的消息和纠正里新推断出这些：'),...lines(added.map(x=>`· ${x}`)),
- plain('不对的话，在私聊里直接告诉我，我会记成说明，以后以你的话为准。',GREY)],{title:'关于你的新推断',summary:`模型新推断了 ${added.length} 条关于你的内容`});
+ plain(`不对的话，到 ${AGENT_GROUP}里告诉管家，它会记成说明，以后以你的话为准。`,GREY)],{title:'关于你的新推断',summary:`模型新推断了 ${added.length} 条关于你的内容`});
 
 export class LevelCards{
  #timer;#ticking;#stopped=false;

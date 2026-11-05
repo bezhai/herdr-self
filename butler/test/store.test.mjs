@@ -148,6 +148,18 @@ test('a store from before levels: watched groups are instant by me from when the
  assert.deepEqual(['g1','g2'].map(id=>again.level(id).since),[min(0),min(-60)],'opening it again changes nothing');
 });
 
+test('a store from when butler talked in the direct chat loses the conversation table; opening it again changes nothing',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const old=new DatabaseSync(file);
+ old.exec(`CREATE TABLE conversation(id INTEGER PRIMARY KEY AUTOINCREMENT, message_id TEXT NOT NULL UNIQUE, said TEXT NOT NULL, at INTEGER NOT NULL,
+  reply TEXT, output TEXT, error TEXT, finished_at INTEGER);`);old.close();
+ const tables=store=>store.db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map(r=>r.name);
+ const store=new Store(file,{linkBase:LINK_BASE});t.after(()=>store.close());
+ assert.ok(!tables(store).includes('conversation'));
+ store.close();const again=new Store(file,{linkBase:LINK_BASE});t.after(()=>again.close());
+ assert.ok(!tables(again).includes('conversation'));
+});
+
 // Every statement a call prepares, with its query plan. No ANALYZE statistics are kept (sqlite_stat1), so a plan
 // does not depend on how many rows there are: an empty store plans as the live one, with hundreds of thousands of
 // messages, would.

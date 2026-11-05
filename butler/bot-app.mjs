@@ -5,9 +5,10 @@
 // the cards had buttons gets their callback.
 import {registerApp} from '@larksuite/channel';
 
-// The bot only sends as itself, receives direct messages, reads its own basic info and gets the clicks on its cards'
-// buttons (card.action.trigger); no user scopes. preset false drops Feishu's default template, so nothing else is
-// asked for. How the clicks are delivered (over the long connection) is not among what this can say: see README.
+// The bot only sends as itself, receives direct messages (to say where to talk to butler instead), reads its own
+// basic info and gets the clicks on its cards' buttons (card.action.trigger); no user scopes. preset false drops
+// Feishu's default template, so nothing else is asked for. How the clicks are delivered (over the long connection) is
+// not among what this can say: see README.
 export const APP_ADDONS={preset:false,
  scopes:{tenant:['im:message:send_as_bot','im:message.p2p_msg:readonly','application:bot.basic_info:read']},
  events:{items:{tenant:['im.message.receive_v1']}},callbacks:{items:['card.action.trigger']}};
@@ -31,7 +32,7 @@ const secretOf=result=>{
 
 // A new app, never an existing one. Resolves to {appId, appSecret, owner, domain} once the app is created.
 export async function createApp({register=registerApp,onLink,signal,name='工作管家'}){
- const result=await run({register,onLink,signal,createOnly:true,appPreset:{name,desc:'整理和你有关的飞书消息，定时汇总，在私聊里听你吩咐'}});
+ const result=await run({register,onLink,signal,createOnly:true,appPreset:{name,desc:'整理和你有关的飞书消息，定时把待办汇总成卡片发给你'}});
  const appId=result?.client_id,appSecret=secretOf(result),owner=result?.user_info?.open_id,brand=result?.user_info?.tenant_brand;
  if(typeof appId!=='string'||!APP_ID.test(appId))throw Error('飞书返回的 App ID 不对');
  if(typeof owner!=='string'||!/^ou_[a-zA-Z0-9]+$/.test(owner))throw Error('飞书没有返回创建者的 open_id，不知道机器人该听谁的');

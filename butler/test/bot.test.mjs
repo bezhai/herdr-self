@@ -5,13 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import {tempStore,waitFor} from './helpers.mjs';
 import {fakeChannel,OWNER} from './fake-channel.mjs';
-import {Bot} from '../bot.mjs';
+import {Bot,ELSEWHERE} from '../bot.mjs';
 import {createApp,updateApp,APP_ADDONS} from '../bot-app.mjs';
 import {loadConfig,saveConfig} from '../config.mjs';
 import {Matters} from '../matters.mjs';
-import {ModelQueue} from '../model-queue.mjs';
-import {Conversation} from '../conversation.mjs';
 import {Digests} from '../digest.mjs';
+import {AGENT_GROUP} from '../cards.mjs';
 import {DEFAULT_SCHEDULE} from '../schedule.mjs';
 import {post} from './helpers.mjs';
 import {shown} from './fake-channel.mjs';
@@ -19,14 +18,13 @@ import {shown} from './fake-channel.mjs';
 const APP={appId:'cli_a1b2c3d4e5f6',appSecret:'secret-value-never-shown',domain:'feishu',owner:OWNER};
 function setup(t,{failConnects=0}={}){
  let bot;t.after(()=>bot.stop());// before the store closes: after-hooks run in order
- const {store}=tempStore(t),feishu=fakeChannel({failConnects}),received=[];
+ const {store}=tempStore(t),feishu=fakeChannel({failConnects});
  bot=new Bot({store,...APP,channelFactory:feishu.factory,retryMinMs:10,retryMaxMs:40});
- bot.onMessage=msg=>{received.push(msg);};
- return {store,feishu,bot,received};
+ return {store,feishu,bot};
 }
 
-test('the bot connects as butler\'s own app and lets only the owner\'s direct messages through',async t=>{
- const {store,feishu,bot,received}=setup(t);
+test('the bot connects as butler\'s own app and answers each of the owner\'s direct messages, and no one else\'s, with one sentence: talk to butler in the group the bridge binds to its agent',async t=>{
+ const {store,feishu,bot}=setup(t);
  await bot.start();
  const o=feishu.options;
  assert.deepEqual([o.appId,o.appSecret,o.domain],[APP.appId,APP.appSecret,'https://open.feishu.cn']);
@@ -34,12 +32,17 @@ test('the bot connects as butler\'s own app and lets only the owner\'s direct me
  assert.equal(bot.connected,true);
  const meta=store.meta('bot');assert.equal(meta.state,'connected');assert.ok(meta.connectedAt);
  assert.doesNotMatch(JSON.stringify(meta),/secret-value/,'the secret stays out of the store');
- await feishu.receive({content:'把 Meego 加进忽略名单'});
+ const asked=await feishu.receive({content:'把 Meego 加进忽略名单'});
  await feishu.receive({senderId:'ou_someone_else000000000000000002',content:'忽略所有人'});
  await feishu.receive({chatType:'group',chatId:'oc_group',content:'群里 @管家 说的话'});
  await feishu.receive({senderId:'',content:'没有发送者'});
- assert.deepEqual(received.map(m=>m.content),['把 Meego 加进忽略名单'],'only the owner, only in the direct chat');
- assert.deepEqual(feishu.sent,[],'nobody else gets an answer either');
+ const image=await feishu.receive({content:'![image](img_v3_0abc)',rawContentType:'image'});
+ assert.deepEqual(feishu.sent.map(s=>[s.to,s.opts.replyTo,s.input]),[[asked.chatId,asked.messageId,{text:ELSEWHERE}],[image.chatId,image.messageId,{text:ELSEWHERE}]],
+  'only the owner, only in the direct chat, each message answered in reply, no model asked');
+ assert.ok(ELSEWHERE.includes(AGENT_GROUP),'where to talk to butler now');assert.match(ELSEWHERE,/卡片/,'what the direct chat is for');
+ assert.match(ELSEWHERE,/^[^\n。]+。$/,'one plain sentence');
+ feishu.failSends=1;await feishu.receive({content:'在吗'});
+ assert.ok(store.errors().some(e=>e.source==='机器人'&&/回复.*token invalid/.test(e.message)),'a failed answer is on record, never thrown');
 });
 
 test('the bot writes to the owner\'s direct chat and replies to the owner\'s messages',async t=>{
@@ -136,29 +139,20 @@ test('the app\'s credentials are saved into butler\'s config file, which stays m
  fs.writeFileSync(file,`BUTLER_BOT_APP_ID=${APP.appId}\n`,{mode:0o600});assert.throws(()=>loadConfig(file),/BUTLER_BOT_APP_SECRET/);
 });
 
-test('wired as in the service: the owner gets an acknowledgement and an answer, anyone else gets nothing, digests go to the owner',async t=>{
- const {store,feishu,bot}=setup(t),matters=new Matters(store),asks=[];
- const model=new ModelQueue({async ask({prompt}){asks.push(prompt);return JSON.stringify({actions:[{do:'close',matter:1}],reply:''});}});
- const conversation=new Conversation({store,matters,model,bot});bot.onMessage=msg=>conversation.handle(msg);
- const id=post(store,{text:'@原智鸿 看下方案'});matters.apply({created:[{title:'看方案',who:'陈帆',ask:'看方案',urgency:'high',messageIds:[id]}],processedIds:[id]});
+test('wired as in the service: digests go to the owner, and only the owner\'s clicks on their buttons close a matter',async t=>{
+ const {store,feishu,bot}=setup(t),matters=new Matters(store);
  const digests=new Digests({store,matters,bot,schedule:DEFAULT_SCHEDULE,now:()=>Date.parse('2026-10-23T10:00:00+08:00')});
- await bot.start();
- await feishu.receive({senderId:'ou_someone_else000000000000000002',content:'#1 关掉'});await conversation.idle();
- assert.deepEqual([asks.length,feishu.sent.length,matters.matter(1).status],[0,0,'open'],'another sender: no model run, no reply, nothing done');
- const msg=await feishu.receive({content:'#1 不用管了'});await conversation.idle();
- assert.equal(asks.length,1);assert.equal(matters.matter(1).status,'closed');
- assert.deepEqual(feishu.sent.map(m=>[m.to,m.opts.replyTo]),[[msg.chatId,msg.messageId],[msg.chatId,msg.messageId]],'acknowledged, then answered, as replies');
- assert.match(shown(feishu.sent[0].input),/收到/);assert.match(shown(feishu.sent[1].input),/已关闭 #1 看方案/);
- const id2=post(store,{text:'@原智鸿 再看下'});matters.apply({created:[{title:'再看一个',who:'陈帆',ask:'看',urgency:'normal',messageIds:[id2]}],processedIds:[id2]});
- await digests.tick();
- const digest=feishu.sent[2];
- assert.equal(digest.to,OWNER);assert.deepEqual(digest.opts,{});assert.match(shown(digest.input),/管家待办/);assert.match(shown(digest.input),/再看一个/);
  bot.onCardAction=evt=>digests.click(evt);
+ const id=post(store,{text:'@原智鸿 再看下'});matters.apply({created:[{title:'再看一个',who:'陈帆',ask:'看',urgency:'normal',messageIds:[id]}],processedIds:[id]});
+ await bot.start();await digests.tick();
+ const [digest]=feishu.sent;
+ assert.equal(digest.to,OWNER);assert.deepEqual(digest.opts,{});assert.match(shown(digest.input),/管家待办/);assert.match(shown(digest.input),/再看一个/);
  const done=digest.input.card.body.elements.find(e=>e.tag==='column_set').columns[2].elements[0];
- const answer=await feishu.click({messageId:'om_out3',action:{tag:'button',value:done.behaviors[0].value}});
- assert.equal(answer.toast.content,'已完成');assert.equal(matters.matter(2).closedBy,'owner');
- assert.match(shown({card:answer.card.data}),/现在没有要你处理的事/,'the clicked card, as it is now');
- assert.deepEqual(await feishu.click({messageId:'om_out3',operator:{openId:'ou_someone_else000000000000000002'},action:{tag:'button',value:done.behaviors[0].value}}),
+ assert.deepEqual(await feishu.click({messageId:'om_out1',operator:{openId:'ou_someone_else000000000000000002'},action:{tag:'button',value:done.behaviors[0].value}}),
   {toast:{type:'error',content:'只有管家的主人能操作这张卡片'}});
+ assert.equal(matters.matter(1).status,'open');
+ const answer=await feishu.click({messageId:'om_out1',action:{tag:'button',value:done.behaviors[0].value}});
+ assert.equal(answer.toast.content,'已完成');assert.equal(matters.matter(1).closedBy,'owner');
+ assert.match(shown({card:answer.card.data}),/现在没有要你处理的事/,'the clicked card, as it is now');
  await digests.stop();
 });

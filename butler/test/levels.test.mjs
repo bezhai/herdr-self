@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {tempStore,post,waitFor} from './helpers.mjs';
 import {fakeChannel,shown,componentsOf,OWNER} from './fake-channel.mjs';
-import {MAX_COMPONENTS,CARD_BYTES} from '../cards.mjs';
+import {MAX_COMPONENTS,CARD_BYTES,AGENT_GROUP} from '../cards.mjs';
 import {DEFAULT_SCHEDULE} from '../schedule.mjs';
 import {Matters} from '../matters.mjs';
 import {Digests} from '../digest.mjs';
@@ -44,7 +44,7 @@ test('the level list: a collapsed panel per level, instant first, each chat a li
  assert.deepEqual(panels.map(p=>[p.header.title.content,p.expanded]),[['即时 2 个',false],['每日 1 个',false],['只存不看 1 个',false],['忽略 1 个',false],['还没有分级 1 个',false]]);
  assert.deepEqual(panels.map(p=>textOf(p.elements)),['GEO 小分队（你定的） — 我在跟这个项目\nBits（你定的）','开发进展群 — 项目讨论，和TA的工作有关',
   'AI 工具交流群 — **闲聊** [点这里](https://evil.example/x) <at id=all></at>','（名称未知的聊天） — 刷屏的通知','oc_new（按只存不看）']);
- assert.match(shown({card}),/在私聊里说「把 xx 改成每日」/,'how to change one');
+ assert.ok(shown({card}).includes(`想改哪个、问哪个为什么是这个级别，到 ${AGENT_GROUP}里说`),'where to change one');assert.doesNotMatch(shown({card}),/私聊/);
  plainOnly(cards);
 });
 
@@ -116,7 +116,7 @@ test('a week of many changes comes in cards of up to twelve rows, at most 36 in 
  assert.deepEqual(cards.map(c=>rowsOf(c).length),[12,12,12]);
  for(const c of cards){assert.ok(size(c)<=CARD_BYTES,`${size(c)} bytes`);assert.ok(count(c)<=MAX_COMPONENTS,`${count(c)} components`);}
  for(const c of cards)assert.deepEqual(rowsOf(c).map(r=>r.value.ids),rowsOf(c).map(()=>rowsOf(c).map(r=>r.value.chat)),'each card\'s buttons name its own chats');
- assert.match(shown({card:cards[0]}),/第一次分了 50 个/);assert.match(shown({card:cards[0]}),/只列出了 36 个，其余的在私聊里说「列出分级」可以看到/);
+ assert.match(shown({card:cards[0]}),/第一次分了 50 个/);assert.ok(shown({card:cards[0]}).includes(`只列出了 36 个，其余的到 ${AGENT_GROUP}里问管家。`));
 });
 
 // A bot that records what it sends to the owner, and can be made to fail or to go offline.
@@ -169,7 +169,8 @@ test('what the model newly inferred about me goes to me with how to correct it; 
  await cards.inferred({text:'【工作】……',added:['负责 GEO 洞察的后端','对 AI 编程工具感兴趣 https://evil.example/x'],at:at(23,'09:00')});
  assert.equal(bot.sent.length,1);
  const text=shown(bot.sent[0]);
- assert.match(text,/负责 GEO 洞察的后端/);assert.match(text,/对 AI 编程工具感兴趣 https:\/\/evil\.example\/x/,'as text');assert.match(text,/在私聊里/);
+ assert.match(text,/负责 GEO 洞察的后端/);assert.match(text,/对 AI 编程工具感兴趣 https:\/\/evil\.example\/x/,'as text');
+ assert.ok(text.includes(`不对的话，到 ${AGENT_GROUP}里告诉管家`),'where to correct it');assert.doesNotMatch(text,/私聊/);
  plainOnly([bot.sent[0].card]);
  bot.fail=1;await cards.inferred({text:'x',added:['新的推断'],at:at(23,'10:00')});
  assert.ok(store.errors().some(e=>e.source==='分级'&&/关于TA/.test(e.message)&&/token invalid/.test(e.message)),'a failed send is on record, never thrown');

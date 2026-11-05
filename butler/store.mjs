@@ -60,15 +60,16 @@ export class Store{
   this.file=file;this.linkBase=linkBase;this.log=log;this.db=new DatabaseSync(file);
   this.db.exec('PRAGMA journal_mode=WAL;PRAGMA busy_timeout=5000;PRAGMA foreign_keys=ON;');this.db.exec(SCHEMA);this.#upgrade();
  }
- // A store created by an earlier version: chats.gap_retries became read_retries, later columns are added, and my
- // messages recorded before the own category have it too.
+ // A store created by an earlier version: chats.gap_retries became read_retries, later columns are added, my
+ // messages recorded before the own category have it too, and the table of the conversation butler once held in my
+ // direct chat goes: talking to butler moved to an agent that works the command line (see cli.mjs).
  #upgrade(){
   const columns=table=>new Set(this.#all(`PRAGMA table_info(${table})`).map(c=>c.name));
   if(columns('chats').has('gap_retries'))this.db.exec('ALTER TABLE chats RENAME COLUMN gap_retries TO read_retries');
   for(const [table,column,definition] of ADDED_COLUMNS)if(!columns(table).has(column))this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   const ownless=`FROM messages m WHERE m.is_mine=1 AND NOT EXISTS(SELECT 1 FROM message_categories c WHERE c.message_id=m.id AND c.category='own')`;
   if(this.#get(`SELECT 1 ${ownless} LIMIT 1`))this.#run(`INSERT INTO message_categories(message_id,category,created_at) SELECT m.id,'own',m.created_at ${ownless}`);
-  this.db.exec('DROP INDEX IF EXISTS messages_feed');
+  this.db.exec('DROP INDEX IF EXISTS messages_feed;DROP TABLE IF EXISTS conversation;');
   if(this.#get("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watches'"))this.#tx(()=>this.#levelsFromWatches());
  }
  // A store from before chat levels: a watched group is one I set to instant from when it was watched, its messages'
