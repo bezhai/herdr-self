@@ -29,7 +29,7 @@ const chat=(store,feedId,name,chatMode='group')=>{store.upsertChatInfo({feedId,n
 function setup(t){
  const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(),queue=new ModelQueue(model);
  const bot={replies:[],async reply(msg,input){bot.replies.push({to:msg.messageId,input});return {messageId:`om_r${bot.replies.length}`};}};
- const conversation=new Conversation({store,matters,model:queue,bot,now:()=>T});
+ const changes=[],conversation=new Conversation({store,matters,model:queue,bot,now:()=>T,onMattersChanged:()=>changes.push(T)});
  // The people, bots and groups butler knows of, and three matters.
  const seen=[post(store,{mine:true,text:'我发的',at:T-7200e3})];
  for(const [sender,name,type] of [['meego','Meego 项目管理','bot'],['chiwei','赤尾','bot'],['tool','赤尾工具人','bot'],['u1','陈帆','user']])seen.push(post(store,{sender,name,type,text:`${name} 的消息`,at:T-3600e3}));
@@ -38,19 +38,20 @@ function setup(t){
  const made=(title,urgency='normal')=>{const id=post(store,{text:title,at:T-1800e3});return matters.apply({created:[{title,who:'陈帆',ask:`处理${title}`,due:null,urgency,messageIds:[id]}],processedIds:[id],now:T-1700e3})[0];};
  const ids=[made('查看 Meego 状态变更通知','low'),made('给黄凯熙加权限','high'),made('评审接口方案')];
  let n=0;
- // The owner says text; answer is what the model makes of it. Returns the acknowledgement and the reply, as text.
+ // The owner says text; answer is what the model makes of it. Returns the acknowledgement and the reply, as text, and
+ // the reply's cards.
  const say=async(text,answer)=>{
   if(answer!==undefined)model.script.push(answer);
   const msg={messageId:`om_in${++n}`,chatId:'oc_dm',chatType:'p2p',senderId:OWNER,content:text,createTime:T};
   await conversation.handle(msg);await conversation.idle();
-  const mine=bot.replies.filter(r=>r.to===msg.messageId).map(r=>shown(r.input));
-  return {ack:mine[0],reply:mine.slice(1).join('\n'),data:model.calls.at(-1)?.data,msg};
+  const replies=bot.replies.filter(r=>r.to===msg.messageId),mine=replies.map(r=>shown(r.input));
+  return {ack:mine[0],reply:mine.slice(1).join('\n'),cards:replies.slice(1).map(r=>r.input.card),data:model.calls.at(-1)?.data,msg};
  };
- return {store,matters,model,queue,bot,conversation,say,ids,geo,alarm,topic};
+ return {store,matters,model,queue,bot,conversation,say,ids,geo,alarm,topic,changes};
 }
 
 test('the owner talks freely: the model picks the actions, butler carries them out and says what it did',async t=>{
- const {store,matters,model,say,ids:[meego,perm,review],geo,topic}=setup(t);
+ const {store,matters,model,say,ids:[meego,perm,review],geo,topic,changes}=setup(t);
  let r=await say('把 Meego 项目管理加进忽略名单',{actions:[{do:'ignore',sender:'Meego 项目管理'}],reply:''});
  assert.match(r.ack,/收到/);
  const d=r.data;
@@ -79,20 +80,24 @@ test('the owner talks freely: the model picks the actions, butler carries them o
  r=await say(`#${meego} 不用管了`,{actions:[{do:'close',matter:meego,reason:'只是通知'}],reply:''});
  assert.equal(matters.matter(meego).status,'closed');assert.equal(matters.matter(meego).closedBy,'owner');assert.match(matters.matter(meego).reason,/只是通知/);
  assert.match(r.reply,new RegExp(`已关闭 #${meego} 查看 Meego 状态变更通知`));
+ assert.equal(changes.length,1,'whoever shows the matters is told');
  r=await say(`#${meego} 还是打开吧`,{actions:[{do:'reopen',matter:meego}],reply:''});
  assert.ok(r.data.closedMatters.some(m=>m.matter===meego),'the model sees what it could reopen');
  assert.equal(matters.matter(meego).status,'open');assert.equal(matters.matter(meego).reason,null);assert.match(r.reply,new RegExp(`已重新打开 #${meego}`));
+ assert.equal(changes.length,2);
 
  r=await say('现在有哪些事',{actions:[{do:'list'}],reply:'最急的是给黄凯熙加权限。'});
  assert.match(r.reply,/最急的是给黄凯熙加权限。/);
- for(const id of [meego,perm,review])assert.match(r.reply,new RegExp(`#${id} \\[`));
- assert.ok(r.reply.indexOf(`#${perm} [紧急]`)<r.reply.indexOf(`#${meego} [不急]`),'most urgent first');
- assert.ok(r.reply.includes(matters.matter(perm).link),'with butler\'s links');
+ assert.equal(r.cards.flatMap(c=>c.body.elements).filter(e=>e.tag==='column_set').length,3,'every open matter in the block a digest shows it in');
+ for(const id of [meego,perm,review])assert.match(r.reply,new RegExp(`#${id} · 陈帆 · `));
+ assert.ok(r.reply.indexOf(`#${perm} · `)<r.reply.indexOf(`#${meego} · `),'most urgent first');
+ assert.ok(r.cards.some(c=>JSON.stringify(c).includes(JSON.stringify(`[打开](${matters.matter(perm).link})`))),'with butler\'s links');
 
  const before=JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.watches()]);
  r=await say('今天最急的是什么？',{actions:[],reply:'最急的是给黄凯熙加权限，今天要处理。'});
  assert.equal(r.reply,'最急的是给黄凯熙加权限，今天要处理。','just an answer');
  assert.equal(JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.watches()]),before,'and nothing changed');
+ assert.equal(changes.length,2,'listing and answering change no matter');
 });
 
 test('a name that fits more than one sender or group lists the candidates and does nothing',async t=>{
@@ -111,12 +116,13 @@ test('a name that fits more than one sender or group lists the candidates and do
 });
 
 test('what the model asks for outside the fixed actions is not carried out',async t=>{
- const {store,matters,say,ids:[meego,perm,review]}=setup(t);
+ const {store,matters,say,ids:[meego,perm,review],changes}=setup(t);
  const before=JSON.stringify([matters.ignoredSenders(),store.watches()]);
  const r=await say('帮我处理一下',{actions:[{do:'delete',matter:meego},{do:'send',to:'陈帆',text:'好的'},{do:'close'},{do:'ignore'},'close 1',{do:'close',matter:99},
   {do:'close',matter:`#${perm}`},{do:'reopen',matter:review}],reply:'已经处理好了，详情见 https://evil.example/a'});
  assert.equal(matters.matter(meego).status,'open','an unknown action does nothing');
  assert.equal(matters.matter(perm).status,'closed','a matter given as "#n" is fine');
+ assert.equal(changes.length,1,'told of the one matter closed, not of the reopen that did nothing');
  assert.equal(JSON.stringify([matters.ignoredSenders(),store.watches()]),before);
  assert.match(r.reply,/delete/);assert.match(r.reply,/send/);assert.match(r.reply,/没有执行/);
  assert.match(r.reply,/没有 #99/);assert.match(r.reply,new RegExp(`#${review} 没有结束`));

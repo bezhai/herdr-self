@@ -244,7 +244,9 @@ async function processCommand(config,once){
  const machine=requireModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
  const model=new ModelQueue(new HerdrModel({machine,cwd:config.modelCwd,name:config.modelName,command:[config.herdr],log:m=>console.error(m)}));
  const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
- const processor=new Processor({store,matters,model,options,log:m=>console.log(m)});
+ // The latest digest follows the matters: whatever a batch, a review or the conversation changes refreshes it.
+ let bot,digests,conversation;
+ const processor=new Processor({store,matters,model,options,log:m=>console.log(m),onMattersChanged:()=>digests?.refresh()});
  if(once){
   try{
    await processor.start({periodic:false});const r=await processor.runOnce();await processor.stop();
@@ -254,11 +256,11 @@ async function processCommand(config,once){
    return r.failures||p?.error||v?.error?1:0;
   }finally{store.close();}
  }
- let bot,digests,conversation;
  if(config.bot){
   const {Bot}=await feishu();
   bot=new Bot({store,...config.bot,log:m=>console.log(m)});
-  conversation=new Conversation({store,matters,model,bot});digests=new Digests({store,matters,bot,schedule:config.schedule});
+  digests=new Digests({store,matters,bot,schedule:config.schedule});
+  conversation=new Conversation({store,matters,model,bot,onMattersChanged:()=>digests.refresh()});
   bot.onMessage=msg=>conversation.handle(msg);
  }
  // The model run under way (a batch or a turn) is waited for, bounded; a turn cut off here goes unanswered.

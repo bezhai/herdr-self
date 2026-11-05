@@ -50,6 +50,11 @@ test('the bot writes to the owner\'s direct chat and replies to the owner\'s mes
  const msg=feishu.message({content:'在吗'});
  await bot.reply(msg,{text:'收到'});
  assert.deepEqual(feishu.sent[1],{to:msg.chatId,input:{text:'收到'},opts:{replyTo:msg.messageId}});
+ const card={schema:'2.0',config:{update_multi:true},body:{elements:[]}};
+ await bot.updateCard('om_out1',card);
+ assert.deepEqual(feishu.updated,[{messageId:'om_out1',card}],'a card it sent is updated in place');
+ await bot.stop();
+ assert.throws(()=>bot.updateCard('om_out1',card),/没有连上飞书/);
 });
 
 test('a failed connection is retried and shown in the store; reconnects are tracked; stop disconnects',async t=>{
@@ -115,5 +120,5 @@ test('wired as in the service: the owner gets an acknowledgement and an answer, 
  const id2=post(store,{text:'@原智鸿 再看下'});matters.apply({created:[{title:'再看一个',who:'陈帆',ask:'看',urgency:'normal',messageIds:[id2]}],processedIds:[id2]});
  await digests.tick();
  const digest=feishu.sent[2];
- assert.equal(digest.to,OWNER);assert.deepEqual(digest.opts,{});assert.match(shown(digest.input),/管家汇总/);assert.match(shown(digest.input),/再看一个/);
+ assert.equal(digest.to,OWNER);assert.deepEqual(digest.opts,{});assert.match(shown(digest.input),/管家待办/);assert.match(shown(digest.input),/再看一个/);
 });

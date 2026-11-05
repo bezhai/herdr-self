@@ -1,11 +1,11 @@
 // A stand-in for @larksuite/channel's LarkChannel, as the bot uses it: createLarkChannel(options) returns it, the bot
-// registers its handlers with on(), connects, sends and disconnects. The test makes Feishu deliver messages (receive)
-// and connection events (emit), and makes connecting fail.
+// registers its handlers with on(), connects, sends, updates the cards it sent and disconnects. The test makes Feishu
+// deliver messages (receive) and connection events (emit), and makes connecting fail.
 export const OWNER='ou_owner0000000000000000000000001';
 let seq=0;
 
 export function fakeChannel({failConnects=0}={}){
- const f={options:undefined,handlers:{},sent:[],connects:0,disconnects:0,failConnects,state:'idle'};
+ const f={options:undefined,handlers:{},sent:[],updated:[],connects:0,disconnects:0,failConnects,state:'idle'};
  const channel={
   on(name,handler){f.handlers[name]=handler;return ()=>{if(f.handlers[name]===handler)delete f.handlers[name];};},
   async connect(){f.connects+=1;if(f.connects<=f.failConnects){f.state='error';throw Error('WebSocket connect failed: getaddrinfo ENOTFOUND open.feishu.cn');}f.state='open';},
@@ -13,6 +13,7 @@ export function fakeChannel({failConnects=0}={}){
   rawWsClient:{close(){f.state='closed';}},
   getConnectionStatus(){return {state:f.state};},
   async send(to,input,opts={}){f.sent.push({to,input,opts});return {messageId:`om_out${f.sent.length}`};},
+  async updateCard(messageId,card){f.updated.push({messageId,card});},
  };
  // A message as the SDK normalizes it: by default a direct message from the owner.
  f.message=(o={})=>({messageId:`om_in${++seq}`,chatId:'oc_dm_owner',chatType:'p2p',senderId:OWNER,content:'在吗',rawContentType:'text',resources:[],mentions:[],
@@ -22,10 +23,15 @@ export function fakeChannel({failConnects=0}={}){
  f.factory=options=>{f.options=options;return channel;};
  return f;
 }
-// The text a sent message shows: a text message's text, or the text of every element of a card.
+// Every component of a card, nested ones and text objects too (whatever has a tag), in the order the JSON lists them.
+export function* componentsOf(x){
+ if(Array.isArray(x)){for(const y of x)yield* componentsOf(y);return;}
+ if(!x||typeof x!=='object')return;
+ if(typeof x.tag==='string')yield x;
+ for(const v of Object.values(x))yield* componentsOf(v);
+}
+// The text a sent message shows: a text message's text, or every text of a card, its header and buttons included.
 export function shown(input){
  if(input.text!==undefined)return input.text;
- const parts=input.card.header?[input.card.header.title.content]:[];
- for(const e of input.card.body.elements)parts.push(e.tag==='div'?e.text.content:e.tag==='markdown'?e.content:'');
- return parts.join('\n');
+ return [...componentsOf(input.card)].filter(c=>c.tag==='plain_text'||c.tag==='markdown').map(c=>c.content).join('\n');
 }

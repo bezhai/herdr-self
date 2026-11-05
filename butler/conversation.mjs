@@ -9,7 +9,7 @@
 import {clean,parse,prose} from './prompt.mjs';
 import {find} from './lookup.mjs';
 import {cards,plain,heading} from './cards.mjs';
-import {endReason,matterElements} from './digest.mjs';
+import {endReason,matterBlock,ordered} from './digest.mjs';
 
 // One row per message of mine: what I said, butler's reply, and the model's raw answer for looking into it later.
 const SCHEMA=`
@@ -88,9 +88,10 @@ function pick(items,query,{key,noun,line},missing=''){
 
 export class Conversation{
  #turns=new Set();
- // model: the shared ModelQueue; bot: {reply(msg, input)}; now: the clock; historyTurns: earlier turns the model sees.
- constructor({store,matters,model,bot,now=Date.now,historyTurns=6}){
-  Object.assign(this,{store,matters,model,bot,now,historyTurns});
+ // model: the shared ModelQueue; bot: {reply(msg, input)}; now: the clock; historyTurns: earlier turns the model sees;
+ // onMattersChanged: called when I have closed or reopened a matter; it neither throws nor rejects (Digests.refresh).
+ constructor({store,matters,model,bot,now=Date.now,historyTurns=6,onMattersChanged=()=>{}}){
+  Object.assign(this,{store,matters,model,bot,now,historyTurns,onMattersChanged});
   store.db.exec(SCHEMA);
  }
  // A message of mine (the bot lets no other through). Resolves once it is acknowledged; the turn runs after.
@@ -171,14 +172,14 @@ export class Conversation{
    case 'close':
     if(!m)return {lines:[`没有 #${a.matter} 这个事项`]};
     if(!this.matters.close(m.id,a.reason,now))return {lines:[`#${m.id} 已经结束了`]};
-    return {lines:[`已关闭 #${m.id} ${m.title}`]};
+    this.onMattersChanged();return {lines:[`已关闭 #${m.id} ${m.title}`]};
    case 'reopen':
     if(!m)return {lines:[`没有 #${a.matter} 这个事项`]};
     if(!this.matters.reopen(m.id,now))return {lines:[`#${m.id} 没有结束，不用重新打开`]};
-    return {lines:[`已重新打开 #${m.id} ${m.title}`]};
+    this.onMattersChanged();return {lines:[`已重新打开 #${m.id} ${m.title}`]};
    case 'list':{
-    const open=this.matters.list();
-    return open.length?{elements:[heading(`没结束的事项（${open.length}）`),...matterElements(open)]}:{lines:['现在没有没结束的事项']};
+    const open=ordered(this.matters.list());
+    return open.length?{elements:[heading(`没结束的事项（${open.length}）`),...open.map(x=>matterBlock(x))]}:{lines:['现在没有没结束的事项']};
    }
    case 'note':{
     if(this.matters.notes().some(n=>n.text===a.text))return {lines:[`这条说明已经记过了：${a.text}`]};

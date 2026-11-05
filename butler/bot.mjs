@@ -41,8 +41,10 @@ export class Bot{
   if(channel)await this.#dispose(channel).catch(()=>{});
   this.#set('stopped');
  }
- // A message to the owner's direct chat.
+ // A message to the owner's direct chat; resolves with {messageId}.
  toOwner(input){return this.#ready().send(this.owner,input);}
+ // A card the bot sent, replaced in place (Feishu: within 14 days of sending, for a card that says update_multi).
+ updateCard(messageId,card){return this.#ready().updateCard(messageId,card);}
  // A reply to a message of the owner's.
  reply(msg,input){return this.#ready().send(msg.chatId,input,{replyTo:msg.messageId});}
 
