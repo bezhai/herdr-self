@@ -34,9 +34,10 @@ export function tempStore(t){
 }
 let seq=0;
 const CHATS={g1:['项目群','group'],g2:['大群','group'],d1:['张三','direct'],bot:['Zebra2.0自动化投放平台','direct']};
-// o: id (to record a message again), chat (a key of CHATS), sender id, name, type, mine, text, at (ms), categories (by
-// default a person's direct message, or a message of an instant chat), threadRole, rootId, parentId, parts, reactions
-// (as open-lark lists them; one of mine is an owner reaction, as the collector records it).
+// o: id (to record a message again), chat (a key of CHATS), sender id, name, type, mine, text, at (ms), seen (ms, when
+// butler first saw it; by default now), categories (by default a person's direct message, or a message of an instant
+// chat), threadRole, rootId, parentId, parts, reactions (as open-lark lists them; one of mine is an owner reaction, as
+// the collector records it).
 export function post(store,o){
  const id=o.id??String(7200000000000000000n+BigInt(++seq)),chat=o.chat??'g1',[chatName,chatKind]=CHATS[chat]??[chat,'group'];
  store.upsertChatInfo({feedId:chat,name:chatName,chatMode:chatKind});
@@ -44,6 +45,6 @@ export function post(store,o){
  store.upsertMessage({id,feedId:chat,chatKind,senderId:mine?'me':o.sender??'u1',senderName:mine?'原智鸿':o.name??'陈帆',senderType:o.type??'user',
   createdAt:o.at??Date.now(),position:String(seq),threadRole:o.threadRole??'none',rootId:o.rootId??null,parentId:o.parentId??null,replyToSenderId:null,
   text:o.text??'hi',parts:JSON.stringify(o.parts??[]),unreadable:false,isMine:mine,mentionsAll:false,isRecalled:false,isEdited:false,isEphemeral:false,
-  reactions:o.reactions?JSON.stringify(o.reactions):null},o.categories??(chatKind==='direct'&&(o.type??'user')==='user'?['dm']:['instant']));
+  reactions:o.reactions?JSON.stringify(o.reactions):null},o.categories??(chatKind==='direct'&&(o.type??'user')==='user'?['dm']:['instant']),o.seen??Date.now());
  return id;
 }

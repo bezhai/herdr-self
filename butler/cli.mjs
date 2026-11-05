@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-// butler's command line: runs the collector and the processor (with the bot), shows their status, what they collected,
-// the matters made of it and 关于TA, sets chat levels, keeps the ignored-sender list, and creates and updates the bot's
-// Feishu app.
+// butler's command line: runs the collector and the processor (with the bot and the grading), shows their status, what
+// they collected, the matters made of it and 关于TA, sets chat levels and has the model grade chats, keeps the
+// ignored-sender list, and creates and updates the bot's Feishu app.
 import {parseArgs} from 'node:util';
 import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
@@ -10,6 +10,7 @@ import {Matters} from './matters.mjs';
 import {Processor,DEFAULTS as PROCESSOR} from './processor.mjs';
 import {HerdrModel} from './herdr-model.mjs';
 import {ModelQueue} from './model-queue.mjs';
+import {Grader} from './grader.mjs';
 import {find} from './lookup.mjs';
 import {Conversation} from './conversation.mjs';
 import {Digests,digestStatus,endReason} from './digest.mjs';
@@ -36,10 +37,12 @@ const HELP=`用法：butler [--config 配置文件] <命令>
                                    daily 每日（存下，每日整理还没有做）、store 只存不看、ignore 忽略（不存）；
                                    和我有关的消息不看级别，照旧收、照旧交给模型
   level clear <聊天名或 id>...      取消我定的级别，回到模型的判断，还没有判断时私聊按即时、群按只存不看
+  level grade [<聊天名或 id>...]    让模型现在给这些聊天分级；不写聊天时是最近 7 天有消息、级别不是我定的全部聊天。
+                                   加工端也会自己分级：新的活跃聊天、每周一次、说明变了以后，以及即时的聊天消息突然变多时
   process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每天根据我发的消息
-                                   写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍；配置了机器人时也
-                                   运行机器人：定时汇总、私聊对话；--once 只运行一轮（处理完积压，到了时间也写
-                                   「关于TA」、整理事项）就退出，不运行机器人
+                                   写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍，在另一条模型通道上
+                                   给活跃的聊天分级；配置了机器人时也运行机器人：定时汇总、私聊对话；--once 只运行
+                                   一轮（处理完积压，到了时间也写「关于TA」、整理事项）就退出，不运行机器人，不分级
   matters [--all] [--json]         未结束的事项，紧急的在前；--all 连同已结束的
   profile [--json]                 「关于TA」（管家归纳的我的工作：哪些事归我）和我在私聊里让管家记下的说明
   ignore list                      忽略名单：这些发送方的消息不交给模型
@@ -90,6 +93,12 @@ function printStatus(s){
  lines.push(!b.configured?'机器人：没有配置（butler bot create 创建它的飞书应用）':!processing?'机器人：未运行（加工端未运行）'
   :b.state==='connected'?`机器人：已连接（连接于 ${time(b.connectedAt)}）`:b.state==='reconnecting'?`机器人：正在重连（上次连接于 ${time(b.connectedAt)}）`
   :b.state==='error'?`机器人：连接失败，正在重试（${b.error}）`:b.state==='connecting'?'机器人：正在连接':`机器人：${b.state??'未知'}`);
+ const g=s.grading;
+ lines.push(`分级：${g.at?`上次 ${time(g.at)}（${g.chats} 个聊天，分了 ${g.graded} 个${g.error?`，没有分完：${g.error}`:''}）`:'还没有分过'}；${
+  g.due?`现在有 ${g.due} 个聊天等着分级${g.next>Date.now()?`，${time(g.next)} 之后再分`:''}`
+  :g.sampledAt===undefined?`还没有只存不看的消息，收下全部消息满 ${g.sampleDays} 天以后开始分级`
+  :g.sampledAt>Date.now()?`收下全部消息满 ${g.sampleDays} 天（${time(g.sampledAt)}）以后开始分级`
+  :g.next?`下一次在 ${time(g.next)} 之后`:'没有要分级的活跃聊天'}；模型定了级别的聊天 ${g.byModel} 个`);
  const d=s.digest;
  lines.push(`汇总：${d.at?`上次 ${time(d.at)}，共发出 ${d.sent} 份`:'还没有发过'}${d.failedAt?`；${time(d.failedAt)} 发送失败`:''}；下一份：${d.next
   ?`${time(d.next)}（新事项 ${d.fresh} 个，结束 ${d.ended} 个）`:'暂无（上次以来没有新的或结束的事项）'}`);
@@ -140,6 +149,9 @@ function pick(items,query,{key,noun,missing,line}=GROUPS){
  throw new UsageError(`“${query}”对应多个${noun}，请用完整名称或 id：\n${found.map(line).join('\n')}`);
 }
 
+// The model as herdr reaches it on the model machine (see herdr-model.mjs).
+const herdrModel=config=>new HerdrModel({machine:requireModel(config),cwd:config.modelCwd,name:config.modelName,effort:config.modelEffort,command:[config.herdr],log:m=>console.error(m)});
+
 const URGENCY={high:'紧急',normal:'一般',low:'不急'};
 function printMatters(list,all){
  if(!list.length){console.log(all?'还没有事项':'没有未结束的事项');return;}
@@ -177,6 +189,7 @@ async function main(argv){
     const s={...store.status(),processing:{...store.meta('processor'),pending:matters.pendingCount(),skipped:matters.skippedCount(),openMatters:matters.list().length},
      review:{...store.meta('review'),everyMs:config.reviewEveryMs??PROCESSOR.reviewEveryMs},profile:{...store.meta('profile'),everyMs:config.profileEveryMs??PROCESSOR.profileEveryMs},
      bot:{configured:Boolean(config.bot),...store.meta('bot')},digest:digestStatus({store,matters,schedule:config.schedule})};
+    const grader=new Grader({store,matters});s.grading={...grader.status(),sampleDays:grader.options.sampleMs/86400e3};
     if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;
    }
    case 'matters':{const list=matters.list({all:values.all});if(values.json)console.log(JSON.stringify(list,null,1));else printMatters(list,values.all);return 0;}
@@ -246,6 +259,19 @@ async function main(argv){
      }
      return 0;
     }
+    // The model grades now, here, through herdr, as the processor's grading does in the background; a level I set is
+    // not the model's to judge.
+    if(action==='grade'){
+     const chats=args.map(q=>pick(store.chats(),q,CHATS));
+     for(const c of chats){const l=store.level(c.feedId);if(l?.by==='owner')throw new UsageError(`${c.name||c.feedId} 的级别是我定的（${LEVEL_NAMES[l.level]}），模型不改我定的级别；要让模型判断，先 butler level clear ${c.name||c.feedId}`);}
+     const r=await new Grader({store,matters,model:herdrModel(config)}).grade(args.length?chats.map(c=>c.feedId):undefined);
+     const named=id=>store.chat(id)?.name||id;
+     if(!r.chats){console.log('没有要分级的聊天：最近 7 天有消息、级别不是我定的聊天一个都没有');return 0;}
+     for(const {feedId,before,after} of r.graded){const mode=store.chat(feedId)?.chatMode;console.log(`${named(feedId)}：${levelName(before,mode)} → ${levelName(after,mode)}：${after.modelReason}`);}
+     if(r.left.length)console.log(`没有分级：${r.left.map(named).join('、')}（${r.error??'模型的回复里没有它们，或者给的级别、理由不能用，见 butler status 里的错误'}）`);
+     console.log(`分了 ${r.chats} 个聊天里的 ${r.graded.length} 个，模型运行 ${r.runs} 次`);
+     return r.left.length?1:0;
+    }
     throw new UsageError(`level 没有这个操作：${action}`);
    }
    default:throw new UsageError(`没有这个命令：${command}\n\n${HELP}`);
@@ -254,11 +280,12 @@ async function main(argv){
 }
 
 // The processor, as a service or (once) for one round: the backlog, and 关于TA and the review of the open matters when
-// they are due, as a round of the service would. As a service it also runs the bot, when one is configured: digests
-// and the conversation, whose turns share the model with the batches and reviews (see model-queue.mjs).
+// they are due, as a round of the service would. As a service it also grades the chats, on a model queue of its own
+// (two claudes may run at once, each in a herdr workspace of its own), and runs the bot, when one is configured:
+// digests and the conversation, whose turns share the model with the batches and reviews (see model-queue.mjs).
 async function processCommand(config,once){
- const machine=requireModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
- const model=new ModelQueue(new HerdrModel({machine,cwd:config.modelCwd,name:config.modelName,effort:config.modelEffort,command:[config.herdr],log:m=>console.error(m)}));
+ const herdr=herdrModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
+ const model=new ModelQueue(herdr);
  const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
  // The latest digest follows the matters: whatever a batch, a review or the conversation changes refreshes it.
  let bot,digests,conversation;
@@ -279,14 +306,19 @@ async function processCommand(config,once){
   conversation=new Conversation({store,matters,model,bot,onMattersChanged:()=>digests.refresh()});
   bot.onMessage=msg=>conversation.handle(msg);bot.onCardAction=evt=>digests.click(evt);
  }
- // The model run under way (a batch or a turn) is waited for, bounded; a turn cut off here goes unanswered.
+ // Grading's runs queue apart from the batches, the reviews, 关于TA and the turns: a pass of many runs holds none of them up.
+ const background=new ModelQueue(herdr),grader=new Grader({store,matters,model:background,log:m=>console.log(m)});
+ // The model runs under way (a batch or a turn, and a grading) are waited for, bounded; a turn cut off here goes
+ // unanswered, and a grading cut off is done again.
  const stop=async()=>{
-  await Promise.race([Promise.all([processor.stop(),digests?.stop(),conversation?.idle()]),new Promise(r=>setTimeout(r,20_000))]);
+  await Promise.race([Promise.all([processor.stop(),grader.stop(),digests?.stop(),conversation?.idle()]),new Promise(r=>setTimeout(r,20_000))]);
   await Promise.race([bot?.stop(),new Promise(r=>setTimeout(r,5000))]);process.exit(0);
  };
  process.on('SIGTERM',stop);process.on('SIGINT',stop);
- console.log(`butler 加工端启动：模型在 herdr 机器 ${machine}，存储 ${store.file}`);
- await processor.start();
+ console.log(`butler 加工端启动：模型在 herdr 机器 ${herdr.machine}，存储 ${store.file}`);
+ // The processor's start closes the workspaces a crashed process left on the model machine, grading's too (they have
+ // one label); grading starts after it, so that none of its own is closed.
+ await processor.start();grader.start();
  if(bot){
   console.log(`管家机器人（${config.bot.appId}）正在连接飞书`);
   bot.start().catch(e=>store.addError('机器人',`机器人停了：${e?.message??e}`));digests.start();

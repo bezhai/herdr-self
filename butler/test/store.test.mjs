@@ -38,6 +38,60 @@ test('a chat\'s level is mine when I set one, else the model\'s; it begins when 
  assert.deepEqual(store.status().levels,{instant:1,daily:0,store:0,ignore:0,owner:1});
 });
 
+test('the model\'s level comes with when it last graded the chat, kept while I set and clear mine',t=>{
+ const {store}=tempStore(t);
+ store.setLevel('g1','daily',{by:'model',reason:'讨论和TA的项目有关',now:min(0)});assert.equal(store.level('g1').modelAt,min(0));
+ store.setLevel('g1','daily',{by:'model',reason:'还是和项目有关',now:min(5)});
+ assert.deepEqual([store.level('g1').since,store.level('g1').modelAt],[min(0),min(5)],'graded again to the same level: it began when it did, the grading is new');
+ store.setLevel('g1','instant',{by:'owner',now:min(6)});assert.equal(store.level('g1').modelAt,min(5));
+ store.clearLevel('g1',min(7));assert.deepEqual([store.level('g1').level,store.level('g1').by,store.level('g1').modelAt],['daily','model',min(5)]);
+ store.setLevel('d1','instant',{by:'owner',now:min(8)});assert.equal(store.level('d1').modelAt,undefined,'never graded');
+});
+
+test('a store from before grading times gains the column; its levels have none until the model grades them',t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const old=new DatabaseSync(file);
+ old.exec(`CREATE TABLE chat_levels(feed_id TEXT PRIMARY KEY, level TEXT NOT NULL, reason TEXT, set_by TEXT NOT NULL, since INTEGER NOT NULL, model_level TEXT, model_reason TEXT);
+  INSERT INTO chat_levels VALUES('g1','instant',NULL,'owner',${min(0)},NULL,NULL);`);old.close();
+ const store=new Store(file,{linkBase:LINK_BASE});t.after(()=>store.close());
+ assert.deepEqual([store.level('g1').level,store.level('g1').by,store.level('g1').modelAt],['instant','owner',undefined]);
+ store.setLevel('g1','store',{by:'model',reason:'多是转发',now:min(1)});
+ assert.deepEqual([store.level('g1').level,store.level('g1').modelLevel,store.level('g1').modelAt],['instant','store',min(1)]);
+});
+
+test('butler keeps every message since it first saw one it kept only because the chat is not ignored',t=>{
+ const {store}=tempStore(t);
+ post(store,{text:'@原智鸿 看下',at:min(-600),seen:min(-600),categories:['mention']});
+ assert.equal(store.keptSince(),undefined,'only what is about me so far');
+ post(store,{chat:'g2',text:'读回来的旧闲聊',at:min(-3000),seen:min(10),categories:['stored']});
+ post(store,{chat:'g2',text:'推送来的闲聊',at:min(5),seen:min(5),categories:['stored']});
+ assert.equal(store.keptSince(),min(5),'when butler saw it, not when it was sent: a chat read back by position reaches far earlier');
+});
+
+test('active chats: those with messages since a time, how many since another and how many of those bots sent, their first message, what butler knows of them and their level',t=>{
+ const {store}=tempStore(t);
+ post(store,{chat:'g1',text:'很早',at:min(-20000),categories:['stored']});post(store,{chat:'g1',text:'活跃窗口里、统计之前',at:min(-100),categories:['stored']});
+ post(store,{chat:'g1',text:'b',at:min(10),categories:['stored']});post(store,{chat:'g1',sender:'gitlab',name:'GitLab',type:'bot',text:'流水线失败',at:min(20),categories:['stored']});
+ post(store,{chat:'d1',text:'在吗',at:min(30)});
+ post(store,{chat:'g2',text:'不活跃',at:min(-20000),categories:['stored']});
+ post(store,{chat:'oc_push',text:'只从推送见过的群',at:min(15),categories:['stored']});store.db.prepare('DELETE FROM chats WHERE feed_id=?').run('oc_push');
+ store.upsertChatInfo({feedId:'g1',name:'项目群',chatMode:'group',memberCount:42,isMuted:true});
+ store.setLevel('g1','daily',{by:'model',reason:'项目讨论',now:min(40)});
+ assert.deepEqual(store.activity(min(-1000),min(0)).map(c=>[c.feedId,c.name,c.kind,c.members,c.muted,c.messages,c.bots,c.firstAt,c.level?.level]),[
+  ['g1','项目群','group',42,true,2,1,min(-20000),'daily'],['d1','张三','direct',undefined,false,1,0,min(30),undefined],['oc_push',undefined,'group',undefined,undefined,1,0,min(15),undefined]],
+  'the busiest first; a chat seen only through push has no name, member count or mute yet');
+ assert.deepEqual(store.activity(min(0)).map(c=>[c.feedId,c.messages]),[['g1',2],['d1',1],['oc_push',1]]);
+});
+
+test('what I did in each chat since a time: my messages, @ of me and my reactions',t=>{
+ const {store}=tempStore(t),mineOn=[{key:'Get',count:1,isMine:true,userNames:['原智鸿']}];
+ post(store,{chat:'g1',mine:true,text:'我说的',at:min(10),categories:['own']});post(store,{chat:'g1',mine:true,text:'太早',at:min(-10),categories:['own']});
+ post(store,{chat:'g1',text:'@原智鸿 看下',at:min(11),categories:['mention']});post(store,{chat:'g2',text:'@所有人 开会',at:min(12),categories:['stored']});
+ store.setReactions(post(store,{chat:'g2',text:'闲聊',at:min(13),categories:['stored']}),mineOn,min(14));
+ store.setReactions(post(store,{chat:'d1',text:'很久以前的',at:min(-100)}),mineOn,min(-50));
+ assert.deepEqual(Object.fromEntries(store.involvement(min(0))),{g1:{mine:1,mentions:1,reactions:0},g2:{mine:0,mentions:0,reactions:1}});
+});
+
 test('stored stands for no other category: it gives way to one that comes later and never joins one',t=>{
  const {store}=tempStore(t);
  const a=post(store,{text:'别人的讨论',categories:['stored']});assert.deepEqual(cats(store,a),['stored']);
@@ -98,7 +152,8 @@ test('the queries that run often go through indexes: none reads every message, a
  const calls={pending:()=>matters.pending(40,['x']),pendingCount:()=>matters.pendingCount(),pendingReactions:()=>matters.pendingReactions(40),
   ownerWaiting:()=>matters.ownerWaiting(),skipIgnored:()=>matters.skipIgnored(),before:()=>matters.before('g1',min(9),8),
   responses:()=>matters.responses(['g1'],min(0),min(9),5),visible:()=>matters.visible(ask),mine:()=>matters.mine(1000),me:()=>matters.me(),meId:()=>matters.meId(),
-  senders:()=>matters.senders(),level:()=>store.level('g1'),chatsMissingInfo:()=>store.chatsMissingInfo(20),open:()=>new Store(file,{linkBase:LINK_BASE}).close()};
+  senders:()=>matters.senders(),level:()=>store.level('g1'),chatsMissingInfo:()=>store.chatsMissingInfo(20),open:()=>new Store(file,{linkBase:LINK_BASE}).close(),
+  activity:()=>store.activity(min(0),min(1)),involvement:()=>store.involvement(min(0)),keptSince:()=>store.keptSince(),batchedByChat:()=>matters.batchedByChat(min(0))};
  for(const [name,call] of Object.entries(calls))for(const {sql,plan} of plans(store.db,call)){
   const full=plan.filter(l=>FULL.test(l));
   assert.deepEqual(full,[],`${name} scans:\n${sql}\n${plan.join('\n')}`);

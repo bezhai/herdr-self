@@ -1,6 +1,6 @@
 // butler's own store: one SQLite file. The collector writes it; the CLI and the processor (other processes) read it
 // and set chat levels, so it runs in WAL mode with a busy timeout and the collector reads a chat's level on every
-// message.
+// message. What grading is told of the chats (see grader.mjs) is read here too.
 import fs from 'node:fs';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS chats(
  feed_id TEXT PRIMARY KEY, name TEXT, chat_mode TEXT, member_count INTEGER, is_muted INTEGER, last_active_at INTEGER,
  cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, read_retries INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS chat_levels(
- feed_id TEXT PRIMARY KEY, level TEXT NOT NULL, reason TEXT, set_by TEXT NOT NULL, since INTEGER NOT NULL, model_level TEXT, model_reason TEXT);
+ feed_id TEXT PRIMARY KEY, level TEXT NOT NULL, reason TEXT, set_by TEXT NOT NULL, since INTEGER NOT NULL, model_level TEXT, model_reason TEXT, model_at INTEGER);
 CREATE TABLE IF NOT EXISTS threads(
  root_id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, reply_count INTEGER NOT NULL DEFAULT 0, announced_count INTEGER NOT NULL DEFAULT 0,
  root_position TEXT, participated_since INTEGER, stale INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, checked_at INTEGER);
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEG
 // Columns added after a store was first created, added to an older store when it is opened.
 const ADDED_COLUMNS=[['chats','read_retries','INTEGER NOT NULL DEFAULT 0'],['threads','announced_count','INTEGER NOT NULL DEFAULT 0'],
  ['threads','attempts','INTEGER NOT NULL DEFAULT 0'],['threads','last_error','TEXT'],['messages','is_ephemeral','INTEGER NOT NULL DEFAULT 0'],
- ['messages','reactions',"TEXT NOT NULL DEFAULT '[]'"]];
+ ['messages','reactions',"TEXT NOT NULL DEFAULT '[]'"],['chat_levels','model_at','INTEGER']];
 // The store keeps nearly every message of most chats (see rules.mjs), so what runs often reads through an index on a
 // small part of it: messages_by_chat for a chat's latest messages, messages_mine for mine, categories_batched for what
 // batches take (every category but stored); messages_by_chat replaces an index on the chat alone.
@@ -195,11 +195,12 @@ export class Store{
  }
 
  // ---- chat levels (see rules.mjs LEVELS): mine when I set one, else the model's. A level of mine stays until I clear
- // it; the model's last one is kept beside it (modelLevel, modelReason), so that clearing mine brings it back and what I
- // changed can be told from what the model said. since: when the chat got this level, kept while the level stays the
- // same (an instant chat's messages from then on are instant); reason: why, the model's words or mine, if any. A chat
- // with no row has no level yet and goes by rules.mjs ungradedLevel: a direct chat is instant, a group store.
- static #level=r=>r&&{feedId:r.feed_id,level:r.level,reason:r.reason,by:r.set_by,since:r.since,modelLevel:r.model_level,modelReason:r.model_reason};
+ // it; the model's last one is kept beside it (modelLevel, modelReason, and modelAt, when it graded the chat last), so
+ // that clearing mine brings it back and what I changed can be told from what the model said. since: when the chat got
+ // this level, kept while the level stays the same (an instant chat's messages from then on are instant); reason: why,
+ // the model's words or mine, if any. A chat with no row has no level yet and goes by rules.mjs ungradedLevel: a direct
+ // chat is instant, a group store.
+ static #level=r=>r&&{feedId:r.feed_id,level:r.level,reason:r.reason,by:r.set_by,since:r.since,modelLevel:r.model_level,modelReason:r.model_reason,modelAt:r.model_at??undefined};
  level(feedId){return Store.#level(this.#get('SELECT * FROM chat_levels WHERE feed_id=?',feedId));}
  instantSince(feedId){const l=this.level(feedId);return l?.level==='instant'?l.since:undefined;}
  // Chats with a level and what butler knows of them, by level, then the latest to get theirs first.
@@ -213,7 +214,7 @@ export class Store{
   if(!LEVELS.includes(level))throw Error(`没有这个级别：${level}（可选 ${LEVELS.join(' ')}）`);
   if(!SETTERS.includes(by))throw Error(`级别只能由 owner 或 model 定：${by}`);
   return this.#tx(()=>{
-   const before=this.level(feedId),model=by==='model'?{level,reason}:{level:before?.modelLevel??null,reason:before?.modelReason??null};
+   const before=this.level(feedId),model=by==='model'?{level,reason,at:now}:{level:before?.modelLevel??null,reason:before?.modelReason??null,at:before?.modelAt};
    this.#putLevel(feedId,by==='owner'||before?.by!=='owner'?{level,reason,by}:before,model,before,now);
    return {before,after:this.level(feedId)};
   });
@@ -224,14 +225,40 @@ export class Store{
    const before=this.level(feedId);
    if(before?.by!=='owner')return {before,after:before};
    if(before.modelLevel==null)this.#run('DELETE FROM chat_levels WHERE feed_id=?',feedId);
-   else{const model={level:before.modelLevel,reason:before.modelReason};this.#putLevel(feedId,{...model,by:'model'},model,before,now);}
+   else{const model={level:before.modelLevel,reason:before.modelReason,at:before.modelAt};this.#putLevel(feedId,{...model,by:'model'},model,before,now);}
    return {before,after:this.level(feedId)};
   });
  }
  #putLevel(feedId,{level,reason,by},model,before,now){
-  this.#run(`INSERT INTO chat_levels(feed_id,level,reason,set_by,since,model_level,model_reason) VALUES(?,?,?,?,?,?,?)
-   ON CONFLICT(feed_id) DO UPDATE SET level=excluded.level,reason=excluded.reason,set_by=excluded.set_by,since=excluded.since,model_level=excluded.model_level,model_reason=excluded.model_reason`,
-   feedId,level,reason??null,by,before?.level===level?before.since:now,model.level,model.reason??null);
+  this.#run(`INSERT INTO chat_levels(feed_id,level,reason,set_by,since,model_level,model_reason,model_at) VALUES(?,?,?,?,?,?,?,?)
+   ON CONFLICT(feed_id) DO UPDATE SET level=excluded.level,reason=excluded.reason,set_by=excluded.set_by,since=excluded.since,model_level=excluded.model_level,model_reason=excluded.model_reason,model_at=excluded.model_at`,
+   feedId,level,reason??null,by,before?.level===level?before.since:now,model.level,model.reason??null,model.at??null);
+ }
+
+ // ---- what grading is told of the chats (see grader.mjs)
+ // When butler began keeping every message of a chat that is not ignored: when it first saw a message it kept for no
+ // other reason (stored). Not when that message was sent: a chat read by position for the first time is read back to
+ // when collection began. Undefined until there is one. It reads the categories of every stored message, so grading
+ // asks only until the moment is long enough ago to stop mattering.
+ keptSince(){return this.#get("SELECT min(m.first_seen_at) t FROM message_categories c INDEXED BY categories_by_time JOIN messages m ON m.id=c.message_id WHERE c.category='stored'").t??undefined;}
+ // The chats with messages since since (ms), the busiest first, each with: how many of its messages are from from on
+ // (by default since) and how many of those a bot or an agent sent, when its first message in the store was, what
+ // butler knows of it (no name, member count or mute yet for a chat seen only through push) and its level, if any.
+ activity(since,from=since){
+  return this.#all(`SELECT a.*,(SELECT min(created_at) FROM messages f WHERE f.feed_id=a.feed_id) first_at,c.name,c.chat_mode,c.member_count,c.is_muted FROM
+   (SELECT feed_id,max(chat_kind) chat_kind,sum(created_at>=?) n,sum(created_at>=? AND sender_type IN ('bot','agent')) bots,max(created_at) last FROM messages INDEXED BY messages_created WHERE created_at>=? GROUP BY feed_id) a
+   LEFT JOIN chats c ON c.feed_id=a.feed_id ORDER BY a.n DESC,a.last DESC`,from,from,since)
+   .map(r=>({feedId:r.feed_id,name:r.name??undefined,kind:r.chat_mode??r.chat_kind,members:r.member_count??undefined,muted:r.is_muted==null?undefined:Boolean(r.is_muted),
+    messages:r.n,bots:r.bots,firstAt:r.first_at,level:this.level(r.feed_id)}));
+ }
+ // What I did in each chat since since (ms): my messages, @ of me (mention) and my reactions (when butler saw them).
+ // A Map by chat; chats where I did none of these are not in it. Read from my messages, the mentions and my reactions.
+ involvement(since){
+  const out=new Map(),add=(key,rows)=>{for(const r of rows){const x=out.get(r.feed_id)??{mine:0,mentions:0,reactions:0};x[key]=r.n;out.set(r.feed_id,x);}};
+  add('mine',this.#all('SELECT feed_id,count(*) n FROM messages INDEXED BY messages_mine WHERE is_mine=1 AND created_at>=? GROUP BY feed_id',since));
+  add('mentions',this.#all("SELECT m.feed_id,count(*) n FROM message_categories c INDEXED BY categories_by_time JOIN messages m ON m.id=c.message_id WHERE c.category='mention' AND c.created_at>=? GROUP BY m.feed_id",since));
+  add('reactions',this.#all('SELECT m.feed_id,count(*) n FROM owner_reactions o CROSS JOIN messages m ON m.id=o.message_id WHERE o.at>=? GROUP BY m.feed_id',since));
+  return out;
  }
 
  // ---- threads butler follows: replies to fetch when the root's reply count moves

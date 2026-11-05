@@ -96,6 +96,12 @@ export class Matters{
  // Messages that wait for the model, and reactions of mine that do (see REACTION_PENDING). Messages that are only
  // kept never wait.
  pendingCount(){return this.#get(`SELECT count(DISTINCT c.message_id) n FROM ${WAITING} AND ${NOT_IGNORED}`).n+this.#get(`SELECT count(*) n FROM ${REACTIONS} WHERE ${REACTION_PENDING}`).n;}
+ // How many messages batches take (processed or not) each chat has had since since (ms), ignored senders left out: how
+ // much of the batches a chat makes (see grader.mjs). A Map by chat.
+ batchedByChat(since){
+  return new Map(this.#all(`SELECT m.feed_id,count(DISTINCT c.message_id) n FROM message_categories c INDEXED BY categories_batched JOIN messages m ON m.id=c.message_id
+   WHERE c.category<>'stored' AND c.created_at>=? AND ${NOT_IGNORED} GROUP BY m.feed_id`,since).map(r=>[r.feed_id,r.n]));
+ }
  // My reactions that wait for the model, in the order butler saw them: {kind: 'reaction', messageId, key, at, chatId}.
  pendingReactions(limit){
   return this.#all(`SELECT o.message_id,o.key,o.at,m.feed_id FROM ${REACTIONS} WHERE ${REACTION_PENDING} ORDER BY o.at,o.message_id,o.key LIMIT ?`,limit)

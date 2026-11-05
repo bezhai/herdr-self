@@ -27,9 +27,9 @@ const message=e=>e?.message??String(e);
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
 // Whether what is done every everyMs is due: it has never been done (last has no at), or that long ago.
 const due=(last,everyMs,now)=>!(now-last?.at<everyMs);
-// What a profile or a review was made with, to tell when they are out of date: my notes by their numbers (see
-// matters.mjs), and for a review the profile by when it was written.
-const numbers=notes=>notes.map(n=>n.id),same=(a=[],b=[])=>a.length===b.length&&a.every((x,i)=>x===b[i]);
+// What a profile, a review or a grading was made with, to tell when they are out of date: my notes by their numbers
+// (see matters.mjs), and for a review the profile by when it was written.
+export const numbers=notes=>notes.map(n=>n.id),same=(a=[],b=[])=>a.length===b.length&&a.every((x,i)=>x===b[i]);
 // A batch holds messages (store records) and my reactions (see Matters.pendingReactions); a reaction is timed by when
 // butler saw it.
 const isReaction=x=>x.kind==='reaction',timeOf=x=>isReaction(x)?x.at:x.createdAt;

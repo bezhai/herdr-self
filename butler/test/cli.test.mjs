@@ -169,6 +169,36 @@ test('BUTLER_MODEL_EFFORT sets the effort claude is asked for, and only one clau
  assert.match(r.stderr,/BUTLER_MODEL_EFFORT/);assert.match(r.stderr,/low、medium、high、xhigh 或 max/);assert.match(r.stderr,/medium-high/);
 });
 
+test('level grade has the model grade the chats named, or every active chat whose level I did not set, through herdr; status shows grading',async t=>{
+ const {lark,store,dir}=await setup(t),hour=3600e3,now=Date.now();
+ // Butler has kept every message for three days; 项目群 is the busiest chat, 大群 the next.
+ for(let i=0;i<3;i++)post(store,{chat:'g1',sender:'u5',name:'王五',text:`项目讨论 ${i}`,at:now-3*24*hour+i*hour,seen:now-3*24*hour,categories:['stored']});
+ post(store,{chat:'g2',sender:'u5',name:'王五',text:'午饭吃什么',at:now-30*hour,categories:['stored']});
+ post(store,{chat:'g3',text:'值班交接',at:now-hour,categories:['instant']});store.setLevel('g3','instant',{by:'owner'});
+ let r=await cli(writeConfig(dir,lark),'status');assert.equal(r.code,0,r.stderr);
+ assert.match(r.stdout,/分级：还没有分过；现在有 2 个聊天等着分级；模型定了级别的聊天 0 个/);
+ r=await cli(writeConfig(dir,lark),'level','grade','项目群');assert.equal(r.code,1);assert.match(r.stderr,/BUTLER_MODEL_MACHINE/);
+ const grade=(chat,level,reason)=>({text:JSON.stringify({chats:[{chat,level,reason}]})});
+ const herdr=fakeHerdr(dir,{replies:[grade('c1','daily','项目讨论，和TA的工作有关'),{text:JSON.stringify({chats:[{chat:'c1',level:'store',reason:'项目讨论，TA只是旁观'},{chat:'c2',level:'ignore',reason:'闲聊'}]})},{text:'都挺重要的'}]});
+ const config=writeConfig(dir,lark,0o600,`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`);
+ r=await cli(config,'level','grade','项目群');assert.equal(r.code,0,r.stderr);
+ assert.match(r.stdout,/^项目群：未分级（按只存不看） → 每日：项目讨论，和TA的工作有关$/m);assert.match(r.stdout,/分了 1 个聊天里的 1 个，模型运行 1 次/);
+ assert.deepEqual([store.level('g1').level,store.level('g1').by],['daily','model']);
+ r=await cli(config,'level','grade','值班群');assert.equal(r.code,1);assert.match(r.stderr,/没有找到聊天/);
+ r=await cli(config,'level','grade','g3');assert.equal(r.code,1);assert.match(r.stderr,/g3 的级别是我定的（即时），模型不改/);assert.match(r.stderr,/level clear/);
+ r=await cli(config,'level','grade');assert.equal(r.code,0,r.stderr);
+ assert.match(r.stdout,/^项目群：每日 → 只存不看：项目讨论，TA只是旁观$/m);assert.match(r.stdout,/^大群：未分级（按只存不看） → 忽略：闲聊$/m);assert.doesNotMatch(r.stdout,/g3/);
+ r=await cli(config,'level','list');assert.match(r.stdout,/只存不看\s+项目群.*理由：项目讨论，TA只是旁观/);
+ r=await cli(config,'status');
+ assert.match(r.stdout,/分级：上次 \d{4}-\d\d-\d\d \d\d:\d\d:\d\d（2 个聊天，分了 2 个）；下一次在 \d{4}-\d\d-\d\d \d\d:\d\d:\d\d 之后；模型定了级别的聊天 2 个/);
+ assert.equal(JSON.parse((await cli(config,'status','--json')).stdout).grading.byModel,2);
+ post(store,{chat:'g4',sender:'u5',name:'王五',text:'新群',at:now-30*hour,categories:['stored']});
+ r=await cli(config,'level','grade','g4');assert.equal(r.code,1);assert.match(r.stdout,/没有分级：g4（模型的回复不是 JSON/);
+ r=await cli(config,'status');assert.match(r.stdout,/分级：上次 .*（1 个聊天，分了 0 个，没有分完：模型的回复不是 JSON/);assert.match(r.stdout,/现在有 1 个聊天等着分级，\d{4}-.* 之后再分/);
+ assert.deepEqual(new Matters(store).runs().map(x=>[x.kind,x.ok]),[['grade',true],['grade',true],['grade',false]]);
+ assert.deepEqual(lark.writes(),[]);
+});
+
 test('status shows the bot connection, the last digest and the next one when one is due',async t=>{
  const {lark,store,dir}=await setup(t);
  let r=await cli(writeConfig(dir,lark),'status');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/机器人：没有配置/);

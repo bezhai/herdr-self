@@ -1,6 +1,8 @@
-// One model run at a time for the whole process: the processor's batches and the owner's conversation turns share the
-// model machine. A turn goes ahead of the batches waiting, behind the turns already waiting; it never interrupts a run
-// under way, so it waits for one batch at most. The processor asks the queue as it would ask the model.
+// One model run at a time per queue. The processor's process has two: the batches, reviews, 关于TA and the owner's
+// conversation turns share one, and grading (see grader.mjs) has the other, so that a grading pass of many runs holds
+// none of them up; a run of each may go on at once, each a claude of its own on the model machine. On the first queue a
+// turn goes ahead of the batches waiting, behind the turns already waiting; it never interrupts a run under way, so it
+// waits for one batch at most. The processor and the grader ask a queue as they would ask the model.
 export class ModelQueue{
  #waiting=[];#running;
  constructor(model){this.model=model;}
