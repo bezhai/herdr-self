@@ -1,9 +1,10 @@
-// butler's own store: one SQLite file. The collector writes it; the CLI (another process) reads it and edits the
-// watch list, so it runs in WAL mode with a busy timeout and the collector re-reads the watch list on every message.
+// butler's own store: one SQLite file. The collector writes it; the CLI and the processor (other processes) read it
+// and set chat levels, so it runs in WAL mode with a busy timeout and the collector reads a chat's level on every
+// message.
 import fs from 'node:fs';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
-import {CATEGORIES,messageLink,reactionsOf} from './rules.mjs';
+import {CATEGORIES,LEVELS,messageLink,reactionsOf} from './rules.mjs';
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS messages(
@@ -15,17 +16,20 @@ CREATE TABLE IF NOT EXISTS messages(
  is_ephemeral INTEGER NOT NULL DEFAULT 0, reactions TEXT NOT NULL DEFAULT '[]');
 CREATE INDEX IF NOT EXISTS messages_created ON messages(created_at);
 CREATE INDEX IF NOT EXISTS messages_root ON messages(root_id);
-CREATE INDEX IF NOT EXISTS messages_feed ON messages(feed_id);
+CREATE INDEX IF NOT EXISTS messages_by_chat ON messages(feed_id,created_at);
+CREATE INDEX IF NOT EXISTS messages_mine ON messages(created_at) WHERE is_mine=1;
 CREATE TABLE IF NOT EXISTS message_categories(
  message_id TEXT NOT NULL REFERENCES messages(id), category TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(message_id,category));
 CREATE INDEX IF NOT EXISTS categories_by_time ON message_categories(category,created_at);
+CREATE INDEX IF NOT EXISTS categories_batched ON message_categories(created_at,message_id) WHERE category<>'stored';
 CREATE TABLE IF NOT EXISTS owner_reactions(
  message_id TEXT NOT NULL REFERENCES messages(id), key TEXT NOT NULL, at INTEGER NOT NULL, PRIMARY KEY(message_id,key));
 CREATE INDEX IF NOT EXISTS owner_reactions_by_time ON owner_reactions(at);
 CREATE TABLE IF NOT EXISTS chats(
  feed_id TEXT PRIMARY KEY, name TEXT, chat_mode TEXT, member_count INTEGER, is_muted INTEGER, last_active_at INTEGER,
  cursor INTEGER, signature TEXT, pending_signature TEXT, dirty INTEGER NOT NULL DEFAULT 0, read_retries INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS watches(feed_id TEXT PRIMARY KEY, since INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS chat_levels(
+ feed_id TEXT PRIMARY KEY, level TEXT NOT NULL, reason TEXT, set_by TEXT NOT NULL, since INTEGER NOT NULL, model_level TEXT, model_reason TEXT);
 CREATE TABLE IF NOT EXISTS threads(
  root_id TEXT PRIMARY KEY, feed_id TEXT NOT NULL, reply_count INTEGER NOT NULL DEFAULT 0, announced_count INTEGER NOT NULL DEFAULT 0,
  root_position TEXT, participated_since INTEGER, stale INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT, checked_at INTEGER);
@@ -38,8 +42,12 @@ CREATE TABLE IF NOT EXISTS errors(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEG
 const ADDED_COLUMNS=[['chats','read_retries','INTEGER NOT NULL DEFAULT 0'],['threads','announced_count','INTEGER NOT NULL DEFAULT 0'],
  ['threads','attempts','INTEGER NOT NULL DEFAULT 0'],['threads','last_error','TEXT'],['messages','is_ephemeral','INTEGER NOT NULL DEFAULT 0'],
  ['messages','reactions',"TEXT NOT NULL DEFAULT '[]'"]];
+// The store keeps nearly every message of most chats (see rules.mjs), so what runs often reads through an index on a
+// small part of it: messages_by_chat for a chat's latest messages, messages_mine for mine, categories_batched for what
+// batches take (every category but stored); messages_by_chat replaces an index on the chat alone.
 const KEEP_ERRORS=100;
 const order=c=>CATEGORIES.indexOf(c);
+const SETTERS=['owner','model'];
 
 export class Store{
  // linkBase: open-lark's web address for message links. log: also gets every recorded error (the service's journal).
@@ -56,6 +64,20 @@ export class Store{
   for(const [table,column,definition] of ADDED_COLUMNS)if(!columns(table).has(column))this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   const ownless=`FROM messages m WHERE m.is_mine=1 AND NOT EXISTS(SELECT 1 FROM message_categories c WHERE c.message_id=m.id AND c.category='own')`;
   if(this.#get(`SELECT 1 ${ownless} LIMIT 1`))this.#run(`INSERT INTO message_categories(message_id,category,created_at) SELECT m.id,'own',m.created_at ${ownless}`);
+  this.db.exec('DROP INDEX IF EXISTS messages_feed');
+  if(this.#get("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watches'"))this.#tx(()=>this.#levelsFromWatches());
+ }
+ // A store from before chat levels: a watched group is one I set to instant from when it was watched, its messages'
+ // watched category is instant, and a direct message from a bot or an agent, which was dm, is instant instead: dm is
+ // what a person writes, and its chat, a direct chat not graded yet, is instant (see rules.mjs ungradedLevel).
+ #levelsFromWatches(){
+  this.#run(`INSERT OR IGNORE INTO chat_levels(feed_id,level,set_by,since) SELECT feed_id,'instant','owner',since FROM watches`);
+  this.#run(`UPDATE message_categories SET category='instant' WHERE category='watched'`);
+  const bots=`SELECT id FROM messages WHERE sender_type IN ('bot','agent')`;
+  this.#run(`INSERT OR IGNORE INTO message_categories(message_id,category,created_at) SELECT message_id,'instant',created_at FROM message_categories
+   WHERE category='dm' AND message_id IN (${bots})`);
+  this.#run(`DELETE FROM message_categories WHERE category='dm' AND message_id IN (${bots})`);
+  this.db.exec('DROP TABLE watches');
  }
  close(){if(this.db.isOpen)this.db.close();}
  #all(sql,...p){return this.db.prepare(sql).all(...p);}
@@ -64,7 +86,8 @@ export class Store{
  #tx(fn){this.db.exec('BEGIN IMMEDIATE');try{const r=fn();this.db.exec('COMMIT');return r;}catch(e){this.db.exec('ROLLBACK');throw e;}}
 
  // ---- messages
- // Inserts or updates one record; categories only accumulate. Recalled and edited are sticky, and a view that is less
+ // Inserts or updates one record; categories only accumulate, but for stored, which stands for no other: it gives way
+ // to one that comes later and never joins one. Recalled and edited are sticky, and a view that is less
  // recalled or less edited than the stored record (a page fetched before the edit arrived) does not replace its content.
  // Reactions (JSON, see rules.mjs recordOf) are the view's when it has them, and each of mine is an owner reaction.
  upsertMessage(r,categories,now=Date.now()){
@@ -78,8 +101,10 @@ export class Store{
      unreadable=CASE WHEN excluded.is_recalled<messages.is_recalled OR excluded.is_edited<messages.is_edited THEN messages.unreadable ELSE excluded.unreadable END,
      mentions_all=excluded.mentions_all,is_recalled=MAX(messages.is_recalled,excluded.is_recalled),is_edited=MAX(messages.is_edited,excluded.is_edited),is_ephemeral=excluded.is_ephemeral,reactions=COALESCE($reactions,messages.reactions),updated_at=excluded.updated_at`,
     {...r,unreadable:r.unreadable?1:0,isMine:r.isMine?1:0,mentionsAll:r.mentionsAll?1:0,isRecalled:r.isRecalled?1:0,isEdited:r.isEdited?1:0,isEphemeral:r.isEphemeral?1:0,reactions:r.reactions??null,now});
-   const add=this.db.prepare('INSERT OR IGNORE INTO message_categories(message_id,category,created_at) VALUES(?,?,?)');
-   for(const c of categories)add.run(r.id,c,r.createdAt);
+   const add=this.db.prepare('INSERT OR IGNORE INTO message_categories(message_id,category,created_at) VALUES(?,?,?)'),reasons=categories.filter(c=>c!=='stored');
+   for(const c of reasons)add.run(r.id,c,r.createdAt);
+   if(reasons.length)this.#run("DELETE FROM message_categories WHERE message_id=? AND category='stored'",r.id);
+   else if(categories.includes('stored'))this.#run("INSERT INTO message_categories(message_id,category,created_at) SELECT ?,'stored',? WHERE NOT EXISTS(SELECT 1 FROM message_categories WHERE message_id=?)",r.id,r.createdAt,r.id);
    if(r.reactions!=null)this.#ownerReacted(r.id,JSON.parse(r.reactions),now);
   });
  }
@@ -149,8 +174,9 @@ export class Store{
   return r&&{feedId:r.feed_id,name:r.name,chatMode:r.chat_mode,memberCount:r.member_count,isMuted:Boolean(r.is_muted),lastActiveAt:r.last_active_at,
    cursor:r.cursor,signature:r.signature,pendingSignature:r.pending_signature,dirty:Boolean(r.dirty),readRetries:r.read_retries};
  }
- // Group chats butler has seen, most recently active first.
- groups(){return this.#all(`SELECT feed_id FROM chats WHERE chat_mode IN ('group','topic') ORDER BY last_active_at DESC`).map(r=>this.chat(r.feed_id));}
+ // Chats butler has seen, most recently active first; groups: the group chats among them, normal and topic.
+ chats(){return this.#all('SELECT feed_id FROM chats ORDER BY last_active_at DESC').map(r=>this.chat(r.feed_id));}
+ groups(){return this.chats().filter(c=>c.chatMode==='group'||c.chatMode==='topic');}
  markDirty(feedId,signature){
   this.#run(`INSERT INTO chats(feed_id,dirty,pending_signature) VALUES(?,1,?) ON CONFLICT(feed_id) DO UPDATE SET dirty=1,pending_signature=COALESCE(excluded.pending_signature,chats.pending_signature)`,feedId,signature??null);
  }
@@ -160,15 +186,52 @@ export class Store{
  settleChat(feedId){this.#run('UPDATE chats SET signature=COALESCE(pending_signature,signature),pending_signature=NULL,dirty=0,read_retries=0 WHERE feed_id=?',feedId);}
  // A read that fell short; returns how many in a row.
  readRetry(feedId){this.#run('UPDATE chats SET read_retries=read_retries+1 WHERE feed_id=?',feedId);return this.#get('SELECT read_retries FROM chats WHERE feed_id=?',feedId).read_retries;}
- chatsMissingInfo(limit){return this.#all('SELECT DISTINCT m.feed_id FROM messages m LEFT JOIN chats c ON c.feed_id=m.feed_id WHERE c.name IS NULL LIMIT ?',limit).map(r=>r.feed_id);}
+ // Chats that records point at but butler cannot name. The collector asks every cycle and the store keeps nearly every
+ // message, so the chats are walked one seek each in the index by chat, from one chat to the next above it, never
+ // message by message.
+ chatsMissingInfo(limit){
+  return this.#all(`WITH RECURSIVE f(feed_id) AS (SELECT min(feed_id) FROM messages UNION ALL SELECT (SELECT min(feed_id) FROM messages WHERE feed_id>f.feed_id) FROM f WHERE f.feed_id IS NOT NULL)
+   SELECT f.feed_id FROM f LEFT JOIN chats c ON c.feed_id=f.feed_id WHERE f.feed_id IS NOT NULL AND c.name IS NULL LIMIT ?`,limit).map(r=>r.feed_id);
+ }
 
- // ---- watched groups
- watch(feedId,since=Date.now()){this.#run('INSERT INTO watches(feed_id,since) VALUES(?,?) ON CONFLICT(feed_id) DO NOTHING',feedId,since);}
- unwatch(feedId){this.#run('DELETE FROM watches WHERE feed_id=?',feedId);}
- watchSince(feedId){return this.#get('SELECT since FROM watches WHERE feed_id=?',feedId)?.since;}
- watches(){
-  return this.#all('SELECT w.feed_id,w.since,c.name,c.chat_mode,c.member_count FROM watches w LEFT JOIN chats c ON c.feed_id=w.feed_id ORDER BY w.since')
-   .map(r=>({feedId:r.feed_id,since:r.since,name:r.name,chatMode:r.chat_mode,memberCount:r.member_count}));
+ // ---- chat levels (see rules.mjs LEVELS): mine when I set one, else the model's. A level of mine stays until I clear
+ // it; the model's last one is kept beside it (modelLevel, modelReason), so that clearing mine brings it back and what I
+ // changed can be told from what the model said. since: when the chat got this level, kept while the level stays the
+ // same (an instant chat's messages from then on are instant); reason: why, the model's words or mine, if any. A chat
+ // with no row has no level yet and goes by rules.mjs ungradedLevel: a direct chat is instant, a group store.
+ static #level=r=>r&&{feedId:r.feed_id,level:r.level,reason:r.reason,by:r.set_by,since:r.since,modelLevel:r.model_level,modelReason:r.model_reason};
+ level(feedId){return Store.#level(this.#get('SELECT * FROM chat_levels WHERE feed_id=?',feedId));}
+ instantSince(feedId){const l=this.level(feedId);return l?.level==='instant'?l.since:undefined;}
+ // Chats with a level and what butler knows of them, by level, then the latest to get theirs first.
+ levels(){
+  return this.#all(`SELECT l.*,c.name,c.chat_mode,c.member_count FROM chat_levels l LEFT JOIN chats c ON c.feed_id=l.feed_id
+   ORDER BY CASE l.level ${LEVELS.map((x,i)=>`WHEN '${x}' THEN ${i}`).join(' ')} END,l.since DESC`).map(r=>({...Store.#level(r),name:r.name,chatMode:r.chat_mode,memberCount:r.member_count}));
+ }
+ // by: owner (I set it) or model (it graded the chat, which leaves a level of mine as it is). Returns the chat's level
+ // before and after.
+ setLevel(feedId,level,{by,reason=null,now=Date.now()}){
+  if(!LEVELS.includes(level))throw Error(`没有这个级别：${level}（可选 ${LEVELS.join(' ')}）`);
+  if(!SETTERS.includes(by))throw Error(`级别只能由 owner 或 model 定：${by}`);
+  return this.#tx(()=>{
+   const before=this.level(feedId),model=by==='model'?{level,reason}:{level:before?.modelLevel??null,reason:before?.modelReason??null};
+   this.#putLevel(feedId,by==='owner'||before?.by!=='owner'?{level,reason,by}:before,model,before,now);
+   return {before,after:this.level(feedId)};
+  });
+ }
+ // My level of the chat goes: the model's applies again, or none. Returns the chat's level before and after.
+ clearLevel(feedId,now=Date.now()){
+  return this.#tx(()=>{
+   const before=this.level(feedId);
+   if(before?.by!=='owner')return {before,after:before};
+   if(before.modelLevel==null)this.#run('DELETE FROM chat_levels WHERE feed_id=?',feedId);
+   else{const model={level:before.modelLevel,reason:before.modelReason};this.#putLevel(feedId,{...model,by:'model'},model,before,now);}
+   return {before,after:this.level(feedId)};
+  });
+ }
+ #putLevel(feedId,{level,reason,by},model,before,now){
+  this.#run(`INSERT INTO chat_levels(feed_id,level,reason,set_by,since,model_level,model_reason) VALUES(?,?,?,?,?,?,?)
+   ON CONFLICT(feed_id) DO UPDATE SET level=excluded.level,reason=excluded.reason,set_by=excluded.set_by,since=excluded.since,model_level=excluded.model_level,model_reason=excluded.model_reason`,
+   feedId,level,reason??null,by,before?.level===level?before.since:now,model.level,model.reason??null);
  }
 
  // ---- threads butler follows: replies to fetch when the root's reply count moves
@@ -229,11 +292,17 @@ export class Store{
  }
  errors(limit=10){return this.#all('SELECT at,source,message FROM errors ORDER BY id DESC LIMIT ?',limit);}
 
+ // How many chats have each level, and how many of them I set.
+ #levelCounts(){
+  const out=Object.fromEntries(LEVELS.map(l=>[l,0]));
+  for(const {level,n} of this.#all('SELECT level,count(*) n FROM chat_levels GROUP BY level'))out[level]=n;
+  return {...out,owner:this.#get("SELECT count(*) n FROM chat_levels WHERE set_by='owner'").n};
+ }
  status(){
   const size=f=>{try{return fs.statSync(f).size;}catch{return 0;}};
   return {collector:this.meta('collector')??{},events:this.meta('events')??{},reconcile:this.meta('reconcile')??{},sync:this.meta('sync')??{},
    collectedSince:this.meta('collectedSince'),mentionsSweptUntil:this.meta('mentions.sweptUntil'),threadFeedScannedAt:this.meta('threadFeed.scannedAt'),
-   counts:this.counts(),pendingMentions:this.#get('SELECT count(*) n FROM pending_mentions').n,watched:this.#get('SELECT count(*) n FROM watches').n,
+   counts:this.counts(),pendingMentions:this.#get('SELECT count(*) n FROM pending_mentions').n,levels:this.#levelCounts(),
    chatsRead:this.#get('SELECT count(*) n FROM chats WHERE cursor>0').n,staleThreads:this.#get('SELECT count(*) n FROM threads WHERE stale=1').n,
    errors:this.errors(10),file:this.file,sizeBytes:size(this.file)+size(`${this.file}-wal`)};
  }

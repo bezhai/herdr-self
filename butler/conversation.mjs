@@ -7,6 +7,7 @@
 // model-queue.mjs) ahead of the processor's next batch; every message is acknowledged at once, since a run takes from
 // tens of seconds to minutes.
 import {clean,parse,prose} from './prompt.mjs';
+import {LEVEL_NAMES,ungradedLevel} from './rules.mjs';
 import {find} from './lookup.mjs';
 import {cards,plain} from './cards.mjs';
 import {endReason,listCards} from './digest.mjs';
@@ -24,13 +25,16 @@ const MAX_ACTIONS=20,REPLY=2000,NOTE=200;
 const at=ms=>new Date(ms).toLocaleString('sv-SE').slice(0,16);
 const short=ms=>at(ms).slice(5);
 const KIND={user:'人',bot:'机器人',agent:'agent'};
+// A chat's level as I am told it (see Store.level); a chat without one, with the level it goes by until it is graded
+// (see rules.mjs ungradedLevel).
+const levelName=(l,chatMode)=>l?`${LEVEL_NAMES[l.level]}${l.by==='owner'?'（你定的）':''}`:`未分级（${LEVEL_NAMES[ungradedLevel(chatMode)]}）`;
 
 // One line: it travels as a command-line argument, and herdr refuses control characters there.
 export function systemPrompt(me){
  return [
   `你是「${me}」的工作管家，在飞书私聊里和TA对话。管家替TA收集和TA有关的飞书消息，由另一个模型整理成事项（每个事项有编号），定时把汇总发给TA。`,
-  '你会收到一个 JSON：now 是现在的时间；said 是TA刚说的话；history 是之前几轮对话（TA说的和管家的回复）；profile 是管家根据TA自己发过的消息归纳的「关于TA」（TA的角色、在做的事、常一起做事的人、哪些事归TA、哪些通常不归TA）和写的时间，还没有写时是 null；notes 是TA让管家记下的说明，带编号，是TA的原话，管家写「关于TA」和整理事项时都会带上，说明优先于「关于TA」；openMatters 是没结束的事项；closedMatters 是最近结束的事项；ignored 是忽略名单，名单上的发送方的消息不交给整理事项的模型；senders 是发过消息、不在忽略名单上的发送方（type 为 user 是人，bot 和 agent 是机器人，messages 是消息数）；watched 是关注的群，这些群的全部消息都会收集；groups 是最近活跃、还没关注的群，只是一部分。',
-  'TA的话由你理解，不必是命令的格式。你能让管家做的只有这几种动作：ignore 把发送方加入忽略名单；unignore 把发送方移出忽略名单；watch 把群加入关注；unwatch 把群移出关注；close 关掉一个没结束的事项；reopen 重新打开一个结束了的事项；list 把现在没结束的事项连同链接列给TA；note 把TA对「哪些事归TA」的更正记成一条说明（比如「审批不归我管」）；unnote 按编号删掉一条说明。',
+  '你会收到一个 JSON：now 是现在的时间；said 是TA刚说的话；history 是之前几轮对话（TA说的和管家的回复）；profile 是管家根据TA自己发过的消息归纳的「关于TA」（TA的角色、在做的事、常一起做事的人、哪些事归TA、哪些通常不归TA）和写的时间，还没有写时是 null；notes 是TA让管家记下的说明，带编号，是TA的原话，管家写「关于TA」和整理事项时都会带上，说明优先于「关于TA」；openMatters 是没结束的事项；closedMatters 是最近结束的事项；ignored 是忽略名单，名单上的发送方的消息不交给整理事项的模型；senders 是发过消息、不在忽略名单上的发送方（type 为 user 是人，bot 和 agent 是机器人，messages 是消息数）；instant 是即时级别的聊天，这些聊天的全部消息都交给整理事项的模型；groups 是最近活跃、不是即时级别的群，只是一部分。',
+  'TA的话由你理解，不必是命令的格式。你能让管家做的只有这几种动作：ignore 把发送方加入忽略名单；unignore 把发送方移出忽略名单；watch 把群定为即时级别（关注它）；unwatch 取消TA给群定的级别（不再关注它）；close 关掉一个没结束的事项；reopen 重新打开一个结束了的事项；list 把现在没结束的事项连同链接列给TA；note 把TA对「哪些事归TA」的更正记成一条说明（比如「审批不归我管」）；unnote 按编号删掉一条说明。',
   '只做TA要求的事，不要自作主张多做。发送方写名称：senders 和 ignored 是全部的发送方，TA指的是哪一个很明确时写它的完整名称；可能是好几个时，写TA用来指它的关键词（比如「赤尾」），管家会用这个词查找并列出候选让TA选，不要替TA挑。群也写名称，但 groups 只是一部分群：TA说出了完整的群名时写这个群名，否则写TA用来指它的关键词（比如「任务中心」），即使 groups 里只有一个相近的也一样，管家会在全部的群里查找，只有一个就执行，有好几个就列出候选。事项写编号；TA用描述指事项、又可能是好几个时，不要动作，在 reply 里列出可能的事项问TA。只有TA明确更正管家对TA负责什么的理解、或者明确要你记下时才用 note，text 写TA的原话，只去掉和这条说明无关的部分；TA关掉事项时说的理由只写进 close 的 reason，不要另记说明。TA问你觉得TA负责什么、管家怎么看TA的工作时，用 profile 和 notes 回答，profile 还没有写时如实说。',
   '只输出一个 JSON 对象，不要输出任何别的文字，只回答问题、没有动作时也一样：{"actions":[动作],"reply":"给TA的回复"}。动作写成 {"do":"ignore","sender":"名称"}、{"do":"unignore","sender":"名称"}、{"do":"watch","group":"名称"}、{"do":"unwatch","group":"名称"}、{"do":"close","matter":编号,"reason":"TA说的理由，没说就不写"}、{"do":"reopen","matter":编号}、{"do":"list"}、{"do":"note","text":"TA的原话"}、{"do":"unnote","note":说明编号}；不需要动作时 actions 是 []。',
   '管家会把每个动作的执行结果告诉TA，所以 reply 里不要说动作已经做了，只写回答、说明或者要问TA的话；只是执行动作、没有别的要说时 reply 写空字符串。TA问的问题用给你的数据回答，数据里没有的不要编。reply 是纯文本，不要用 Markdown，不要写链接。',
@@ -39,12 +43,12 @@ export function systemPrompt(me){
 }
 
 // profile: the meta profile (see processor.mjs); notes: my notes.
-export function composeTurn({now,me,said,history,profile,notes,open,closed,ignored,senders,watched,groups}){
+export function composeTurn({now,me,said,history,profile,notes,open,closed,ignored,senders,instant,groups}){
  const data={now:at(now),me,said,history:history.map(h=>({time:short(h.at),said:h.said,reply:h.reply})),
   profile:profile?.text?{text:profile.text,written:short(profile.at)}:null,notes:notes.map(n=>({note:n.id,text:n.text,time:short(n.at)})),
   openMatters:open.map(m=>({matter:m.id,title:m.title,who:m.who,ask:m.ask,due:m.due,urgency:m.urgency,since:short(m.since),chats:m.chats})),
   closedMatters:closed.map(m=>({matter:m.id,title:m.title,reason:endReason(m),closed:short(m.closedAt)})),
-  ignored,senders,watched,groups};
+  ignored,senders,instant,groups};
  return {system:systemPrompt(me),prompt:`以下是这次的数据：\n${JSON.stringify(data)}`};
 }
 
@@ -127,11 +131,11 @@ export class Conversation{
  // What the model is shown besides my words.
  #facts(){
   const ignored=this.matters.ignoredSenders(),ignoredIds=new Set(ignored.map(s=>s.senderId)),senders=this.matters.senders();
-  const watches=this.store.watches(),watched=new Set(watches.map(w=>w.feedId));
+  const instant=this.store.levels().filter(l=>l.level==='instant'),shown=new Set(instant.map(l=>l.feedId));
   return {profile:this.store.meta('profile'),notes:this.matters.notes(),open:this.matters.list(),closed:this.matters.recentlyClosed(20),
    ignored:ignored.map(s=>({name:s.name,type:senders.find(x=>x.senderId===s.senderId)?.type})),
    senders:senders.filter(s=>!ignoredIds.has(s.senderId)).slice(0,300).map(s=>({name:s.name,type:s.type,messages:s.messages})),
-   watched:watches.map(w=>w.name??'（名称未知的群）'),groups:this.store.groups().filter(g=>!watched.has(g.feedId)&&g.name).slice(0,60).map(g=>g.name)};
+   instant:instant.map(l=>l.name??'（名称未知的聊天）'),groups:this.store.groups().filter(g=>!shown.has(g.feedId)&&g.name).slice(0,60).map(g=>g.name)};
  }
  // One turn, holding the model: ask it, carry out what it chose, and return the reply's cards: what butler did and the
  // model's answer, then the list of the open matters when it was asked for.
@@ -158,16 +162,20 @@ export class Conversation{
     const r=pick(this.matters.ignoredSenders(),a.sender,SENDERS,'（它不在忽略名单上）');if(!r.item)return r;
     this.matters.unignore(r.item.senderId);return {lines:[`已移出忽略名单：${r.item.name||r.item.senderId}，之后的新消息照常交给模型`]};
    }
+   // Watching a group is setting it to instant myself; not watching it any more clears my level of it.
    case 'watch':{
     const r=pick(this.store.groups(),a.group,GROUPS);if(!r.item)return r;
-    const g=r.item;if(this.store.watchSince(g.feedId))return {lines:[`${g.name} 已经在关注名单上`]};
-    this.store.watch(g.feedId,now);
-    return {lines:[`已加入关注：${g.name}，从 ${at(now)} 开始收集这个群的全部消息`,
+    const g=r.item,level=this.store.level(g.feedId);
+    if(level?.level==='instant'&&level.by==='owner')return {lines:[`${g.name} 已经是你定的即时`]};
+    const {before,after}=this.store.setLevel(g.feedId,'instant',{by:'owner',now});
+    return {lines:[`已把 ${g.name} 定为即时：${levelName(before,g.chatMode)} → ${levelName(after,g.chatMode)}，从 ${at(after.since)} 起它的全部消息交给模型`,
      ...g.chatMode==='topic'?[`注意：${g.name} 是话题群，管家只能收到推送来的消息，收集器停机或断线期间的补不上；其中你参与的话题和 @你 的消息不受影响。`]:[]]};
    }
    case 'unwatch':{
-    const r=pick(this.store.watches().map(w=>({...w,name:w.name??''})),a.group,GROUPS,'（它不在关注名单上）');if(!r.item)return r;
-    this.store.unwatch(r.item.feedId);return {lines:[`已移出关注：${r.item.name||r.item.feedId}，之后不再因为关注收集它的消息`]};
+    const mine=this.store.levels().filter(l=>l.by==='owner'&&l.level==='instant').map(l=>({...l,name:l.name??''}));
+    const r=pick(mine,a.group,GROUPS,'（你没有把它定为即时）');if(!r.item)return r;
+    const {before,after}=this.store.clearLevel(r.item.feedId,now);
+    return {lines:[`已取消你给 ${r.item.name||r.item.feedId} 定的级别：${levelName(before,r.item.chatMode)} → ${levelName(after,r.item.chatMode)}`]};
    }
    case 'close':
     if(!m)return {lines:[`没有 #${a.matter} 这个事项`]};

@@ -1,8 +1,19 @@
 // What a message is to butler, decided from the message alone and a few facts the caller looks up. Pure functions.
 
-// In the order a record lists them. own: a message I sent, in any chat the collector reads; what I answered, and where,
-// shows what I already took care of.
-export const CATEGORIES=['mention','dm','reply','thread','watched','own'];
+// In the order a record lists them. Every category but stored says the message is about me (mention, dm, reply,
+// thread, own) or comes from a chat at the instant level since it became instant: batches take those (see
+// matters.mjs). own: a message I sent, in any chat the collector reads; what I answered, and where, shows what I
+// already took care of. stored: none of the others, kept only because its chat is not ignored, as context and for
+// later; it never joins another category (see Store.upsertMessage).
+export const CATEGORIES=['mention','dm','reply','thread','instant','own','stored'];
+// A chat's level: instant (every message goes to the batches), daily (kept for a daily look, not yet made), store
+// (kept, not looked at) or ignore (not kept). A chat without one goes by ungradedLevel until it is graded.
+export const LEVELS=['instant','daily','store','ignore'];
+// The level of a chat that has none yet, from when collection began: a direct chat is instant, so that what a bot or
+// an agent sends me goes to the model as it did before levels; a group of either kind is store.
+export const ungradedLevel=chatKind=>chatKind==='direct'?'instant':'store';
+// What they are called when butler talks to me.
+export const LEVEL_NAMES={instant:'即时',daily:'每日',store:'只存不看',ignore:'忽略'};
 
 // The root of the thread a message belongs to. Every message carries a threadId (its own id or the root of its reply
 // chain), so only threadMessageType says whether it is in a thread.
@@ -18,19 +29,25 @@ export function mentionsMe(v,me){
  return Boolean(v.isAtMe)&&!v.isAtAll;
 }
 
-// ctx: me, collectedSince (ms; nothing older is collected), chatKind (direct|group|topic), and when they apply:
-// watchSince (the chat is watched since then), participatedSince (I took part in this message's thread since then),
-// parentIsMine (the message it replies to is one of mine, known from butler's own store).
+// open-lark's sender types are user, bot and agent. One of unknown type counts as a person, so that a person's direct
+// message is never only stored for want of a type.
+const isPerson=v=>v.senderType!=='bot'&&v.senderType!=='agent';
+// ctx: me, collectedSince (ms; nothing older is collected), chatKind (direct|group|topic), level (the chat's {level,
+// since}, if it has one; see ungradedLevel otherwise), and when they apply: participatedSince (I took part in this
+// message's thread since then), parentIsMine (the message it replies to is one of mine, known from butler's own store).
+// What is about me is kept whatever the chat's level. In a direct chat that is what a person writes (dm), so that
+// instant there marks only what a bot or an agent says, and a person's message reads dm alone as it always did.
 export function categoriesOf(v,ctx){
  const t=Date.parse(v.createdAt);
  if(!(t>=ctx.collectedSince))return [];
- const out=[];
+ const out=[],level=ctx.level??{level:ungradedLevel(ctx.chatKind),since:ctx.collectedSince},dm=ctx.chatKind==='direct'&&isPerson(v);
  if(!v.isMine&&mentionsMe(v,ctx.me))out.push('mention');
- if(ctx.chatKind==='direct')out.push('dm');
+ if(dm)out.push('dm');
  if(!v.isMine&&(v.replyTo?.senderId===ctx.me||ctx.parentIsMine))out.push('reply');
  if(ctx.participatedSince!==undefined&&t>=ctx.participatedSince&&threadRootOf(v))out.push('thread');
- if(ctx.watchSince!==undefined&&t>=ctx.watchSince)out.push('watched');
+ if(level.level==='instant'&&t>=level.since&&!dm)out.push('instant');
  if(v.isMine)out.push('own');
+ if(!out.length&&level.level!=='ignore')out.push('stored');
  return out;
 }
 

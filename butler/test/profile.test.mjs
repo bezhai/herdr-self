@@ -26,7 +26,7 @@ function setup(t,{answer,options}={}){
 test('the profile is written from my messages, each with the message it answered or else the one before it, and my notes',async t=>{
  const {store,matters,model,write}=setup(t,{answer:()=>({profile:'角色：GEO 服务的后端\n通常不归TA：审批，见 https://evil.example/x'})});
  post(store,{text:'早上好',at:min(0)});
- const asked=post(store,{text:'@原智鸿 GEO 接口超时了',at:min(1),categories:['mention','watched']});
+ const asked=post(store,{text:'@原智鸿 GEO 接口超时了',at:min(1),categories:['mention','instant']});
  post(store,{text:'这期间别的话',at:min(2)});
  post(store,{mine:true,text:'我看下，是缓存的问题',at:min(3),parentId:asked,threadRole:'reply',rootId:asked});
  post(store,{chat:'d1',name:'张三',sender:'u3',text:'方案什么时候给',at:min(4)});

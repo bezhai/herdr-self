@@ -1,11 +1,11 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // butler's command line: runs the collector and the processor (with the bot), shows their status, what they collected,
-// the matters made of it and 关于TA, keeps the watched-group and ignored-sender lists, and creates and updates the bot's
+// the matters made of it and 关于TA, sets chat levels, keeps the ignored-sender list, and creates and updates the bot's
 // Feishu app.
 import {parseArgs} from 'node:util';
 import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
-import {CATEGORIES} from './rules.mjs';
+import {CATEGORIES,LEVELS,LEVEL_NAMES,ungradedLevel} from './rules.mjs';
 import {Matters} from './matters.mjs';
 import {Processor,DEFAULTS as PROCESSOR} from './processor.mjs';
 import {HerdrModel} from './herdr-model.mjs';
@@ -30,10 +30,12 @@ const HELP=`用法：butler [--config 配置文件] <命令>
   list [--category 类别] [--since 时间] [--until 时间] [--limit 条数] [--json]
                                    按类别和时间列出收到的消息，新的在前
                                    类别：${CATEGORIES.join(' ')}；时间：ISO 时间，或 30m、2h、7d 这样的相对时间
-  groups [--search 文字] [--json]   列出我所在的群（名称、人数、最近活跃），★ 是关注的群
-  watch list                       关注群名单
-  watch add <群名或 id>...          加入关注名单，从加入时开始收集这个群的全部消息
-  watch remove <群名或 id>...       移出关注名单
+  groups [--search 文字] [--json]   列出我所在的群（级别、名称、人数、最近活跃）
+  level [list]                     有级别的聊天：级别、谁定的、从什么时候开始、理由
+  level set <级别> <聊天名或 id>...  由我定聊天的级别，模型不改我定的：instant 即时（全部消息交给模型）、
+                                   daily 每日（存下，每日整理还没有做）、store 只存不看、ignore 忽略（不存）；
+                                   和我有关的消息不看级别，照旧收、照旧交给模型
+  level clear <聊天名或 id>...      取消我定的级别，回到模型的判断，还没有判断时私聊按即时、群按只存不看
   process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每天根据我发的消息
                                    写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍；配置了机器人时也
                                    运行机器人：定时汇总、私聊对话；--once 只运行一轮（处理完积压，到了时间也写
@@ -74,7 +76,8 @@ function printStatus(s){
  lines.push(`open-lark 同步：${s.sync.state?`${s.sync.state} / ${s.sync.mode}（检查于 ${time(s.sync.checkedAt)}）`:'未知'}${s.sync.state&&!(s.sync.state==='live'&&s.sync.mode==='frontier')?'，不健康：对账的水位暂停推进':''}`);
  lines.push(`@我补扫：已扫到 ${time(s.mentionsSweptUntil&&s.mentionsSweptUntil*1000)}；话题列表检查于 ${time(s.threadFeedScannedAt)}；从 ${time(s.collectedSince)} 开始收集`);
  lines.push(`消息：共 ${s.counts.total} 条 · ${CATEGORIES.map(c=>`${c} ${s.counts[c]}`).join(' · ')}；待补取的 @我 ${s.pendingMentions} 条，待取回复的话题 ${s.staleThreads} 个`);
- lines.push(`关注群：${s.watched} 个；已记下读取位置的聊天 ${s.chatsRead} 个`);
+ const l=s.levels;
+ lines.push(`聊天级别：${LEVELS.map(x=>`${LEVEL_NAMES[x]} ${l[x]} 个`).join('、')}（我定的 ${l.owner} 个），没有级别的私聊按即时、群按只存不看；已记下读取位置的聊天 ${s.chatsRead} 个`);
  const p=s.processing;
  lines.push(`加工：最近一轮 ${time(p.lastRoundAt)}，最近成功 ${time(p.lastSuccessAt)}${p.stoppedAt?`，已停止于 ${time(p.stoppedAt)}`:''}；待加工 ${p.pending} 条，跳过 ${p.skipped} 条（模型单独处理它们几次都给不出可用的回答），未结束的事项 ${p.openMatters} 个`);
  const v=s.review;
@@ -123,6 +126,12 @@ async function refreshGroups(store,openLark){
  }
 }
 const GROUPS={key:'feedId',noun:'群',missing:'butler groups 可以列出我所在的群',line:g=>`  ${g.name}（${g.memberCount??'?'} 人）  ${g.feedId}`};
+const CHATS={...GROUPS,noun:'聊天',line:c=>`  ${c.name||'（无名）'}（${c.chatMode==='direct'?'私聊':`${c.memberCount??'?'} 人`}）  ${c.feedId}`};
+// A chat's level as the command line shows it (see Store.level); a chat without one, with the level it goes by until
+// it is graded (see rules.mjs ungradedLevel).
+const levelName=(l,chatMode)=>l?`${LEVEL_NAMES[l.level]}${l.by==='owner'?'（我定的）':''}`:`未分级（按${LEVEL_NAMES[ungradedLevel(chatMode)]}）`;
+// What a level I set does from now on.
+const LEVEL_EFFECT={instant:'它的全部消息交给模型',daily:'存下它的消息，每日的整理还没有做，现在和只存不看一样',store:'存下它的消息，不交给模型',ignore:'不再存它的消息'};
 const SENDERS={key:'senderId',noun:'发送方',missing:'只能忽略存储里发过消息的发送方',line:s=>`  ${s.name}（${s.type??'?'}，${s.messages??'?'} 条消息）  ${s.senderId}`};
 function pick(items,query,{key,noun,missing,line}=GROUPS){
  const found=find(items,query,key);
@@ -203,35 +212,41 @@ async function main(argv){
    }
    case 'groups':{
     await refreshGroups(store,openLark());
-    const watched=new Set(store.watches().map(w=>w.feedId)),groups=values.search?find(store.groups(),values.search,'feedId'):store.groups();
-    if(values.json){console.log(JSON.stringify(groups.map(g=>({...g,watched:watched.has(g.feedId)})),null,1));return 0;}
-    for(const g of groups)console.log(`${watched.has(g.feedId)?'★':' '} ${g.name}  ${g.memberCount??'?'} 人  最近活跃 ${time(g.lastActiveAt)}${g.chatMode==='topic'?'  话题群':''}  ${g.feedId}`);
+    const levels=new Map(store.levels().map(l=>[l.feedId,l])),groups=values.search?find(store.groups(),values.search,'feedId'):store.groups();
+    if(values.json){console.log(JSON.stringify(groups.map(g=>({...g,level:levels.get(g.feedId)??null})),null,1));return 0;}
+    for(const g of groups)console.log(`${levelName(levels.get(g.feedId),g.chatMode)}  ${g.name}  ${g.memberCount??'?'} 人  最近活跃 ${time(g.lastActiveAt)}${g.chatMode==='topic'?'  话题群':''}  ${g.feedId}`);
     return 0;
    }
-   case 'watch':{
-    const [action,...queries]=rest;
+   case 'level':{
+    const [action,...args]=rest;
     if(action==='list'||action===undefined){
-     const list=store.watches();if(!list.length)console.log('关注名单是空的（butler watch add <群名或 id>）');
-     for(const w of list)console.log(`${w.name??w.feedId}  ${w.memberCount??'?'} 人  从 ${time(w.since)} 开始收集  ${w.feedId}`);
+     const list=store.levels();if(!list.length)console.log('还没有聊天有级别（butler level set <级别> <聊天名或 id>）；没有级别的私聊按即时：全部消息交给模型，群按只存不看：存下，不交给模型');
+     for(const l of list)console.log(`${levelName(l)}  ${l.name||'（无名）'}  从 ${time(l.since)} 起${l.reason?`  理由：${l.reason}`:''}${l.by==='owner'&&l.modelLevel?`  模型的判断：${LEVEL_NAMES[l.modelLevel]}`:''}  ${l.feedId}`);
      return 0;
     }
-    if(!queries.length)throw new UsageError(`watch ${action} 需要群名或 id`);
-    if(action==='add'){
-     // The store knows the groups seen so far; anything it cannot resolve uniquely is looked up in open-lark.
-     if(queries.some(q=>find(store.groups(),q,'feedId').length!==1))await refreshGroups(store,openLark());
-     const picked=queries.map(q=>pick(store.groups(),q)),since=Date.now();
-     for(const g of picked){
-      store.watch(g.feedId,since);console.log(`已加入关注：${g.name}（${g.feedId}），从 ${time(store.watchSince(g.feedId))} 开始收集`);
-      if(g.chatMode==='topic')console.log(`注意：${g.name} 是话题群。butler 不按位置读话题群（open-lark 给话题群的消息窗口不可靠），这个群只能收到推送来的消息，收集器停机或断线期间的消息补不上；其中我参与的话题和 @我 的消息不受影响。`);
+    if(action==='set'){
+     const [level,...queries]=args;
+     if(!LEVELS.includes(level))throw new UsageError(`level set 的第一个参数是级别：${LEVELS.join(' ')}${level?`，没有 ${level}`:''}`);
+     if(!queries.length)throw new UsageError('level set 需要聊天名或 id');
+     // The store knows the chats seen so far, direct ones too; a group it cannot resolve uniquely is looked up in open-lark.
+     if(queries.some(q=>find(store.chats(),q,'feedId').length!==1))await refreshGroups(store,openLark());
+     for(const c of queries.map(q=>pick(store.chats(),q,CHATS))){
+      const {before,after}=store.setLevel(c.feedId,level,{by:'owner'});
+      console.log(`${c.name||c.feedId}：${levelName(before,c.chatMode)} → ${levelName(after,c.chatMode)}，从 ${time(after.since)} 起${LEVEL_EFFECT[level]}；和我有关的消息照旧收、照旧交给模型`);
+      if(level==='instant'&&c.chatMode==='topic')console.log(`注意：${c.name} 是话题群。butler 不按位置读话题群（open-lark 给话题群的消息窗口不可靠），这个群只能收到推送来的消息，收集器停机或断线期间的消息补不上；其中我参与的话题和 @我 的消息不受影响。`);
      }
      return 0;
     }
-    if(action==='remove'){
-     const watched=store.watches().map(w=>({...w,name:w.name??''})),picked=queries.map(q=>pick(watched,q));
-     for(const g of picked){store.unwatch(g.feedId);console.log(`已移出关注：${g.name||g.feedId}`);}
+    if(action==='clear'){
+     if(!args.length)throw new UsageError('level clear 需要聊天名或 id');
+     const mine=store.levels().filter(l=>l.by==='owner').map(l=>({...l,name:l.name??''}));
+     for(const c of args.map(q=>pick(mine,q,{...CHATS,missing:'只能取消我定的级别，butler level list 列出它们'}))){
+      const {before,after}=store.clearLevel(c.feedId);
+      console.log(`${c.name||c.feedId}：${levelName(before,c.chatMode)} → ${levelName(after,c.chatMode)}`);
+     }
      return 0;
     }
-    throw new UsageError(`watch 没有这个操作：${action}`);
+    throw new UsageError(`level 没有这个操作：${action}`);
    }
    default:throw new UsageError(`没有这个命令：${command}\n\n${HELP}`);
   }

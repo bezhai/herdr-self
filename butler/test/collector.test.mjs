@@ -10,24 +10,29 @@ import {DatabaseSync} from 'node:sqlite';
 import {startFakeOpenLark} from './fake-open-lark.mjs';
 import {Store} from '../store.mjs';
 import {Collector} from '../collector.mjs';
+import {Matters} from '../matters.mjs';
 import {FAST} from './helpers.mjs';
 
 const cats=(store,id)=>store.message(id)?.categories;
 
-test('pushed messages are stored by category; unrelated group messages and @all alone are not',async t=>{
+test('pushed messages are stored by category: what is not about me as stored, and of an ignored chat only what is about me',async t=>{
  const {lark,store,running}=await setup(t);
- const dm=lark.chat({name:'张三',chatMode:'direct'}),noisy=lark.chat({name:'闲聊群',memberCount:300}),watched=lark.chat({name:'关注的群'});
- await running();store.watch(watched,lark.now());
+ const dm=lark.chat({name:'张三',chatMode:'direct'}),bot=lark.chat({name:'机器人',chatMode:'direct'}),noisy=lark.chat({name:'闲聊群',memberCount:300});
+ const instant=lark.chat({name:'即时的群'}),muted=lark.chat({name:'忽略的群'});
+ await running();store.setLevel(instant,'instant',{by:'owner',now:lark.now()});store.setLevel(muted,'ignore',{by:'owner'});
  const mine=lark.post(noisy,{mine:true,text:'我的提问'});
  const m={dm:lark.post(dm,{text:'私聊'}),myDm:lark.post(dm,{mine:true,text:'我回私聊'}),atMe:lark.post(noisy,{atMe:true,text:'看下'}),
   atAllOnly:lark.post(noisy,{atAll:true,isAtMe:true,text:'通知'}),atAllAndMe:lark.post(noisy,{atAll:true,atMe:true,text:'通知和我'}),
-  reply:lark.post(noisy,{replyTo:mine.id,text:'回复你'}),unrelated:lark.post(noisy,{text:'无关'}),watchedMsg:lark.post(watched,{text:'关注群消息'}),bot:lark.post(dm,{senderType:'bot',text:'机器人'})};
+  reply:lark.post(noisy,{replyTo:mine.id,text:'回复你'}),unrelated:lark.post(noisy,{text:'无关'}),instantMsg:lark.post(instant,{text:'即时群消息'}),
+  ignored:lark.post(muted,{text:'忽略的群里的闲聊'}),ignoredAtMe:lark.post(muted,{atMe:true,text:'忽略的群里 @我'}),bot:lark.post(bot,{senderType:'bot',text:'机器人'})};
  await waitFor(()=>store.message(m.bot.id)&&store.message(m.atMe.id)?.chatName==='闲聊群',{message:'pushed messages and the chat name'});
  assert.deepEqual(cats(store,m.dm.id),['dm']);assert.deepEqual(cats(store,m.myDm.id),['dm','own']);assert.equal(store.message(m.myDm.id).isMine,true);
  assert.deepEqual(cats(store,m.atMe.id),['mention']);assert.deepEqual(cats(store,m.atAllAndMe.id),['mention']);assert.equal(store.message(m.atAllAndMe.id).mentionsAll,true);
- assert.deepEqual(cats(store,m.reply.id),['reply']);assert.deepEqual(cats(store,m.watchedMsg.id),['watched']);assert.equal(store.message(m.bot.id).senderType,'bot');
+ assert.deepEqual(cats(store,m.reply.id),['reply']);assert.deepEqual(cats(store,m.instantMsg.id),['instant']);
+ assert.deepEqual(cats(store,m.bot.id),['instant'],'a bot\'s direct chat goes by its level, which is instant until it is graded');assert.equal(store.message(m.bot.id).senderType,'bot');
  assert.deepEqual(cats(store,mine.id),['own']);
- for(const v of [m.atAllOnly,m.unrelated])assert.equal(store.message(v.id),undefined,v.textPreview);
+ for(const v of [m.atAllOnly,m.unrelated])assert.deepEqual(cats(store,v.id),['stored'],v.textPreview);
+ assert.equal(store.message(m.ignored.id),undefined,'nothing of an ignored chat is kept');assert.deepEqual(cats(store,m.ignoredAtMe.id),['mention'],'but what is about me');
  const r=store.message(m.atMe.id);
  assert.deepEqual({chatId:r.chatId,chatName:r.chatName,chatKind:r.chatKind,senderId:r.senderId,senderName:r.senderName,senderType:r.senderType,text:r.text,isMine:r.isMine,mentionsAll:r.mentionsAll,isRecalled:r.isRecalled,isEdited:r.isEdited,threadRole:r.threadRole},
   {chatId:noisy,chatName:'闲聊群',chatKind:'group',senderId:m.atMe.senderId,senderName:'同事',senderType:'user',text:'@我看下',isMine:false,mentionsAll:false,isRecalled:false,isEdited:false,threadRole:'none'});
@@ -36,9 +41,20 @@ test('pushed messages are stored by category; unrelated group messages and @all 
  assert.equal(store.message(m.dm.id).chatKind,'direct');
 });
 
+test('a direct chat not graded yet is instant: what a bot says there goes to the model; once the model grades it store, only what I say there does',async t=>{
+ const {lark,store,running}=await setup(t);const bot=lark.chat({name:'Argos平台报警',chatMode:'direct'});await running();const matters=new Matters(store);
+ const alert=lark.post(bot,{senderType:'bot',text:'告警：CPU 高'});await waitFor(()=>store.message(alert.id),{message:'the pushed alert'});
+ assert.deepEqual(cats(store,alert.id),['instant']);assert.deepEqual(matters.pending(40).map(m=>m.id),[alert.id]);assert.equal(matters.pendingCount(),1);
+ store.setLevel(bot,'store',{by:'model',reason:'只是监控通知',now:lark.now()});
+ const later=lark.post(bot,{senderType:'bot',text:'告警恢复'}),mine=lark.post(bot,{mine:true,text:'收到'});
+ await waitFor(()=>store.message(later.id)&&store.message(mine.id),{message:'what came after the grade'});
+ assert.deepEqual(cats(store,later.id),['stored']);assert.deepEqual(cats(store,mine.id),['dm','own']);
+ assert.deepEqual(matters.pending(40).map(m=>m.id),[alert.id,mine.id],'only kept, it never waits');assert.equal(matters.pendingCount(),2);
+});
+
 test('every message I send is stored as own, pushed or read by position, in any normal group, and a reply to it counts as a reply to me',async t=>{
  const {lark,store,running}=await setup(t);
- const dm=lark.chat({name:'张三',chatMode:'direct'}),group=lark.chat({name:'不关注的群',memberCount:300}),other=lark.chat({name:'另一个群'});
+ const dm=lark.chat({name:'张三',chatMode:'direct'}),group=lark.chat({name:'没有级别的群',memberCount:300}),other=lark.chat({name:'另一个群'});
  const c=await running();
  const pushed=lark.post(group,{mine:true,text:'收到，我今天捋一下'}),inDm=lark.post(dm,{mine:true,text:'私聊里我说的'});
  await waitFor(()=>store.message(pushed.id)&&store.message(inDm.id),{message:'my pushed messages'});
@@ -46,7 +62,7 @@ test('every message I send is stored as own, pushed or read by position, in any 
  const quiet=lark.post(other,{mine:true,text:'只写库的我的消息'},{event:'none'}),unrelated=lark.post(other,{text:'别人的闲聊'},{event:'none'});
  await c.reconcile('periodic');
  assert.deepEqual(cats(store,pushed.id),['own']);assert.deepEqual(cats(store,quiet.id),['own']);assert.deepEqual(cats(store,inDm.id),['dm','own']);
- assert.equal(store.message(pushed.id).isMine,true);assert.equal(store.message(unrelated.id),undefined,'others\' messages there still are not kept');
+ assert.equal(store.message(pushed.id).isMine,true);assert.deepEqual(cats(store,unrelated.id),['stored'],'others\' messages there are kept as stored');
  // A reply that does not carry who sent the message it answers: butler's own record of it says it was mine.
  const reply=lark.post(other,{replyTo:quiet.id,text:'好的'},{event:'none'});delete lark.messages.get(reply.id).replyTo;
  await c.reconcile('periodic');assert.deepEqual(cats(store,reply.id),['reply']);
@@ -81,8 +97,8 @@ test('reactions are kept on stored messages without who exactly reacted, and one
 });
 
 test('reaction.updated refreshes the reactions of a message butler holds once per burst, from open-lark\'s own store',async t=>{
- const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'}),group=lark.chat({name:'不关注的群'});
- const c=await running();const v=lark.post(dm,{text:'方案发你了'}),other=lark.post(group,{text:'和我无关'});
+ const {lark,store,running}=await setup(t);const dm=lark.chat({name:'张三',chatMode:'direct'}),group=lark.chat({name:'忽略的群'});
+ const c=await running();store.setLevel(group,'ignore',{by:'owner'});const v=lark.post(dm,{text:'方案发你了'}),other=lark.post(group,{text:'和我无关'});
  await waitFor(()=>store.message(v.id));
  const asked=id=>lark.requests.filter(r=>r.path===`/agent/v1/messages/${id}/reactions`).length;
  // A burst: several reactions on one message, and one on a message butler does not hold.
@@ -127,24 +143,26 @@ test('an event without its message is completed with GET /messages/:id',async t=
  assert.ok(lark.requests.some(r=>r.path===`/agent/v1/messages/${v.id}`));
 });
 
-test('reconciliation recovers what was missed while the collector was down, without storing unrelated messages',async t=>{
+test('reconciliation recovers what was missed while the collector was down, and keeps nothing of an ignored chat but what is about me',async t=>{
  const {lark,store,running}=await setup(t);
- const dm=lark.chat({name:'张三',chatMode:'direct'}),watched=lark.chat({name:'关注的群'}),other=lark.chat({name:'别的群'});
- const first=await running();store.watch(watched,lark.now());
- const seen=lark.post(dm,{text:'停机前'}),root=lark.post(watched,{text:'关注群里的讨论'}),mine=lark.post(other,{mine:true,text:'我在别的群说话'});
+ const dm=lark.chat({name:'张三',chatMode:'direct'}),instant=lark.chat({name:'即时的群'}),other=lark.chat({name:'别的群'}),muted=lark.chat({name:'忽略的群'});
+ const first=await running();store.setLevel(instant,'instant',{by:'owner',now:lark.now()});store.setLevel(muted,'ignore',{by:'owner'});
+ const seen=lark.post(dm,{text:'停机前'}),root=lark.post(instant,{text:'即时群里的讨论'}),mine=lark.post(other,{mine:true,text:'我在别的群说话'});
  await first.reconcile('periodic');await first.stop();
  // While butler is down: open-lark stores some messages without events (backfill, gap repair) and pushes others to nobody.
- const missed=[lark.post(dm,{text:'停机时的私聊'}),lark.post(watched,{text:'停机时的关注群消息'},{event:'none'}),
-  lark.post(watched,{thread:root.id,text:'停机时的话题回复'},{event:'none'}),
-  lark.post(other,{atMe:true,text:'停机时@我'},{event:'none'}),lark.post(other,{replyTo:mine.id,text:'停机时回复我'},{event:'none'})];
- const unrelated=lark.post(other,{text:'无关'},{event:'none'});
+ const missed=[lark.post(dm,{text:'停机时的私聊'}),lark.post(instant,{text:'停机时的即时群消息'},{event:'none'}),
+  lark.post(instant,{thread:root.id,text:'停机时的话题回复'},{event:'none'}),
+  lark.post(other,{atMe:true,text:'停机时@我'},{event:'none'}),lark.post(other,{replyTo:mine.id,text:'停机时回复我'},{event:'none'}),
+  lark.post(muted,{atMe:true,text:'忽略的群里停机时@我'},{event:'none'})];
+ const unrelated=lark.post(other,{text:'无关'},{event:'none'}),ignored=lark.post(muted,{text:'忽略的群里停机时的闲聊'},{event:'none'});
  const many=Array.from({length:130},(_,i)=>lark.post(dm,{text:`第${i}条`},{event:'none'}));
  // A chat butler has never read: from its newest messages back to when collection started, over several pages.
  const fresh=lark.chat({name:'新的私聊',chatMode:'direct'}),newDm=Array.from({length:120},(_,i)=>lark.post(fresh,{text:`新私聊${i}`},{event:'none'}));
  await running();
  for(const v of [seen,...missed,...many,...newDm])assert.ok(store.message(v.id),`missing ${v.textPreview}`);
- assert.deepEqual(cats(store,missed[2].id),['watched']);assert.deepEqual(cats(store,missed[3].id),['mention']);assert.deepEqual(cats(store,missed[4].id),['reply']);
- assert.equal(store.message(unrelated.id),undefined);assert.deepEqual(cats(store,mine.id),['own']);
+ assert.deepEqual(cats(store,missed[2].id),['instant']);assert.deepEqual(cats(store,missed[3].id),['mention']);assert.deepEqual(cats(store,missed[4].id),['reply']);
+ assert.deepEqual(cats(store,missed[5].id),['mention']);assert.equal(store.message(ignored.id),undefined);
+ assert.deepEqual(cats(store,unrelated.id),['stored']);assert.deepEqual(cats(store,mine.id),['own']);
 });
 
 test('reconciliation picks up messages open-lark stored without an event while the collector runs',async t=>{
@@ -156,15 +174,15 @@ test('reconciliation picks up messages open-lark stored without an event while t
  assert.deepEqual(cats(store,quiet.id),['dm']);assert.deepEqual(cats(store,reply.id),['reply']);
 });
 
-test('a thread reply in a watched group is reconciled even when no new main message follows it',async t=>{
- const {lark,store,running}=await setup(t);const group=lark.chat({name:'关注的群'});
- const c=await running();store.watch(group,lark.now());
+test('a thread reply in an instant group is reconciled even when no new main message follows it',async t=>{
+ const {lark,store,running}=await setup(t);const group=lark.chat({name:'即时的群'});
+ const c=await running();store.setLevel(group,'instant',{by:'owner',now:lark.now()});
  const root=lark.post(group,{text:'讨论'});for(let i=0;i<6;i++)lark.post(group,{text:`后面第${i}条`});await c.reconcile('periodic');
  // Its position is <= 0 and its root is older than the rows read again, so only a page whose first row is no later
  // than the last read row brings it in, by time.
  const reply=lark.post(group,{thread:root.id,text:'话题里的新回复'},{event:'none'}),last=lark.post(group,{thread:root.id,text:'又一个回复'},{event:'none'});
  await c.reconcile('periodic');
- assert.deepEqual(cats(store,reply.id),['watched']);assert.deepEqual(cats(store,last.id),['watched']);
+ assert.deepEqual(cats(store,reply.id),['instant']);assert.deepEqual(cats(store,last.id),['instant']);
 });
 
 test('after an open-lark restart the event socket reconnects and reconciliation catches up',async t=>{
@@ -191,6 +209,17 @@ test('a changed reply count fetches the replies of a thread I started',async t=>
  // Already known as my thread: now only the grown count of the re-sent root says there is more.
  const r3=lark.post(group,{thread:root.id,text:'后来的回复'},{event:'root-only'});
  await waitFor(()=>store.message(r3.id),{message:'reply announced only by the root'});assert.deepEqual(cats(store,r3.id),['reply','thread']);
+});
+
+test('the replies of a direct chat\'s thread are fetched back to when collection began, whatever level the chat has',async t=>{
+ const {lark,store,running}=await setup(t);const bot=lark.chat({name:'发布机器人',chatMode:'direct'});const c=await running();
+ const root=lark.post(bot,{senderType:'bot',text:'发布单'},{touch:false});await waitFor(()=>store.message(root.id),{message:'the root'});
+ // More than a page of replies, all before the chat got its level, written without events; only fetching the thread finds them.
+ const early=Array.from({length:120},(_,i)=>lark.post(bot,{thread:root.id,senderType:'bot',text:`进度${i}`},{event:'none',touch:false}));
+ store.setLevel(bot,'instant',{by:'owner',now:lark.now()+1});
+ const last=lark.post(bot,{thread:root.id,senderType:'bot',text:'发布完成'},{event:'root-only',touch:false});
+ await waitFor(()=>store.message(last.id),{message:'the thread fetched'});await c.idle();
+ assert.ok(store.message(early[0].id),'the oldest reply, two pages back');assert.deepEqual(cats(store,early[0].id),['stored']);
 });
 
 test('a reply count announced while its thread is being fetched is fetched too',async t=>{
@@ -239,20 +268,20 @@ test('the thread feed finds new replies in a topic I took part in while the coll
  const {lark,store,running}=await setup(t);const topic=lark.chat({name:'话题群',chatMode:'topic'});
  const first=await running();const root=lark.post(topic,{text:'别人的话题'}),mine=lark.post(topic,{thread:root.id,mine:true,text:'我的回复'});
  await waitFor(()=>store.message(mine.id));await first.reconcile('periodic');await first.stop();
- assert.equal(store.message(root.id),undefined,'the root came before I took part');
+ assert.deepEqual(cats(store,root.id),['stored'],'the root came before I took part: it is only stored');
  // A topic reply that does not move the conversation entry: only the thread feed and its reply count show it.
  const later=lark.post(topic,{thread:root.id,text:'之后的回复'},{event:'none',touch:false});
  await running();
  assert.deepEqual(cats(store,later.id),['thread']);assert.deepEqual(cats(store,mine.id),['thread','own']);
 });
 
-test('the @me sweep finds a mention in a group that is not watched and whose entry did not change',async t=>{
+test('the @me sweep finds a mention in a group without a level whose entry did not change',async t=>{
  const {lark,store,running}=await setup(t);const group=lark.chat({name:'大群',memberCount:2000});
  const c=await running();
  const v=lark.post(group,{atMe:true,text:'求助'},{event:'none',touch:false}),all=lark.post(group,{atAll:true,isAtMe:true,text:'全员通知'},{event:'none',touch:false});
  await c.reconcile('periodic');assert.equal(store.message(v.id),undefined,'periodic reconciliation does not see it');
  await c.reconcile('manual');
- assert.deepEqual(cats(store,v.id),['mention']);assert.equal(store.message(all.id),undefined);
+ assert.deepEqual(cats(store,v.id),['mention']);assert.deepEqual(cats(store,all.id),['stored'],'an @all the search also finds is no mention of me');
  assert.equal(store.message(v.id).chatName,'大群','named in the same cycle that found it');
  const sweep=lark.requests.filter(r=>r.path==='/agent/v1/search/mention-history').at(-1);
  assert.equal(typeof sweep.body.startTime,'number');assert.equal(typeof sweep.body.endTime,'number');assert.ok(sweep.body.limit<=50);
@@ -278,17 +307,19 @@ test('a mention open-lark has not stored yet is resolved around its position or 
  assert.deepEqual(cats(store,r.id),['mention']);assert.equal(store.status().pendingMentions,0);
 });
 
-test('watch list changes apply at once and a newly watched group is collected from when it was added',async t=>{
- const {lark,store,running}=await setup(t);const g=lark.chat({name:'新关注群'});const c=await running();
- const before=lark.post(g,{text:'加入前'});await c.idle();await sleep(30);
- store.watch(g,lark.now());
- const after=lark.post(g,{text:'加入后'});await waitFor(()=>store.message(after.id));
- assert.deepEqual(cats(store,after.id),['watched']);
- const quiet=lark.post(g,{text:'加入后只写库'},{event:'none'});await c.reconcile('periodic');
- assert.deepEqual(cats(store,quiet.id),['watched']);assert.equal(store.message(before.id),undefined);
- store.unwatch(g);
- const removed=lark.post(g,{text:'移出后'});lark.post(g,{text:'移出后只写库'},{event:'none'});await c.reconcile('periodic');await sleep(30);
- assert.equal(store.message(removed.id),undefined);assert.equal(store.counts().total,2);
+test('a level applies at once: a group set to instant is instant from then on and read every cycle, and once I clear it what follows is only stored',async t=>{
+ const {lark,store,running}=await setup(t);const g=lark.chat({name:'新的即时群'});const c=await running();
+ const before=lark.post(g,{text:'定级之前'});await waitFor(()=>store.message(before.id));
+ store.setLevel(g,'instant',{by:'owner',now:lark.now()});
+ const after=lark.post(g,{text:'定级之后'});await waitFor(()=>store.message(after.id));await c.reconcile('periodic');
+ assert.deepEqual(cats(store,before.id),['stored'],'what came before is only stored');assert.deepEqual(cats(store,after.id),['instant']);
+ // Written without an event and without moving the chat's entry: only reading the instant group every cycle finds it.
+ const quiet=lark.post(g,{text:'定级之后只写库'},{event:'none',touch:false});await c.reconcile('periodic');
+ assert.deepEqual(cats(store,quiet.id),['instant']);
+ store.clearLevel(g);
+ const removed=lark.post(g,{text:'取消之后'});await waitFor(()=>store.message(removed.id));await c.reconcile('periodic');
+ const unread=lark.post(g,{text:'取消之后只写库'},{event:'none',touch:false});await c.reconcile('periodic');
+ assert.deepEqual(cats(store,removed.id),['stored']);assert.equal(store.message(unread.id),undefined,'no longer read every cycle');
 });
 
 test('open-lark not live holds the reconciliation watermark until sync returns to live',async t=>{
@@ -352,14 +383,15 @@ test('a chat that cannot be read to its last message is given up after a bound w
 });
 
 // Live, open-lark's stored last position of a chat stayed one behind its newest message for cycles on end, in a direct
-// chat with a bot whose newest message had been pushed and stored, and in a group that is not watched whose newest
-// message does not concern me. A chat read to its cursor whose window is then held there while `posts` arrive, each
-// '<how>[ <kind>]': 'pushed' butler stores at once (it @s me, so that it does in any chat), 'quiet' (@ me as well) and
-// 'unrelated' only open-lark stores; kind 'ephemeral' is a message only I see, at the position of the one before it,
-// and 'deleted' one that Lark deleted.
-async function laggingWindow(t,{chatMode='direct',watched=false,posts}){
+// chat with a bot whose newest message had been pushed and stored, and in a group whose newest message did not concern
+// me (then not kept; a group butler keeps nothing of but what concerns me is now an ignored one). A chat read to its
+// cursor, at `level` if given, whose window is then held there while `posts` arrive, each '<how>[ <kind>]': 'pushed'
+// butler stores at once (it @s me, so that it does in any chat), 'quiet' (@ me as well) and 'unrelated' only open-lark
+// stores; kind 'ephemeral' is a message only I see, at the position of the one before it, and 'deleted' one that Lark
+// deleted.
+async function laggingWindow(t,{chatMode='direct',level,posts}){
  const {lark,store,running}=await setup(t);const id=lark.chat({name:'机器人',chatMode});const c=await running();
- if(watched)store.watch(id,lark.now());
+ if(level)store.setLevel(id,level,{by:'owner',now:lark.now()});
  lark.post(id,{text:'第一条'});await c.reconcile('periodic');const cursor=store.chat(id).cursor;assert.ok(cursor>0);
  lark.freezeWindow(id,cursor);
  const views=posts.map(p=>{
@@ -372,8 +404,9 @@ async function laggingWindow(t,{chatMode='direct',watched=false,posts}){
 }
 // asks: how often butler asks open-lark for the last message (GET /messages/:id) when its store does not have it.
 for(const [what,options,asks] of [['a direct chat',{posts:['pushed']},0],['a direct chat two behind',{posts:['pushed','pushed']},0],
- ['a watched group',{chatMode:'group',watched:true,posts:['pushed']},0],['a group that is not watched',{chatMode:'group',posts:['pushed']},0],
- ['a direct chat one behind a message it was not pushed',{posts:['quiet']},1],['a group that is not watched one behind a message it does not keep',{chatMode:'group',posts:['unrelated']},1]])
+ ['an instant group',{chatMode:'group',level:'instant',posts:['pushed']},0],['a group without a level',{chatMode:'group',posts:['pushed']},0],
+ ['a direct chat one behind a message it was not pushed',{posts:['quiet']},1],['an ignored group one behind a message it does not keep',{chatMode:'group',level:'ignore',posts:['unrelated']},1],
+ ['a group without a level one behind a message only open-lark stored',{chatMode:'group',posts:['unrelated']},1]])
  test(`${what} whose window lags behind is read to its last message in the first cycle`,async t=>{
   const w=await laggingWindow(t,options);await w.c.reconcile('periodic');
   assert.equal(w.store.chat(w.id).dirty,false,'settled in the first cycle');assert.equal(w.store.chat(w.id).cursor,Number(w.last.position));
@@ -381,9 +414,9 @@ for(const [what,options,asks] of [['a direct chat',{posts:['pushed']},0],['a dir
  });
 // asks: whether butler asks open-lark for the last message in every cycle (it is not in butler's store, or not as one
 // that can stand for its position).
-for(const [what,options,asks] of [['a group that is not watched missing a position before it',{chatMode:'group',posts:['quiet','pushed']},false],
+for(const [what,options,asks] of [['a group without a level missing a position before it',{chatMode:'group',posts:['quiet','pushed']},false],
  ['a direct chat missing a position before it',{posts:['quiet','pushed']},false],
- ['a group that is not watched two behind messages it does not keep',{chatMode:'group',posts:['unrelated','unrelated']},true],
+ ['an ignored group two behind messages it does not keep',{chatMode:'group',level:'ignore',posts:['unrelated','unrelated']},true],
  ['a direct chat whose missing position also holds a pushed ephemeral message',{posts:['quiet','pushed ephemeral','pushed']},false],
  ['a direct chat whose last message is ephemeral, at the missing position before it',{posts:['quiet','quiet ephemeral']},true],
  ['a direct chat whose last message is deleted',{posts:['quiet deleted']},true]])
@@ -407,21 +440,21 @@ test('one chat reads at most a few pages per cycle and goes on in the next',asyn
  assert.equal(store.chat(dm).dirty,false);for(const v of many)assert.ok(store.message(v.id),v.textPreview);
 });
 
-test('topic groups are never read by position; my topics come from the thread feed and @me from the sweep',async t=>{
- const {lark,store,running}=await setup(t);const topic=lark.chat({name:'话题群',chatMode:'topic'}),watchedTopic=lark.chat({name:'关注的话题群',chatMode:'topic'});
- const first=await running();store.watch(watchedTopic,lark.now());
- lark.freezeWindow(topic,0);lark.freezeWindow(watchedTopic,0);
+test('topic groups are never read by position, instant ones neither; my topics come from the thread feed and @me from the sweep',async t=>{
+ const {lark,store,running}=await setup(t);const topic=lark.chat({name:'话题群',chatMode:'topic'}),instantTopic=lark.chat({name:'即时的话题群',chatMode:'topic'});
+ const first=await running();store.setLevel(instantTopic,'instant',{by:'owner',now:lark.now()});
+ lark.freezeWindow(topic,0);lark.freezeWindow(instantTopic,0);
  const root=lark.post(topic,{text:'别人的话题'}),mine=lark.post(topic,{thread:root.id,mine:true,text:'我的回复'});
- const pushed=lark.post(watchedTopic,{text:'关注的话题群里推送来的'});
+ const pushed=lark.post(instantTopic,{text:'即时的话题群里推送来的'});
  lark.emit({type:'message.upserted',feedId:topic,messageId:'sync:complete'});
  await waitFor(()=>store.message(mine.id)&&store.message(pushed.id));await first.reconcile('periodic');await first.stop();
  // While butler is down: a reply in my topic and an @me in another topic, neither moving the conversation entry.
  const later=lark.post(topic,{thread:root.id,text:'之后的回复'},{event:'none',touch:false});
  const other=lark.post(topic,{text:'另一个话题'},{event:'none',touch:false}),atMe=lark.post(topic,{thread:other.id,atMe:true,text:'@我'},{event:'none',touch:false});
  const c=await running();await c.reconcile('manual');
- assert.deepEqual(cats(store,later.id),['thread']);assert.deepEqual(cats(store,atMe.id),['mention']);assert.deepEqual(cats(store,pushed.id),['watched']);
- assert.deepEqual(lark.requests.filter(r=>r.path.endsWith('/messages')&&(r.path.includes(topic)||r.path.includes(watchedTopic))).map(r=>r.path),[]);
- for(const id of [topic,watchedTopic])assert.ok(!store.chat(id)?.cursor,'no cursor for a topic group');
+ assert.deepEqual(cats(store,later.id),['thread']);assert.deepEqual(cats(store,atMe.id),['mention']);assert.deepEqual(cats(store,pushed.id),['instant']);
+ assert.deepEqual(lark.requests.filter(r=>r.path.endsWith('/messages')&&(r.path.includes(topic)||r.path.includes(instantTopic))).map(r=>r.path),[]);
+ for(const id of [topic,instantTopic])assert.ok(!store.chat(id)?.cursor,'no cursor for a topic group');
 });
 
 test('a store from the previous version is upgraded, and a chat it left at cursor 0 is read from its tail',async t=>{
@@ -475,7 +508,7 @@ test('startup waits until open-lark offers every route it needs',async t=>{
 test('the collector only reads: no write route and never the pins route',async t=>{
  const {lark,store,running}=await setup(t);
  const dm=lark.chat({name:'张三',chatMode:'direct'}),group=lark.chat({name:'项目群'}),topic=lark.chat({name:'话题群',chatMode:'topic'});
- const c=await running();store.watch(group,lark.now());
+ const c=await running();store.setLevel(group,'instant',{by:'owner',now:lark.now()});
  const root=lark.post(group,{mine:true,text:'讨论'});lark.post(group,{thread:root.id,text:'回复'},{event:'root-only'});
  lark.post(dm,{text:'私聊'},{event:'bare'});lark.post(topic,{atMe:true,text:'@我'},{event:'none',touch:false});
  const t1=lark.post(topic,{text:'话题'});lark.post(topic,{thread:t1.id,mine:true,text:'我回'});

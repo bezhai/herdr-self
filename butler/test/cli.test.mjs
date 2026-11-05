@@ -27,23 +27,35 @@ test('the config file holds the token and must not be readable by others',async 
  r=await cli(path.join(dir,'missing.env'),'status');assert.equal(r.code,1);assert.match(r.stderr,/配置文件/);
 });
 
-test('watch list commands: add by name or id, refuse ambiguous names, remove; groups lists my groups',async t=>{
+test('level commands: set by name or id, refuse ambiguous names and unknown levels, clear mine; groups shows each group\'s level',async t=>{
  const {lark,store,dir}=await setup(t);const config=writeConfig(dir,lark);
  const project=lark.chat({name:'项目群',memberCount:42}),a=lark.chat({name:'测试群A'}),b=lark.chat({name:'测试群B',memberCount:7});lark.chat({name:'张三',chatMode:'direct'});
  let r=await cli(config,'groups');assert.equal(r.code,0,r.stderr);
  for(const name of ['项目群','测试群A','测试群B'])assert.match(r.stdout,new RegExp(name));assert.doesNotMatch(r.stdout,/张三/);assert.match(r.stdout,/42/);
- r=await cli(config,'watch','add','项目群');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/项目群/);
- r=await cli(config,'watch','add','测试群');assert.equal(r.code,1);assert.match(r.stderr,/测试群A/);assert.match(r.stderr,/测试群B/);
- r=await cli(config,'watch','add',b);assert.equal(r.code,0,r.stderr);
- assert.deepEqual(store.watches().map(w=>w.feedId).sort(),[project,b].sort());
- assert.ok(store.watches().every(w=>Math.abs(w.since-Date.now())<60e3),'collected from when it was added');
- r=await cli(config,'watch','list');assert.match(r.stdout,/项目群/);assert.match(r.stdout,/测试群B/);assert.doesNotMatch(r.stdout,/测试群A/);
- r=await cli(config,'groups');assert.match(r.stdout.split('\n').find(l=>l.includes('项目群')),/★/);
- r=await cli(config,'watch','remove','项目群');assert.equal(r.code,0,r.stderr);assert.deepEqual(store.watches().map(w=>w.feedId),[b]);
- // A topic group is added, with a warning: butler does not read topic groups by position.
+ assert.match(r.stdout.split('\n').find(l=>l.includes('项目群')),/^未分级（按只存不看） /);
+ r=await cli(config,'level');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/还没有聊天有级别/);assert.match(r.stdout,/没有级别的私聊按即时.*群按只存不看/);
+ r=await cli(config,'level','set','instant','项目群');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/项目群：未分级（按只存不看） → 即时（我定的）/);
+ r=await cli(config,'level','set','instant','测试群');assert.equal(r.code,1);assert.match(r.stderr,/测试群A/);assert.match(r.stderr,/测试群B/);
+ r=await cli(config,'level','set','watched','项目群');assert.equal(r.code,1);assert.match(r.stderr,/instant daily store ignore/);
+ r=await cli(config,'level','set','ignore',b);assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/测试群B：未分级（按只存不看） → 忽略（我定的）/);
+ assert.deepEqual(store.levels().map(l=>[l.feedId,l.level,l.by]),[[project,'instant','owner'],[b,'ignore','owner']]);
+ assert.ok(Math.abs(store.level(project).since-Date.now())<60e3,'instant from when it was set');
+ r=await cli(config,'level','list');assert.match(r.stdout,/即时（我定的）\s+项目群/);assert.match(r.stdout,/忽略（我定的）\s+测试群B/);assert.doesNotMatch(r.stdout,/测试群A/);
+ r=await cli(config,'groups');assert.match(r.stdout.split('\n').find(l=>l.includes('项目群')),/^即时（我定的） /);
+ r=await cli(config,'groups','--json');assert.equal(JSON.parse(r.stdout).find(g=>g.feedId===project).level.level,'instant');
+ r=await cli(config,'level','clear','项目群');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/项目群：即时（我定的） → 未分级（按只存不看）\n/);
+ assert.deepEqual(store.levels().map(l=>l.feedId),[b]);
+ r=await cli(config,'level','clear','测试群A');assert.equal(r.code,1,'only a level I set is cleared');assert.match(r.stderr,/没有找到/);
+ // A bot's direct chat goes by its level, which is instant until it is graded; a topic group is set with a warning:
+ // butler does not read it by position.
+ store.upsertChatInfo({feedId:'oc_bits',name:'Bits',chatMode:'direct'});
+ r=await cli(config,'level','set','store','Bits');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/Bits：未分级（按即时） → 只存不看（我定的）/);
+ assert.equal(store.level('oc_bits').level,'store');
+ r=await cli(config,'level','clear','Bits');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/Bits：只存不看（我定的） → 未分级（按即时）\n/);
+ r=await cli(config,'level','set','instant','Bits');assert.equal(r.code,0,r.stderr);assert.equal(store.level('oc_bits').level,'instant');
  const topic=lark.chat({name:'需求讨论',chatMode:'topic'});
- r=await cli(config,'watch','add','需求讨论');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/是话题群/);assert.ok(store.watchSince(topic));
- r=await cli(config,'watch','add',b);assert.doesNotMatch(r.stdout,/是话题群/);
+ r=await cli(config,'level','set','instant','需求讨论');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/是话题群/);assert.equal(store.instantSince(topic)>0,true);
+ r=await cli(config,'level','set','instant',b);assert.doesNotMatch(r.stdout,/是话题群/);assert.match(r.stdout,/忽略（我定的） → 即时（我定的）/);
  assert.ok(a);assert.deepEqual(lark.writes(),[]);
 });
 
@@ -54,13 +66,19 @@ test('status and list show what the collector recorded',async t=>{
  await waitFor(()=>store.message(at.id)?.chatName&&store.message(d.id));c.flushStatus();
  let r=await cli(config,'status');assert.equal(r.code,0,r.stderr);
  assert.match(r.stdout,/推送：已连接/);assert.match(r.stdout,/对账/);assert.match(r.stdout,/live/);assert.match(r.stdout,/mention 1/);assert.match(r.stdout,/dm 1/);
+ assert.match(r.stdout,/聊天级别：即时 0 个、每日 0 个、只存不看 0 个、忽略 0 个（我定的 0 个），没有级别的私聊按即时、群按只存不看/);
  r=await cli(config,'status','--json');const s=JSON.parse(r.stdout);assert.equal(s.events.connected,true);assert.equal(s.counts.total,2);
+ store.setLevel(group,'instant',{by:'owner'});store.setLevel(dm,'store',{by:'model',reason:'x'});
+ r=await cli(config,'status');assert.match(r.stdout,/聊天级别：即时 1 个、每日 0 个、只存不看 1 个、忽略 0 个（我定的 1 个）/);
+ r=await cli(config,'status','--json');assert.deepEqual(JSON.parse(r.stdout).levels,{instant:1,daily:0,store:1,ignore:0,owner:1});
  r=await cli(config,'list','--category','mention');assert.equal(r.code,0,r.stderr);
  assert.match(r.stdout,/请看下/);assert.match(r.stdout,/大群/);assert.doesNotMatch(r.stdout,/私聊内容/);
  assert.ok(r.stdout.includes(`${LINK_BASE}/messenger/${group}?message=${at.id}`));
  r=await cli(config,'list','--json','--since','1h');const items=JSON.parse(r.stdout);
  assert.deepEqual(items.map(i=>i.id).sort(),[at.id,d.id].sort());assert.ok(items.every(i=>i.link&&Array.isArray(i.categories)&&i.chatName));
  r=await cli(config,'list','--category','nope');assert.equal(r.code,1);
+ const chatter=lark.post(lark.chat({name:'闲聊群'}),{text:'和我无关的闲聊'});await waitFor(()=>store.message(chatter.id));
+ r=await cli(config,'list','--category','stored');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/和我无关的闲聊/);assert.match(r.stdout,/\[stored\]/);
 });
 
 test('run collects as a long-running process and stops cleanly on SIGTERM',async t=>{
@@ -106,7 +124,7 @@ const agentStarts=dir=>fs.readFileSync(path.join(dir,'herdr','calls.jsonl'),'utf
 
 test('process --once turns the backlog into matters through herdr; matters lists them with links',async t=>{
  const {lark,store,dir}=await setup(t);
- const ask=post(store,{text:'@原智鸿 帮忙审批下这个合并请求',categories:['mention','watched']}),noise=post(store,{chat:'g2',name:'李四',text:'收到'});
+ const ask=post(store,{text:'@原智鸿 帮忙审批下这个合并请求',categories:['mention','instant']}),noise=post(store,{chat:'g2',name:'李四',text:'收到'});
  const herdr=fakeHerdr(dir,{replies:[{text:JSON.stringify({new:[{title:'审批合并请求',who:'陈帆',ask:'审批 MR',due:null,urgency:'high',messages:['m1']}],updates:[]})}]});
  let r=await cli(writeConfig(dir,lark),'process','--once');assert.equal(r.code,1);assert.match(r.stderr,/BUTLER_MODEL_MACHINE/);
  const config=writeConfig(dir,lark,0o600,`BUTLER_MODEL_MACHINE=cpu1-butler\nBUTLER_MODEL_CWD=/home/me/.local/share/butler-model\nBUTLER_HERDR=${herdr}\n`);

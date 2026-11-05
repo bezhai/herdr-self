@@ -58,7 +58,7 @@ test('the owner talks freely: the model picks the actions, butler carries them o
  assert.equal(d.said,'把 Meego 项目管理加进忽略名单');assert.equal(d.me,'原智鸿');
  assert.ok(d.senders.some(s=>s.name==='Meego 项目管理'&&s.type==='bot'));
  assert.deepEqual(d.openMatters.map(m=>m.matter).sort(),[meego,perm,review].sort());
- assert.ok(d.groups.includes('GEO 小分队'));assert.deepEqual(d.watched,[]);assert.deepEqual(d.ignored,[]);
+ assert.ok(d.groups.includes('GEO 小分队'));assert.deepEqual(d.instant,[]);assert.deepEqual(d.ignored,[]);
  assert.match(model.calls[0].system,/ignore/);assert.doesNotMatch(model.calls[0].system,/\n/,'the system prompt is one command-line argument');
  assert.doesNotMatch(model.calls[0].prompt,/oc_geo|meego\b/,'ids stay with butler');
  assert.deepEqual(matters.ignoredSenders().map(s=>[s.senderId,s.name]),[['meego','Meego 项目管理']]);
@@ -70,12 +70,19 @@ test('the owner talks freely: the model picks the actions, butler carries them o
  assert.match(r.data.history[0].reply,/已加入忽略名单/);
  assert.deepEqual(matters.ignoredSenders(),[]);assert.match(r.reply,/已移出忽略名单：Meego 项目管理/);assert.match(r.reply,/好的。/);
 
+ // Watching a group is setting it to instant myself; not watching it any more clears my level.
  r=await say('关注一下 GEO 小分队',{actions:[{do:'watch',group:'GEO 小分队'}],reply:''});
- assert.deepEqual(store.watches().map(w=>w.feedId),[geo]);assert.match(r.reply,/已加入关注：GEO 小分队/);
+ assert.deepEqual(store.levels().map(l=>[l.feedId,l.level,l.by,l.since]),[[geo,'instant','owner',T]]);
+ assert.match(r.reply,/已把 GEO 小分队 定为即时：未分级（只存不看） → 即时（你定的）/,'what it was and what it is');
  r=await say('需求讨论也关注',{actions:[{do:'watch',group:'需求讨论'}],reply:''});
- assert.ok(store.watchSince(topic));assert.match(r.reply,/话题群/,'the topic-group caveat, as on the command line');
+ assert.equal(store.instantSince(topic),T);assert.match(r.reply,/话题群/,'the topic-group caveat, as on the command line');
+ assert.deepEqual(model.calls.at(-1).data.instant,['GEO 小分队'],'the model sees the instant chats');
+ r=await say('还是关注 GEO 小分队',{actions:[{do:'watch',group:'GEO 小分队'}],reply:''});assert.match(r.reply,/GEO 小分队 已经是你定的即时/);
  r=await say('GEO 小分队别关注了',{actions:[{do:'unwatch',group:'GEO 小分队'}],reply:''});
- assert.deepEqual(store.watches().map(w=>w.feedId),[topic]);assert.match(r.reply,/已移出关注：GEO 小分队/);
+ assert.deepEqual(store.levels().map(l=>l.feedId),[topic]);assert.match(r.reply,/已取消你给 GEO 小分队 定的级别：即时（你定的） → 未分级（只存不看）/);
+ // A direct chat I set to instant on the command line: without my level it is instant until the model grades it.
+ store.upsertChatInfo({feedId:'oc_bits',name:'Bits',chatMode:'direct'});store.setLevel('oc_bits','instant',{by:'owner',now:T});
+ r=await say('Bits 别关注了',{actions:[{do:'unwatch',group:'Bits'}],reply:''});assert.match(r.reply,/已取消你给 Bits 定的级别：即时（你定的） → 未分级（即时）/);
 
  r=await say(`#${meego} 不用管了`,{actions:[{do:'close',matter:meego,reason:'只是通知'}],reply:''});
  assert.equal(matters.matter(meego).status,'closed');assert.equal(matters.matter(meego).closedBy,'owner');assert.match(matters.matter(meego).reason,/只是通知/);
@@ -97,10 +104,10 @@ test('the owner talks freely: the model picks the actions, butler carries them o
  assert.deepEqual(rows.map(e=>e.columns[2].elements[0].behaviors[0].value),[perm,review,meego].map(matter=>({act:'done',matter,card:'list',ids:[perm,review,meego],t:T})),
   'then the list, whose buttons say which matters its card shows');
 
- const before=JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.watches()]);
+ const before=JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.levels()]);
  r=await say('今天最急的是什么？',{actions:[],reply:'最急的是给黄凯熙加权限，今天要处理。'});
  assert.equal(r.reply,'最急的是给黄凯熙加权限，今天要处理。','just an answer');
- assert.equal(JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.watches()]),before,'and nothing changed');
+ assert.equal(JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.levels()]),before,'and nothing changed');
  assert.equal(changes.length,2,'listing and answering change no matter');
 });
 
@@ -110,7 +117,7 @@ test('a name that fits more than one sender or group lists the candidates and do
  assert.deepEqual(matters.ignoredSenders(),[]);
  assert.match(r.reply,/对应多个发送方/);assert.match(r.reply,/赤尾工具人/);assert.match(r.reply,/赤尾（/);
  r=await say('关注 GEO 的群',{actions:[{do:'watch',group:'GEO'}],reply:''});
- assert.deepEqual(store.watches(),[]);assert.match(r.reply,/对应多个群/);assert.match(r.reply,/GEO 小分队/);assert.match(r.reply,/GEO服务告警群/);
+ assert.deepEqual(store.levels(),[]);assert.match(r.reply,/对应多个群/);assert.match(r.reply,/GEO 小分队/);assert.match(r.reply,/GEO服务告警群/);
  r=await say('忽略王五',{actions:[{do:'ignore',sender:'王五'}],reply:''});
  assert.match(r.reply,/没有找到发送方：王五/);
  r=await say('就忽略赤尾',{actions:[{do:'ignore',sender:'赤尾'}],reply:''});
@@ -121,13 +128,13 @@ test('a name that fits more than one sender or group lists the candidates and do
 
 test('what the model asks for outside the fixed actions is not carried out',async t=>{
  const {store,matters,say,ids:[meego,perm,review],changes}=setup(t);
- const before=JSON.stringify([matters.ignoredSenders(),store.watches()]);
+ const before=JSON.stringify([matters.ignoredSenders(),store.levels()]);
  const r=await say('帮我处理一下',{actions:[{do:'delete',matter:meego},{do:'send',to:'陈帆',text:'好的'},{do:'close'},{do:'ignore'},'close 1',{do:'close',matter:99},
   {do:'close',matter:`#${perm}`},{do:'reopen',matter:review}],reply:'已经处理好了，详情见 https://evil.example/a'});
  assert.equal(matters.matter(meego).status,'open','an unknown action does nothing');
  assert.equal(matters.matter(perm).status,'closed','a matter given as "#n" is fine');
  assert.equal(changes.length,1,'told of the one matter closed, not of the reopen that did nothing');
- assert.equal(JSON.stringify([matters.ignoredSenders(),store.watches()]),before);
+ assert.equal(JSON.stringify([matters.ignoredSenders(),store.levels()]),before);
  assert.match(r.reply,/delete/);assert.match(r.reply,/send/);assert.match(r.reply,/没有执行/);
  assert.match(r.reply,/没有 #99/);assert.match(r.reply,new RegExp(`#${review} 没有结束`));
  assert.doesNotMatch(r.reply,/evil\.example/,'a link the model wrote is not passed on');

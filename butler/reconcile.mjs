@@ -2,9 +2,9 @@
 // open-lark writes during gap repair, backfill or background thread syncs), so each cycle reads open-lark's store:
 // - conversation lists, newest first down to a horizon, to find chats whose entry changed; those chats are read by
 //   position from where butler stopped (all of them, since a reply to me in any group counts and Lark keeps no
-//   history of replies to look up), and watched groups on every cycle. Topic groups are not read by position: open-lark
-//   cannot be trusted with their message window (see syncChat), and what concerns me there is in topics I took part
-//   in or @s me, which the next two cover;
+//   history of replies to look up), and normal groups at the instant level on every cycle. Topic groups are not read
+//   by position, instant or not: open-lark cannot be trusted with their message window (see syncChat), and what
+//   concerns me there is in topics I took part in or @s me, which the next two cover;
 // - the thread feed, for threads I took part in whose reply count changed;
 // - the @me history search over a time window, for mentions in chats whose entry did not change;
 // and fetches replies of threads whose root showed a grown reply count.
@@ -83,7 +83,8 @@ export class Reconciler{
   return true;
  }
  async #syncChats(errors){
-  const ids=[...new Set([...this.store.dirtyChats(this.options.maxChatsPerCycle),...this.store.watches().map(w=>w.feedId)])];
+  const instant=this.store.levels().filter(l=>l.level==='instant'&&l.chatMode==='group').map(l=>l.feedId);
+  const ids=[...new Set([...this.store.dirtyChats(this.options.maxChatsPerCycle),...instant])];
   for(const feedId of ids){
    try{await this.syncChat(feedId);}
    catch(e){errors.push(feedId);this.store.addError(`聊天 ${this.store.chat(feedId)?.name||feedId}`,message(e));}
@@ -91,7 +92,7 @@ export class Reconciler{
   return ids.length;
  }
  // Reads one chat by position from its cursor, or the first time from its newest messages back to when collection
- // started, and records every message; the recorder keeps the ones that concern me. At most options.chatPages pages a
+ // started, and records every message; the recorder keeps all but an ignored chat's. At most options.chatPages pages a
  // cycle: a long backlog goes on in the next cycle, so one chat cannot hold a cycle (a page can take open-lark seconds
  // when it has to fetch the positions from Lark).
  //
@@ -145,10 +146,10 @@ export class Reconciler{
  // A read that ended at the cursor still reached a message above it when butler holds every position from just after
  // the cursor `through` the message's own, or the one before it when the message is the view just read by id. Live,
  // open-lark's window stayed one behind the newest message for cycles on end: in a direct chat with a bot, whose newest
- // message was pushed and stored, and in a group that is not watched, whose newest one did not concern me. Main-sequence
- // positions are dense, one message each besides ephemeral ones (see Store.holdsPositions), so nothing in the main
- // sequence is left unread; the cursor moves there. A longer range is complete mostly in a direct chat or a watched
- // group, where butler stores every message; other groups hold only what concerns me.
+ // message was pushed and stored, and in a group whose newest one did not concern me. Main-sequence positions are
+ // dense, one message each besides ephemeral ones (see Store.holdsPositions), so nothing in the main sequence is left
+ // unread; the cursor moves there. A longer range is complete when every message of it was pushed: butler keeps every
+ // message it is pushed, but an ignored chat's that do not concern me.
  #heldUpTo(chat,cursor,position,through=position){
   if(!this.store.holdsPositions(chat.feedId,cursor+1,through))return false;
   this.store.setCursor(chat.feedId,position);return true;
@@ -241,7 +242,9 @@ export class Reconciler{
  }
  #followSince(thread,root){
   const direct=(this.store.chat(root.feedId)?.chatMode??(root.chatType===1?'direct':undefined))==='direct';
-  const since=thread?.participatedSince??this.store.watchSince(root.feedId)??(direct?this.collectedSince:undefined);
+  // A direct chat's replies count from when collection began, whatever its level: a person's are dm, and a bot's are
+  // instant until the chat is graded.
+  const since=thread?.participatedSince??(direct?this.collectedSince:this.store.instantSince(root.feedId));
   return since===undefined?undefined:Math.max(since,this.collectedSince);
  }
 

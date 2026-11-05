@@ -13,8 +13,8 @@ const at=ms=>new Date(ms).toLocaleString('sv-SE').slice(0,16);
 const short=ms=>at(ms).slice(5);
 
 // What every kind of run is told alike.
-const FACTS='每条消息带着这些事实：sender 是发送者；senderType 为 user 是人，bot 和 agent 是机器人；mine 表示是TA自己发的；categories 说明这条消息为什么和TA有关：mention 是有人 @TA，dm 是私聊，reply 是回复TA的消息，thread 是TA参与过的话题，watched 是TA关注的群，own 是TA自己发的消息；mentionsAll 表示 @所有人；mentions 是这条消息 @ 到的人，其中的 TA 是TA本人；myReactions 是TA给这条消息加的表情，reactions 是别人加的表情、人数和其中几个人的名字；thread 为 root 是话题的第一条，为 reply 是话题里的回复，root 和 replyTo 指向相关的那条消息。这些只是事实，怎么权衡由你决定。';
-const BAR='事项是需要TA本人去做、回复、决定或跟进的事；只需要TA知道的信息（包括状态变化、日程和会议的通知）、成功或完成的通知、没有要做的事的提醒、闲聊（哪怕是在问TA）和活动推广都不算事项。机器人、告警和系统发来的通知默认不是事项，除非内容明确要TA本人去做一件TA还没做的事；内容太少、看不出要TA做什么的（比如只有标题的卡片）不是事项。一条消息 @ 了好几个人，或者是关注的群（watched）里的讨论，只有明确要TA本人做什么时才是事项。消息发给了TA、@了TA或者私聊TA，本身不说明这件事归TA：要按「关于TA」（profile）、TA的说明（notes）和TA标记过不归TA的事项（notMine）判断是不是该TA去做，TA的说明优先于「关于TA」。';
+const FACTS='每条消息带着这些事实：sender 是发送者；senderType 为 user 是人，bot 和 agent 是机器人；mine 表示是TA自己发的；categories 说明管家为什么收下这条消息：mention 是有人 @TA，dm 是真人发来的私聊（包括TA在私聊里发的），reply 是回复TA的消息，thread 是TA参与过的话题，instant 是即时级别的聊天里的消息（这些聊天的消息都交给你整理），own 是TA自己发的消息，stored 是和TA没有直接关系、只因为所在的聊天没有被忽略才存下的消息，只作为上下文；mentionsAll 表示 @所有人；mentions 是这条消息 @ 到的人，其中的 TA 是TA本人；myReactions 是TA给这条消息加的表情，reactions 是别人加的表情、人数和其中几个人的名字；thread 为 root 是话题的第一条，为 reply 是话题里的回复，root 和 replyTo 指向相关的那条消息。这些只是事实，怎么权衡由你决定。';
+const BAR='事项是需要TA本人去做、回复、决定或跟进的事；只需要TA知道的信息（包括状态变化、日程和会议的通知）、成功或完成的通知、没有要做的事的提醒、闲聊（哪怕是在问TA）和活动推广都不算事项。机器人、告警和系统发来的通知默认不是事项，除非内容明确要TA本人去做一件TA还没做的事；内容太少、看不出要TA做什么的（比如只有标题的卡片）不是事项。一条消息 @ 了好几个人，或者是即时级别的聊天（instant）里的讨论，只有明确要TA本人做什么时才是事项。消息发给了TA、@了TA或者私聊TA，本身不说明这件事归TA：要按「关于TA」（profile）、TA的说明（notes）和TA标记过不归TA的事项（notMine）判断是不是该TA去做，TA的说明优先于「关于TA」。';
 // What the owner has answered, in words or with a reaction, the owner knows and follows up on; butler is for the rest.
 const RESPONDED='管家只跟踪TA还没回应的事。TA已经回应了的，不管是回复了消息（哪怕TA只是答应下来、还没做完），还是加了表示收到、知道、同意或完成的表情（比如 Get、OK、DONE、THUMBSUP；JOYFUL、ClownFace 这类通常只是表达情绪，不算回应），TA都已经知道了，会自己跟进：不要为它新建事项，已有的事项关掉，reason 写「TA已回应」并说明TA怎么回应的。一个表情算不算回应由你判断。';
 // 关于TA, my notes and the matters I marked as not mine come partly from the model reading messages, so they travel

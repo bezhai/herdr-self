@@ -36,7 +36,7 @@ function setup(t,{answer,options,now,profiled=true,reviewed=true}={}){
 test('new messages become matters: the model decides, butler keeps the sources and makes the links',async t=>{
  const {store,matters,model,processor}=setup(t,{answer:d=>({new:[{title:'评审接口方案',who:'陈帆',ask:'看一下接口方案并给意见',due:'2026-10-24 18:00',urgency:'high',
   messages:[ref(d,'帮忙看下'),ref(d,'文档在这')]}],updates:[]})});
- const ask=post(store,{text:'@原智鸿 帮忙看下接口方案，明天下班前要',at:min(1),categories:['mention','watched']});
+ const ask=post(store,{text:'@原智鸿 帮忙看下接口方案，明天下班前要',at:min(1),categories:['mention','instant']});
  const doc=post(store,{text:'文档在这',at:min(2)});
  post(store,{chat:'g2',name:'李四',text:'中午吃啥',at:min(3)});
  const before=JSON.stringify(store.list({limit:100}));
@@ -102,6 +102,28 @@ test('ignored senders never reach the model, not even as context, and un-ignorin
  matters.unignore('zebra');assert.deepEqual(matters.ignoredSenders(),[]);
  assert.equal(matters.pendingCount(),0,'skipped while ignored, so they stay skipped');
  assert.ok(colleague);
+});
+
+// What the collector keeps of a chat beyond what is about me, and not at the instant level, is only stored (see rules.mjs).
+test('batches take what is about me and what instant chats say; what is only stored never waits and comes only as context',async t=>{
+ const {store,matters,model,processor}=setup(t);
+ const chatter=[post(store,{chat:'g2',sender:'u5',name:'王五',text:'别人的闲聊',at:min(0),categories:['stored']}),post(store,{chat:'g2',sender:'u5',name:'王五',text:'还在闲聊',at:min(1),categories:['stored']})];
+ post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:min(2)});
+ post(store,{text:'即时群里的讨论',at:min(3)});
+ post(store,{chat:'bot',sender:'zebra',name:'Zebra',type:'bot',text:'投放完成',at:min(4),categories:['stored']});
+ post(store,{chat:'g2',text:'@原智鸿 帮忙看下',at:min(5),categories:['mention']});
+ post(store,{chat:'g2',sender:'u5',name:'王五',text:'之后的闲聊',at:min(6),categories:['stored']});
+ assert.equal(matters.pendingCount(),3,'a person\'s direct message, the instant chat\'s and the mention');
+ assert.deepEqual(matters.senders().map(s=>s.name).sort(),['张三','陈帆'].sort(),'senders whose messages could reach the model');
+ matters.ignore('u5','王五');assert.equal(matters.skipIgnored(),0,'nothing of theirs waits, so nothing is passed by');matters.unignore('u5');
+ await processor.runOnce();
+ assert.equal(model.calls.length,1);const d=model.calls[0].data;
+ assert.deepEqual(newTexts(d),['在吗','即时群里的讨论','@原智鸿 帮忙看下']);
+ const context=messagesOf(d).filter(m=>!m.new).map(m=>[m.text,m.categories]);
+ assert.deepEqual(context,[['别人的闲聊',['stored']],['还在闲聊',['stored']]],'the chat\'s earlier messages, only stored, are context');
+ assert.doesNotMatch(model.calls[0].prompt,/投放完成|之后的闲聊/);
+ assert.equal(matters.pendingCount(),0);assert.equal((await processor.runOnce()).runs,0,'what is only stored never comes up');
+ assert.ok(chatter.every(id=>store.message(id)));
 });
 
 test('only my own messages and nothing open: no model run',async t=>{
@@ -467,6 +489,20 @@ test('my message or reaction in the chat of an open matter starts a round at onc
  assert.equal(r.runs,1);assert.deepEqual(newTexts(model.calls[2].data),['也看下这个'],'a new message that carries a reaction of mine');
  matters.ignore('u9','广告机器人');post(store,{sender:'u9',name:'广告机器人',type:'bot',text:'广告',at:min(6),reactions:GET});
  assert.equal(processor.checkOwner(),undefined,'not my reaction on an ignored sender\'s message');
+});
+
+test('a message only stored that carries a reaction of mine starts no round and never waits, and comes along as what I did there',async t=>{
+ const {store,matters,model,processor}=setup(t);
+ opened(store,matters);
+ const chatter=post(store,{text:'群里别人的闲聊',at:min(2),categories:['stored'],reactions:GET}),later=post(store,{text:'另一句闲聊',at:min(3),categories:['stored']});
+ store.setReactions(later,GET);
+ assert.equal(processor.checkOwner(),undefined,'it would never be processed: a quick round every few seconds for good');
+ assert.equal(matters.pendingCount(),0);
+ post(store,{text:'日志在群文件里',at:min(4)});
+ await processor.runOnce();
+ const shown=messagesOf(model.calls[0].data).filter(m=>m.myReactions).map(m=>[m.text,Boolean(m.new)]);
+ assert.deepEqual(shown,[['群里别人的闲聊',false],['另一句闲聊',false]],'context, never new');
+ assert.equal(processor.checkOwner(),undefined);assert.ok(chatter);
 });
 
 test('the quick check starts no round while one runs; the round under way takes my message along',async t=>{

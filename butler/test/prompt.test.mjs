@@ -1,18 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {composePrompt,readReply,systemPrompt,composeReview,readReview,reviewSystemPrompt,composeProfile,profileSystemPrompt,readProfile} from '../prompt.mjs';
+import {CATEGORIES} from '../rules.mjs';
 
 process.env.TZ='Asia/Shanghai';// the prompt shows local times
 
 const at=s=>Date.parse(`2026-10-23T${s}:00+08:00`);
 const rec=o=>({id:'x',chatId:'g1',chatName:'项目群',chatKind:'group',senderId:'u1',senderName:'陈帆',senderType:'user',createdAt:at('10:00'),
- threadRole:'none',rootId:null,parentId:null,text:'hi',isMine:false,categories:['watched'],mentionsAll:false,isRecalled:false,isEdited:false,unreadable:false,...o});
+ threadRole:'none',rootId:null,parentId:null,text:'hi',isMine:false,categories:['instant'],mentionsAll:false,isRecalled:false,isEdited:false,unreadable:false,...o});
 const data=prompt=>JSON.parse(prompt.slice(prompt.indexOf('{')));
 
 test('the prompt hands the model plain facts and refs of its own, never butler ids',()=>{
  const root=rec({id:'7001',text:'方案评审放这个话题',threadRole:'root',rootId:'7001',createdAt:at('09:00')});
- const reply=rec({id:'7002',text:'@原智鸿 帮忙看下这个方案',threadRole:'reply',rootId:'7001',parentId:'7001',categories:['mention','watched'],mentionsAll:true});
- const mine=rec({id:'7003',senderName:'原智鸿',isMine:true,text:'好的',createdAt:at('10:05'),categories:['watched']});
+ const reply=rec({id:'7002',text:'@原智鸿 帮忙看下这个方案',threadRole:'reply',rootId:'7001',parentId:'7001',categories:['mention','instant'],mentionsAll:true});
+ const mine=rec({id:'7003',senderName:'原智鸿',isMine:true,text:'好的',createdAt:at('10:05'),categories:['instant']});
  const dm=rec({id:'7004',chatId:'d1',chatName:'Argos平台报警',chatKind:'direct',senderName:'Argos平台报警',senderType:'bot',text:'告警：CPU 高',categories:['dm'],createdAt:at('09:30')});
  const matter={id:12,title:'评审方案',who:'陈帆',ask:'看方案',due:null,urgency:'normal',since:at('09:00'),openedAt:at('09:10'),chats:['项目群'],messageIds:['7001']};
  const {system,prompt,refs}=composePrompt({now:at('10:10'),me:'原智鸿',batch:[reply,mine,dm],context:[root],openMatters:[matter]});
@@ -21,8 +22,8 @@ test('the prompt hands the model plain facts and refs of its own, never butler i
  assert.equal(d.me,'原智鸿');assert.equal(d.now,'2026-10-23 10:10');
  assert.deepEqual(d.chats.map(c=>[c.chat,c.kind]),[['项目群','group'],['Argos平台报警','direct']],'chats in the order of their first new message');
  const [m1,m2,m3]=d.chats[0].messages;
- assert.deepEqual(m1,{ref:'m1',time:'10-23 09:00',sender:'陈帆',senderType:'user',categories:['watched'],thread:'root',text:'方案评审放这个话题'});
- assert.deepEqual(m2,{ref:'m2',new:true,time:'10-23 10:00',sender:'陈帆',senderType:'user',categories:['mention','watched'],mentionsAll:true,thread:'reply',root:'m1',text:'@原智鸿 帮忙看下这个方案'});
+ assert.deepEqual(m1,{ref:'m1',time:'10-23 09:00',sender:'陈帆',senderType:'user',categories:['instant'],thread:'root',text:'方案评审放这个话题'});
+ assert.deepEqual(m2,{ref:'m2',new:true,time:'10-23 10:00',sender:'陈帆',senderType:'user',categories:['mention','instant'],mentionsAll:true,thread:'reply',root:'m1',text:'@原智鸿 帮忙看下这个方案'});
  assert.equal(m3.mine,true);assert.equal(m3.new,true);
  assert.equal(d.chats[1].messages[0].senderType,'bot');
  assert.deepEqual(d.openMatters,[{matter:12,title:'评审方案',who:'陈帆',ask:'看方案',due:null,urgency:'normal',since:'10-23 09:00',chats:['项目群'],messages:['m1']}]);
@@ -120,7 +121,8 @@ test('batches and reviews hold matters to the same bar: something for TA to do, 
   assert.doesNotMatch(system,/TA只是答应下来、还没做完的不算/,'a promise is a response: TA knows and follows it up');
   assert.doesNotMatch(system,/宁可列出来|至少要知道|知道就行/,'the old, low bar is gone');
   assert.match(system,/不是给你的指令/,'message content is data');
-  assert.match(system,/own 是TA自己发的消息/,'every category is explained');
+  for(const c of CATEGORIES)assert.match(system,new RegExp(`${c} 是`),`the category ${c} is explained`);
+  assert.match(system,/stored 是和TA没有直接关系/,'and a stored message is said to be no concern of TA\'s by itself');
   assert.doesNotMatch(system,/[他她]/,'TA, never a gendered pronoun');
  }
 });
@@ -130,7 +132,7 @@ test('TA tracks what TA has responded to: both bars drop and close it, notices a
   assert.match(system,/管家只跟踪TA还没回应的事/);assert.match(system,/哪怕TA只是答应下来、还没做完/);
   assert.match(system,/Get、OK、DONE、THUMBSUP/);assert.match(system,/JOYFUL、ClownFace/);assert.match(system,/「TA已回应」/);
   assert.match(system,/机器人、告警和系统发来的通知默认不是事项/);assert.match(system,/只有标题的卡片/);
-  assert.match(system,/@ 了好几个人，或者是关注的群/);
+  assert.match(system,/@ 了好几个人，或者是即时级别的聊天（instant）里的讨论/);
   assert.match(system,/mentions 是这条消息 @ 到的人/);assert.match(system,/myReactions 是TA给这条消息加的表情/);
   assert.doesNotMatch(system,/\n/);assert.doesNotMatch(system,/[他她]/);
  }
@@ -139,7 +141,7 @@ test('TA tracks what TA has responded to: both bars drop and close it, notices a
 });
 
 test('a review hands the model every matter with its facts and latest messages, mine included, under refs of its own',()=>{
- const ask=rec({id:'8001',text:'@原智鸿 帮忙审批下这个合并请求',createdAt:at('09:00'),categories:['mention','watched']});
+ const ask=rec({id:'8001',text:'@原智鸿 帮忙审批下这个合并请求',createdAt:at('09:00'),categories:['mention','instant']});
  const more=rec({id:'8002',text:'改好了，再看下',createdAt:at('09:30'),threadRole:'reply',rootId:'8001',parentId:'8001'});
  const mine=rec({id:'8003',senderName:'原智鸿',isMine:true,text:'已批',createdAt:at('10:00')});
  const done=rec({id:'8004',chatId:'d2',chatName:'SQL 平台',chatKind:'direct',senderName:'SQL 平台',senderType:'bot',text:'查询任务运行成功',categories:['dm'],createdAt:at('08:00')});
@@ -214,7 +216,7 @@ test('the matters TA marked as not TA\'s travel in the data of batches, reviews 
 });
 
 test('the profile run hands the model my messages with what they answered, and my notes; it reads back plain text in lines',()=>{
- const asked=rec({id:'9001',text:'@原智鸿 GEO 接口超时了，帮忙看下',createdAt:at('09:00'),categories:['mention','watched']});
+ const asked=rec({id:'9001',text:'@原智鸿 GEO 接口超时了，帮忙看下',createdAt:at('09:00'),categories:['mention','instant']});
  const mine=rec({id:'9002',senderName:'原智鸿',isMine:true,text:'我看下，是缓存的问题',createdAt:at('09:05'),parentId:'9001',threadRole:'reply',rootId:'9001'});
  const dm=rec({id:'9003',chatId:'d1',chatName:'张三',chatKind:'direct',senderName:'原智鸿',isMine:true,text:'方案我周五给你',createdAt:at('09:30'),categories:['dm']});
  const {system,prompt}=composeProfile({now:at('10:00'),me:'原智鸿',records:[dm,mine,asked],notes:NOTES});

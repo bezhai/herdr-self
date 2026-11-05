@@ -34,13 +34,22 @@ export const NOT_MINE='不归我';
 const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER'],['model_runs','model','TEXT']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
+// What batches take: a message with a category other than stored, that is, about me or from an instant chat since
+// it became instant (see rules.mjs). Everything else the collector keeps, which is most of the store, is only ever
+// context. WAITING goes through the index on those categories (see store.mjs), named so that no plan reads the rest;
+// a message with several of them comes once per category, hence DISTINCT. BATCHED is the same for one message (m)
+// found otherwise.
+const WAITING=`message_categories c INDEXED BY categories_batched JOIN messages m ON m.id=c.message_id WHERE c.category<>'stored' AND NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=c.message_id)`;
+const BATCHED=`EXISTS(SELECT 1 FROM message_categories b WHERE b.message_id=m.id AND b.category<>'stored')`;
 const NOT_IN='m.id NOT IN (SELECT value FROM json_each(?))';
 const IN_LIST=column=>`${column} IN (SELECT value FROM json_each(?))`;
 // My reactions (owner_reactions o, on messages m) not processed yet.
 const REACTION_UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed_reactions pr WHERE pr.message_id=o.message_id AND pr.key=o.key)';
 // One of them waits for the model only once its message has been processed: until then the message's own facts show it.
 const REACTION_PENDING=`${REACTION_UNPROCESSED} AND NOT (${UNPROCESSED}) AND ${NOT_IGNORED}`;
-const REACTIONS='owner_reactions o JOIN messages m ON m.id=o.message_id';
+// From my reactions to the messages they are on, in that order (SQLite keeps the tables of a CROSS JOIN in place): my
+// reactions are few, the messages of a chat many.
+const REACTIONS='owner_reactions o CROSS JOIN messages m ON m.id=o.message_id';
 
 export class Matters{
  constructor(store){
@@ -53,19 +62,21 @@ export class Matters{
  #tx(fn){this.db.exec('BEGIN IMMEDIATE');try{const r=fn();this.db.exec('COMMIT');return r;}catch(e){this.db.exec('ROLLBACK');throw e;}}
 
  // ---- the ignore list: senders whose messages never go to the model
- // Everyone but me who sent a message butler holds, with the name and type of their latest message.
+ // Everyone but me who sent a message batches take (see WAITING), with the name and type of their latest message: the
+ // senders whose messages could reach the model, not everyone in every chat whose messages are only kept.
  senders(){
-  return this.#all(`SELECT sender_id,sender_name,sender_type,max(created_at) last,count(*) n FROM messages WHERE is_mine=0 AND sender_id IS NOT NULL GROUP BY sender_id ORDER BY n DESC`)
+  return this.#all(`SELECT sender_id,sender_name,sender_type,max(created_at) last,count(*) n FROM messages
+   WHERE id IN (SELECT message_id FROM message_categories WHERE category<>'stored') AND is_mine=0 AND sender_id IS NOT NULL GROUP BY sender_id ORDER BY n DESC`)
    .map(r=>({senderId:r.sender_id,name:r.sender_name??'',type:r.sender_type,messages:r.n,lastAt:r.last}));
  }
  ignoredSenders(){return this.#all('SELECT * FROM ignored_senders ORDER BY since,name').map(r=>({senderId:r.sender_id,name:r.name??'',since:r.since}));}
  ignore(senderId,name,now=Date.now()){this.#run('INSERT INTO ignored_senders(sender_id,name,since) VALUES(?,?,?) ON CONFLICT(sender_id) DO UPDATE SET name=excluded.name',senderId,name??null,now);}
  unignore(senderId){this.#run('DELETE FROM ignored_senders WHERE sender_id=?',senderId);}
- // Messages of ignored senders, and my reactions on them, count as processed when they are passed by, so taking a sender
- // off the list later does not hand the model everything it sent while it was on it.
+ // Messages of ignored senders that batches would take, and my reactions on them, count as processed when they are
+ // passed by, so taking a sender off the list later does not hand the model everything it sent while it was on it.
  skipIgnored(now=Date.now()){
   this.#run(`INSERT INTO processed_reactions(message_id,key,outcome,at) SELECT o.message_id,o.key,'ignored',? FROM ${REACTIONS} WHERE ${REACTION_UNPROCESSED} AND NOT (${NOT_IGNORED})`,now);
-  return Number(this.#run(`INSERT INTO processed(message_id,outcome,at) SELECT m.id,'ignored',? FROM messages m WHERE ${UNPROCESSED} AND NOT (${NOT_IGNORED})`,now).changes);
+  return Number(this.#run(`INSERT INTO processed(message_id,outcome,at) SELECT DISTINCT c.message_id,'ignored',? FROM ${WAITING} AND NOT (${NOT_IGNORED})`,now).changes);
  }
 
  // ---- my notes: corrections in my own words to what butler takes as mine (see profile.mjs), oldest first. A note
@@ -78,23 +89,28 @@ export class Matters{
 
  // ---- what the model is given
  #records(ids){return ids.map(r=>this.store.message(r.id)).filter(Boolean);}
- // Unprocessed messages, oldest first, ignored senders and exclude (ids) left out.
- pending(limit,exclude=[]){return this.#records(this.#all(`SELECT id FROM messages m WHERE ${UNPROCESSED} AND ${NOT_IGNORED} AND ${NOT_IN} ORDER BY created_at,id LIMIT ?`,JSON.stringify(exclude),limit));}
- // Messages that wait for the model, and reactions of mine that do (see REACTION_PENDING).
- pendingCount(){return this.#get(`SELECT count(*) n FROM messages m WHERE ${UNPROCESSED} AND ${NOT_IGNORED}`).n+this.#get(`SELECT count(*) n FROM ${REACTIONS} WHERE ${REACTION_PENDING}`).n;}
+ // Unprocessed messages batches take (see WAITING), oldest first, ignored senders and exclude (ids) left out.
+ pending(limit,exclude=[]){
+  return this.#records(this.#all(`SELECT DISTINCT c.created_at,c.message_id id FROM ${WAITING} AND ${NOT_IGNORED} AND ${NOT_IN} ORDER BY c.created_at,c.message_id LIMIT ?`,JSON.stringify(exclude),limit));
+ }
+ // Messages that wait for the model, and reactions of mine that do (see REACTION_PENDING). Messages that are only
+ // kept never wait.
+ pendingCount(){return this.#get(`SELECT count(DISTINCT c.message_id) n FROM ${WAITING} AND ${NOT_IGNORED}`).n+this.#get(`SELECT count(*) n FROM ${REACTIONS} WHERE ${REACTION_PENDING}`).n;}
  // My reactions that wait for the model, in the order butler saw them: {kind: 'reaction', messageId, key, at, chatId}.
  pendingReactions(limit){
   return this.#all(`SELECT o.message_id,o.key,o.at,m.feed_id FROM ${REACTIONS} WHERE ${REACTION_PENDING} ORDER BY o.at,o.message_id,o.key LIMIT ?`,limit)
    .map(r=>({kind:'reaction',messageId:r.message_id,key:r.key,at:r.at,chatId:r.feed_id}));
  }
  // Whether something of mine waits that could end an open matter: in the chat of one, since the earliest open one
- // started, a message of mine not processed yet, a message not processed yet that carries a reaction of mine, or a
- // reaction of mine that waits for the model. The processor asks every few seconds (see processor.mjs checkOwner).
+ // started, a message of mine not processed yet, a message batches take, not processed yet, that carries a reaction of
+ // mine, or a reaction of mine that waits for the model. A message that is only kept never waits, or this would hold
+ // for good. The processor asks every few seconds (see processor.mjs checkOwner), so it reads only my messages (their
+ // index) and my reactions, never the chats' other messages.
  ownerWaiting(){
   return this.#get(`WITH sources AS (SELECT m.feed_id,m.created_at FROM matters x JOIN matter_messages mm ON mm.matter_id=x.id JOIN messages m ON m.id=mm.message_id WHERE x.status='open'),
    chats AS (SELECT DISTINCT feed_id FROM sources),since AS (SELECT min(created_at) t FROM sources)
-   SELECT EXISTS(SELECT 1 FROM messages m WHERE m.created_at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${UNPROCESSED} AND ${NOT_IGNORED}
-     AND (m.is_mine=1 OR EXISTS(SELECT 1 FROM owner_reactions o WHERE o.message_id=m.id)))
+   SELECT EXISTS(SELECT 1 FROM messages m INDEXED BY messages_mine WHERE m.is_mine=1 AND m.created_at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${UNPROCESSED} AND ${NOT_IGNORED})
+    OR EXISTS(SELECT 1 FROM ${REACTIONS} WHERE m.created_at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${UNPROCESSED} AND ${NOT_IGNORED} AND ${BATCHED})
     OR EXISTS(SELECT 1 FROM ${REACTIONS} WHERE o.at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${REACTION_PENDING}) waiting`).waiting===1;
  }
  // My reactions on these messages not processed yet, as owner reaction records ({messageId, key, at}).
@@ -107,10 +123,13 @@ export class Matters{
   return this.#records(this.#all(`SELECT id FROM messages m WHERE feed_id=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at DESC,id DESC LIMIT ?`,feedId,t,limit)).reverse();
  }
  // What I did in these chats from since to before until: my latest messages and the latest messages that carry a
- // reaction of mine, oldest first, ignored senders left out.
+ // reaction of mine, oldest first, ignored senders left out. Read from my messages (their index) and my reactions
+ // (any message I reacted to has one), not from everything said in these chats in the meantime.
  responses(feedIds,since,until,limit){
-  return this.#records(this.#all(`SELECT id FROM messages m WHERE ${IN_LIST('feed_id')} AND created_at>=? AND created_at<? AND ${NOT_IGNORED}
-   AND (is_mine=1 OR EXISTS(SELECT 1 FROM json_each(m.reactions) j WHERE j.value->>'isMine')) ORDER BY created_at DESC,id DESC LIMIT ?`,JSON.stringify(feedIds),since,until,limit)).reverse();
+  const where=`${IN_LIST('m.feed_id')} AND m.created_at>=? AND m.created_at<? AND ${NOT_IGNORED}`,args=[JSON.stringify(feedIds),since,until];
+  return this.#records(this.#all(`SELECT id FROM (SELECT m.id,m.created_at FROM messages m INDEXED BY messages_mine WHERE m.is_mine=1 AND ${where}
+   UNION SELECT m.id,m.created_at FROM ${REACTIONS} WHERE ${where} AND EXISTS(SELECT 1 FROM json_each(m.reactions) j WHERE j.value->>'isMine')) ORDER BY created_at DESC,id DESC LIMIT ?`,
+   ...args,...args,limit)).reverse();
  }
  // My own latest messages, newest first.
  mine(limit){return this.#records(this.#all('SELECT id FROM messages WHERE is_mine=1 ORDER BY created_at DESC,id DESC LIMIT ?',limit));}
