@@ -6,7 +6,7 @@ import path from 'node:path';
 import {tempStore,waitFor} from './helpers.mjs';
 import {fakeChannel,OWNER} from './fake-channel.mjs';
 import {Bot} from '../bot.mjs';
-import {createApp,APP_ADDONS} from '../bot-app.mjs';
+import {createApp,updateApp,APP_ADDONS} from '../bot-app.mjs';
 import {loadConfig,saveConfig} from '../config.mjs';
 import {Matters} from '../matters.mjs';
 import {ModelQueue} from '../model-queue.mjs';
@@ -97,14 +97,29 @@ test('creating the app: the official one-link flow, only the scopes the bot uses
  assert.deepEqual(links,[['https://open.feishu.cn/page/launcher?user_code=ABCD',600]]);
  const o=calls[0];
  assert.deepEqual(o.addons,APP_ADDONS);
- assert.deepEqual(APP_ADDONS,{preset:false,scopes:{tenant:['im:message:send_as_bot','im:message.p2p_msg:readonly','application:bot.basic_info:read']},events:{items:{tenant:['im.message.receive_v1']}}},
-  'send as the bot, read direct messages, basic bot info and the message event; no card callbacks, no user scopes');
+ assert.deepEqual(APP_ADDONS,{preset:false,scopes:{tenant:['im:message:send_as_bot','im:message.p2p_msg:readonly','application:bot.basic_info:read']},events:{items:{tenant:['im.message.receive_v1']}},
+  callbacks:{items:['card.action.trigger']}},'send as the bot, read direct messages, basic bot info, the message event and card clicks; no user scopes');
  assert.equal(o.createOnly,true,'a new app, never an existing one');assert.ok(o.appPreset.name);
  const lark=await createApp({register:async()=>({client_id:'cli_x1',client_secret:'s',user_info:{open_id:OWNER,tenant_brand:'lark'}}),onLink(){}});
  assert.equal(lark.domain,'lark');
  await assert.rejects(createApp({register:async o=>{o.onQRCodeReady({url:'http://open.feishu.cn.evil.example/x',expireIn:600});return {};},onLink(){}}),/链接/);
  await assert.rejects(createApp({register:async()=>({client_id:'cli_x1',client_secret:'s',user_info:{}}),onLink(){}}),/open_id/);
  await assert.rejects(createApp({register:async()=>({client_id:'nope',client_secret:'s',user_info:{open_id:OWNER}}),onLink(){}}),/App ID/);
+});
+
+test('updating the app: the official flow for the configured app only, with what a new app gets, card clicks included; another app is never taken',async()=>{
+ const calls=[],links=[];
+ const register=async o=>{calls.push(o);o.onQRCodeReady({url:'https://open.feishu.cn/page/launcher?user_code=EFGH',expireIn:300});
+  return {client_id:APP.appId,client_secret:'secret-value-never-shown',user_info:{open_id:OWNER,tenant_brand:'feishu'}};};
+ assert.deepEqual(await updateApp({register,appId:APP.appId,onLink:(url,expiresIn)=>links.push([url,expiresIn])}),{appSecret:'secret-value-never-shown'});
+ assert.deepEqual(links,[['https://open.feishu.cn/page/launcher?user_code=EFGH',300]]);
+ const o=calls[0];
+ assert.equal(o.appId,APP.appId,'the configured app');assert.equal(o.createOnly,false,'createOnly true would ignore the app and create a new one');
+ assert.deepEqual(o.addons,APP_ADDONS);
+ await assert.rejects(updateApp({register:async()=>({client_id:'cli_other1',client_secret:'s',user_info:{open_id:OWNER}}),appId:APP.appId,onLink(){}}),/cli_other1/);
+ await assert.rejects(updateApp({register:async o=>{o.onQRCodeReady({url:'https://open.feishu.cn.evil.example/x',expireIn:600});return {};},appId:APP.appId,onLink(){}}),/链接/);
+ await assert.rejects(updateApp({register:async()=>({client_id:APP.appId}),appId:APP.appId,onLink(){}}),/App Secret/);
+ await assert.rejects(updateApp({register:async()=>{throw Error('should not be called');},appId:'nope',onLink(){}}),/App ID/);
 });
 
 test('the app\'s credentials are saved into butler\'s config file, which stays mode 600',t=>{

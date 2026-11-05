@@ -1,7 +1,7 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // butler's command line: runs the collector and the processor (with the bot), shows their status, what they collected,
-// the matters made of it and 关于TA, keeps the watched-group and ignored-sender lists, and creates the bot's Feishu
-// app.
+// the matters made of it and 关于TA, keeps the watched-group and ignored-sender lists, and creates and updates the bot's
+// Feishu app.
 import {parseArgs} from 'node:util';
 import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
@@ -44,6 +44,7 @@ const HELP=`用法：butler [--config 配置文件] <命令>
   ignore add <发送方名称或 id>...    加入忽略名单
   ignore remove <发送方名称或 id>... 移出忽略名单
   bot create [--name 名称]          通过飞书的官方流程创建管家机器人的应用，凭证写进配置文件
+  bot update                       通过飞书的官方流程给已经配置的应用加上它还没有的权限和回调（卡片上的按钮要用的回调）
 
 配置文件默认是 ~/.config/butler/butler.env（也可用 BUTLER_CONFIG 指定），说明见 butler/README.md。`;
 
@@ -279,20 +280,31 @@ async function processCommand(config,once){
 }
 
 // bot create: the bot's Feishu app, through Feishu's official flow; the credentials and the owner (whoever creates
-// it) go into the config file.
+// it) go into the config file. bot update: the configured app, and no other, gets what a new one would (the card
+// callback, for one), through the same flow.
 async function botCommand(config,[action],values){
- if(action!=='create')throw new UsageError(action?`bot 没有这个操作：${action}`:'用法：butler bot create [--name 名称]');
- if(config.bot)throw new UsageError(`机器人已经配置（应用 ${config.bot.appId}）。要换一个，先从 ${config.file} 删掉 BUTLER_BOT_ 开头的几行`);
+ if(action!=='create'&&action!=='update')throw new UsageError(action?`bot 没有这个操作：${action}`:'用法：butler bot create [--name 名称] 或 butler bot update');
+ if(action==='create'&&config.bot)throw new UsageError(`机器人已经配置（应用 ${config.bot.appId}）。要换一个，先从 ${config.file} 删掉 BUTLER_BOT_ 开头的几行`);
+ if(action==='update'&&!config.bot)throw new UsageError(`${config.file} 里没有配置机器人，没有可以更新的应用；先用 butler bot create 创建`);
  const controller=new AbortController(),abort=()=>controller.abort();process.on('SIGINT',abort);
+ const onLink=what=>(url,expiresIn)=>console.log(
+  `用飞书扫码或在浏览器里打开下面的链接，在飞书的页面上确认${what}（${Math.round(expiresIn/60)} 分钟内有效）：\n\n${url}\n\n等待确认……（Ctrl-C 放弃）`);
  try{
-  const {createApp}=await feishu();
-  const app=await createApp({name:values.name,signal:controller.signal,onLink:(url,expiresIn)=>console.log(
-   `用飞书扫码或在浏览器里打开下面的链接，在飞书的页面上确认创建应用和它的权限（${Math.round(expiresIn/60)} 分钟内有效）：\n\n${url}\n\n等待确认……（Ctrl-C 放弃）`)});
+  const {createApp,updateApp}=await feishu();
+  if(action==='update'){
+   const {appId,appSecret}=config.bot;
+   const app=await updateApp({appId,signal:controller.signal,onLink:onLink(`给应用 ${appId} 加上卡片回调`)});
+   // Should Feishu have issued a new secret, the bot needs it to connect.
+   if(app.appSecret!==appSecret)saveConfig(config.file,{BUTLER_BOT_APP_SECRET:app.appSecret});
+   console.log(`已在飞书确认更新应用 ${appId}${app.appSecret!==appSecret?`，飞书返回了新的 App Secret，已写进 ${config.file}`:''}。重启加工端（systemctl --user restart butler-processor）后，点卡片上的按钮试一下；还是提示应用没有配置回调时，按 README「给已有的应用加上卡片回调」在开发者后台把回调的订阅方式设成长连接。`);
+   return 0;
+  }
+  const app=await createApp({name:values.name,signal:controller.signal,onLink:onLink('创建应用和它的权限')});
   saveConfig(config.file,{BUTLER_BOT_APP_ID:app.appId,BUTLER_BOT_APP_SECRET:app.appSecret,BUTLER_BOT_OWNER:app.owner,BUTLER_BOT_DOMAIN:app.domain});
   console.log(`已创建应用 ${app.appId}，只听创建它的人（${app.owner}）的话；凭证已写进 ${config.file}。重启加工端（systemctl --user restart butler-processor）后机器人上线。`);
   return 0;
  }catch(e){
-  if(controller.signal.aborted)throw new UsageError('已放弃创建。如果已经在飞书确认过，这个应用已经建好，可以在飞书开放平台删掉它，再重新创建');
+  if(controller.signal.aborted)throw new UsageError(action==='update'?'已放弃更新，配置文件没有改动':'已放弃创建。如果已经在飞书确认过，这个应用已经建好，可以在飞书开放平台删掉它，再重新创建');
   throw e;
  }finally{process.off('SIGINT',abort);}
 }

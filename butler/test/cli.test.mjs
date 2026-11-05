@@ -210,6 +210,12 @@ test('status shows 关于TA in one line and profile prints it with my notes; BUT
  r=await cli(writeConfig(dir,lark,0o600,'BUTLER_PROFILE_EVERY=1 day\n'),'status');assert.equal(r.code,1);assert.match(r.stderr,/写「关于TA」的间隔的格式不对/);
 });
 
+test('bot update needs a configured bot: it only ever updates that app',async t=>{
+ const {lark,dir}=await setup(t);
+ const r=await cli(writeConfig(dir,lark),'bot','update');assert.equal(r.code,1);assert.match(r.stderr,/没有配置机器人/);assert.match(r.stderr,/bot create/);
+ const help=await cli(writeConfig(dir,lark),'--help');assert.match(help.stdout,/bot update/);
+});
+
 test('bot create refuses to replace a configured bot',async t=>{
  const {lark,dir}=await setup(t);
  const config=writeConfig(dir,lark,0o600,'BUTLER_BOT_APP_ID=cli_a1b2c3d4e5f6\nBUTLER_BOT_APP_SECRET=s\nBUTLER_BOT_OWNER=ou_owner0000000000000000000000001\n');
