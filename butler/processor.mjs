@@ -9,7 +9,8 @@
 // new 关于TA (see profile.mjs and #profile), and every few hours, or when 关于TA or my notes have changed, a round ends
 // with a review of all open matters (see review.mjs and #review). Batches and reviews are told 关于TA, my notes and
 // the matters I marked as not mine.
-// Whoever shows the matters is told when a batch or a review has changed them (onMattersChanged).
+// Whoever shows the matters is told when a batch or a review has changed them (onMattersChanged), and whoever tells me
+// of 关于TA when one has been written (onProfile).
 import {composePrompt,readReply} from './prompt.mjs';
 import {review} from './review.mjs';
 import {writeProfile} from './profile.mjs';
@@ -20,9 +21,12 @@ import {writeProfile} from './profile.mjs';
 // come along too, so that my answer shows even when the chat has moved on past its latest messages.
 // profileMessages: how many of my latest messages 关于TA is written from at most, more than fit one prompt (the
 // newest that fit go). ownerCheckMs: how often to look for something of mine that could end an open matter. notMine:
-// how many of the matters I marked as not mine, the latest, batches, reviews and 关于TA are shown.
+// how many of the matters I marked as not mine, the latest, batches, reviews and 关于TA are shown. activeMs: how recent
+// a chat's messages make it active, involvementMs: the window of what I did in a chat, for 关于TA and grading alike
+// (see grader.mjs); profileChats: how many of the chats where I take part 关于TA is shown at most.
+const DAY=86_400_000;
 export const DEFAULTS={everyMs:600_000,ownerCheckMs:15_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,ownerMessages:5,textChars:1500,skipAfter:3,
- reviewEveryMs:10_800_000,profileEveryMs:86_400_000,profileMessages:1000,notMine:20};
+ reviewEveryMs:10_800_000,profileEveryMs:DAY,profileMessages:1000,notMine:20,activeMs:7*DAY,involvementMs:30*DAY,profileChats:60};
 const message=e=>e?.message??String(e);
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
 // Whether what is done every everyMs is due: it has never been done (last has no at), or that long ago.
@@ -38,11 +42,13 @@ export class Processor{
  #limit;#cycle;#timers=[];#halting=false;#failed=false;
  // model: {ask({system,prompt}) → reply text, cleanup?()}; ask throws when there is no usable answer, with
  // answered: true when the model did answer (one too long, say). pid: this process (another one may hold the store).
- // now: the clock. onMattersChanged: called once a batch or a part of a review has made, changed or closed matters;
- // what it throws or rejects with is recorded and changes nothing else.
- constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now,onMattersChanged=()=>{}}){
+ // now: the clock. onMattersChanged: called once a batch or a part of a review has made, changed or closed matters.
+ // onProfile({text, added, at}): called once 关于TA has been written, with what the model says it newly inferred
+ // compared with the last one (a list, possibly empty). What either throws or rejects with is recorded and changes
+ // nothing else.
+ constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now,onMattersChanged=()=>{},onProfile=()=>{}}){
   this.store=store;this.matters=matters;this.model=model;this.options={...DEFAULTS,...options};this.log=log;this.pid=pid;this.now=now;
-  this.onMattersChanged=onMattersChanged;this.#limit=this.options.maxMessages;
+  this.onMattersChanged=onMattersChanged;this.onProfile=onProfile;this.#limit=this.options.maxMessages;
  }
 
  // Claims the store (one processor at a time, so batches never overlap), closes what a crashed run left on the model
@@ -127,15 +133,19 @@ export class Processor{
  // 关于TA, after a round's batches and before its review, which then judges by it. It is due when none has been
  // written (the first round after deployment writes it), once profileEveryMs have passed since the last one, and
  // when my notes are no longer those it was written with. One that fails is recorded and goes again on the next
- // round; it holds up no message, and the review goes on with what there is. The meta profile: {text, at, notes
- // (their numbers), messages (how many of mine it was written from)} of the last one written, and {failedAt, error}
+ // round; it holds up no message, and the review goes on with what there is. Each is written beside the last one, so
+ // that the model can say what it newly inferred. The meta profile: {text, at, notes (their numbers), messages (how
+ // many of mine it was written from), added (what was newly inferred)} of the last one written, and {failedAt, error}
  // of a failure since.
  #profileDue(){const p=this.store.meta('profile');return due(p,this.options.profileEveryMs,this.now())||!same(p?.notes,numbers(this.matters.notes()));}
  async #profile(){
   const last=this.store.meta('profile')??{},notes=this.matters.notes();
   try{
-   const r=await writeProfile({matters:this.matters,model:this.model,options:this.options,notes,now:this.now});
-   if(r)this.store.setMeta('profile',{text:r.text,at:this.now(),notes:numbers(notes),messages:r.messages});
+   const r=await writeProfile({matters:this.matters,model:this.model,options:this.options,notes,previous:last.text,now:this.now});
+   if(r){
+    const at=this.now();this.store.setMeta('profile',{text:r.text,at,notes:numbers(notes),messages:r.messages,added:r.added});
+    this.#tell('写了「关于TA」',()=>this.onProfile({text:r.text,added:r.added,at}));
+   }
    return r;
   }catch(e){
    this.store.addError('加工',`写「关于TA」没有完成，下一轮再试：${message(e)}`);
@@ -166,9 +176,11 @@ export class Processor{
    return {error:message(e)};
   }
  }
- #changed(){
-  const failed=e=>this.store.addError('加工',`事项有变化，但通知出错：${message(e)}`);
-  try{Promise.resolve(this.onMattersChanged()).catch(failed);}catch(e){failed(e);}
+ #changed(){this.#tell('事项有变化',()=>this.onMattersChanged());}
+ // Calls a hook; what it throws or rejects with is recorded, after what happened (what).
+ #tell(what,hook){
+  const failed=e=>this.store.addError('加工',`${what}，但通知出错：${message(e)}`);
+  try{Promise.resolve(hook()).catch(failed);}catch(e){failed(e);}
  }
  #strike(id,error){
   if(this.matters.strike(id,error)<this.options.skipAfter)return;

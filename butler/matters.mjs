@@ -1,8 +1,8 @@
 // The processor's own tables in butler's store: the ignore list, my notes, which messages and which of my reactions
-// have been processed, the matters and their source messages, and the model runs. The collector's tables (messages,
-// chats, owner_reactions, …) are only read here; the processor is a separate process on the same SQLite file (WAL,
-// busy timeout). The bot, in the processor's process, edits the ignore list and my notes and closes and reopens
-// matters through this same class.
+// have been processed, the matters and their source messages, the model runs and the exams (see grader.mjs). The
+// collector's tables (messages, chats, owner_reactions, …) are only read here, and so is what the model is shown of
+// chats (see chatFacts); the processor is a separate process on the same SQLite file (WAL, busy timeout). The bot, in
+// the processor's process, edits the ignore list and my notes and closes and reopens matters through this same class.
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS ignored_senders(sender_id TEXT PRIMARY KEY, name TEXT, since INTEGER NOT NULL);
@@ -23,14 +23,20 @@ CREATE TABLE IF NOT EXISTS message_failures(
 CREATE TABLE IF NOT EXISTS model_runs(
  id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER NOT NULL, finished_at INTEGER, messages INTEGER NOT NULL, prompt_bytes INTEGER NOT NULL,
  ok INTEGER, error TEXT, output TEXT, kind TEXT NOT NULL DEFAULT 'batch', matters INTEGER, model TEXT);
+CREATE TABLE IF NOT EXISTS exams(id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, total INTEGER NOT NULL, correct INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS exam_answers(
+ exam_id INTEGER NOT NULL REFERENCES exams(id), feed_id TEXT NOT NULL, name TEXT, owner_level TEXT NOT NULL, model_level TEXT, reason TEXT,
+ PRIMARY KEY(exam_id,feed_id));
 `;
+const DAY=86400e3;
 // The reason of a matter I closed as not mine (on a card, or in the conversation in those words).
 export const NOT_MINE='不归我';
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
 // judged the matter ended) or owner (I closed it in the conversation). A model run's kind: batch (of new messages),
-// review (of the open matters, see review.mjs) or profile (关于TA, see profile.mjs); runs from before reviews were
-// batches. Its matters: how many open matters it was shown, unknown for runs from before. Its model: the name of the
-// model claude was asked for (BUTLER_MODEL_NAME), unknown for claude's default and for runs from before.
+// review (of the open matters, see review.mjs), profile (关于TA, see profile.mjs), grade or exam (see grader.mjs);
+// runs from before reviews were batches. Its matters: how many open matters it was shown, unknown for runs from
+// before. Its model: the name of the model claude was asked for (BUTLER_MODEL_NAME), unknown for claude's default and
+// for runs from before.
 const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER'],['model_runs','model','TEXT']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
@@ -146,6 +152,33 @@ export class Matters{
  // My user id, the same way; undefined before I have sent anything.
  meId(){return this.#get('SELECT sender_id FROM messages WHERE is_mine=1 AND sender_id IS NOT NULL ORDER BY created_at DESC LIMIT 1')?.sender_id;}
 
+ // ---- what the model is shown of chats: grading's (see grader.mjs) and 关于TA's (see profile.mjs)
+ // These chats (feed ids), but for their messages: what butler knows of each and its level (see Store.activity); how
+ // busy it has been, in messages per day from from on, or from its first message when that is later, and how many of
+ // them a bot or an agent sent (botShare, a percentage); and what I did there since mineSince (Store.involvement). A
+ // chat with no message since since (one I asked to grade, say) has none counted.
+ chatFacts(ids,{now,since,from=since,mineSince}){return this.#facts(ids,{now,from,active:this.store.activity(since,from),mine:this.store.involvement(mineSince)});}
+ // The chats where I did something since mineSince, where I did most first (my messages, then @ of me, then my
+ // reactions), then the chats with messages since since that I muted, the busiest first; at most limit of them, as
+ // chatFacts shows them.
+ involvedChats({now,since,mineSince,limit}){
+  const active=this.store.activity(since),mine=this.store.involvement(mineSince);
+  const ids=[...[...mine].sort(([,a],[,b])=>b.mine-a.mine||b.mentions-a.mentions||b.reactions-a.reactions).map(([id])=>id),...active.filter(c=>c.muted).map(c=>c.feedId)];
+  return this.#facts([...new Set(ids)].slice(0,limit),{now,from:since,active,mine});
+ }
+ #facts(ids,{now,from,active,mine}){
+  const byId=new Map(active.map(c=>[c.feedId,c]));
+  return ids.map(feedId=>{
+   const c=byId.get(feedId)??this.#quiet(feedId),days=Math.max(1,(now-Math.max(from,c.firstAt??from))/DAY);
+   return {...c,perDay:Math.round(c.messages/days*10)/10,botShare:c.messages?Math.round(100*c.bots/c.messages):undefined,...mine.get(feedId)??{mine:0,mentions:0,reactions:0}};
+  });
+ }
+ // A chat with no message in the window: what butler knows of it.
+ #quiet(feedId){
+  const c=this.store.chat(feedId);
+  return {feedId,name:c?.name??undefined,kind:c?.chatMode??undefined,members:c?.memberCount??undefined,muted:c?.isMuted,messages:0,bots:0,level:this.store.level(feedId)};
+ }
+
  // ---- matters
  #matter(row){
   if(!row)return undefined;
@@ -213,6 +246,24 @@ export class Matters{
  }
  clearStrikes(ids){this.#run(`DELETE FROM message_failures WHERE message_id IN (SELECT value FROM json_each(?))`,JSON.stringify(ids));}
  skippedCount(){return this.#get(`SELECT count(*) n FROM processed WHERE outcome='failed'`).n;}
+
+ // ---- exams: the model grades the chats whose level I set again, without being shown my level (see grader.mjs)
+ // answers: one per chat, {feedId, name, owner: my level, model: its answer (undefined when it gave none), reason: its}.
+ // Returns the exam's number.
+ addExam({at,answers}){
+  return this.#tx(()=>{
+   const id=Number(this.#run('INSERT INTO exams(at,total,correct) VALUES(?,?,?)',at,answers.length,answers.filter(a=>a.model===a.owner).length).lastInsertRowid);
+   const add=this.db.prepare('INSERT INTO exam_answers(exam_id,feed_id,name,owner_level,model_level,reason) VALUES(?,?,?,?,?,?)');
+   for(const a of answers)add.run(id,a.feedId,a.name??null,a.owner,a.model??null,a.reason??null);
+   return id;
+  });
+ }
+ // The latest exams, newest first: when, how many chats, how many it got right, and the answers it got wrong.
+ exams(limit){
+  return this.#all('SELECT * FROM exams ORDER BY id DESC LIMIT ?',limit).map(e=>({at:e.at,total:e.total,correct:e.correct,
+   wrong:this.#all('SELECT * FROM exam_answers WHERE exam_id=? AND model_level IS NOT owner_level ORDER BY rowid',e.id)
+    .map(a=>({feedId:a.feed_id,name:a.name??undefined,owner:a.owner_level,model:a.model_level??undefined,reason:a.reason??undefined}))}));
+ }
 
  // ---- model runs, kept with the raw reply so a decision can be looked into later
  // messages: the new messages it was given to process (none for a review); matters: the open matters it was shown;

@@ -23,14 +23,16 @@ const none={new:[],updates:[]};
 // matters has just been done (by that profile, if there is one), so a round runs only its batches (a store without a
 // profile writes one in its first round, and one without a review reviews).
 const PROFILE='角色：GEO 服务的后端';
-// changes: how often the processor said the matters changed (onMattersChanged).
-function setup(t,{answer,options,now,profiled=true,reviewed=true}={}){
- const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??(()=>none)),changes=[];
- const processor=new Processor({store,matters,model,options:{maxMessages:40,...options},...now&&{now},onMattersChanged:()=>changes.push(model.calls.length)});
+// changes: how often the processor said the matters changed (onMattersChanged); profiles: what it said of each 关于TA
+// it wrote (onProfile), unless onProfile is given.
+function setup(t,{answer,options,now,profiled=true,reviewed=true,onProfile}={}){
+ const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??(()=>none)),changes=[],profiles=[];
+ const processor=new Processor({store,matters,model,options:{maxMessages:40,...options},...now&&{now},onMattersChanged:()=>changes.push(model.calls.length),
+  onProfile:onProfile??(p=>profiles.push(p))});
  const t0=(now??Date.now)();
  if(profiled)store.setMeta('profile',{text:PROFILE,at:t0,notes:[],messages:1});
  if(reviewed)store.setMeta('review',{at:t0,reviewed:0,closed:0,...profiled&&{profileAt:t0},notes:[]});
- return {store,matters,model,processor,t0,changes};
+ return {store,matters,model,processor,t0,changes,profiles};
 }
 
 test('new messages become matters: the model decides, butler keeps the sources and makes the links',async t=>{
@@ -329,7 +331,7 @@ test('a message that gets through after failing loses its strikes',async t=>{
 const kinds=model=>model.calls.map(c=>c.data.openMatters?'batch':c.data.matters?'review':'profile');
 // A model that makes a matter of every new message, titled with its text, answers reviews with review(data) and
 // writes 关于TA with profile(data).
-const making=(review,profile=()=>({profile:PROFILE}))=>d=>d.matters?review(d):d.openMatters?{new:newTexts(d).map(text=>({title:text,who:'陈帆',ask:'处理',urgency:'normal',messages:[ref(d,text)]})),updates:[]}:profile(d);
+const making=(review,profile=()=>({work:PROFILE,interests:'',added:[]}))=>d=>d.matters?review(d):d.openMatters?{new:newTexts(d).map(text=>({title:text,who:'陈帆',ask:'处理',urgency:'normal',messages:[ref(d,text)]})),updates:[]}:profile(d);
 
 test('a round reviews the open matters after its batches when there has been no review, and again reviewEveryMs after the last',async t=>{
  let clock=T0+3600e3;
@@ -393,7 +395,7 @@ test('a review cut short by stopping is not recorded as done',async t=>{
 // ---- 关于TA (see profile.mjs), which a round writes after its batches and before its review when it is due
 test('a round with no 关于TA yet writes it after its batches, and the review that follows and later batches judge by it',async t=>{
  let clock=T0+3600e3;
- const {store,matters,model,processor}=setup(t,{profiled:false,now:()=>clock,answer:making(()=>({updates:[]}),()=>({profile:'角色：GEO 服务的后端\n通常不归TA：审批'}))});
+ const {store,matters,model,processor}=setup(t,{profiled:false,now:()=>clock,answer:making(()=>({updates:[]}),()=>({work:'角色：GEO 服务的后端\n通常不归TA：审批',interests:'AI 编程工具',added:['TA对 AI 编程工具感兴趣']}))});
  post(store,{mine:true,text:'GEO 的接口我来看',at:min(0)});post(store,{text:'@原智鸿 帮忙审批一下',at:min(1)});
  const note=matters.addNote('审批不归我管',min(2));
  const r=await processor.runOnce();
@@ -401,8 +403,9 @@ test('a round with no 关于TA yet writes it after its batches, and the review t
  assert.deepEqual([model.calls[0].data.profile,model.calls[0].data.notes],[null,['审批不归我管']],'no profile for the first batch yet, but my notes');
  assert.deepEqual(messagesOf(model.calls[1].data).map(m=>m.text),['GEO 的接口我来看']);assert.deepEqual(model.calls[1].data.notes,['审批不归我管']);
  const profile=store.meta('profile');
- assert.deepEqual(profile,{text:'角色：GEO 服务的后端\n通常不归TA：审批',at:clock,notes:[note],messages:1});
- assert.deepEqual(r.profile,{text:profile.text,messages:1});
+ const text='【工作】\n角色：GEO 服务的后端\n通常不归TA：审批\n【兴趣】\nAI 编程工具';
+ assert.deepEqual(profile,{text,at:clock,notes:[note],messages:1,added:['TA对 AI 编程工具感兴趣']});
+ assert.deepEqual(r.profile,{text,added:['TA对 AI 编程工具感兴趣'],messages:1});
  assert.deepEqual([model.calls[2].data.profile,model.calls[2].data.notes],[profile.text,['审批不归我管']]);
  assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:0,profileAt:clock,notes:[note]});
  const [,run]=matters.runs();assert.deepEqual([run.kind,run.ok,run.messages],['profile',true,1]);
@@ -427,17 +430,18 @@ test('batches, reviews and 关于TA are shown the matters I marked as not mine, 
 
 test('关于TA is written again once profileEveryMs have passed and whenever my notes change, and each new one re-judges the open matters at once',async t=>{
  let clock=T0+3600e3,version=0;
- const {store,matters,model,processor}=setup(t,{now:()=>clock,options:{reviewEveryMs:7*86400e3},answer:making(()=>({updates:[]}),()=>({profile:`第${++version}版`}))});
+ const {store,matters,model,processor}=setup(t,{now:()=>clock,options:{reviewEveryMs:7*86400e3},answer:making(()=>({updates:[]}),d=>({work:`第${++version}版`,interests:'',added:d.previous?[]:['第一版']}))});
  const id=post(store,{text:'旧事',at:min(0)}),mine=post(store,{mine:true,text:'我负责 GEO',at:min(1)});
  matters.apply({created:[{title:'旧事',who:'陈帆',ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id,mine]});
  clock+=23*3600e3;await processor.runOnce();
  assert.deepEqual(kinds(model),[],'not within a day');
  clock+=3600e3;await processor.runOnce();
  assert.deepEqual(kinds(model),['profile','review'],'a day on it is written again, and the open matters are judged by it');
- assert.deepEqual([store.meta('profile').text,model.calls[1].data.profile],['第1版','第1版']);
+ assert.deepEqual([store.meta('profile').text,model.calls[1].data.profile],['【工作】\n第1版','【工作】\n第1版']);
  const note=matters.addNote('审批不归我管',clock);clock+=60e3;await processor.runOnce();
  assert.deepEqual(kinds(model).slice(2),['profile','review'],'a new note: at once');
- assert.deepEqual(model.calls[2].data.notes,['审批不归我管']);assert.deepEqual([model.calls[3].data.profile,model.calls[3].data.notes],['第2版',['审批不归我管']]);
+ assert.deepEqual(model.calls[2].data.notes,['审批不归我管']);assert.deepEqual([model.calls[3].data.profile,model.calls[3].data.notes],['【工作】\n第2版',['审批不归我管']]);
+ assert.deepEqual([model.calls[0].data.previous,model.calls[2].data.previous],[PROFILE,'【工作】\n第1版'],'each is written beside the last one');
  assert.deepEqual(store.meta('profile').notes,[note]);
  clock+=60e3;await processor.runOnce();assert.equal(model.calls.length,4,'and once');
  matters.removeNote(note);clock+=60e3;await processor.runOnce();
@@ -446,7 +450,7 @@ test('关于TA is written again once profileEveryMs have passed and whenever my 
 
 test('a profile that fails is on record and goes again on the next round, never twice in one; it holds up no message, and the review goes on',async t=>{
  let down=true;
- const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,answer:making(()=>({updates:[]}),()=>down?'我说不清TA是做什么的':{profile:'角色：后端'})});
+ const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,answer:making(()=>({updates:[]}),()=>down?'我说不清TA是做什么的':{work:'角色：后端',added:[]})});
  post(store,{mine:true,text:'我负责 GEO',at:min(0)});post(store,{text:'@原智鸿 看下',at:min(1)});
  let r=await processor.runOnce();
  assert.equal(r.failures,0);assert.match(r.profile.error,/不是 JSON/);assert.deepEqual(kinds(model),['batch','profile','review']);
@@ -459,7 +463,32 @@ test('a profile that fails is on record and goes again on the next round, never 
  assert.deepEqual(kinds(model).slice(3),['profile'],'tried again on the next round');
  down=false;r=await processor.runOnce();
  assert.deepEqual(kinds(model).slice(4),['profile','review'],'and once written, the open matters are judged by it');
- assert.deepEqual(Object.keys(store.meta('profile')).sort(),['at','messages','notes','text'],'the failure is cleared');
+ assert.deepEqual(Object.keys(store.meta('profile')).sort(),['added','at','messages','notes','text'],'the failure is cleared');
+});
+
+test('whoever shows 关于TA is told of each one written, with what the model newly inferred; not of one that failed or could not be written',async t=>{
+ let clock=T0+3600e3,down=false;
+ const {store,matters,processor,profiles}=setup(t,{profiled:false,reviewed:false,now:()=>clock,
+  answer:making(()=>({updates:[]}),d=>down?'说不清':{work:'角色：后端',interests:'',added:d.previous?[]:['TA是做后端的']})});
+ await processor.runOnce();
+ assert.deepEqual(profiles,[],'nothing to write it from');
+ post(store,{mine:true,text:'GEO 的接口我来看',at:min(0)});
+ await processor.runOnce();
+ assert.deepEqual(profiles,[{text:'【工作】\n角色：后端',added:['TA是做后端的'],at:clock}]);
+ matters.addNote('审批不归我管',clock);clock+=60e3;await processor.runOnce();
+ assert.deepEqual(profiles.at(-1),{text:'【工作】\n角色：后端',added:[],at:clock},'told even when nothing is new: whoever shows it decides');
+ down=true;matters.addNote('Meego 的通知不用管',clock);clock+=60e3;await processor.runOnce();
+ assert.equal(profiles.length,2,'not of one that failed');
+});
+
+test('what the hook for 关于TA throws or rejects with is recorded and changes nothing',async t=>{
+ for(const onProfile of [()=>{throw Error('飞书连不上');},async()=>{throw Error('飞书连不上');}]){
+  const {store,processor}=setup(t,{profiled:false,reviewed:false,onProfile,answer:making(()=>({updates:[]}))});
+  post(store,{mine:true,text:'GEO 的接口我来看',at:min(0)});
+  const r=await processor.runOnce();await new Promise(r=>setImmediate(r));
+  assert.equal(r.profile.text,`【工作】\n${PROFILE}`);assert.equal(store.meta('profile').text,r.profile.text);assert.ok(r.review.complete);
+  assert.ok(store.errors().some(e=>e.source==='加工'&&/关于TA.*通知出错.*飞书连不上/.test(e.message)));
+ }
 });
 
 // ---- what I do about an open matter is processed within seconds, not on the next cycle

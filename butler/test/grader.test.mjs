@@ -4,7 +4,7 @@ import {tempStore,post,waitFor} from './helpers.mjs';
 import {Matters} from '../matters.mjs';
 import {Processor} from '../processor.mjs';
 import {ModelQueue} from '../model-queue.mjs';
-import {Grader,DEFAULTS} from '../grader.mjs';
+import {Grader,DEFAULTS,gradingSystemPrompt} from '../grader.mjs';
 
 process.env.TZ='Asia/Shanghai';
 const T0=Date.parse('2026-10-23T09:00:00+08:00'),hour=n=>T0+n*3600e3,day=n=>T0+n*86400e3;
@@ -23,12 +23,12 @@ const every=(level='daily',levels={})=>d=>({chats:d.chats.map(c=>({chat:c.chat,l
 const names=data=>data.chats.map(c=>c.name);
 const graded=r=>r.graded.map(g=>g.feedId).sort();
 // Butler began keeping every message at T0 (a stored message in 大群 it saw then), unless kept is false; the clock
-// starts when the first grading is due, two days on. tick: sets the clock.
-function setup(t,{answer,options,now=day(2),kept=true}={}){
+// starts when the first grading is due, two days on. tick: sets the clock. onPass: the grader's hook.
+function setup(t,{answer,options,now=day(2),kept=true,onPass}={}){
  let clock=now;
  const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??every());
  if(kept)post(store,{chat:'g2',sender:'u5',name:'王五',text:'收下全部消息以后的第一条',at:T0,seen:T0,categories:['stored']});
- const grader=new Grader({store,matters,model,options,now:()=>clock});
+ const grader=new Grader({store,matters,model,options,now:()=>clock,onPass});
  return {store,matters,model,grader,tick:ms=>{clock=ms;}};
 }
 const chatter=(store,chat,at,more={})=>post(store,{chat,sender:'u5',name:'王五',text:'群里的讨论',at,categories:['stored'],...more});
@@ -255,4 +255,112 @@ test('status: the last pass, how many chats the model has graded, how many wait 
  await grader.check();
  const s=grader.status();assert.deepEqual(pick(s),{at:day(2)+3600e3,chats:1,graded:0,due:1,next:day(2)+3600e3+DEFAULTS.retryMs,sampledAt:day(2),byModel:2});
  assert.match(s.error,/Connection refused/);
+});
+
+// ---- what grading tells
+const byChat=list=>[...list].sort((a,b)=>a.feedId<b.feedId?-1:1);
+test('whoever shows grading is told after each pass that graded a chat: how it started, the chats whose level from the model changed, how many were graded and how many not',async t=>{
+ const passes=[];let down=false,second=false;
+ const {store,grader,tick}=setup(t,{onPass:p=>passes.push(p),answer:d=>{if(down)throw Error(DOWN);
+  const r=every('daily',second?{项目群:'store',大群:'instant'}:{项目群:'store'})(d);if(second)r.chats=r.chats.filter(c=>d.chats.find(x=>x.chat===c.chat).name!=='张三');return r;}});
+ chatter(store,'g1',hour(20));post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:hour(20)});
+ await grader.check();
+ assert.equal(passes.length,1);
+ assert.deepEqual(byChat(passes[0].changed).map(c=>[c.feedId,c.name,c.before,c.after,c.reason]),
+  [['d1','张三',undefined,'daily','张三的理由'],['g1','项目群',undefined,'store','项目群的理由'],['g2','大群',undefined,'daily','大群的理由']],'every chat graded for the first time');
+ assert.deepEqual([passes[0].at,passes[0].by,passes[0].graded,passes[0].failed],[day(2),'schedule',3,0],'a pass check started is a scheduled one');
+ second=true;for(const c of ['g1','g2'])chatter(store,c,day(8));post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:day(8)});
+ tick(day(9));await grader.check();
+ assert.deepEqual(passes[1],{at:day(9),by:'schedule',graded:2,failed:1,changed:[{feedId:'g2',name:'大群',before:'daily',after:'instant',reason:'大群的理由'}]},
+  'not 项目群, graded the same again; 张三 left out of the answer is not graded');
+ await grader.grade(['g1']);
+ assert.deepEqual([passes[2].by,passes[2].graded],['request',1],'a pass I asked for (grade) says so');
+ down=true;tick(day(20));for(const c of ['g1','g2'])chatter(store,c,day(19));await grader.check();
+ assert.equal(passes.length,3,'a pass that graded nothing tells nothing');
+});
+
+test('what the grader\'s hook throws or rejects with is recorded and changes nothing',async t=>{
+ for(const onPass of [()=>{throw Error('飞书连不上');},async()=>{throw Error('飞书连不上');}]){
+  const {store,grader}=setup(t,{onPass});
+  const r=await grader.check();await new Promise(r=>setImmediate(r));
+  assert.deepEqual(graded(r),['g2']);assert.equal(store.level('g2').level,'daily');
+  assert.ok(store.errors().some(e=>e.source==='分级'&&/通知出错.*飞书连不上/.test(e.message)));
+ }
+});
+
+// ---- the exam: the chats whose level I set, graded again without my level
+// Butler has kept everything for two days and graded what was due (大群), so that what check starts next is an exam.
+async function examSetup(t,o={}){
+ const s=setup(t,o);
+ s.store.setMeta('profile',{text:'【工作】\n角色：GEO 服务的后端',at:day(2),notes:[],messages:3});
+ await s.grader.check();s.model.calls.length=0;
+ return s;
+}
+const examined=model=>model.calls.map(c=>names(c.data).sort());
+
+test('an exam grades the chats whose level I set as grading would, each shown as ungraded, and scores the answers against my levels',async t=>{
+ const {store,matters,model,grader}=await examSetup(t,{answer:d=>{const r=every('daily',{项目群:'instant',张三:'daily'})(d);r.chats=r.chats.filter(c=>d.chats.find(x=>x.chat===c.chat).name!=='旧群');return r;}});
+ chatter(store,'g1',hour(30));post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:hour(30)});chatter(store,'old',day(-20));
+ store.setLevel('g1','store',{by:'model',reason:'多是通知',now:day(1)});store.setLevel('g1','instant',{by:'owner',reason:'我负责的项目都在这里讨论',now:day(2)});
+ store.setLevel('d1','store',{by:'owner',now:day(2)});store.setLevel('old','daily',{by:'owner',now:day(2)});store.upsertChatInfo({feedId:'old',name:'旧群',chatMode:'group'});
+ const before=store.levels();
+ await grader.check();
+ assert.equal(model.calls.length,1);const [{system,prompt,data:d}]=model.calls;
+ assert.equal(system,gradingSystemPrompt(matters.me()),'the grading prompt itself');
+ assert.deepEqual(names(d).sort(),['张三','旧群','项目群'],'only the chats whose level I set');
+ for(const c of d.chats){assert.equal(c.level,null,'shown as ungraded');assert.ok(!('by' in c));}
+ assert.doesNotMatch(prompt,/我负责的项目都在这里讨论|多是通知|owner/,'neither my reason nor the model\'s earlier level');
+ assert.equal(d.profile,'【工作】\n角色：GEO 服务的后端');
+ assert.deepEqual(d.chats.find(c=>c.name==='旧群').messages.map(m=>m.text),['群里的讨论'],'a chat quiet this week is shown its latest messages all the same');
+ const exams=matters.exams(5);assert.equal(exams.length,1);const [e]=exams;
+ assert.deepEqual([e.at,e.total,e.correct],[day(2),3,1]);
+ assert.deepEqual(byChat(e.wrong),[{feedId:'d1',name:'张三',owner:'store',model:'daily',reason:'张三的理由'},{feedId:'old',name:'旧群',owner:'daily',model:undefined,reason:undefined}],
+  'a chat the answer left out counts as wrong');
+ assert.deepEqual(store.levels(),before,'an exam changes no level');
+ assert.deepEqual(matters.runs().slice(-1).map(r=>[r.kind,r.ok,r.messages]),[['exam',true,3]]);
+});
+
+test('an exam follows a new 关于TA or a change of my notes, once 关于TA has caught up with them, if 关于TA, my notes or the levels I set changed since the last; at most once per examMs',async t=>{
+ const {store,matters,model,grader,tick}=await examSetup(t);
+ const profile=(text,at,notes=[])=>store.setMeta('profile',{text,at,notes,messages:3}),h=n=>day(2)+n*3600e3;
+ assert.equal(grader.check(),undefined,'no level of mine, no exam');
+ store.setLevel('g2','instant',{by:'owner',now:day(2)});
+ const none=setup(t);none.store.setLevel('g2','instant',{by:'owner',now:day(2)});await none.grader.check();
+ none.store.setMeta('profile',{failedAt:day(2),error:'x'});
+ assert.equal(none.grader.check(),undefined,'no 关于TA yet, nothing to test');
+ await grader.check();assert.deepEqual(examined(model),[['大群']],'the first exam: there has been none');
+ assert.equal(grader.check(),undefined,'nothing new');
+ tick(h(2));store.setLevel('d1','store',{by:'owner',now:h(2)});post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:day(2)});
+ assert.equal(grader.check(),undefined,'a level I set waits for the next 关于TA');
+ profile('【工作】\n角色：GEO 服务的后端',h(2));
+ await grader.check();assert.deepEqual(examined(model).at(-1),['大群','张三'],'关于TA written again, the same, but a level of mine is new');
+ tick(h(3.5));profile('【工作】\n角色：GEO 服务的后端',h(3.5));
+ assert.equal(grader.check(),undefined,'关于TA written again, the same, and nothing else new');
+ tick(h(4));profile('【工作】\n角色：后端',h(4));
+ await grader.check();assert.equal(model.calls.length,3,'a new 关于TA');
+ tick(h(4.5));profile('【工作】\n角色：前端',h(4.5));
+ assert.equal(grader.check(),undefined,'within the hour');
+ tick(h(5));await grader.check();assert.equal(model.calls.length,4,'an hour on');
+ tick(h(7));const note=matters.addNote('值班群都不看',h(7));
+ assert.equal(grader.check(),undefined,'my notes changed, but 关于TA has not caught up with them');
+ profile('【工作】\n角色：前端',h(7),[note]);
+ await grader.check();assert.equal(model.calls.length,5);assert.deepEqual(model.calls[4].data.notes,['值班群都不看']);
+ assert.equal(DEFAULTS.examMs,3600e3);
+ assert.deepEqual(matters.exams(10).map(e=>e.at),[h(7),h(5),h(4),h(2),day(2)],'newest first');
+});
+
+test('an exam that fails is on record and tried again examMs later; grading goes first, and its wait after a failure holds up no exam',async t=>{
+ let down=false;
+ const {store,matters,model,grader,tick}=await examSetup(t,{answer:d=>{if(down)throw Error(DOWN);return names(d).includes('毒')?'都挺重要的':every()(d);}});
+ store.setLevel('g1','instant',{by:'owner',now:day(2)});chatter(store,'g1',hour(30));
+ down=true;await grader.check();
+ assert.deepEqual(matters.exams(5),[]);
+ const e=store.meta('exam');assert.equal(e.failedAt,day(2));assert.match(e.error,/Connection refused/);
+ assert.ok(store.errors().some(x=>x.source==='分级'&&/纠正题.*Connection refused/.test(x.message)));
+ assert.deepEqual(matters.runs().slice(-1).map(r=>[r.kind,r.ok]),[['exam',false]]);
+ down=false;tick(day(2)+3600e3-1);assert.equal(grader.check(),undefined);
+ chatter(store,'毒',hour(10));chatter(store,'g5',hour(10));tick(day(2)+3600e3);
+ let r=await grader.check();assert.deepEqual(r.left,['毒'],'grading goes first');assert.deepEqual(matters.exams(5),[]);
+ r=await grader.check();assert.equal(matters.exams(5).length,1,'then the exam, while grading waits after leaving a chat');
+ assert.equal(store.meta('exam').error,undefined,'the failure is cleared');assert.equal(model.calls.at(-1).data.chats.length,1);
 });
