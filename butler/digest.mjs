@@ -1,83 +1,89 @@
 // The digest: one card in my direct chat with the bot, 管家待办, and the sender that checks every minute whether one is
 // due (see schedule.mjs), sends it, and keeps the latest one current in place. A digest lists the open matters, the
-// most urgent first, one compact block each, marking those new since the digest before it; the matters that ended
-// since then are folded away in a panel, with the reason. Matters I closed myself in the conversation are listed among
-// the ended ones after those butler ended, but are no reason to send a digest: I know of them already.
+// most urgent first, one row each; the matters that ended today are folded away in a panel, with the reason. Matters I
+// closed myself are listed among the ended ones after those butler ended, but are no reason to send a digest: I know
+// of them already. The conversation lists the open matters in the same rows.
 import {decide,nextDigest} from './schedule.mjs';
-import {plain,link,lines,tags,fits} from './cards.mjs';
+import {plain,dot,lines,fits} from './cards.mjs';
 export {CARD_BYTES} from './cards.mjs';
 
 export const URGENCY={high:'紧急',normal:'一般',low:'不急'};
-const TAG_COLOR={high:'red',normal:'orange',low:'neutral'},RANK={high:0,normal:1,low:2};
+const DOT={high:'red',normal:'orange',low:'grey'},RANK={high:0,normal:1,low:2};
 const time=ms=>new Date(ms).toLocaleString('sv-SE').slice(5,16),day=ms=>new Date(ms).toDateString();
-export const endReason=m=>m.closedBy==='owner'?`在私聊里关掉${m.reason?`：${m.reason}`:''}`:m.reason??'';
+const midnight=ms=>new Date(ms).setHours(0,0,0,0);
+export const endReason=m=>m.closedBy==='owner'?`你关掉的${m.reason?`：${m.reason}`:''}`:m.reason??'';
 // Feishu updates a message only within 14 days of sending it; an hour less leaves room for the clocks.
 const UPDATABLE_MS=14*86400e3-3600e3;
 
 // Open matters in the order a digest lists them: the most urgent first, and within one urgency the one that started
 // first.
 export const ordered=list=>[...list].sort((a,b)=>(RANK[a.urgency]??1)-(RANK[b.urgency]??1)||a.since-b.since||a.id-b.id);
-// What a digest after the one sent at since reports: every open matter, those of them opened after since (all, when
-// since is undefined: there has been none), and the matters that ended after since.
-export function digestOf(matters,since){
- const open=ordered(matters.list());
- return {open,fresh:open.filter(m=>since===undefined||m.openedAt>since),ended:matters.closedSince(since)};
+// What a digest card made at at shows: every open matter, and the matters that ended since midnight.
+export const todoOf=(matters,at)=>({open:ordered(matters.list()),ended:matters.closedSince(midnight(at))});
+// How much news there is since the digest sent at since (none sent yet when it is undefined): the open matters opened
+// after it, and the matters butler ended after it. It decides whether a digest goes out.
+function news(matters,since){
+ return {fresh:matters.list().filter(m=>since===undefined||m.openedAt>since).length,ended:matters.closedSince(since).filter(m=>m.closedBy!=='owner').length};
 }
-// How much of it is news: what decides whether a digest goes out.
-const news=d=>({fresh:d.fresh.length,ended:d.ended.filter(m=>m.closedBy!=='owner').length});
 
-// One open matter: its urgency (and 新 when it is fresh) as tags, its title, a grey line of facts (its number, which
-// the conversation goes by, who, where, since when, the due date), what it asks of me, and a link to its first
-// message. The digest's blocks and the conversation's list of matters.
-export function matterBlock(m,{fresh=false}={}){
- const labels=[...URGENCY[m.urgency]?[[URGENCY[m.urgency],TAG_COLOR[m.urgency]]]:[],...fresh?[['新','blue']]:[]];
- const facts=[`#${m.id}`,m.who,m.chats.join('、'),`${time(m.since)} 起`,...m.due?[`期限 ${m.due}`]:[]].filter(Boolean).join(' · ');
- return {tag:'column_set',columns:[
-  ...labels.length?[{tag:'column',width:'auto',elements:[tags(labels)]}]:[],
+// One open matter in a row, as a card made at at shows it: a dot in its urgency's color, its title and, in grey, who
+// asks, in which chats and the due date or else when it started, which open its first message when clicked; then
+// 完成, and ⋯ with 不归我 and 打开原消息. The buttons send back their action and the matter.
+export function matterRow(m,{at}){
+ const when=day(m.since)===day(at)?`今天 ${time(m.since).slice(6)}`:time(m.since);
+ // A date the model wrote as YYYY-MM-DD (see prompt.mjs) goes without the year when it is this one.
+ const year=`${new Date(at).getFullYear()}-`,due=m.due?.startsWith(year)?m.due.slice(year.length):m.due;
+ const text=[plain(m.title),plain([m.who,m.chats.join('、'),due?`期限 ${due}`:when].filter(Boolean).join(' · '),{text_size:'notation',text_color:'grey'})];
+ const option=(content,more)=>({text:{tag:'plain_text',content},...more});
+ return {tag:'column_set',horizontal_spacing:'8px',columns:[
+  {tag:'column',width:'auto',elements:[dot(DOT[m.urgency]??DOT.normal)]},
   {tag:'column',width:'weighted',weight:1,vertical_spacing:'4px',
-   elements:[plain(m.title,{text_size:'heading'}),plain(facts,{text_size:'notation',text_color:'grey'}),...m.ask?[plain(m.ask)]:[]]},
-  ...m.link?[{tag:'column',width:'auto',elements:[link('打开',m.link)]}]:[]]};
+   elements:m.link?[{tag:'interactive_container',padding:'0px',vertical_spacing:'4px',behaviors:[{type:'open_url',default_url:m.link}],elements:text}]:text},
+  {tag:'column',width:'auto',direction:'horizontal',horizontal_spacing:'4px',elements:[
+   {tag:'button',type:'default',size:'small',text:{tag:'plain_text',content:'完成'},behaviors:[{type:'callback',value:{act:'done',matter:m.id}}]},
+   {tag:'overflow',options:[option('不归我',{value:'not_mine'}),...m.link?[option('打开原消息',{multi_url:{url:m.link}})]:[]],
+    behaviors:[{type:'callback',value:{matter:m.id}}]}]}]};
 }
 // The open matters a digest does not list, counted by urgency in one line.
 const counted=rest=>`另有 ${rest.length} 件没有列出（${[...Map.groupBy(rest,m=>m.urgency)].map(([u,ms])=>`${ms.length} 件${URGENCY[u]??u}`).join('、')}），在私聊里说「现在有哪些事」可以看全部`;
 // The ended matters a digest lists: those butler ended before those I closed myself, which I know of already; the
 // latest to end first.
-const OPEN_LISTED=15,ENDED_LISTED=10;
+const OPEN_LISTED=10,ENDED_LISTED=10;
 const listedEnded=ended=>[...ended].sort((a,b)=>(a.closedBy==='owner')-(b.closedBy==='owner')||b.closedAt-a.closedAt||b.id-a.id).slice(0,ENDED_LISTED);
 function endedPanel(ended){
  const listed=listedEnded(ended),reason=m=>endReason(m);
  return {tag:'collapsible_panel',expanded:false,
-  header:{title:{tag:'plain_text',content:`上次汇总以来结束了 ${ended.length} 件`},icon:{tag:'standard_icon',token:'down-small-ccm_outlined',size:'16px 16px'},
-   icon_position:'right',icon_expanded_angle:-180},
+  header:{title:{tag:'plain_text',content:`今天结束了 ${ended.length} 件`},icon:{tag:'standard_icon',token:'right-small-ccm_outlined',size:'16px 16px'},
+   icon_position:'left',icon_expanded_angle:90},
   border:{color:'grey',corner_radius:'5px'},
-  elements:lines([...listed.map(m=>`#${m.id} ${m.title}${reason(m)?` — ${reason(m)}`:''}`),...ended.length>listed.length?[`另有 ${ended.length-listed.length} 件也结束了，没有列出`]:[]],
+  elements:lines([...listed.map(m=>`${m.title}${reason(m)?` — ${reason(m)}`:''}`),...ended.length>listed.length?[`另有 ${ended.length-listed.length} 件也结束了，没有列出`]:[]],
    {text_color:'grey'})};
 }
 
-// The digest card, as of at: a digest sent at sentAt (at itself for a new one) with what digestOf reports. The header
-// is red while something urgent is open; the update time carries the date once it is no longer the day it was sent.
-// At most fifteen open matters are listed, fewer when that is what fits one card.
-export function digestCard({at,sentAt=at,open,fresh,ended}){
- const isNew=new Set(fresh.map(m=>m.id)),high=open.filter(m=>m.urgency==='high').length;
+// The digest card, as of at, with what todoOf reports: for a digest sent at sentAt (at itself for a new one). The
+// header counts the urgent matters on its right, and is red while there are any; the update time carries the date
+// once it is no longer the day it was sent. At most ten open matters are listed, fewer when that is what fits one card.
+export function digestCard({at,sentAt=at,open,ended}){
+ const high=open.filter(m=>m.urgency==='high').length;
  const make=n=>({schema:'2.0',
   config:{update_multi:true,summary:{content:open.length?`${high?`${high} 件紧急 · `:''}共 ${open.length} 件待办`:'现在没有待办'}},
-  header:{title:{tag:'plain_text',content:'管家待办'},subtitle:{tag:'plain_text',content:`更新于 ${day(at)===day(sentAt)?time(at).slice(6):time(at)}`},template:high?'red':'blue'},
-  body:{vertical_spacing:'12px',elements:[
-   ...open.length?open.slice(0,n).map(m=>matterBlock(m,{fresh:isNew.has(m.id)})):[plain('现在没有要你处理的事。')],
+  header:{title:{tag:'plain_text',content:'管家待办'},subtitle:{tag:'plain_text',content:`更新于 ${day(at)===day(sentAt)?time(at).slice(6):time(at)}`},
+   ...high&&{text_tag_list:[{tag:'text_tag',text:{tag:'plain_text',content:`${high} 件紧急`},color:'red'}]},template:high?'red':'blue'},
+  body:{vertical_spacing:'16px',elements:[
+   ...open.length?open.slice(0,n).map(m=>matterRow(m,{at})):[plain('现在没有要你处理的事。')],
    ...open.length>n?[plain(counted(open.slice(n)),{text_size:'notation',text_color:'grey'})]:[],
-   ...ended.length?[endedPanel(ended)]:[]]}});
+   ...ended.length?[{tag:'hr'},endedPanel(ended)]:[]]}});
  for(let n=Math.min(open.length,OPEN_LISTED);;n--){const card=make(n);if(n===0||fits(card))return card;}
 }
 // What an earlier digest turns into once a newer one is sent, so that it shows no todos that are out of date.
 export const supersededCard=()=>({schema:'2.0',config:{update_multi:true,summary:{content:'这份待办已经过时'}},
  header:{title:{tag:'plain_text',content:'管家待办（已过时）'},template:'grey'},body:{elements:[plain('有一份更新的待办在下面，这份不再更新。')]}});
 
-// The digest state in the store (meta digest: {at, slot, sent, failedAt, messageId, previousAt}: when the latest digest
-// went out, the last slot handled, how many have gone out, when a send last failed, the latest digest's message and
-// when the digest before it went out) with what the next digest would report and when it would go out. The command
-// line's status reads it from another process.
+// The digest state in the store (meta digest: {at, slot, sent, failedAt, messageId}: when the latest digest went out,
+// the last slot handled, how many have gone out, when a send last failed and the latest digest's message) with what
+// the next digest would report and when it would go out. The command line's status reads it from another process.
 export function digestStatus({store,matters,schedule,now=Date.now()}){
- const last=store.meta('digest')??{},n=news(digestOf(matters,last.at));
+ const last=store.meta('digest')??{},n=news(matters,last.at);
  return {...last,...n,next:nextDigest({now,last,...n,schedule})};
 }
 
@@ -113,22 +119,23 @@ export class Digests{
   if(this.#stopped||!this.bot.connected)return;
   const now=this.now(),last=this.store.meta('digest')??{};
   if(now-last.failedAt<this.retryMs)return;
-  const d=digestOf(this.matters,last.at),r=decide({now,last,...news(d),schedule:this.schedule});
+  const r=decide({now,last,...news(this.matters,last.at),schedule:this.schedule});
   if(!r.send){if(r.slot!==undefined)this.store.setMeta('digest',{...last,slot:r.slot});return;}
   let sent;
-  try{sent=await this.bot.toOwner({card:digestCard({at:now,...d})});}
+  try{sent=await this.bot.toOwner({card:digestCard({at:now,...todoOf(this.matters,now)})});}
   catch(e){
    this.store.addError('汇总',`汇总没有发出去，${Math.round(this.retryMs/60e3)} 分钟后再试：${e?.message??e}`);
    this.store.setMeta('digest',{...last,failedAt:now});return;
   }
+  // previousAt: when the digest before it went out, which earlier versions kept.
   const {failedAt,messageId,previousAt,...rest}=last;
-  this.store.setMeta('digest',{...rest,at:now,...r.slot!==undefined&&{slot:r.slot},sent:(last.sent??0)+1,messageId:sent?.messageId,previousAt:last.at});
+  this.store.setMeta('digest',{...rest,at:now,...r.slot!==undefined&&{slot:r.slot},sent:(last.sent??0)+1,messageId:sent?.messageId});
   if(messageId&&now-last.at<UPDATABLE_MS)await this.#update(messageId,supersededCard(),'上一份汇总');
  }
  async #refresh(){
   const last=this.store.meta('digest')??{},now=this.now();
   if(this.#stopped||!this.bot.connected||!last.messageId||!(now-last.at<UPDATABLE_MS))return;
-  await this.#update(last.messageId,digestCard({at:now,sentAt:last.at,...digestOf(this.matters,last.previousAt)}),'汇总');
+  await this.#update(last.messageId,digestCard({at:now,sentAt:last.at,...todoOf(this.matters,now)}),'汇总');
  }
  async #update(messageId,card,what){
   try{await this.bot.updateCard(messageId,card);}catch(e){this.store.addError('汇总',`${what}的卡片没有更新：${e?.message??e}`);}

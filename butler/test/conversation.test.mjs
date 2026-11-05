@@ -89,9 +89,9 @@ test('the owner talks freely: the model picks the actions, butler carries them o
  r=await say('现在有哪些事',{actions:[{do:'list'}],reply:'最急的是给黄凯熙加权限。'});
  assert.match(r.reply,/最急的是给黄凯熙加权限。/);
  assert.equal(r.cards.flatMap(c=>c.body.elements).filter(e=>e.tag==='column_set').length,3,'every open matter in the block a digest shows it in');
- for(const id of [meego,perm,review])assert.match(r.reply,new RegExp(`#${id} · 陈帆 · `));
- assert.ok(r.reply.indexOf(`#${perm} · `)<r.reply.indexOf(`#${meego} · `),'most urgent first');
- assert.ok(r.cards.some(c=>JSON.stringify(c).includes(JSON.stringify(`[打开](${matters.matter(perm).link})`))),'with butler\'s links');
+ const titles=r.cards.flatMap(c=>c.body.elements).filter(e=>e.tag==='column_set').map(e=>shown({card:e.columns[1]}).split('\n')[0]);
+ assert.deepEqual(titles,['给黄凯熙加权限','评审接口方案','查看 Meego 状态变更通知'],'most urgent first');
+ assert.ok(r.cards.some(c=>JSON.stringify(c).includes(JSON.stringify(matters.matter(perm).link))),'with butler\'s links');
 
  const before=JSON.stringify([matters.list({all:true}),matters.ignoredSenders(),store.watches()]);
  r=await say('今天最急的是什么？',{actions:[],reply:'最急的是给黄凯熙加权限，今天要处理。'});

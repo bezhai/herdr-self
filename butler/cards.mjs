@@ -1,7 +1,8 @@
 // The Feishu cards (JSON 2.0) butler sends. Text from the model, the chats and the people always goes in plain text,
-// so nothing in it is read as markdown or becomes a link; markdown is butler's own: headings and tags it words, and
-// links it made from the source messages. Feishu checks a 2.0 card strictly and refuses one with a property it does
-// not know, at send time, so only properties its card JSON 2.0 documentation lists are used.
+// so nothing in it is read as markdown or becomes a link; markdown is butler's own: headings it words and colored
+// dots. The only links are butler's, made from the source messages, and they go in components' link properties, never
+// in text. Feishu checks a 2.0 card strictly and refuses one with a property it does not know, at send time, so only
+// properties its card JSON 2.0 documentation lists are used.
 
 // Feishu refuses a card message whose request body exceeds 30 KB; the card travels serialized as a string inside
 // that body (see bridge/message-cards.mjs, which keeps 28000 bytes for the same reason).
@@ -21,10 +22,8 @@ export const fits=card=>size(card)<=CARD_BYTES&&components(card)<=MAX_COMPONENTS
 export const plain=(content,style={})=>({tag:'div',text:{tag:'plain_text',content:clip(content,PLAIN),...style}});
 // text: butler's own words, without markdown characters.
 export const heading=text=>({tag:'markdown',content:`**${text}**`});
-// url: one butler made; parentheses and spaces would end the markdown link.
-export const link=(text,url)=>({tag:'markdown',content:`[${text}](${url.replace(/[() ]/g,c=>({'(':'%28',')':'%29',' ':'%20'})[c])})`});
-// Tags in one line: [label, color] pairs, labels in butler's own words, colors among the text_tag ones.
-export const tags=list=>({tag:'markdown',content:list.map(([label,color])=>`<text_tag color='${color}'>${label}</text_tag>`).join(' ')});
+// A dot in color, one of the card colors.
+export const dot=color=>({tag:'markdown',content:`<font color='${color}'>●</font>`});
 // Lines of plain text in as few elements as stay well within a card, each in style.
 export function lines(list,style={}){
  const out=[];let part=[];

@@ -9,7 +9,7 @@
 import {clean,parse,prose} from './prompt.mjs';
 import {find} from './lookup.mjs';
 import {cards,plain,heading} from './cards.mjs';
-import {endReason,matterBlock,ordered} from './digest.mjs';
+import {endReason,matterRow,ordered} from './digest.mjs';
 
 // One row per message of mine: what I said, butler's reply, and the model's raw answer for looking into it later.
 const SCHEMA=`
@@ -179,7 +179,7 @@ export class Conversation{
     this.onMattersChanged();return {lines:[`已重新打开 #${m.id} ${m.title}`]};
    case 'list':{
     const open=ordered(this.matters.list());
-    return open.length?{elements:[heading(`没结束的事项（${open.length}）`),...open.map(x=>matterBlock(x))]}:{lines:['现在没有没结束的事项']};
+    return open.length?{elements:[heading(`没结束的事项（${open.length}）`),...open.map(x=>matterRow(x,{at:now}))]}:{lines:['现在没有没结束的事项']};
    }
    case 'note':{
     if(this.matters.notes().some(n=>n.text===a.text))return {lines:[`这条说明已经记过了：${a.text}`]};
