@@ -20,6 +20,14 @@ export function statusTone(status) {
   return 'neutral';
 }
 
+const clientStates = { online: ['ok', '客户端在线'], refused: ['error', '客户端被拒绝'], offline: ['neutral', '客户端离线'] };
+
+// Badge of the connection of a machine's client: online, refused (its last hello failed, for a reason the card shows) or offline.
+export function clientStatus(client) {
+  const [tone, label] = clientStates[client?.state] || clientStates.offline;
+  return { tone, label };
+}
+
 // Enabled machines whose last Herdr refresh succeeded; only these can take a new binding.
 export const connectedMachines = (state) => state.machines.filter((m) => m.enabled && m.state === 'connected');
 

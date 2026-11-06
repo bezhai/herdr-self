@@ -187,11 +187,48 @@ test('machine cards list Herdr agents with their status, mark agents without a s
   expect(within(codex).getByText('空闲').classList.contains('neutral')).toBe(true);
   expect(within(codex).getByText('未识别会话')).toBeTruthy();
   expect(within(blocked).getByText('等待确认')).toBeTruthy();
-  expect(cpu2.querySelector('.facts').textContent).toBe('3个终端3个 Agent');
+  expect(cpu2.querySelector('.facts').textContent).toBe('3个终端3个 Agentcpu2-host上的客户端');
   expect(within(cpu2).queryByRole('button', { name: '查看连接' })).toBeNull();
   expect(within(cpu2).queryByRole('button', { name: /适配器/ })).toBeNull();
   expect(within(card('cpu3')).getByText('ssh: connection refused')).toBeTruthy();
   expect(screen.getByText('Agent', { selector: '.metric span' }).nextElementSibling.textContent).toBe('3');
+});
+
+test('machine cards show the connection of their client, online with its host, refused with the reason or offline, and generate its token; a new token comes after a warning, and the machines are fetched again', async () => {
+  const state = sampleState();
+  const config = '{\n  "url": "ws://bridge-host:8080/api/client",\n  "token": "secret"\n}\n';
+  const fetch = stubFetch({
+    '/api/state': () => state,
+    '/api/machines/token': () => {
+      state.machines[0] = { ...state.machines[0], client: { state: 'offline' } };
+      return { config };
+    },
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^机器连接/ }));
+  const cpu2 = card('cpu2');
+  expect(within(cpu2).getByText('客户端在线').className).toBe('badge');
+  expect(within(cpu2.querySelector('.facts')).getByText('cpu2-host').tagName).toBe('B');
+  expect(within(card('gpu1')).getByText('客户端离线').classList.contains('neutral')).toBe(true);
+  expect(card('gpu1').querySelector('.facts').textContent).toBe('0个终端0个 Agent');
+  const cpu3 = card('cpu3');
+  expect(within(cpu3).getByText('客户端被拒绝').classList.contains('error')).toBe(true);
+  expect(within(cpu3).getByText('版本不一致：控制面协议 1，客户端协议 2').className).toBe('card-error');
+  expect(within(card('gpu1')).getByRole('button', { name: '生成 token' })).toBeTruthy();
+  expect(within(card('laptop')).getByRole('button', { name: '生成 token' })).toBeTruthy();
+  expect(within(cpu3).getByRole('button', { name: '重新生成 token' })).toBeTruthy();
+
+  await user.click(within(cpu2).getByRole('button', { name: '重新生成 token' }));
+  expect(screen.getByRole('heading', { name: '重新生成客户端 token' })).toBeTruthy();
+  const before = callsTo(fetch, '/api/state');
+  await user.click(screen.getByRole('button', { name: '重新生成' }));
+  expect((await screen.findByLabelText('客户端配置')).value).toBe(config);
+  expect(bodyOf(fetch, '/api/machines/token')).toEqual({ id: 'm-1' });
+  await waitFor(() => expect(within(card('cpu2')).getByText('客户端离线')).toBeTruthy());
+  expect(callsTo(fetch, '/api/state')).toBe(before + 1);
+  await user.click(within(dialog()).getByRole('button', { name: '关闭' }));
+  expect(dialog()).toBeNull();
 });
 
 test('binding rows show the chat, the machine with the agent kind and working directory, and the status; the page holds only the routes table', async () => {

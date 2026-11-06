@@ -1,6 +1,6 @@
 import { expect, test } from 'vitest';
 import {
-  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, metrics, minutesLeft, permissionModeOf, registrationView, statusLabel, statusTone, topicStatus,
+  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, minutesLeft, permissionModeOf, registrationView, statusLabel, statusTone, topicStatus,
 } from './model.js';
 import { sampleState } from './test/fixtures.js';
 
@@ -23,6 +23,12 @@ test('topic states have a label and a tone', () => {
   expect(['starting', 'choosing', 'ready', 'failed', 'closed', 'other'].map(topicStatus)).toEqual([
     { tone: 'warn', label: '启动中' }, { tone: 'warn', label: '待选择' }, { tone: 'ok', label: '运行中' }, { tone: 'error', label: '失败' },
     { tone: 'neutral', label: '已结束' }, { tone: 'neutral', label: 'other' },
+  ]);
+});
+
+test('the client connection of a machine is online, refused or offline, which is also what a machine without one shows', () => {
+  expect([{ state: 'online', host: 'h', since: 1 }, { state: 'refused', error: 'x' }, { state: 'offline' }, undefined].map(clientStatus)).toEqual([
+    { tone: 'ok', label: '客户端在线' }, { tone: 'error', label: '客户端被拒绝' }, { tone: 'neutral', label: '客户端离线' }, { tone: 'neutral', label: '客户端离线' },
   ]);
 });
 

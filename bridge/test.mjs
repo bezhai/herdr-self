@@ -10,6 +10,8 @@ import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.mjs';imp
 import {check,card,plain} from './request-cards.mjs';import {fits} from './message-cards.mjs';import {nameOf} from './adoption.mjs';
 import {Registrations} from './registration.mjs';import {staticFile,sendStatic} from './web-assets.mjs';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
+import crypto from 'node:crypto';import {WebSocketServer} from 'ws';
+import {link,protocol,closeCodes} from './link.mjs';import {Clients} from './clients.mjs';import {configText} from './client.mjs';
 
 function platformFixture(options){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-platform-')),store=new Store(dir),messages=[],unbound=[];return {dir,store,messages,unbound,platforms:new Platforms(store,{onMessage:(...args)=>messages.push(args),onUnbound:(...args)=>unbound.push(args),...options}),close(){fs.rmSync(dir,{recursive:true});}};}
 const route={id:'b',name:'个人助手',enabled:true,appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false};
@@ -2896,7 +2898,7 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.equal((await api('apps/remove',{id:'app-gone'})).status,200);assert.equal(fs.existsSync(path.join(state,'avatars','app-gone')),false);assert.ok(fs.existsSync(path.join(state,'avatars','app-avatar')));
   assert.equal((await api('apps/remove',{id:'../avatars/app-avatar'})).status,400);assert.ok(fs.existsSync(path.join(state,'avatars','app-avatar')));
   const [m]=(await api('state')).body.machines;assert.equal(m.state,'connected');assert.deepEqual(m.agents,agents);assert.deepEqual(m.panes,[{pane_id:'w1:p1'}]);
-  assert.deepEqual(Object.keys(m).sort(),['agents','binary','checkedAt','enabled','host','id','name','panes','port','session','state','type']);
+  assert.deepEqual(Object.keys(m).sort(),['agents','binary','checkedAt','client','enabled','hasToken','host','id','name','panes','port','session','state','type']);assert.deepEqual([m.client,m.hasToken],[{state:'offline'},false]);
   assert.equal((await api('machines/install',{id:machineId})).status,404);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
@@ -2955,6 +2957,195 @@ test('the server refuses to start with a BRIDGE_URL that is not an http(s) origi
   let err='';server.stderr.on('data',d=>{err+=d;});const timer=setTimeout(()=>server.kill(),5000);const code=await new Promise(r=>server.once('exit',r));clearTimeout(timer);
   assert.notEqual(code,0);assert.match(err,/BRIDGE_URL/);assert.equal(fs.existsSync(path.join(dir,'access-key')),false);
  }finally{fs.rmSync(dir,{recursive:true});}
+});
+
+// The client of a machine and its connection to the control plane (link.mjs, clients.mjs, client.mjs).
+const bridgeDir=path.dirname(fileURLToPath(import.meta.url));
+const freePort=()=>new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
+// Polls check every 50 ms until it gives something truthy and resolves to that; fails naming what after ms.
+async function until(check,what,ms=8000){for(const end=Date.now()+ms;Date.now()<end;await later(50)){const v=await check();if(v)return v;}assert.fail('timed out waiting until '+what);}
+// The code and the reason with which ws closes.
+const closeOf=ws=>new Promise(r=>ws.addEventListener('close',e=>r([e.code,e.reason])));
+// A WebSocket of Node to url with the token, once open; one that the other side refuses before the upgrade rejects.
+const dial=(url,token)=>new Promise((resolve,reject)=>{const ws=new WebSocket(url,{headers:token?{authorization:'Bearer '+token}:{}});ws.onopen=()=>resolve(ws);ws.onerror=()=>reject(Error('not upgraded'));});
+// The frames that arrive on ws, parsed; wait(check) resolves to the first one that check accepts.
+function framesOf(ws){const frames=[];ws.addEventListener('message',e=>frames.push(JSON.parse(e.data)));frames.wait=check=>until(()=>frames.find(check),'a frame');return frames;}
+const hello=(ws,params)=>ws.send(JSON.stringify({id:1,method:'hello',params}));
+// A config file of the client with mode.
+const configFile=(dir,name,text,mode=0o600)=>{const file=path.join(dir,name);fs.writeFileSync(file,text,{mode});fs.chmodSync(file,mode);return file;};
+// The environment of a client process: none of the test's Bridge, Herdr or proxy variables, then every proxy variable pointing at a closed port.
+const clientEnv=env=>({...Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(BRIDGE_|HERDR_)|proxy$/i.test(k))),...Object.fromEntries(['http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','all_proxy'].map(k=>[k,'http://127.0.0.1:9'])),...env});
+// A client process (bin/bridge-client.mjs) with the config file given; log collects its stderr and exited resolves to its exit code.
+function bridgeClient(config){
+ const p=spawn(process.execPath,[path.join(bridgeDir,'bin','bridge-client.mjs')],{env:clientEnv({BRIDGE_CLIENT_CONFIG:config}),stdio:['ignore','ignore','pipe']});
+ p.log='';p.stderr.on('data',d=>{p.log+=d;});p.exited=new Promise(r=>p.once('exit',code=>r(code)));return p;
+}
+// Bridge (server.mjs) on port with the state directory state, once it listens; stop() ends it.
+async function bridgeServer(state,port,env={}){
+ const server=spawn(process.execPath,['server.mjs'],{cwd:bridgeDir,env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',...env},stdio:['ignore','pipe','inherit']});
+ await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
+ server.stop=async()=>{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));};return server;
+}
+// Clients alone on an HTTP server of this process, with the machine cpu2 and its token.
+async function clientsFixture(options){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-clients-')),store=new Store(dir);store.data.machines.push({id:'m',name:'cpu2',type:'ssh',host:'cpu2',session:'default',port:22,binary:'~/.local/bin/herdr',enabled:false});
+ const clients=new Clients(store,options),server=http.createServer((req,res)=>res.end()).on('upgrade',(...args)=>clients.upgrade(...args));
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));const token=clients.issue(store.data.machines[0]);
+ return {store,clients,token,url:`ws://127.0.0.1:${server.address().port}/api/client`,close(){clients.close();server.close();fs.rmSync(dir,{recursive:true});}};
+}
+test('a link carries requests both ways on one WebSocket: answers find their request by id in any order, errors keep their code, a method outside the set is refused, frames that are not JSON are ignored, and a request fails after its timeout or once the connection closes',async()=>{
+ const wss=new WebSocketServer({port:0,host:'127.0.0.1'});await new Promise(r=>wss.once('listening',r));
+ const accepted=new Promise(r=>wss.once('connection',r)),client=await dial(`ws://127.0.0.1:${wss.address().port}`),server=await accepted;
+ try{
+  let release;const gate=new Promise(r=>{release=r;});
+  const control=link(server,{echo:params=>({echo:params})});
+  const machine=link(client,{wait:async()=>{await gate;return {waited:true};},double:({n})=>({n:n*2}),fail:()=>{throw Object.assign(Error('不行'),{code:'nope'});},hang:()=>new Promise(()=>{})});
+  // The first request is answered after the second; each answer still goes to its own request.
+  const first=control.call('wait'),second=control.call('double',{n:2});
+  assert.deepEqual(await second,{n:4});release();assert.deepEqual(await first,{waited:true});
+  // Frames that are not JSON, and answers to no request, are ignored.
+  client.send('not json');server.send('{"id":99,"result":1}');
+  // Each side numbers its own requests: the client's first one has the id of the control plane's first one.
+  assert.deepEqual(await machine.call('echo',{x:1}),{echo:{x:1}});
+  await assert.rejects(control.call('fail'),e=>e.message==='不行'&&e.code==='nope');
+  for(const method of ['run','constructor','__proto__','toString'])await assert.rejects(control.call(method,{argv:['rm','-rf','/']}),e=>e.code==='unknown_method'&&e.message==='不支持的操作：'+method,method);
+  await assert.rejects(control.call('hang',{},{timeoutMs:50}),e=>e.timedOut===true&&e.message==='请求超时：hang');
+  const pending=control.call('hang');client.close();await assert.rejects(pending,/连接已断开/);
+  await assert.rejects(control.call('double',{n:1}),/连接已断开/);await assert.rejects(machine.call('echo'),/连接已断开/);
+ }finally{client.close();wss.close();}
+});
+test('the control plane takes a client at /api/client only from an allowed Host, with its machine\'s token and after a hello with its protocol; it refuses with a close code and a reason, and a machine keeps the reason of a refused version, logged once, until a client gets in',async()=>{
+ let hostAllowed=false;const f=await clientsFixture({allowedHost:()=>hostAllowed,helloMs:200});
+ try{
+  assert.deepEqual(await closeOf(await dial(f.url,f.token)),[closeCodes.host,'不允许的 Host']);hostAllowed=true;
+  await assert.rejects(dial(f.url.replace('/api/client','/api/other'),f.token),/not upgraded/);
+  for(const token of [undefined,'wrong',f.token+'x'])assert.deepEqual(await closeOf(await dial(f.url,token)),[closeCodes.token,'token 无效'],token);
+  assert.deepEqual(await closeOf(await dial(f.url,f.token)),[closeCodes.hello,'没有及时完成握手']);
+  const refused=p=>`版本不一致：控制面协议 ${protocol}，客户端协议 ${p}`;
+  for(const p of ['1'.repeat(300),protocol+1,protocol+1]){const ws=await dial(f.url,f.token),closed=closeOf(ws);hello(ws,{protocol:p,host:'old'});assert.deepEqual(await closed,[closeCodes.version,refused(typeof p==='number'?p:'未知')]);}
+  assert.deepEqual(f.clients.status('m'),{state:'refused',error:refused(protocol+1)});assert.deepEqual(f.clients.status('other'),{state:'offline'});
+  assert.deepEqual(f.store.data.logs.filter(l=>l.level==='error').map(l=>l.message),[`cpu2：客户端被拒绝，${refused('未知')}`,`cpu2：客户端被拒绝，${refused(protocol+1)}`]);
+  const ws=await dial(f.url,f.token),frames=framesOf(ws);hello(ws,{protocol,host:'cpu2-host'});
+  assert.deepEqual(await frames.wait(x=>x.id===1),{id:1,result:{machine:{id:'m',name:'cpu2'},heartbeatMs:15000}});
+  const s=f.clients.status('m');assert.deepEqual([s.state,s.host],['online','cpu2-host']);assert.ok(Math.abs(s.since-Date.now())<5000);
+  ws.close();await until(()=>f.clients.status('m').state==='offline','the client is offline');
+ }finally{f.close();}
+});
+test('a peer that sends a frame no client may send, with or without the right token, or drops a request for another path, does not bring the control plane down',async()=>{
+ const f=await clientsFixture(),port=Number(new URL(f.url).port);
+ const upgrade=(p,token)=>[`GET ${p} HTTP/1.1`,'Host: 127.0.0.1','Upgrade: websocket','Connection: Upgrade','Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==','Sec-WebSocket-Version: 13','Authorization: Bearer '+token,'',''].join('\r\n');
+ try{
+  // A text frame without a mask, which a client must never send.
+  for(const token of [f.token,'wrong']){
+   const s=net.connect(port,'127.0.0.1'),closed=new Promise(r=>s.on('close',r));let got='';s.on('data',d=>{got+=d.toString('latin1');});s.on('error',()=>{});
+   s.write(upgrade('/api/client',token));await until(()=>got.startsWith('HTTP/1.1 101'),'the upgrade');s.write(Buffer.from([0x81,0x02,0x68,0x69]));await closed;
+  }
+  const s=net.connect(port,'127.0.0.1');s.on('error',()=>{});s.write(upgrade('/api/other',f.token));s.resetAndDestroy();await later(100);
+  const ws=await dial(f.url,f.token);await link(ws,{ping:()=>({})}).call('hello',{protocol,host:'h'});assert.equal(f.clients.status('m').state,'online');
+  ws.close();await until(()=>f.clients.status('m').state==='offline','the client is offline');
+ }finally{f.close();}
+});
+test('the control plane pings each client every heartbeat and drops one that does not answer within it; a machine is offline once its client is gone',async()=>{
+ const f=await clientsFixture({heartbeatMs:100});
+ try{
+  const answering=await dial(f.url,f.token),result=await link(answering,{ping:()=>({})}).call('hello',{protocol,host:'a'});
+  assert.equal(result.heartbeatMs,100);await later(450);assert.equal(f.clients.status('m').state,'online');
+  answering.close();await until(()=>f.clients.status('m').state==='offline','the closed client is offline');
+  const mute=await dial(f.url,f.token),frames=framesOf(mute),closed=closeOf(mute);hello(mute,{protocol,host:'b'});
+  await frames.wait(x=>x.method==='ping');assert.equal(f.clients.status('m').state,'online');
+  assert.equal((await closed)[0],1006);await until(()=>f.clients.status('m').state==='offline','the mute client is offline');
+  assert.deepEqual(f.store.data.logs.map(l=>l.message),['cpu2：生成了新的客户端 token，旧 token 已失效','cpu2 的客户端已连接（a）','cpu2 的客户端已断开','cpu2 的客户端已连接（b）','cpu2 的客户端已断开']);
+ }finally{f.close();}
+});
+test('the client dials the URL of its config with its token, says hello with its protocol and host, answers pings and refuses other methods; it reconnects after the control plane drops it or goes silent, logs why, ignores proxy variables and exits once another client of its machine replaces it',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-')),wss=new WebSocketServer({port:0,host:'127.0.0.1'}),connections=[];await new Promise(r=>wss.once('listening',r));
+ wss.on('connection',(ws,req)=>connections.push({ws,req,frames:framesOf(ws)}));
+ const client=bridgeClient(configFile(dir,'client.json',configText(`http://127.0.0.1:${wss.address().port}`,'machine-token')));
+ const connection=n=>until(()=>connections[n],'connection '+(n+1)),welcome=(c,h,heartbeatMs)=>c.ws.send(JSON.stringify({id:h.id,result:{machine:{id:'m',name:'cpu2'},heartbeatMs}}));
+ try{
+  let c=await connection(0);assert.equal(c.req.url,'/api/client');assert.equal(c.req.headers.authorization,'Bearer machine-token');
+  let h=await c.frames.wait(x=>x.method==='hello');assert.deepEqual(h.params,{protocol,host:os.hostname()});welcome(c,h,60000);
+  await until(()=>client.log.includes('已连接控制面，机器「cpu2」'),'the client says it is connected');
+  c.ws.send(JSON.stringify({id:1,method:'ping',params:{}}));c.ws.send(JSON.stringify({id:2,method:'exec',params:{argv:['id']}}));
+  assert.deepEqual(await c.frames.wait(x=>x.id===1&&!x.method),{id:1,result:{}});
+  assert.deepEqual(await c.frames.wait(x=>x.id===2&&!x.method),{id:2,error:{message:'不支持的操作：exec',code:'unknown_method'}});
+  // Dropped with a reason, it dials again a second later.
+  c.ws.close(closeCodes.token,'token 已重新生成');
+  c=await connection(1);h=await c.frames.wait(x=>x.method==='hello');welcome(c,h,100);
+  // Nothing from the control plane for three heartbeats: it gives up on the connection and dials again.
+  c=await connection(2);h=await c.frames.wait(x=>x.method==='hello');welcome(c,h,60000);
+  assert.match(client.log,/与控制面的连接断开（4001：token 已重新生成），1 秒后重连/);assert.match(client.log,/控制面 0\.3 秒没有消息，1 秒后重连/);
+  c.ws.close(closeCodes.replaced,'这台机器的另一个客户端已连接');
+  assert.equal(await client.exited,0);assert.match(client.log,/与控制面的连接断开（4004：这台机器的另一个客户端已连接），不再重连/);assert.equal(connections.length,3);
+ }finally{client.kill();wss.close();fs.rmSync(dir,{recursive:true});}
+});
+test('the client does not start without a config file it can use or with Node\'s proxy support turned on; the config the console hands out points at the client endpoint of the control plane',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-'));
+ try{
+  assert.deepEqual(JSON.parse(configText('http://bridge.example:8080','t')),{url:'ws://bridge.example:8080/api/client',token:'t'});
+  assert.deepEqual(JSON.parse(configText('https://bridge.example','t')),{url:'wss://bridge.example/api/client',token:'t'});
+  const run=env=>{const r=spawnSync(process.execPath,[path.join(bridgeDir,'bin','bridge-client.mjs')],{env:clientEnv(env),encoding:'utf8',timeout:5000});return [r.status,r.stderr];};
+  const good=configFile(dir,'good.json',configText('http://127.0.0.1:9','t'));
+  for(const [env,error] of [
+   [{BRIDGE_CLIENT_CONFIG:path.join(dir,'none.json')},`读不到配置文件 ${path.join(dir,'none.json')}`],
+   [{XDG_CONFIG_HOME:dir},`读不到配置文件 ${path.join(dir,'herdr-bridge','client.json')}`],
+   [{BRIDGE_CLIENT_CONFIG:configFile(dir,'open.json',configText('http://127.0.0.1:9','t'),0o644)},'权限是 644，其他用户也能读到 token，改成 600'],
+   [{BRIDGE_CLIENT_CONFIG:configFile(dir,'text.json','url=ws://x')},'不是有效的 JSON'],
+   [{BRIDGE_CLIENT_CONFIG:configFile(dir,'http.json',JSON.stringify({url:'http://127.0.0.1:9/api/client',token:'t'}))},'url 必须是 ws:// 或 wss:// 开头的控制面地址'],
+   [{BRIDGE_CLIENT_CONFIG:configFile(dir,'empty.json',JSON.stringify({url:'ws://127.0.0.1:9/api/client',token:''}))},'缺少 token'],
+   [{BRIDGE_CLIENT_CONFIG:good,NODE_USE_ENV_PROXY:'1'},'NODE_USE_ENV_PROXY'],
+   [{BRIDGE_CLIENT_CONFIG:good,NODE_OPTIONS:'--use-env-proxy'},'--use-env-proxy'],
+  ]){const [status,stderr]=run(env);assert.equal(status,1,stderr);assert.ok(stderr.startsWith('bridge-client: ')&&stderr.includes(error),stderr);}
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('the client runs on Node alone: bin/bridge-client.mjs and everything it imports load only Node\'s built-in modules and each other, never a package',()=>{
+ const seen=new Set(),visit=file=>{if(seen.has(file))return;seen.add(file);
+  for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:\bfrom|\bimport)\s*\(?\s*['"]([^'"]+)['"]/g)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
+ visit(path.join(bridgeDir,'bin','bridge-client.mjs'));
+ assert.deepEqual([...seen].map(f=>path.relative(bridgeDir,f)).sort(),['bin/bridge-client.mjs','client.mjs','link.mjs']);
+});
+test('a machine\'s client gets in with the token that the console generates and the state keeps only as a hash; the console shows it online with its host, refused with the reason of a version mismatch, or offline; a newer client of the machine replaces the older, which exits; a new token drops the client of the old one, which is refused from then on; the client reconnects after the control plane restarts, and removing the machine drops it',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),port=await freePort(),clients=[];
+ fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
+ fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu2',type:'ssh',host:'cpu2',session:'default',port:22,binary:'~/.local/bin/herdr',enabled:false}]}));
+ let server=await bridgeServer(state,port,{BRIDGE_URL:''});
+ const start=config=>{const c=bridgeClient(config);clients.push(c);return c;},origin=`http://127.0.0.1:${port}`;
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim();
+  const api=async(p,body)=>{const r=await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
+  const machine=async()=>(await api('state')).body.machines[0],online=async()=>{const m=await machine();return m.client.state==='online'&&m;};
+  let m=await machine();assert.equal(m.hasToken,false);assert.deepEqual(m.client,{state:'offline'});
+  assert.deepEqual(await api('machines/token',{id:'gone'}),{status:400,body:{error:'机器连接不存在'}});
+  // The config holds the address that the console was reached at.
+  const issued=await api('machines/token',{id:'m'});assert.equal(issued.status,200);assert.deepEqual(Object.keys(issued.body),['config']);
+  const {url,token}=JSON.parse(issued.body.config);assert.equal(url,`ws://127.0.0.1:${port}/api/client`);assert.match(token,/^[\w-]{43}$/);
+  const saved=fs.readFileSync(path.join(state,'state.json'),'utf8');assert.ok(!saved.includes(token));assert.equal(JSON.parse(saved).machines[0].tokenHash,crypto.createHash('sha256').update(token).digest('hex'));
+  m=await machine();assert.equal(m.hasToken,true);assert.equal('tokenHash' in m,false);
+  // A client of another protocol version is refused, and the console shows why.
+  const stale=await dial(url,token),staleClosed=closeOf(stale),mismatch=`版本不一致：控制面协议 ${protocol}，客户端协议 ${protocol+1}`;
+  hello(stale,{protocol:protocol+1,host:'old'});assert.deepEqual(await staleClosed,[closeCodes.version,mismatch]);
+  assert.deepEqual((await machine()).client,{state:'refused',error:mismatch});
+  // The client with the token gets in; one with another token does not.
+  const config=configFile(dir,'client.json',issued.body.config),first=start(config);
+  m=await until(online,'the client is online');assert.equal(m.client.host,os.hostname());
+  const wrong=start(configFile(dir,'wrong.json',configText(origin,'not-the-token')));
+  await until(()=>wrong.log.includes('（4001：token 无效）'),'the wrong token is refused');wrong.kill();
+  // A second client of the machine replaces the first, which stops.
+  const second=start(config);assert.equal(await first.exited,0);assert.match(first.log,/这台机器的另一个客户端已连接/);
+  await until(()=>second.log.includes('已连接控制面'),'the second client is in');assert.equal((await machine()).client.state,'online');
+  // A new token drops the client of the old one, which is refused from then on.
+  const renewed=JSON.parse((await api('machines/token',{id:'m'})).body.config);assert.notEqual(renewed.token,token);
+  await until(()=>second.log.includes('（4001：token 已重新生成）'),'the client of the old token is dropped');
+  await until(()=>second.log.includes('（4001：token 无效）'),'the old token is refused');assert.deepEqual((await machine()).client,{state:'offline'});second.kill();
+  // The client of the new token gets in, and again after the control plane restarts.
+  const third=start(configFile(dir,'renewed.json',configText(origin,renewed.token)));await until(online,'the client of the new token is online');
+  await server.stop();server=await bridgeServer(state,port,{BRIDGE_URL:''});
+  await until(online,'the client is back after the restart',15000);await until(()=>third.log.split('已连接控制面').length===3,'the client says it is connected again');
+  // Removing the machine drops its client.
+  assert.equal((await api('machines/remove',{id:'m'})).status,200);await until(()=>third.log.includes('（4001：机器已移除）'),'the client of the removed machine is dropped');
+  const logs=(await api('state')).body.logs.filter(l=>l.kind==='机器连接').map(l=>l.message);
+  for(const message of [`cpu2：客户端被拒绝，${mismatch}`,`cpu2 的客户端已连接（${os.hostname()}）`,`cpu2 的客户端已连接（${os.hostname()}），替换了之前的连接`,'cpu2：生成了新的客户端 token，旧 token 已失效','cpu2 的客户端已断开'])assert.ok(logs.includes(message),message);
+ }finally{for(const c of clients)c.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
 });
 
 test('SDK cache isolates apps and honors namespaces and absolute expiry',async()=>{const a=channelCache(),b=channelCache();await a.set('same','seen',Date.now()+60000,{namespace:'dedup'});assert.equal(await a.get('same',{namespace:'dedup'}),'seen');assert.equal(await b.get('same',{namespace:'dedup'}),undefined);assert.equal(await a.get('same',{namespace:'token'}),undefined);await a.set('expired','old',Date.now()-1);assert.equal(await a.get('expired'),undefined);});

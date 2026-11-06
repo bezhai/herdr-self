@@ -7,6 +7,7 @@ import { Toast } from './components/Toast.jsx';
 import { Topbar } from './components/Topbar.jsx';
 import { AppDialog } from './dialogs/AppDialog.jsx';
 import { BindingDialog } from './dialogs/BindingDialog.jsx';
+import { ClientTokenDialog } from './dialogs/ClientTokenDialog.jsx';
 import { MachineDialog } from './dialogs/MachineDialog.jsx';
 import { PendingChatsDialog } from './dialogs/PendingChatsDialog.jsx';
 import { PermissionModeDialog } from './dialogs/PermissionModeDialog.jsx';
@@ -95,7 +96,13 @@ export function App() {
               <PageHeading info={info} onAction={pageActions[page]} />
               <Metrics state={state} />
               {page === 'platforms' && <PlatformsPage {...pageProps} openApp={(app) => openDialog('app', { app })} />}
-              {page === 'machines' && <MachinesPage {...pageProps} openMachine={(machine) => openDialog('machine', { machine })} />}
+              {page === 'machines' && (
+                <MachinesPage
+                  {...pageProps}
+                  openMachine={(machine) => openDialog('machine', { machine })}
+                  openToken={(machine) => openDialog('client-token', { machine })}
+                />
+              )}
               {page === 'bindings' && <BindingsPage {...pageProps} openPermissionMode={(binding) => openDialog('permission-mode', { binding })} />}
               {page === 'logs' && <LogsPage state={state} />}
             </div>
@@ -103,6 +110,7 @@ export function App() {
         </main>
       </div>
       {dialog?.kind === 'machine' && <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={saved} />}
+      {dialog?.kind === 'client-token' && <ClientTokenDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onIssued={refresh} />}
       {dialog?.kind === 'app' && <AppDialog key={dialog.key} app={dialog.app} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'pending' && (
         <PendingChatsDialog key={dialog.key} state={state} onPick={(chat) => openDialog('binding', { chat })} onClose={closeDialog} />

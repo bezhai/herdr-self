@@ -8,6 +8,8 @@ import {skillPlacer} from './skills.mjs';
 import {Schedules} from './schedules.mjs';
 import {AgentSchedules} from './agent-schedules.mjs';
 import {staticFile,sendStatic} from './web-assets.mjs';
+import {Clients} from './clients.mjs';
+import {configText} from './client.mjs';
 const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Store(dir),live=new Map(),refreshes=new Map();
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map(),attempts=new Map();
 if(!store.data.machines.length&&!fs.existsSync(path.join(dir,'initialized'))){store.data.machines.push(normalizeMachine({name:'本机',type:'local',session:'default',enabled:true}));store.save();fs.writeFileSync(path.join(dir,'initialized'),'1');}
@@ -28,14 +30,16 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
-function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(m=>({...m,...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
+function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
+// Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients).
+const allowedHost=req=>['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(req.headers.host?.split(':')[0]),clients=new Clients(store,{allowedHost});
 function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
 async function body(req){let s='';for await(const b of req){s+=b;if(s.length>100000)throw Error('请求内容过大');}return JSON.parse(s||'{}');}
 const server=http.createServer(async(req,res)=>{try{
  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
- const url=new URL(req.url,'http://localhost'),p=url.pathname,host=req.headers.host?.split(':')[0];if(!['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(host))return json(res,403,{error:'不允许的 Host'});
+ const url=new URL(req.url,'http://localhost'),p=url.pathname;if(!allowedHost(req))return json(res,403,{error:'不允许的 Host'});
  const asset=req.method==='GET'&&staticFile(p);if(asset)return sendStatic(res,asset);
  if(p==='/health')return json(res,200,{ok:true,service:'herdr-bridge'});
  if(req.method==='POST'&&!req.headers.authorization&&req.headers.origin!=='http://'+req.headers.host&&req.headers.origin!=='https://'+req.headers.host)return json(res,403,{error:'跨站请求已拒绝'});
@@ -48,7 +52,9 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/machines/save'){const m=normalizeMachine(b);if(b.id){const old=machine(b.id);if(old.enabled)throw Error('请先断开机器再编辑');Object.assign(old,m);}else store.data.machines.push(m);store.save();if(m.enabled)await refresh(m);result={id:m.id};}
  else if(p==='/api/machines/connect'){const m=machine(b.id);m.enabled=true;store.save();await refresh(m);result=live.get(m.id);}
  else if(p==='/api/machines/disconnect'){const m=machine(b.id);m.enabled=false;store.save();store.log('机器连接',m.name+' 已断开桥接，Herdr 任务继续运行');}
- else if(p==='/api/machines/remove'){if(store.data.bindings.some(x=>x.machineId===b.id))throw Error('请先移除该机器的会话绑定');machine(b.id);store.data.machines=store.data.machines.filter(x=>x.id!==b.id);live.delete(b.id);store.save();}
+ else if(p==='/api/machines/remove'){if(store.data.bindings.some(x=>x.machineId===b.id))throw Error('请先移除该机器的会话绑定');machine(b.id);store.data.machines=store.data.machines.filter(x=>x.id!==b.id);live.delete(b.id);clients.remove(b.id);store.save();}
+ // The config of the machine's client with a new token, shown once: for the control plane at BRIDGE_URL, else where the browser reached it.
+ else if(p==='/api/machines/token'){result={config:configText(bridgeUrl||'http://'+req.headers.host,clients.issue(machine(b.id)))};}
  else if(p==='/api/apps/registration/start'){result=registrations.start(b);}
  else if(p==='/api/apps/registration/cancel'){result=registrations.cancel(b.id);}
  else if(p==='/api/apps/save'){const old=b.id?platforms.app(b.id):undefined;if(old?.enabled)throw Error('请先停用应用再编辑');if(old&&old.appId!==b.appId&&store.data.bindings.some(x=>x.appId===old.id))throw Error('现有应用还有绑定，请另建应用');const a=normalizeApp(b,old);if(store.data.apps.some(x=>x.id!==a.id&&x.appId===a.appId))throw Error('该应用已添加');if(old)Object.assign(old,a);else store.data.apps.push(a);await platforms.stop(a.id);store.save();result={id:a.id};}
@@ -74,5 +80,6 @@ for(const m of store.data.machines)if(m.enabled)refresh(m);for(const a of store.
 // Without it Bridge runs on, and only bridge-schedule fails.
 agents.on('error',e=>store.log('定时任务',`Agent 的请求接口没有打开，${socket}：${e.message}`,'error'));
 fs.rmSync(socket,{force:true});agents.listen(socket,()=>fs.chmodSync(socket,0o600));
+server.on('upgrade',(req,socket,head)=>clients.upgrade(req,socket,head));
 server.listen(Number(process.env.PORT||8080),process.env.BIND||'0.0.0.0',()=>console.log('herdr-bridge listening on '+(process.env.PORT||8080)));
-process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();agentSchedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);agents.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});
+process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();agentSchedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);agents.close();clients.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});

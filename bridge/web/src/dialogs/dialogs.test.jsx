@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { expect, test, vi } from 'vitest';
 import { AppDialog } from './AppDialog.jsx';
 import { BindingDialog } from './BindingDialog.jsx';
+import { ClientTokenDialog } from './ClientTokenDialog.jsx';
 import { MachineDialog } from './MachineDialog.jsx';
 import { PermissionModeDialog } from './PermissionModeDialog.jsx';
 import { RegistrationDialog } from './RegistrationDialog.jsx';
@@ -68,6 +69,39 @@ test('machine form edits an existing machine and keeps SSH values when switched 
   await user.click(screen.getByRole('button', { name: '保存并连接' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
   expect(bodyOf(fetch, '/api/machines/save')).toEqual({ id: 'm-4', name: 'cpu3', type: 'local', host: 'cpu3', session: 'default', port: '22', binary: '~/.local/bin/herdr', enabled: true });
+});
+
+test('the client token dialog warns that a new token replaces the old one, then shows the config of the client once; a first token needs no warning and a failure stays in the dialog', async () => {
+  const issue = deferred();
+  const fetch = stubFetch({ '/api/machines/token': () => issue.promise });
+  const onIssued = vi.fn();
+  const user = userEvent.setup();
+  const view = render(<ClientTokenDialog machine={sampleState().machines[0]} onClose={vi.fn()} onIssued={onIssued} />);
+  expect(document.querySelector('.dialog-head').textContent).toBe('重新生成客户端 token');
+  expect(prose()).toEqual(['旧 token 立即失效，正在用它连接的客户端会断开。']);
+  const submit = screen.getByRole('button', { name: '重新生成' });
+  await user.click(submit);
+  expect(submit.disabled).toBe(true);
+  expect(bodyOf(fetch, '/api/machines/token')).toEqual({ id: 'm-1' });
+
+  const config = '{\n  "url": "ws://bridge-host:8080/api/client",\n  "token": "secret"\n}\n';
+  issue.resolve(reply({ config }));
+  const field = await screen.findByLabelText('客户端配置');
+  expect(field.value).toBe(config);
+  expect(field.readOnly).toBe(true);
+  expect(document.querySelector('.dialog-head').textContent).toBe('cpu2 的客户端配置');
+  expect(prose()).toEqual(['只显示这一次。保存为那台机器上的 ~/.config/herdr-bridge/client.json，权限 600。']);
+  expect(onIssued).toHaveBeenCalledTimes(1);
+  view.unmount();
+
+  stubFetch({ '/api/machines/token': reply({ error: '机器连接不存在' }, 400) });
+  render(<ClientTokenDialog machine={sampleState().machines[1]} onClose={vi.fn()} onIssued={onIssued} />);
+  expect(document.querySelector('.dialog-head').textContent).toBe('生成客户端 token');
+  expect(prose()).toEqual([]);
+  await user.click(screen.getByRole('button', { name: '生成' }));
+  expect(await screen.findByText('机器连接不存在')).toBeTruthy();
+  expect(screen.queryByLabelText('客户端配置')).toBeNull();
+  expect(onIssued).toHaveBeenCalledTimes(1);
 });
 
 test('app form defaults to Feishu, splits allowed users and clears the secret after saving', async () => {
