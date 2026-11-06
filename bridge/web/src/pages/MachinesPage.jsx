@@ -20,12 +20,16 @@ function AgentRow({ agent }) {
   );
 }
 
-// Besides Herdr over SSH or locally, a machine has a client that connects to Bridge with the machine's token; the token is shown once.
+// Toast after connecting or refreshing a machine, by the Herdr status it reached; any other status is a failed poll.
+const connectMessages = { connected: '机器已连接', offline: '机器已启用，等待客户端连接' };
+
+// Bridge reaches a machine only through its client, which connects with the machine's token (shown once when generated).
+// The card shows that connection and the Herdr status Bridge polls through it: offline while the client is not connected.
 function MachineCard({ machine: m, refresh, toast, openMachine, openToken }) {
   const client = clientStatus(m.client);
   async function connect() {
     const result = await request('/machines/connect', { id: m.id });
-    toast(result.state === 'connected' ? '机器已连接' : '连接未成功，查看错误信息');
+    toast(connectMessages[result.state] || '连接未成功，查看错误信息');
     await refresh();
   }
   async function act(path, message) {
@@ -36,12 +40,12 @@ function MachineCard({ machine: m, refresh, toast, openMachine, openToken }) {
   return (
     <article className="card">
       <div className="card-head">
-        <span className="card-icon"><Icon name={m.type === 'ssh' ? 'globe' : 'terminal'} /></span>
+        <span className="card-icon"><Icon name="server" /></span>
         <div className="card-title">
           <strong>{m.name}</strong>
-          <p><span>{m.type === 'ssh' ? `${m.host}:${m.port}` : '本机'}</span><span>{`session ${m.session}`}</span></p>
+          <p><span>{`session ${m.session}`}</span></p>
         </div>
-        <StatusBadge status={m.enabled ? m.state || 'connecting' : 'disabled'} />
+        <StatusBadge status={m.state} />
         <div className="card-actions">
           <ActionButton run={m.enabled ? () => act('/machines/disconnect') : connect} onError={toast}>{m.enabled ? '断开' : '连接'}</ActionButton>
           <ActionButton run={connect} onError={toast}>刷新</ActionButton>

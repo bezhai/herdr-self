@@ -324,7 +324,6 @@ fieldset { margin: 20px 0 0; padding: 2px 16px 16px; border: 1px solid var(--lin
 legend { padding: 0 6px; font: 500 11.5px var(--mono); letter-spacing: .06em; color: var(--muted); }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
 .form-grid.wide-first { grid-template-columns: minmax(0, 1fr) 110px; }
-#machine-form:has(#machine-type option[value="local"]:checked) .ssh-only { display: none; }
 p.error { margin: 14px 0 0; font-size: 13px; color: var(--bad); }
 form:has(p.error:not(:empty)) input:not([type="checkbox"]):invalid, #login-form:has(#login-error:not(:empty)) input { border-color: var(--bad); }
 

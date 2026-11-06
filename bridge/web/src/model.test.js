@@ -1,6 +1,7 @@
 import { expect, test } from 'vitest';
 import {
-  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, minutesLeft, permissionModeOf, registrationView, statusLabel, statusTone, topicStatus,
+  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, minutesLeft, onlineMachines, permissionModeOf, registrationView, statusLabel,
+  statusTone, topicStatus,
 } from './model.js';
 import { sampleState } from './test/fixtures.js';
 
@@ -12,6 +13,11 @@ test('status tones group connection and Herdr agent states', () => {
   expect(statusLabel('reconnecting')).toBe('重连中');
   expect(statusLabel('idle')).toBe('未连接');
   expect(statusLabel('unknown-state')).toBe('unknown-state');
+});
+
+test('a machine whose client is not connected has the Herdr status offline', () => {
+  expect(statusLabel('offline')).toBe('离线');
+  expect(statusTone('offline')).toBe('neutral');
 });
 
 test('Herdr agent statuses have their own labels', () => {
@@ -32,19 +38,30 @@ test('the client connection of a machine is online, refused or offline, which is
   ]);
 });
 
-test('metrics count online machines, connected platforms, bindings and the agents Herdr reports on connected machines', () => {
+test('online machines are the enabled ones whose client is connected, whatever their last Herdr poll returned', () => {
   const state = sampleState();
-  expect(metrics(state)).toEqual({ machinesOnline: 2, machines: 4, platformsConnected: 1, platforms: 2, bindings: 1, agents: 3 });
+  expect(onlineMachines(state).map((m) => m.id)).toEqual(['m-1', 'm-2', 'm-5']);
+  state.machines[2].client = { state: 'online', host: 'laptop-host', since: 1 };
+  state.machines[0].client = { state: 'offline' };
+  expect(onlineMachines(state).map((m) => m.id)).toEqual(['m-2', 'm-5']);
+});
+
+test('metrics count online machines, connected platforms, bindings and the agents Herdr reports on online machines', () => {
+  const state = sampleState();
+  expect(metrics(state)).toEqual({ machinesOnline: 3, machines: 5, platformsConnected: 1, platforms: 2, bindings: 1, agents: 3 });
   state.machines[2].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
   state.machines[3].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
   expect(metrics(state).agents).toBe(3);
+  state.machines[1].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
+  expect(metrics(state).agents).toBe(4);
 });
 
-test('a binding is usable while its platform app and its machine are connected', () => {
+test('a binding is usable while its platform app is connected and its machine online', () => {
   const state = sampleState();
   const binding = state.bindings[0];
   const machineDown = { tone: 'neutral', label: '机器未连接' };
   expect(bindingStatus(binding, state)).toEqual({ tone: 'ok', label: '可用' });
+  expect(bindingStatus({ ...binding, machineId: 'm-5' }, state)).toEqual({ tone: 'ok', label: '可用' });
   expect(bindingStatus({ ...binding, machineId: 'm-3' }, state)).toEqual(machineDown);
   expect(bindingStatus({ ...binding, machineId: 'm-4' }, state)).toEqual(machineDown);
   expect(bindingStatus({ ...binding, machineId: 'removed' }, state)).toEqual(machineDown);

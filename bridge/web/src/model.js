@@ -1,10 +1,10 @@
 // Pure display derivations from the /api/state payload. No DOM, no requests.
 
 const statusLabels = {
-  connected: '已连接', disabled: '已停用', idle: '未连接', error: '连接失败', failed: '连接失败', connecting: '连接中', reconnecting: '重连中',
+  connected: '已连接', disabled: '已停用', offline: '离线', idle: '未连接', error: '连接失败', failed: '连接失败', connecting: '连接中', reconnecting: '重连中',
 };
 
-// Label of a machine or platform connection status.
+// Label of a machine's Herdr status or a platform connection status. A machine is offline while its client is not connected.
 export const statusLabel = (status) => statusLabels[status] || status;
 
 const agentStatusLabels = { idle: '空闲', working: '运行中', blocked: '等待确认', done: '已完成', unknown: '未知' };
@@ -28,25 +28,27 @@ export function clientStatus(client) {
   return { tone, label };
 }
 
-// Enabled machines whose last Herdr refresh succeeded; only these can take a new binding.
-export const connectedMachines = (state) => state.machines.filter((m) => m.enabled && m.state === 'connected');
+// Enabled machines whose client is connected. Bridge reaches a machine's Herdr only through its client,
+// so only these report agents and can take a binding.
+export const onlineMachines = (state) => state.machines.filter((m) => m.enabled && m.client?.state === 'online');
 
 export function metrics(state) {
+  const online = onlineMachines(state);
   return {
-    machinesOnline: connectedMachines(state).length,
+    machinesOnline: online.length,
     machines: state.machines.length,
     platformsConnected: state.apps.filter((a) => a.connection === 'connected').length,
     platforms: state.apps.length,
     bindings: state.bindings.length,
-    agents: connectedMachines(state).reduce((n, m) => n + m.agents.length, 0),
+    agents: online.reduce((n, m) => n + m.agents.length, 0),
   };
 }
 
-// A binding is usable while its platform app and its machine are connected.
+// A binding is usable while its platform app is connected and its machine online.
 export function bindingStatus(binding, state) {
   const app = state.apps.find((a) => a.id === binding.appId);
   if (app?.connection !== 'connected') return { tone: 'neutral', label: '等待平台连接' };
-  if (!connectedMachines(state).some((m) => m.id === binding.machineId)) return { tone: 'neutral', label: '机器未连接' };
+  if (!onlineMachines(state).some((m) => m.id === binding.machineId)) return { tone: 'neutral', label: '机器未连接' };
   return { tone: 'ok', label: '可用' };
 }
 

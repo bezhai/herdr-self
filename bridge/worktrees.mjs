@@ -6,8 +6,9 @@ import {card,plain,by} from './request-cards.mjs';
 import {home} from './adoption.mjs';
 // /wt topics (see Topics): a root message `/wt <description>` or `/wt -b <branch> [description]` opens a topic whose agent works in a new
 // Git worktree of the repository of the binding's directory, beside that repository on the binding's machine. The worktree stays when the
-// topic ends; the card of a topic without an agent offers removing it. Everything runs on that machine: git, test and claude through exec
-// (see core.mjs), the rest through the Herdr CLI. The branch and the path come from worktree-branch.mjs, which the wt plugin shares.
+// topic ends; the card of a topic without an agent offers removing it. Everything runs on that machine, through its client: git, the
+// checks whether a path exists and the naming of a branch by claude (see operations in core.mjs), the rest through the Herdr CLI. The
+// branch and the path come from worktree-branch.mjs, which the wt plugin shares.
 export const usage=`用法：${slash.wt} <任务描述>，或 ${slash.wt} -b <已有分支> [任务描述]`;
 export const notRetried=`这个 worktree 话题没有启动成功，请重新发送 ${slash.wt} 开新话题`;
 // The request of a root message whose text is a /wt command: {branch, description, prompt}. branch is the one after -b, or undefined;
@@ -24,19 +25,18 @@ export function wtRequest(text){
 }
 // How long the naming may take before the branch is random, and how long Herdr may take to check out or remove a worktree.
 const namingTimeoutMs=30000,createTimeoutMs=120000,removeTimeoutMs=60000;
-// git on machine m (see worktree-branch.mjs). It never prompts, and it speaks English, whose messages removeWorktree recognizes.
-const gitOn=(exec,m)=>(cwd,args,options)=>exec(m,['env','GIT_TERMINAL_PROMPT=0','LC_ALL=C','git','-C',{path:cwd},...args],options);
-const exists=async(exec,m,p)=>(await exec(m,['test','-e',{path:p}])).code===0;
+// git on machine m (see worktree-branch.mjs). It never prompts, and it speaks English, whose messages removeWorktree recognizes (see the git
+// method in machine.mjs).
+const gitOn=(git,m)=>(cwd,args,options)=>git(m,cwd,args,options);
 // A failed step, with Herdr's error code where it has one.
 const failure=(what,e)=>Error(e.code?`${what}（${e.code}：${e.message}）`:`${what}：${e.message}`);
 const reasonOf=e=>publicText(typeof e.code==='string'?`${e.message}（${e.code}）`:e.message).slice(0,1000);
-// Asks Claude haiku on machine m, in the main checkout root, for a branch name for description, with the prompt of the wt plugin. claude
-// runs through the user's shell, like any SSH command, so that it is found where the user installed it, also on the machine of Bridge
-// itself (see remoteInvocation), and without the HERDR_* variables (see exec): its Herdr hook would report to the pane in HERDR_PANE_ID.
-// Resolves to {branch} or {reason}.
-async function nameBranch(exec,m,root,description){
+// Asks Claude haiku on machine m, in the main checkout root, for a branch name for description, with the prompt of the wt plugin, through
+// nameBranch (see core.mjs): the client finds claude where the user's shell does and runs it without the HERDR_* variables, since its Herdr
+// hook would report to the pane in HERDR_PANE_ID (see machine.mjs). Resolves to {branch} or {reason}.
+async function suggestBranch(nameBranch,m,root,description){
  const text=withoutAttachments(description).trim();if(!text)return {reason:'任务描述里没有文字'};
- let r;try{r=await exec(m,['sh','-c','cd -- "$1" && exec claude -p --model haiku','sh',root],{input:namingPrompt(text),timeoutMs:namingTimeoutMs,shell:true});}
+ let r;try{r=await nameBranch(m,root,namingPrompt(text),{timeoutMs:namingTimeoutMs});}
  catch(e){return {reason:e.timedOut?`${namingTimeoutMs/1000} 秒内没有返回`:`无法运行 claude：${e.message}`};}
  return branchOf(r);
 }
@@ -46,23 +46,23 @@ async function nameBranch(exec,m,root,description){
 // being the main checkout, once they are known and before the worktree is created. Resolves to {worktree, workspaceId, tabId, paneId,
 // notes, created}: notes for the first reply, such as why the branch is random, and created what exists now. A failure rejects with an
 // Error whose created lists what exists by then, which stays in place, and whose kept tells that the worktree exists.
-export async function createWorktree(m,cwd,{branch:given,description},{exec,herdr,save}){
- const created=[],notes=[],git=gitOn(exec,m);let kept=false;
+export async function createWorktree(m,cwd,{branch:given,description},{git:gitOf,exists,nameBranch,herdr,save}){
+ const created=[],notes=[],git=gitOn(gitOf,m);let kept=false;
  try{
   const repo=await repoOf(git,cwd);
   if(repo.linked)notes.push(`绑定目录在 linked worktree 里，新分支基于它的 HEAD ${repo.base.slice(0,12)}`);
   let branch=given;
   if(given){if(!await validRefName(git,repo.mainRoot,given))throw Error(`分支名无效：${given}`);}
-  else{const named=await nameBranch(exec,m,repo.mainRoot,description);branch=named.branch??randomBranch();if(!named.branch)notes.push(`起名失败（${named.reason}），改用随机分支名`);}
+  else{const named=await suggestBranch(nameBranch,m,repo.mainRoot,description);branch=named.branch??randomBranch();if(!named.branch)notes.push(`起名失败（${named.reason}），改用随机分支名`);}
   const target=worktreePath(repo.mainRoot,branch);
-  if(await exists(exec,m,target))throw Error(`目录已存在：${target}，不会覆盖它；换一个分支，或者先处理这个目录`);
+  if(await exists(m,target))throw Error(`目录已存在：${target}，不会覆盖它；换一个分支，或者先处理这个目录`);
   const local=await localBranch(git,repo.mainRoot,branch);
   if(given&&local==='none')throw Error(`本地和 origin 都没有分支 ${branch}`);
   if(local==='tracking'){created.push(`本地分支 ${branch}（跟踪 origin/${branch}）`);notes.push(`已从 origin/${branch} 建立跟踪它的本地分支`);}
   const worktree={branch,path:target,root:repo.mainRoot};save(worktree);
   let made;
   try{made=await herdr(m,['worktree','create','--cwd',repo.mainRoot,'--branch',branch,'--path',target,...repo.base?['--base',repo.base]:[],'--no-focus'],{timeoutMs:createTimeoutMs});}
-  catch(e){if(await exists(exec,m,target).catch(()=>false)){kept=true;created.push(`worktree ${target}（分支 ${branch}），Herdr 没有为它打开 workspace`);}throw failure('创建 worktree 失败',e);}
+  catch(e){if(await exists(m,target).catch(()=>false)){kept=true;created.push(`worktree ${target}（分支 ${branch}），Herdr 没有为它打开 workspace`);}throw failure('创建 worktree 失败',e);}
   kept=true;created.push(`worktree ${target}（分支 ${branch}）`);
   const workspaceId=made?.workspace?.workspace_id,paneId=made?.root_pane?.pane_id;
   if(!workspaceId||!paneId)throw Error('herdr worktree create 的返回里没有 workspace 或 root_pane');
@@ -78,9 +78,9 @@ export const failedText=(e,created)=>`启动失败：${reasonOf(e)}\n${created.l
 // Resolves to {gone} when it is not there any more, which counts as removed, to {dirty}, the lines of git status, when it refuses, and to
 // {removed}. Herdr removes a worktree that it has open, which also closes its workspace; git removes any other. Herdr reuses workspace
 // ids, so the workspace is the one that Herdr lists for the path now, not the one the topic recorded.
-export async function removeWorktree(m,w,{exec,herdr}){
- if(!await exists(exec,m,w.path))return {gone:true};
- const git=gitOn(exec,m),status=await git(w.path,['-c','core.quotePath=false','status','--porcelain','--untracked-files=all']);
+export async function removeWorktree(m,w,{git:gitOf,exists,herdr}){
+ if(!await exists(m,w.path))return {gone:true};
+ const git=gitOn(gitOf,m),status=await git(w.path,['-c','core.quotePath=false','status','--porcelain','--untracked-files=all']);
  if(status.code!==0)throw Error(`git status 失败：${(status.stderr||status.stdout).trim()}`);
  const dirty=status.stdout.split('\n').filter(Boolean);if(dirty.length)return {dirty};
  const {worktrees=[]}=await herdr(m,['worktree','list','--cwd',w.root]),open=worktrees.find(x=>x.path===w.path)?.open_workspace_id;

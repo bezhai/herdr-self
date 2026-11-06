@@ -40,6 +40,15 @@ export function App() {
     refresh();
   };
 
+  // A new machine cannot connect before its client has a token, so adding goes straight on to generating one.
+  function machineSaved(machine) {
+    if (dialog.machine) saved();
+    else {
+      openDialog('client-token', { machine });
+      refresh();
+    }
+  }
+
   useEffect(() => onUnauthorized(() => setDialog(null)), []);
 
   // A binding link from Feishu (/?bind=<token>) is handled once the state is loaded, after the login page if there is one,
@@ -109,7 +118,7 @@ export function App() {
           </div>
         </main>
       </div>
-      {dialog?.kind === 'machine' && <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={saved} />}
+      {dialog?.kind === 'machine' && <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={machineSaved} />}
       {dialog?.kind === 'client-token' && <ClientTokenDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onIssued={refresh} />}
       {dialog?.kind === 'app' && <AppDialog key={dialog.key} app={dialog.app} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'pending' && (

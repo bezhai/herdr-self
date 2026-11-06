@@ -3,16 +3,19 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import {link,protocol,closeCodes} from './link.mjs';
+import {methods,loginEnvironment,stripped} from './machine.mjs';
 // The Bridge client of a machine (bin/bridge-client.mjs runs it, one per machine, as a user service). It dials the control plane at
-// the url of its config with the machine's token and stays connected over one WebSocket (see link.mjs and clients.mjs), and passes the
-// requests of bridge-schedule on this machine on to it (see serve). It uses only Node's built-in modules, Node's own WebSocket among them,
-// so a copy of the Bridge directory without node_modules runs it. It logs to stderr.
+// the url of its config with the machine's token and stays connected over one WebSocket (see link.mjs and clients.mjs), does on this
+// machine what the control plane asks of it with a fixed set of methods (see machine.mjs), and passes the requests of bridge-schedule on
+// this machine on to the control plane (see serve). It uses only Node's built-in modules, Node's own WebSocket among them, so a copy of the
+// Bridge directory without node_modules runs it. It logs to stderr.
 
 // The config file: BRIDGE_CLIENT_CONFIG, else herdr-bridge/client.json in the user's config directory.
 export const configPath=(env=process.env)=>env.BRIDGE_CLIENT_CONFIG||path.join(env.XDG_CONFIG_HOME||path.join(os.homedir(),'.config'),'herdr-bridge','client.json');
 // The config file for a token, which the console shows once: the client endpoint of the control plane at origin, http(s)://host[:port].
 export const configText=(origin,token)=>JSON.stringify({url:origin.replace(/^http/,'ws')+'/api/client',token},null,2)+'\n';
-// The url and the token of the config file. It holds the token, so no one else may read it.
+// The url, the token and the Herdr of the config file: herdr, the path of the Herdr program on this machine, absolute or with ~/ for the
+// home directory, is ~/.local/bin/herdr unless the file names another. It holds the token, so no one else may read it.
 export function readConfig(file){
  let mode;try{mode=fs.statSync(file).mode;}catch(e){throw Error(`读不到配置文件 ${file}：${e.code||e.message}`);}
  if(mode&0o077)throw Error(`配置文件 ${file} 的权限是 ${(mode&0o777).toString(8)}，其他用户也能读到 token，改成 600：chmod 600 ${file}`);
@@ -20,7 +23,8 @@ export function readConfig(file){
  const url=URL.parse(c?.url);
  if(!url||!['ws:','wss:'].includes(url.protocol)||url.hash)throw Error(`配置文件 ${file} 的 url 必须是 ws:// 或 wss:// 开头的控制面地址，例如 ws://<控制面地址>:8080/api/client`);
  if(typeof c.token!=='string'||!c.token)throw Error(`配置文件 ${file} 缺少 token`);
- return {url:url.href,token:c.token};
+ const herdr=c.herdr??'~/.local/bin/herdr';if(typeof herdr!=='string'||!/^(~\/|\/)/.test(herdr))throw Error(`配置文件 ${file} 的 herdr 必须是 Herdr 程序的绝对路径或 ~/ 开头的路径`);
+ return {url:url.href,token:c.token,herdr};
 }
 // The Unix socket on which the client takes the requests of bridge-schedule: BRIDGE_CLIENT_SOCKET, else herdr-bridge/client.sock in
 // ~/.local/state. Both find it from the home directory alone, not from XDG_RUNTIME_DIR or XDG_STATE_HOME: the user service of the client and
@@ -50,16 +54,15 @@ export async function serve(socket,peer){
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(socket,resolve);});
  fs.chmodSync(socket,0o600);return server;
 }
-// What the client does for the control plane: a fixed set, with no operation that runs any command.
-const methods={ping:()=>({})};
 // Connects and stays connected until the process ends. After a connection ends or fails it dials again 1 s later, doubling the wait up
 // to 30 s, and from 1 s again once a hello succeeds. It dials again after a refusal too (a wrong token or another protocol version), so
 // it gets in by itself once the other side is fixed. A connection on which nothing arrives for three heartbeats, which the control plane
 // names in its answer to the hello, is given up as dead. A client that another client of its machine replaced stops: two clients with
 // one token would otherwise take the machine from each other again and again. It ends the process then with process.exit, which unlike closing
 // the server of serve leaves its socket where it is: the client that replaced it may run on this machine and have put its own socket at
-// that path already. Returns a function that returns the link of the connection while one is in, else null (see serve).
-export function run({url,token},log){
+// that path already. methods are what the control plane may ask of the client (see link.mjs). Returns a function that returns the link of
+// the connection while one is in, else null (see serve).
+export function run({url,token},log,methods){
  let wait=1000,current=null;
  const connect=()=>{
   const ws=new WebSocket(url,{headers:{authorization:'Bearer '+token}}),peer=link(ws,methods);let opened=false,done=false,silence=0,timer;
@@ -83,10 +86,15 @@ export function run({url,token},log){
 // The client connects to the control plane directly (a machine's proxy is for the outside, and may not reach it), so it does not run
 // with either.
 function envProxy(env){return env.NODE_USE_ENV_PROXY==='1'?'NODE_USE_ENV_PROXY=1':[...process.execArgv,...(env.NODE_OPTIONS||'').split(/\s+/)].includes('--use-env-proxy')?'--use-env-proxy':'';}
-export function main(env=process.env){
+// The commands of the methods run with the environment of the user's shell, which the client takes once, at its start (see
+// loginEnvironment): a change of the shell's startup files reaches them once the client restarts. When the shell fails, they run with the
+// client's own environment, where Herdr is still found at its path, but programs that only the shell's PATH has, such as claude, may not be.
+export async function main(env=process.env){
  const log=s=>console.error('bridge-client: '+s),proxy=envProxy(env);
  if(proxy){log(`客户端要直接连接控制面，不能经过代理：去掉 ${proxy} 再启动`);process.exitCode=1;return;}
  let config;try{config=readConfig(configPath(env));}catch(e){log(e.message);process.exitCode=1;return;}
+ let shellEnv;try{shellEnv=await loginEnvironment(env);}catch(e){log(`没能取得登录 shell 的环境，命令按客户端自己的环境运行：${e.message}`);shellEnv=stripped(env);}
  // Without its socket the client runs on, and only bridge-schedule fails on this machine.
- const socket=clientSocket(env);serve(socket,run(config,log)).catch(e=>log(`没能打开 bridge-schedule 用的 socket ${socket}：${e.message}`));
+ const socket=clientSocket(env),peer=run(config,log,{ping:()=>({}),...methods({herdr:config.herdr,env:shellEnv})});
+ serve(socket,peer).catch(e=>log(`没能打开 bridge-schedule 用的 socket ${socket}：${e.message}`));
 }

@@ -1,10 +1,7 @@
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-export const quote=s=>"'"+String(s).replaceAll("'","'\\''")+"'";
 export function text(v,max=200){if(typeof v!=='string'||!v.trim()||v.length>max)throw Error('字段为空或过长');return v.trim();}
 export const uuid=()=>crypto.randomUUID();
 // Keyed queues: tasks with the same key run one after another; a failed task does not block the next one.
@@ -14,84 +11,52 @@ export function enqueue(queues,key,task){
 }
 // A path on the Herdr host: absolute or under ~/, without shell metacharacters.
 export function hostPath(v,label){const p=text(v,300);if(!/^(~\/|\/)[a-zA-Z0-9_./-]+$/.test(p))throw Error(label+'必须为绝对路径或 ~/ 开头');return p;}
+// A machine of Bridge: where its Herdr session runs, which Bridge reaches through the client of the machine (see clients.mjs), and whether
+// Bridge uses it: enabled, which the console turns off to stop polling the machine and opening or prompting topics there while its client
+// stays connected. The client's token is kept apart (see Clients.issue).
 export function normalizeMachine(b){
- const type=b.type==='local'?'local':'ssh',host=type==='ssh'?text(b.host):'';
- if(host&&!/^[a-zA-Z0-9][a-zA-Z0-9._:@-]*$/.test(host))throw Error('SSH 地址格式无效，可填写 SSH 别名或 user@host');
  const session=text(b.session||'default',80);if(!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(session))throw Error('Herdr session 名称无效');
- const port=Number(b.port||22);if(!Number.isInteger(port)||port<1||port>65535)throw Error('端口无效');
- const binary=hostPath(b.binary||'~/.local/bin/herdr','Herdr 路径');
- return {id:b.id||uuid(),name:text(b.name,60),type,host,session,port,binary,enabled:Boolean(b.enabled)};
+ return {id:b.id||uuid(),name:text(b.name,60),session,enabled:Boolean(b.enabled)};
 }
-// A path on this machine: a leading ~/ is its home.
-const localPath=p=>p.replace(/^~\//,os.homedir()+'/');
-// The shell of the user's passwd entry, which sshd runs every SSH command with.
-const userShell=()=>os.userInfo().shell||'/bin/sh';
-// argv[0] is the program, argv[1..] its arguments. Each is a string passed verbatim, or {path} for a path on machine m whose
-// leading ~/ expands to that machine's home. Herdr itself does not expand ~ in --cwd. An SSH machine runs the command line through the
-// user's shell, which finds the program on the PATH that the shell sets up without a login or a terminal (for zsh in ~/.zshenv). With
-// shell a local machine does the same, instead of looking the program up on Bridge's own PATH: for commands the user installs, such as
-// claude, whose directory a service's PATH may lack.
-export function remoteInvocation(m,argv,{shell=false}={}){
- const shellPath=p=>p.startsWith('~/')?'"$HOME"/'+quote(p.slice(2)):quote(p);
- const command=argv.map(a=>typeof a==='string'?quote(a):shellPath(a.path)).join(' ');
- if(m.type==='ssh')return ['ssh',['-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=7','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=1','-p',String(m.port),'--',m.host,'env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c '+quote(command)]];
- if(shell)return [userShell(),['-c',command]];
- const [program,...args]=argv.map(a=>typeof a==='string'?a:localPath(a.path));return [program,args];
+// Machines of state files from before the clients have a type (local or ssh), an SSH host and port and the path of Herdr there, which the
+// client of each machine stands for now. They are dropped at the start of Bridge, in one save with a log line that names a path of Herdr
+// other than the default of the client's config, which that config then has to name.
+export function migrateMachines(store){
+ const old=store.data.machines.filter(m=>['type','host','port','binary'].some(k=>k in m));if(!old.length)return;
+ const paths=old.filter(m=>m.binary&&m.binary!=='~/.local/bin/herdr').map(m=>`${m.name} 的 Herdr 在 ${m.binary}`);
+ for(const m of old){delete m.type;delete m.host;delete m.port;delete m.binary;}
+ store.log('机器连接',`机器改为经客户端连接，去掉了 ${old.map(m=>m.name).join('、')} 的连接方式、地址、端口和 Herdr 路径${paths.length?`；${paths.join('，')}，请写进对应机器客户端配置的 herdr`:''}`);
 }
 // Herdr reports a failed request as one {"id","error":{"code","message"}} line on stderr and exits non-zero; keep its code.
 function failure(text){
  try{const {error}=JSON.parse(text.trim().split('\n').at(-1));if(error?.code)return Object.assign(Error(error.message),{code:error.code});}catch{}
  return Error((text||'远程命令失败').slice(-1000));
 }
-// Runs argv (see remoteInvocation, which shell goes to) on machine m without the HERDR_* variables of Bridge and resolves to
-// {code, stdout, stderr} whatever its exit status; stderr keeps its last 2000 characters. Rejects when it cannot start, prints too much,
-// does not finish within timeoutMs (the error then has timedOut) or, on an SSH machine, when ssh itself fails, which it reports with
-// status 255. input, when given, is its stdin, which is closed otherwise.
-export function exec(m,argv,{timeoutMs=12000,input,shell}={}){
- const [bin,args]=remoteInvocation(m,argv,{shell}),env={...process.env};for(const k of Object.keys(env))if(k.startsWith('HERDR_'))delete env[k];
- return new Promise((resolve,reject)=>{const p=spawn(bin,args,{env,stdio:['pipe','pipe','pipe']});let out='',err='';const timer=setTimeout(()=>{p.kill('SIGKILL');reject(Object.assign(Error('连接超时，请检查 SSH 与 Herdr 状态'),{timedOut:true}));},timeoutMs);p.stdout.on('data',d=>{out+=d;if(out.length>4e6){p.kill('SIGKILL');reject(Error('响应过大'));}});p.stderr.on('data',d=>{err=(err+d).slice(-2000);});p.on('error',e=>{clearTimeout(timer);reject(e);});p.on('close',code=>{clearTimeout(timer);if(m.type==='ssh'&&code===255)return reject(failure(err||out));resolve({code,stdout:out,stderr:err});});p.stdin.on('error',()=>{});p.stdin.end(input);});
-}
-// Like exec, and resolves to its stdout; any exit status other than 0 rejects.
-async function run(m,argv,options){const r=await exec(m,argv,options);if(r.code!==0)throw failure(r.stderr||r.stdout);return r.stdout;}
-export async function herdr(m,args,options){
- const out=await run(m,[{path:m.binary},'--session',m.session,...args],options);
- try{return JSON.parse(out).result;}catch{throw Error('远程服务未返回有效 JSON');}
-}
-// Creates dir and its missing parents on machine m; a leading ~/ is that machine's home. An existing directory is fine.
-export async function makeDirectory(m,dir){await run(m,['mkdir','-p','--',{path:dir}]);}
-// Directories of a root of storeFile are removed once they have not changed for this long.
-const staleMinutes=7*24*60;
-// What storeFile runs on an SSH machine, with the root, the directory and the name as $1, $2 and $3, and the content on stdin: under
-// umask 077 the directories it creates are 0700 and the files 0600. A clean-up that fails does not fail the write; a write that fails
-// leaves no file. Prints the path of the file, where the remote shell has already expanded the root's ~/.
-const storeScript=`umask 077 && mkdir -p -- "$1/$2" && { [ -e "$1/.gitignore" ] || printf '*\\n' > "$1/.gitignore"; } && { find "$1" -mindepth 1 -maxdepth 1 -type d ! -name "$2" -mmin +${staleMinutes} -exec rm -rf -- {} + 2>/dev/null; cat > "$1/$2/$3" || { rm -f -- "$1/$2/$3"; exit 1; }; } && printf '%s' "$1/$2/$3"`;
-// Writes body as <root>/<dir>/<name> on machine m and resolves to the absolute path of the file; a leading ~/ of root is that machine's
-// home. root is a directory that Bridge owns: it gets a .gitignore of * unless it has one, and its directories other than dir that have not
-// changed for 7 days are removed along the way. Directories are created 0700 and the file 0600. A local machine writes directly; an SSH
-// machine runs one remote command that takes the content on stdin, never on its command line. What it prints must be such a path: the
-// caller removes its directory later (see removeDirectory).
-export async function storeFile(m,root,dir,name,body){
- if(m.type==='ssh'){
-  const file=await run(m,['sh','-c',storeScript,'sh',{path:root},dir,name],{input:body,timeoutMs:60000});
-  if(!file.startsWith('/')||!file.endsWith(`/${dir}/${name}`)||file.includes('\n'))throw Error('远程命令未返回文件路径');return file;
- }
- const base=path.resolve(localPath(root)),folder=path.join(base,dir),file=path.join(folder,name);
- await fs.promises.mkdir(folder,{recursive:true,mode:0o700});
- await fs.promises.writeFile(path.join(base,'.gitignore'),'*\n',{flag:'wx',mode:0o600}).catch(e=>{if(e.code!=='EEXIST')throw e;});
- await sweep(base,dir).catch(()=>{});
- await fs.promises.writeFile(file,body,{mode:0o600});return file;
-}
-// Removes the directories of root other than keep that have not changed for staleMinutes, with what they hold.
-async function sweep(root,keep){
- const before=Date.now()-staleMinutes*60000;
- for(const e of await fs.promises.readdir(root,{withFileTypes:true}))if(e.isDirectory()&&e.name!==keep){
-  const p=path.join(root,e.name);if((await fs.promises.stat(p)).mtimeMs<before)await fs.promises.rm(p,{recursive:true,force:true});
- }
-}
-// Removes dir with what it holds on machine m; a leading ~/ is that machine's home. A directory that is gone already is fine.
-export async function removeDirectory(m,dir){
- if(m.type==='ssh')await run(m,['rm','-rf','--',{path:dir}]);
- else await fs.promises.rm(path.resolve(localPath(dir)),{recursive:true,force:true});
+// What the control plane does on a machine m, each through the client of m with one of its methods (see machine.mjs): call(m,method,params,
+// {timeoutMs}) sends the request and resolves to the client's answer (see Clients.call), and rejects with the code client_offline while
+// the client of m is offline. A leading ~/ of a path is the home there.
+// herdr(m,args,{timeoutMs}) runs the Herdr CLI in the session of m and resolves to the result it prints; one that fails rejects with Herdr's
+// error code where it has one. args are strings, or {path} for a path of m (Herdr itself does not expand ~ in --cwd).
+// makeDirectory(m,dir) creates dir and its missing parents; an existing directory is fine.
+// storeFile(m,root,dir,name,body) writes body as <root>/<dir>/<name> and resolves to the absolute path of the file. root is a directory that
+// Bridge owns, a .herdr-bridge directory: it gets a .gitignore of * unless it has one, and its directories other than dir that have not
+// changed for 7 days are removed along the way. Directories are created 0700 and the file 0600. The caller removes dir later with
+// removeDirectory(m,dir), which removes only such a directory, with what it holds; one that is gone already is fine.
+// git(m,cwd,args,{timeoutMs}) runs git in cwd, and nameBranch(m,cwd,prompt,{timeoutMs}) asks claude there for a branch name: each resolves to
+// {code, stdout, stderr} whatever the exit status. exists(m,path) resolves to whether path exists.
+export function operations(call){
+ return {
+  async herdr(m,args,options){
+   const r=await call(m,'herdr',{session:m.session,args},options);if(r.code!==0)throw failure(r.stderr||r.stdout);
+   try{return JSON.parse(r.stdout).result;}catch{throw Error('远程服务未返回有效 JSON');}
+  },
+  makeDirectory:async(m,dir)=>{await call(m,'mkdir',{path:dir});},
+  storeFile:(m,root,dir,name,body)=>call(m,'storeFile',{root,dir,name,body:Buffer.from(body).toString('base64')},{timeoutMs:60000}),
+  removeDirectory:async(m,dir)=>{await call(m,'removeDirectory',{path:dir});},
+  git:(m,cwd,args,options)=>call(m,'git',{cwd,args},options),
+  exists:(m,p)=>call(m,'exists',{path:p}),
+  nameBranch:(m,cwd,prompt,options)=>call(m,'nameBranch',{cwd,prompt},options),
+ };
 }
 export function publicText(s){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}
 // Bridge's state directory: BRIDGE_STATE of env, else state in the Bridge directory.

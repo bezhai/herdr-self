@@ -1,37 +1,20 @@
 import { request } from '../api.js';
 import { FormDialog, useFields } from './FormDialog.jsx';
 
-// Add or edit (machine given) a Herdr connection. Saving always enables it.
-// For type=local the SSH fields are hidden by the stylesheet (#machine-form / #machine-type) but still submitted.
+// Add or edit (machine given) a machine: its name and the Herdr session its client works in. Saving always enables it.
+// onSaved gets the saved machine ({ id, name, session }), so adding can go on to the token of its client.
 export function MachineDialog({ machine, onClose, onSaved }) {
-  const { values, field } = useFields({
-    name: machine?.name || '',
-    type: machine?.type || 'ssh',
-    host: machine?.host || '',
-    session: machine?.session || 'default',
-    port: String(machine?.port || 22),
-    binary: machine?.binary || '~/.local/bin/herdr',
-  });
+  const { values, field } = useFields({ name: machine?.name || '', session: machine?.session || 'default' });
 
   async function save() {
-    await request('/machines/save', { id: machine?.id, ...values, enabled: true });
-    onSaved();
+    const { id } = await request('/machines/save', { id: machine?.id, ...values, enabled: true });
+    onSaved({ id, ...values });
   }
 
   return (
-    <FormDialog id="machine-form" title="添加 Herdr 连接" submitLabel="保存并连接" onSubmit={save} onClose={onClose}>
-      <label>连接名称<input required placeholder="例如：cpu2" {...field('name')} /></label>
-      <div className="form-grid">
-        <label>连接方式
-          <select id="machine-type" {...field('type')}><option value="ssh">SSH</option><option value="local">本机</option></select>
-        </label>
-        <label>Herdr Session<input required {...field('session')} /></label>
-      </div>
-      <div className="form-grid wide-first ssh-only">
-        <label>SSH 地址 / 别名<input placeholder="user@host 或 SSH config 别名" {...field('host')} /></label>
-        <label>端口<input type="number" min="1" max="65535" {...field('port')} /></label>
-      </div>
-      <label>Herdr 可执行文件<input required {...field('binary')} /></label>
+    <FormDialog title={machine ? '编辑机器' : '添加机器'} submitLabel={machine ? '保存并连接' : '下一步'} onSubmit={save} onClose={onClose}>
+      <label>机器名称<input required placeholder="例如：cpu2" {...field('name')} /></label>
+      <label>Herdr Session<input required {...field('session')} /></label>
     </FormDialog>
   );
 }

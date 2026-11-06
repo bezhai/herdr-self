@@ -17,7 +17,7 @@ test('form dialogs head with their title next to the close button and hold no ex
   const state = sampleState();
   const forms = [
     [<AppDialog onClose={vi.fn()} onSaved={vi.fn()} />, '应用配置'],
-    [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加 Herdr 连接'],
+    [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加机器'],
     [<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '连接聊天与会话'],
     [<PermissionModeDialog binding={state.bindings[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '修改权限模式'],
   ];
@@ -32,43 +32,42 @@ test('form dialogs head with their title next to the close button and hold no ex
   }
 });
 
-test('machine form starts from defaults and saves with enabled:true; a failed save shows the error in the dialog and re-enables the button', async () => {
+test('machine form asks only for the name and the Herdr session, starts from session default and saves with enabled:true; a failed save shows the error in the dialog and re-enables the button', async () => {
   const save = deferred();
   const fetch = stubFetch({ '/api/machines/save': () => save.promise });
   const onSaved = vi.fn();
   const user = userEvent.setup();
   render(<MachineDialog onClose={vi.fn()} onSaved={onSaved} />);
-  expect(screen.getByRole('heading', { name: '添加 Herdr 连接' })).toBeTruthy();
-  expect(screen.getByLabelText('连接方式').value).toBe('ssh');
+  expect(screen.getByRole('heading', { name: '添加机器' })).toBeTruthy();
+  expect([...document.querySelectorAll('dialog label')].map((label) => label.textContent)).toEqual(['机器名称', 'Herdr Session']);
+  expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(2);
   expect(screen.getByLabelText('Herdr Session').value).toBe('default');
-  expect(screen.getByLabelText('端口').value).toBe('22');
-  expect(screen.getByLabelText('Herdr 可执行文件').value).toBe('~/.local/bin/herdr');
 
-  await user.type(screen.getByLabelText('连接名称'), 'cpu9');
-  await user.type(screen.getByLabelText('SSH 地址 / 别名'), 'bad;host');
-  const submit = screen.getByRole('button', { name: '保存并连接' });
+  await user.type(screen.getByLabelText('机器名称'), 'cpu9');
+  const submit = screen.getByRole('button', { name: '下一步' });
   await user.click(submit);
   expect(submit.disabled).toBe(true);
-  expect(bodyOf(fetch, '/api/machines/save')).toEqual({ name: 'cpu9', type: 'ssh', host: 'bad;host', session: 'default', port: '22', binary: '~/.local/bin/herdr', enabled: true });
+  expect(bodyOf(fetch, '/api/machines/save')).toEqual({ name: 'cpu9', session: 'default', enabled: true });
 
-  save.resolve(reply({ error: 'SSH 地址格式无效' }, 400));
-  expect(await screen.findByText('SSH 地址格式无效')).toBeTruthy();
+  save.resolve(reply({ error: '机器名称已存在' }, 400));
+  expect(await screen.findByText('机器名称已存在')).toBeTruthy();
   expect(submit.disabled).toBe(false);
   expect(onSaved).not.toHaveBeenCalled();
 });
 
-test('machine form edits an existing machine and keeps SSH values when switched to local', async () => {
+test('machine form edits a machine by its id and hands the saved machine to the caller', async () => {
   const fetch = stubFetch({ '/api/machines/save': { id: 'm-3' } });
   const onSaved = vi.fn();
   const user = userEvent.setup();
-  const machine = { ...sampleState().machines[3], enabled: false };
-  render(<MachineDialog machine={machine} onClose={vi.fn()} onSaved={onSaved} />);
-  expect(screen.getByLabelText('连接名称').value).toBe('cpu3');
-  expect(screen.getByLabelText('SSH 地址 / 别名').value).toBe('cpu3');
-  await user.selectOptions(screen.getByLabelText('连接方式'), 'local');
+  render(<MachineDialog machine={sampleState().machines[2]} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(screen.getByRole('heading', { name: '编辑机器' })).toBeTruthy();
+  expect(screen.getByLabelText('机器名称').value).toBe('laptop');
+  expect(screen.getByLabelText('Herdr Session').value).toBe('default');
+  await user.clear(screen.getByLabelText('Herdr Session'));
+  await user.type(screen.getByLabelText('Herdr Session'), 'work');
   await user.click(screen.getByRole('button', { name: '保存并连接' }));
-  await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(bodyOf(fetch, '/api/machines/save')).toEqual({ id: 'm-4', name: 'cpu3', type: 'local', host: 'cpu3', session: 'default', port: '22', binary: '~/.local/bin/herdr', enabled: true });
+  await waitFor(() => expect(onSaved).toHaveBeenCalledWith({ id: 'm-3', name: 'laptop', session: 'work' }));
+  expect(bodyOf(fetch, '/api/machines/save')).toEqual({ id: 'm-3', name: 'laptop', session: 'work', enabled: true });
 });
 
 test('the client token dialog warns that a new token replaces the old one, then shows the config of the client once; a first token needs no warning and a failure stays in the dialog', async () => {
@@ -95,7 +94,7 @@ test('the client token dialog warns that a new token replaces the old one, then 
   view.unmount();
 
   stubFetch({ '/api/machines/token': reply({ error: '机器连接不存在' }, 400) });
-  render(<ClientTokenDialog machine={sampleState().machines[1]} onClose={vi.fn()} onIssued={onIssued} />);
+  render(<ClientTokenDialog machine={sampleState().machines[2]} onClose={vi.fn()} onIssued={onIssued} />);
   expect(document.querySelector('.dialog-head').textContent).toBe('生成客户端 token');
   expect(prose()).toEqual([]);
   await user.click(screen.getByRole('button', { name: '生成' }));
@@ -124,11 +123,13 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
   expect(screen.getByLabelText('App Secret').value).toBe('');
 });
 
-test('binding form shows its chat read-only, lists only connected machines and saves a group route with the link token', async () => {
+test('binding form shows its chat read-only, lists only enabled machines with their client online and saves a group route with the link token', async () => {
   const fetch = stubFetch({ '/api/bindings/save': { id: 'b-2' } });
   const onSaved = vi.fn();
   const user = userEvent.setup();
   const state = sampleState();
+  // Disabled with its client online: not a target.
+  state.machines[2].client = { state: 'online', host: 'laptop-host', since: 1 };
   render(<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={onSaved} />);
   const source = screen.getByRole('group', { name: '来源 · 飞书' });
   expect(within(source).getByText('工作助手')).toBeTruthy();
@@ -139,7 +140,7 @@ test('binding form shows its chat read-only, lists only connected machines and s
   expect(screen.queryByLabelText('飞书应用')).toBeNull();
   expect(screen.queryByLabelText('Chat ID')).toBeNull();
   expect(screen.getByLabelText('绑定名称').value).toBe('飞书群聊');
-  expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work']);
+  expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work', 'gpu2 / default']);
   expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
   expect([...screen.getByLabelText('Agent 类型').options].map((option) => option.value)).toEqual(['claude', 'codex', 'agy']);
   expect(screen.getByLabelText('Agent 类型').value).toBe('claude');

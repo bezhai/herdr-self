@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
-import {normalizeMachine,remoteInvocation,herdr,exec,makeDirectory,storeFile,removeDirectory,quote,Store} from './core.mjs';
+import {normalizeMachine,migrateMachines,operations,Store} from './core.mjs';
 import {skillPlacer,bundledSkills} from './skills.mjs';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.mjs';
@@ -57,18 +57,27 @@ test('begin timeout ignores late callback and does not publish an expired author
  let options,resolve;const f=registrationFixture(o=>{options=o;return new Promise(r=>resolve=r);},{timeoutMs:10});
  try{f.registrations.start({name:'test'});await new Promise(r=>setTimeout(r,25));ready(options);resolve({client_id:'cli_late',client_secret:'late'});await f.registrations.current.done;assert.equal(f.registrations.status().status,'error');assert.equal(f.registrations.status().url,undefined);assert.equal(f.store.data.apps.length,0);}finally{f.close();}
 });
-test('SSH machine rejects option and shell injection; command arguments remain quoted',()=>{
- for(const host of ['-oProxyCommand=x','a;touch /tmp/bad','a$(id)','x\ny'])assert.throws(()=>normalizeMachine({name:'test',host}));
- const m=normalizeMachine({name:'test',host:'user@host',binary:'~/.local/bin/herdr'});const [bin,args]=remoteInvocation(m,[{path:m.binary},'--session','default','agent','prompt','w1:p1',"x'; echo hacked"]);assert.equal(bin,'ssh');assert.ok(args.includes('StrictHostKeyChecking=yes'));assert.ok(args.includes('--'));assert.match(args.at(-1),/sh -c/);
- const shell=command=>'env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c '+quote(command);
- assert.equal(args.at(-1),shell(`"$HOME"/'.local/bin/herdr' '--session' 'default' 'agent' 'prompt' 'w1:p1' 'x'\\''; echo hacked'`));
- const remote=remoteInvocation(m,[{path:m.binary},'tab','create','--cwd',{path:'~/w x'},'--label','~/not-a-path'])[1].at(-1);assert.ok(remote.includes(quote(`"$HOME"/'w x'`).slice(1,-1)));assert.ok(remote.includes(quote(quote('~/not-a-path')).slice(1,-1)));
- // The program is a command name or a {path}; only {path} expands ~/, on the target machine.
- assert.equal(remoteInvocation(m,['mkdir','-p','--',{path:'~/w x'}])[1].at(-1),shell(`'mkdir' '-p' '--' "$HOME"/'w x'`));
- assert.equal(remoteInvocation(m,['mkdir;id','--',{path:"/srv/a'b"}])[1].at(-1),shell(`'mkdir;id' '--' '/srv/a'\\''b'`));
- const local=normalizeMachine({name:'local',type:'local',binary:'~/bin/herdr'});assert.deepEqual(remoteInvocation(local,[{path:local.binary},'--cwd',{path:'~/w x'},{path:'/srv'},'~/text']),[os.homedir()+'/bin/herdr',['--cwd',os.homedir()+'/w x','/srv','~/text']]);
- assert.deepEqual(remoteInvocation(local,['mkdir','-p','--',{path:'~/w x'}]),['mkdir',['-p','--',os.homedir()+'/w x']]);assert.deepEqual(remoteInvocation(local,[{path:'/opt/herdr'}]),['/opt/herdr',[]]);
- assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',session:'../default'}));assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',port:-1}));assert.throws(()=>normalizeMachine({name:'x',host:'cpu2',binary:'herdr'}),/Herdr 路径/);
+test('a machine has a name, a Herdr session, default when none is given, and whether Bridge uses it; whatever else a request sends is dropped',()=>{
+ const m=normalizeMachine({name:' cpu2 ',session:'work',enabled:1,type:'ssh',host:'cpu2',port:22,binary:'~/.local/bin/herdr',tokenHash:'x'});
+ assert.deepEqual(Object.keys(m).sort(),['enabled','id','name','session']);assert.deepEqual([m.name,m.session,m.enabled],['cpu2','work',true]);assert.match(m.id,/^[0-9a-f-]{36}$/);
+ assert.deepEqual(normalizeMachine({id:'m',name:'x'}),{id:'m',name:'x',session:'default',enabled:false});
+ for(const session of ['../default','-x','a b'])assert.throws(()=>normalizeMachine({name:'x',session}),/Herdr session 名称无效/,session);
+ assert.throws(()=>normalizeMachine({name:' '}),/字段为空或过长/);
+});
+test('machines of a state file from before the clients lose their type, address, port and Herdr path in one save with one log line, which names a Herdr path that the client of its machine has to be told; ids, names, sessions, tokens and what refers to them stay',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-migrate-'));try{
+  const old=new Store(dir);
+  old.data.machines=[{id:'m1',name:'cpu1',type:'local',host:'',port:22,session:'default',binary:'~/.local/bin/herdr',enabled:true,tokenHash:'aa'},{id:'m2',name:'cpu2',type:'ssh',host:'cpu2',port:2222,session:'work',binary:'/opt/herdr/bin/herdr',enabled:false},{id:'m3',name:'gpu1',session:'default',enabled:true}];
+  old.data.bindings=[{id:'b',machineId:'m2'}];old.data.topics=[{id:'t',machineId:'m1'}];old.save();
+  const store=new Store(dir),save=store.save.bind(store);let saves=0;store.save=()=>{saves++;save();};
+  migrateMachines(store);assert.equal(saves,1);
+  const saved=JSON.parse(fs.readFileSync(path.join(dir,'state.json'),'utf8'));
+  assert.deepEqual(saved.machines,[{id:'m1',name:'cpu1',session:'default',enabled:true,tokenHash:'aa'},{id:'m2',name:'cpu2',session:'work',enabled:false},{id:'m3',name:'gpu1',session:'default',enabled:true}]);
+  assert.deepEqual([saved.bindings,saved.topics],[[{id:'b',machineId:'m2'}],[{id:'t',machineId:'m1'}]]);
+  assert.deepEqual(saved.logs.map(l=>[l.kind,l.level,l.message]),[['机器连接','info','机器改为经客户端连接，去掉了 cpu1、cpu2 的连接方式、地址、端口和 Herdr 路径；cpu2 的 Herdr 在 /opt/herdr/bin/herdr，请写进对应机器客户端配置的 herdr']]);
+  // Machines without the old fields are left alone, without a save.
+  migrateMachines(store);migrateMachines(new Store(dir));assert.equal(saves,1);assert.equal(new Store(dir).data.logs.length,1);
+ }finally{fs.rmSync(dir,{recursive:true});}
 });
 test('a binding routes the pending chat of an app to a working directory and agent kind on a machine; app and chat never come from the client',()=>{
  const chat={token:'t',appId:'a',chatId:'oc_1',chatType:'group'},input={name:'助手',appId:'forged',chatId:'oc_forged',machineId:'m',cwd:'~/code/x',kind:'codex',requireMention:false};
@@ -251,41 +260,12 @@ test('a start failure with a local path and an English Herdr error keeps them ou
   assert.equal(f.store.data.topics[0].error,raw);
  }finally{f.close();}
 });
-test('Herdr commands keep Herdr error codes, honor per-call timeouts and expand ~/ only in path arguments',async()=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-herdr-')),bin=path.join(dir,'herdr');
- fs.writeFileSync(bin,['#!/bin/sh','case "$3" in',
-  ` blocked) echo 'warning: noise' >&2; echo '{"id":"cli:agent:prompt","error":{"code":"agent_blocked","message":"agent w1:p1 is blocked"}}' >&2; exit 1;;`,
-  ` usage) echo 'agent prompt requires text' >&2; exit 2;;`,
-  ` slow) sleep 0.3; echo '{"id":"x","result":{"type":"ok"}}';;`,
-  ` cwd) printf '{"result":{"cwd":"%s","text":"%s"}}' "$5" "$6";;`,
-  ` text) echo 'not json';;`,
-  ` *) echo '{"id":"cli:agent:list","result":{"type":"agent_list","agents":[]}}';;`,'esac',''].join('\n'),{mode:0o700});
- const m=normalizeMachine({name:'local',type:'local',binary:bin});
- try{
-  assert.deepEqual(await herdr(m,['agent','list']),{type:'agent_list',agents:[]});
-  await assert.rejects(herdr(m,['blocked']),e=>e.code==='agent_blocked'&&e.message==='agent w1:p1 is blocked');
-  await assert.rejects(herdr(m,['usage']),e=>e.code===undefined&&/requires text/.test(e.message));
-  await assert.rejects(herdr(m,['slow'],{timeoutMs:100}),/连接超时/);assert.deepEqual(await herdr(m,['slow'],{timeoutMs:5000}),{type:'ok'});
-  assert.deepEqual(await herdr(m,['cwd','--cwd',{path:'~/work'},'~/work']),{cwd:os.homedir()+'/work',text:'~/work'});
-  await assert.rejects(herdr(m,['text']),/^Error: 远程服务未返回有效 JSON$/);
- }finally{fs.rmSync(dir,{recursive:true});}
-});
-test('makeDirectory creates nested directories on a local machine, succeeds again when they exist and reports what mkdir says on failure',async()=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-mkdir-')),target=path.join(dir,'a','b','c'),m=normalizeMachine({name:'local',type:'local'});
- try{
-  await makeDirectory(m,target);assert.ok(fs.statSync(target).isDirectory());
-  await makeDirectory(m,target);assert.ok(fs.statSync(target).isDirectory());
-  fs.writeFileSync(path.join(dir,'file'),'');await assert.rejects(makeDirectory(m,path.join(dir,'file','x')),/mkdir/);
- }finally{fs.rmSync(dir,{recursive:true});}
-});
 const mode=p=>fs.statSync(p).mode&0o777;
 // Sets the modification time of directory p to n days ago.
 const age=(p,n)=>{const t=(Date.now()-n*86400000)/1000;fs.utimesSync(p,t,t);};
-// Runs fn with process.env[key] set to value for its duration.
-async function withEnv(key,value,fn){const old=process.env[key];process.env[key]=value;try{return await fn();}finally{if(old===undefined)delete process.env[key];else process.env[key]=old;}}
-// What storeFile does on any machine, given the home directory that ~/ stands for there: files 0600 in directories 0700, a .gitignore of *
-// that a person may change, and the clean-up of the other directories of the root.
-async function storeFileBehaves(m,home){
+// What storeFile and removeDirectory of the operations ops do on machine m, given the home directory that ~/ stands for there: files 0600 in
+// directories 0700, a .gitignore of * that a person may change, and the clean-up of the other directories of the root.
+async function storeFileBehaves({storeFile,removeDirectory},m,home){
  const body=Buffer.concat([Buffer.from("secret-marker ' \" $(id) `id`\n"),Buffer.from([0,255,10])]),root=path.join(home,'work','.herdr-bridge');
  const file=await storeFile(m,'~/work/.herdr-bridge','t1','om_1-1.png',body);
  assert.equal(file,path.join(root,'t1','om_1-1.png'));assert.deepEqual(fs.readFileSync(file),body);
@@ -305,33 +285,6 @@ async function storeFileBehaves(m,home){
  await removeDirectory(m,'~/work/.herdr-bridge/recent');assert.deepEqual(fs.readdirSync(root),['.gitignore']);
  return body;
 }
-test('storeFile on a local machine writes a file 0600 in a directory 0700 under a root with a .gitignore that ignores everything, removes the other directories of the root unchanged for 7 days and resolves to its absolute path',async()=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-local-')),home=path.join(dir,'home'),m=normalizeMachine({name:'local',type:'local'});
- try{fs.mkdirSync(home);await withEnv('HOME',home,()=>storeFileBehaves(m,home));}finally{fs.rmSync(dir,{recursive:true});}
-});
-test('storeFile on an SSH machine is one remote command under umask 077 that takes the content on stdin, never on the command line, and prints the absolute path; removeDirectory runs rm -rf there',async()=>{
- // A fake ssh records its arguments and runs the remote command here, with its own home.
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-ssh-')),bin=path.join(dir,'bin'),home=path.join(dir,'remote home'),args=path.join(dir,'args');
- fs.mkdirSync(bin);fs.mkdirSync(home);
- fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh',`printf '%s\\n' "$@" >> ${quote(args)}`,'for last; do :; done',`HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
- const m=normalizeMachine({name:'cpu2',host:'cpu2'});
- try{
-  const body=await withEnv('PATH',bin+':'+process.env.PATH,()=>storeFileBehaves(m,home));
-  const lines=fs.readFileSync(args,'utf8');assert.ok(body.includes('secret-marker'));assert.ok(!lines.includes('secret-marker'));
-  // Every call is one remote command line: four writes, then three removals.
-  const prefix='env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c ',commands=lines.split('\n').filter(l=>l.startsWith(prefix)).map(l=>l.slice(prefix.length));
-  const unquote=s=>{assert.ok(s.startsWith("'")&&s.endsWith("'"),s);return s.slice(1,-1).replaceAll("'\\''","'");};
-  assert.equal(commands.length,7);
-  // The program is sh with a fixed script; the root, the directory and the name are its arguments, the root's ~/ the remote home.
-  const first=unquote(commands[0]);assert.ok(first.startsWith("'sh' '-c' '")&&first.endsWith(`' 'sh' "$HOME"/'work/.herdr-bridge' 't1' 'om_1-1.png'`),first);
-  assert.match(first,/umask 077/);assert.match(first,/cat >/);assert.equal(unquote(commands[2]).slice(unquote(commands[2]).lastIndexOf("' 'sh' ")),`' 'sh' ${quote(path.join(home,'abs dir','.herdr-bridge'))} 't2' 'om_3-1.jpg'`);
-  assert.deepEqual(commands.slice(4).map(unquote),[`'rm' '-rf' '--' ${quote(path.join(home,'work','.herdr-bridge','t1'))}`,`'rm' '-rf' '--' ${quote(path.join(home,'work','.herdr-bridge','t1'))}`,`'rm' '-rf' '--' "$HOME"/'work/.herdr-bridge/recent'`]);
-  // Output that is not the path of the file, such as what a login script of the remote shell prints, fails the write: the path is what
-  // removeDirectory later removes.
-  fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh','echo welcome','for last; do :; done',`HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
-  await withEnv('PATH',bin+':'+process.env.PATH,()=>assert.rejects(storeFile(m,'~/work/.herdr-bridge','t1','om_5-1.png',Buffer.from('x')),/未返回文件路径/));
- }finally{fs.rmSync(dir,{recursive:true});}
-});
 
 // Skills for the placement tests in directory src: alpha, with a file in a subdirectory and text that a shell would change, and beta.
 function skillSource(src){
@@ -341,10 +294,10 @@ function skillSource(src){
 }
 // What directory dir holds, through a link: {relative path: text} of its files.
 const tree=dir=>Object.fromEntries(fs.readdirSync(dir,{recursive:true,withFileTypes:true}).filter(e=>e.isFile()).map(e=>{const p=path.join(e.parentPath,e.name);return [path.relative(dir,p),fs.readFileSync(p,'utf8')];}));
-// What placing the skills of dir/skills does on any machine whose home directory is dir/home; resolves to the number of placements.
-async function placeSkillsBehaves(m,dir){
- const home=path.join(dir,'home'),src=path.join(dir,'skills'),store=path.join(home,'.local/share/herdr-bridge/skills'),plain=path.join(home,'plain');let n=0;
- const place=(...args)=>{n++;return skillPlacer(exec,src)(m,...args);};
+// What placing the skills of dir/skills through call (see skillPlacer) does on machine m, whose home directory is dir/home.
+async function placeSkillsBehaves(call,m,dir){
+ const home=path.join(dir,'home'),src=path.join(dir,'skills'),store=path.join(home,'.local/share/herdr-bridge/skills'),plain=path.join(home,'plain');
+ const place=(...args)=>skillPlacer(call,src)(m,...args);
  // A copy holds the skill and Bridge's marker with the digest of the skills it was copied from.
  const copied=p=>{const {'.herdr-bridge-skill':mark,...rest}=tree(p);assert.match(mark,/^[0-9a-f]{64}\n$/);return rest;};
  skillSource(src);fs.mkdirSync(plain);
@@ -385,45 +338,25 @@ async function placeSkillsBehaves(m,dir){
  assert.equal(fs.readFileSync(exclude,'utf8'),'# mine\n/.agents/skills/alpha\n/sub/.claude/skills/alpha\n/sub/.claude/skills/beta\n');assert.equal(git(repo,'status','--porcelain'),'');
  // A directory where the skills directory cannot be created fails the placement with what failed.
  fs.writeFileSync(path.join(home,'file'),'');await assert.rejects(place(path.join(home,'file'),'claude'),/file/);
- return n;
 }
-test('placing skills on a local machine links Claude\'s and Codex\'s skills to the store of the machine and copies them for Antigravity, writes only changed content, leaves skills that are not Bridge\'s alone and records the placed paths once in the info/exclude of a Git repository',async()=>{
- const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-local-'))),home=path.join(dir,'home'),m=normalizeMachine({name:'local',type:'local'});
- try{fs.mkdirSync(home);await withEnv('HOME',home,()=>placeSkillsBehaves(m,dir));}finally{fs.rmSync(dir,{recursive:true});}
-});
-test('placing skills on an SSH machine is one remote command, which takes the skills as a tar archive on stdin, never on its command line, and does there what it does locally',async()=>{
- // A fake ssh records its arguments, each ended by a NUL since the script has several lines, and runs the remote command here, with its own home.
- const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-ssh-'))),bin=path.join(dir,'bin'),home=path.join(dir,'home'),args=path.join(dir,'args');
- fs.mkdirSync(bin);fs.mkdirSync(home);
- fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh',`printf '%s\\0' "$@" >> ${quote(args)}`,'for last; do :; done',`HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
- const m=normalizeMachine({name:'cpu2',host:'cpu2'});
- try{
-  const n=await withEnv('PATH',bin+':'+process.env.PATH,()=>placeSkillsBehaves(m,dir)),lines=fs.readFileSync(args,'utf8');
-  const prefix='env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c ',commands=lines.split('\0').filter(l=>l.startsWith(prefix)).map(l=>l.slice(prefix.length));
-  assert.equal(commands.length,n);assert.ok(!lines.includes('secret-marker'));
-  // The program is sh with a fixed script; the store and the working directory are its arguments, whose ~/ is the remote home.
-  const first=commands[0].slice(1,-1).replaceAll("'\\''","'");
-  assert.ok(first.startsWith("'sh' '-c' '")&&/' 'sh' "\$HOME"\/'\.local\/share\/herdr-bridge\/skills' '[0-9a-f]{64}' '\.claude\/skills' 'link' "\$HOME"\/'plain' 'alpha' 'beta'$/.test(first),first);
- }finally{fs.rmSync(dir,{recursive:true});}
-});
-test('skill placements run one after another on a machine and at once on different machines; each sends the skills of its directory as a tar archive, resolves to the paths the command lists and rejects with what it reports when it fails',async()=>{
+test('skill placements run one after another on a machine and at once on different machines; each asks the client of its machine to place the skills of its directory, sent as their files with their digest, and resolves or rejects with what the client answers',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-queue-')),src=path.join(dir,'skills'),calls=[],running={};let most=0,both=false;
- // What the command prints besides the paths, such as what a login script of the remote shell prints, is not a path.
- const fake=async(m,argv,{input})=>{
-  calls.push([m.id,argv,input]);running[m.id]=(running[m.id]||0)+1;most=Math.max(most,running[m.id]);both||=Object.values(running).filter(Boolean).length>1;
-  await later(20);running[m.id]--;return argv[8].path==='/broken'?{code:1,stdout:'',stderr:'mkdir: cannot create directory\n'}:{code:0,stdout:'welcome\n/w/.claude/skills/beta\n',stderr:''};
+ const fake=async(m,method,params)=>{
+  calls.push([m.id,method,params]);running[m.id]=(running[m.id]||0)+1;most=Math.max(most,running[m.id]);both||=Object.values(running).filter(Boolean).length>1;
+  await later(20);running[m.id]--;if(params.cwd==='/broken')throw Error("ENOTDIR: not a directory, mkdir '/broken/.agents/skills'");return ['/w/.claude/skills/beta'];
  };
  try{
   skillSource(src);const place=skillPlacer(fake,src),one={id:'m1'},two={id:'m2'};
   const results=await Promise.allSettled([place(one,'~/w','claude'),place(one,'/broken','codex'),place(one,'~/w','agy'),place(two,'/w','claude')]);
   assert.deepEqual([most,both],[1,true]);
-  assert.deepEqual(results.map(r=>r.status==='fulfilled'?r.value:r.reason.message),[['/w/.claude/skills/beta'],'mkdir: cannot create directory',['/w/.claude/skills/beta'],['/w/.claude/skills/beta']]);
-  const on=id=>calls.filter(c=>c[0]===id).map(c=>c[1]),[first,second,third]=on('m1'),input=calls.find(c=>c[0]==='m1')[2];
-  assert.deepEqual(first.slice(0,2),['sh','-c']);assert.deepEqual(first.slice(3,5),['sh',{path:'~/.local/share/herdr-bridge/skills'}]);assert.match(first[5],/^[0-9a-f]{64}$/);
-  assert.deepEqual(first.slice(6),['.claude/skills','link',{path:'~/w'},'alpha','beta']);assert.deepEqual(second.slice(6,8),['.agents/skills','link']);assert.deepEqual(third.slice(6,8),['.agents/skills','copy']);
-  assert.deepEqual(execFileSync('tar',['-tf','-'],{input,encoding:'utf8'}).split('\n').filter(e=>e&&!e.endsWith('/')).sort(),['alpha/SKILL.md','alpha/ref/notes.md','beta/SKILL.md']);
+  assert.deepEqual(results.map(r=>r.status==='fulfilled'?r.value:r.reason.message),[['/w/.claude/skills/beta'],"ENOTDIR: not a directory, mkdir '/broken/.agents/skills'",['/w/.claude/skills/beta'],['/w/.claude/skills/beta']]);
+  const on=id=>calls.filter(c=>c[0]===id).map(c=>c[2]),[first,second,third]=on('m1');assert.ok(calls.every(c=>c[1]==='placeSkills'));
+  const files=Object.fromEntries(Object.entries(tree(src)).map(([p,text])=>[p,Buffer.from(text).toString('base64')]));
+  assert.deepEqual(Object.keys(files).sort(),['alpha/SKILL.md','alpha/ref/notes.md','beta/SKILL.md']);
+  assert.match(first.digest,/^[0-9a-f]{64}$/);assert.deepEqual(first,{store:'~/.local/share/herdr-bridge/skills',digest:first.digest,skills:'.claude/skills',as:'link',cwd:'~/w',names:['alpha','beta'],files});
+  assert.deepEqual([second.skills,second.as,second.cwd],['.agents/skills','link','/broken']);assert.deepEqual([third.skills,third.as],['.agents/skills','copy']);
   // The digest follows the content.
-  assert.equal(on('m2')[0][5],first[5]);fs.writeFileSync(path.join(src,'beta/SKILL.md'),'changed\n');await place(two,'/w','claude');assert.notEqual(on('m2')[1][5],first[5]);
+  assert.equal(on('m2')[0].digest,first.digest);fs.writeFileSync(path.join(src,'beta/SKILL.md'),'changed\n');await place(two,'/w','claude');assert.notEqual(on('m2')[1].digest,first.digest);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 
@@ -443,10 +376,12 @@ const flags=args=>Object.fromEntries(args.flatMap((a,i)=>a.startsWith('--')&&typ
 // `pane close <pane>` removes the agent of that pane.
 // `api snapshot` returns the agents with h.workspaces, h.tabs and h.panes, the entries that only carry what Bridge reads (ids and labels).
 // h.hosts[machine id], when present, is another machine with its own agents, retained replies and requests; every call to a host with
-// down fails with that message. h.toolCalls[paneId] holds the tool call records Herdr keeps for the agent of that pane; `agent send-keys`
+// down fails with that message, or with down itself when it is an Error, such as the one of a machine whose client is offline; so does
+// makeDirectory on h with down. h.toolCalls[paneId] holds the tool call records Herdr keeps for the agent of that pane; `agent send-keys`
 // only succeeds. `worktree create`, `list` and `remove` run the real git on the throwaway repositories of the tests, as Herdr does: create
 // adds the worktree and opens a workspace for it, which h.workspaces lists with its checkout and repository; list reports the workspace
 // open for each worktree; remove removes the worktree of an open workspace and closes it.
+const down=host=>host.down instanceof Error?host.down:Error(host.down);
 function fakeHerdr(){
  const h={calls:[],timeouts:[],machines:[],workspaces:[],tabs:[],panes:[],agents:[],retained:{},requests:{},toolCalls:{},hosts:{},made:[],created:0,opened:0,on:{}};
  const run=(args,host=h)=>{
@@ -493,10 +428,10 @@ function fakeHerdr(){
   throw Error('unexpected herdr '+args.join(' '));
  };
  h.herdr=async(m,args,options={})=>{
-  h.calls.push(args);h.timeouts.push(options.timeoutMs);h.machines.push(m.id);await null;const host=h.hosts[m.id]||h;if(host.down)throw Error(host.down);
+  h.calls.push(args);h.timeouts.push(options.timeoutMs);h.machines.push(m.id);await null;const host=h.hosts[m.id]||h;if(host.down)throw down(host);
   const key=args[0]+' '+args[1],hook=h.on[key];if(hook){delete h.on[key];return hook(args,a=>run(a,host));}return run(args,host);
  };
- h.makeDirectory=async(m,dir)=>{h.made.push([m.id,dir]);await null;};
+ h.makeDirectory=async(m,dir)=>{h.made.push([m.id,dir]);await null;if(h.down)throw down(h);};
  return h;
 }
 // Calls as [machine id, ...args].
@@ -509,9 +444,10 @@ const cotPath='/open-apis/im/v1/message_cot';
 // f.downloads records every attachment download as [app id, message id, type, file key, limit]; f.resources[file key], when present,
 // answers it, an error by throwing it, else the body is 'data:<file key>' of type image/png. f.stored records every file written as
 // [machine id, root, dir, name, body as text], which resolves to its path with ~/ as /home/u/; f.removed every directory removed as
-// [machine id, dir]. f.execs records every other command run on a machine (see exec in core.mjs) as [machine id, ...argv]: claude answers
-// from f.h.claude, by default with BRANCH=feat/add-login, as {code, stdout, stderr} or an Error to reject with, and f.naming records each of
-// its calls as {argv, input, timeoutMs, shell}; anything else, git and test, runs here for real (see gitEnv). f.placed records every placement
+// [machine id, dir]. f.execs records the other operations on a machine (see operations in core.mjs) as [machine id, 'git', cwd, ...args],
+// [machine id, 'exists', path] and [machine id, 'nameBranch', cwd]: git and exists run here for real (see gitEnv), and the naming answers
+// from f.h.claude, by default with BRANCH=feat/add-login, as {code, stdout, stderr} or an Error to reject with; f.naming records each naming
+// as {cwd, prompt, timeoutMs}. f.placed records every placement
 // of Bridge's skills as [machine id, directory, agent kind, number of Herdr calls made before it]; it resolves to f.h.placing, by default
 // no skills of others, or rejects with it when it is an Error.
 function topicFixture({binding,machine,machines=[],cot=true,now}={}){
@@ -524,10 +460,11 @@ function topicFixture({binding,machine,machines=[],cot=true,now}={}){
   storeFile:async(m,root,dir,name,body)=>{stored.push([m.id,root,dir,name,String(body)]);await null;return root.replace(/^~\//,'/home/u/')+'/'+dir+'/'+name;},
   removeDirectory:async(m,dir)=>{removed.push([m.id,dir]);await null;},
   placeSkills:async(m,cwd,kind)=>{placed.push([m.id,cwd,kind,h.calls.length]);await null;if(h.placing instanceof Error)throw h.placing;return h.placing||[];},
-  exec:async(m,argv,options={})=>{
-   execs.push([m.id,...argv]);await null;const args=argv.map(a=>typeof a==='string'?a:a.path);
-   if(args.some(a=>/\bclaude\b/.test(a))){naming.push({argv,input:options.input,timeoutMs:options.timeoutMs,shell:options.shell});if(h.claude instanceof Error)throw h.claude;return {code:0,stdout:'BRANCH=feat/add-login\n',stderr:'',...h.claude};}
-   const r=spawnSync(args[0],args.slice(1),{env:gitEnv,encoding:'utf8'});return {code:r.status,stdout:r.stdout,stderr:r.stderr};
+  git:async(m,cwd,args)=>{execs.push([m.id,'git',cwd,...args]);await null;const r=gitIn(cwd,...args);return {code:r.status,stdout:r.stdout,stderr:r.stderr};},
+  exists:async(m,p)=>{execs.push([m.id,'exists',p]);await null;return fs.existsSync(p);},
+  nameBranch:async(m,cwd,prompt,{timeoutMs}={})=>{
+   execs.push([m.id,'nameBranch',cwd]);naming.push({cwd,prompt,timeoutMs});await null;
+   if(h.claude instanceof Error)throw h.claude;return {code:0,stdout:'BRANCH=feat/add-login\n',stderr:'',...h.claude};
   },
   reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);return 'om_bot_'+ ++sent;},
   react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);},
@@ -693,6 +630,17 @@ test('a topic on a disconnected machine fails without calling Herdr',async()=>{
  const f=topicFixture({machine:{enabled:false}});try{
   await f.send({messageId:'om_1',content:'one'});
   assert.deepEqual([f.h.calls,f.store.data.topics[0].state,f.store.data.topics[0].error,f.replies.map(r=>r[3])],[[],'failed','机器连接已停用',[notice('启动失败，请在 Bridge 管理台查看原因')]]);
+ }finally{f.close();}
+});
+test('while the client of its machine is offline, a new topic does not start and says so in its thread, and the next message retries it; a message to a ready topic is not prompted and gets the same notice',async()=>{
+ const f=topicFixture(),offline=coded('client_offline','机器 cpu2 离线：它的 Bridge 客户端没有连上');try{
+  f.h.down=offline;await f.send({messageId:'om_1',content:'one'});
+  const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed',offline.message]);
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('机器 cpu2 离线：它的 Bridge 客户端没有连上。话题没有启动，请稍后重发消息')]);
+  delete f.h.down;await f.send({messageId:'om_2',rootId:'om_1',content:'two'});assert.equal(t.state,'ready');
+  f.h.down=offline;f.replies.length=0;await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('机器 cpu2 离线：它的 Bridge 客户端没有连上。这条消息没有发给 Agent，请稍后重发')]);
+  assert.equal(t.state,'ready');assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['two']);
  }finally{f.close();}
 });
 test('agent_not_ready at start still opens the topic after turning on remote answers; agent_blocked sends a notice; other prompt errors are only logged',async()=>{
@@ -1810,8 +1758,7 @@ function gitRepo(){
 }
 // A topic fixture whose binding works in a repository of its own (see gitRepo), by default in its main checkout.
 function wtFixture({binding,...options}={}){const repo=gitRepo(),f=topicFixture({...options,binding:{cwd:repo.main,...binding}});return {...f,repo,close(){f.close();repo.close();}};}
-const gitArgs=(cwd,...args)=>['env','GIT_TERMINAL_PROMPT=0','LC_ALL=C','git','-C',{path:cwd},...args];
-const namingArgs=root=>['sh','-c','cd -- "$1" && exec claude -p --model haiku','sh',root];
+const gitArgs=(cwd,...args)=>['git',cwd,...args];
 // A notice of several lines, whose summary has its whitespace collapsed and holds at most 100 code points.
 const noticeOf=text=>{const s=[...text.replace(/\s+/g,' ').trim()];return notice(text,s.length>100?s.slice(0,99).join('')+'…':s.join(''));};
 const intro=(branch,p,...notes)=>noticeOf(['已在 cpu2 新建 worktree',`分支：${branch}`,`路径：${p}`,...notes].join('\n'));
@@ -1837,32 +1784,12 @@ test('worktree branches: haiku\'s answer names a branch only with a clean exit a
  assert.equal(worktreePath('/src/genvi','feat/a/b'),'/src/genvi-worktrees/feat-a-b');assert.equal(continueBranch('fix/x'),'Continue work on branch fix/x');
  assert.match(namingPrompt('加验证码'),/^You are a git branch naming tool[\s\S]*BRANCH=type\/short-kebab-name[\s\S]*Requirement:\n加验证码$/);
 });
-test('exec resolves to the exit status and output of a command on a machine whatever the status, and rejects when it cannot start, does not finish in time or ssh itself fails; with shell, a local command line goes through the user\'s shell like an SSH command, without the HERDR_* variables',async()=>{
- const local=normalizeMachine({name:'local',type:'local'}),ssh=normalizeMachine({name:'cpu2',host:'cpu2'}),shell=os.userInfo().shell||'/bin/sh';
- assert.deepEqual(await exec(local,['sh','-c','echo out; echo err >&2; exit 3']),{code:3,stdout:'out\n',stderr:'err\n'});
- await assert.rejects(exec(local,['sleep','5'],{timeoutMs:100}),e=>e.timedOut===true&&/连接超时/.test(e.message));
- await assert.rejects(exec(local,['/nonexistent/bridge-program']),/ENOENT/);
- assert.deepEqual(remoteInvocation(local,['sh','-c','exec claude "$@"',{path:'~/w x'}],{shell:true}),[shell,['-c',`'sh' '-c' 'exec claude "$@"' "$HOME"/'w x'`]]);
- assert.deepEqual(remoteInvocation(ssh,['claude','-p'],{shell:true}),remoteInvocation(ssh,['claude','-p']));
- const r=await withEnv('HERDR_PANE_ID','w1:p1',()=>exec(local,['sh','-c','env; printf "%s" "$1"','sh',{path:'~/x'}],{shell:true}));
- assert.equal(r.code,0);assert.doesNotMatch(r.stdout,/^HERDR_/m);assert.ok(r.stdout.endsWith(os.homedir()+'/x'),r.stdout.slice(-200));
- // A fake ssh that runs the remote command here: its status comes back, and 255 is the failure of ssh itself.
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-exec-')),bin=path.join(dir,'bin');fs.mkdirSync(bin);
- try{
-  fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh','for last; do :; done','exec sh -c "$last"',''].join('\n'),{mode:0o700});
-  await withEnv('PATH',bin+':'+process.env.PATH,async()=>{
-   assert.deepEqual(await exec(ssh,['sh','-c','echo no >&2; exit 1']),{code:1,stdout:'',stderr:'no\n'});
-   fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh','echo "ssh: connect to host cpu2 port 22: Connection refused" >&2','exit 255',''].join('\n'),{mode:0o700});
-   await assert.rejects(exec(ssh,['true']),/Connection refused/);
-  });
- }finally{fs.rmSync(dir,{recursive:true});}
-});
 test('/wt with a description names the branch with Claude haiku on the binding machine, creates the worktree beside the repository through Herdr without changing focus, starts the agent in its root pane like any topic, names the branch and path in its first reply and prompts the description',async()=>{
  const f=wtFixture();try{
   await f.send({messageId:'om_1',content:'/wt 给登录页加验证码\n第二行'});
   const t=f.store.data.topics[0],target=f.repo.target('feat/add-login');
-  assert.deepEqual(f.naming,[{argv:namingArgs(f.repo.main),input:namingPrompt('给登录页加验证码\n第二行'),timeoutMs:30000,shell:true}]);
-  assert.deepEqual(f.execs,[['m',...gitArgs(f.repo.main,'rev-parse','--path-format=absolute','--git-dir','--git-common-dir')],['m',...namingArgs(f.repo.main)],['m','test','-e',{path:target}],
+  assert.deepEqual(f.naming,[{cwd:f.repo.main,prompt:namingPrompt('给登录页加验证码\n第二行'),timeoutMs:30000}]);
+  assert.deepEqual(f.execs,[['m',...gitArgs(f.repo.main,'rev-parse','--path-format=absolute','--git-dir','--git-common-dir')],['m','nameBranch',f.repo.main],['m','exists',target],
    ['m',...gitArgs(f.repo.main,'show-ref','--verify','--quiet','refs/heads/feat/add-login')],['m',...gitArgs(f.repo.main,'fetch','--quiet','origin','+refs/heads/feat/add-login:refs/remotes/origin/feat/add-login')],
    ['m',...gitArgs(f.repo.main,'show-ref','--verify','--quiet','refs/remotes/origin/feat/add-login')]]);
   assert.deepEqual(f.h.calls,[['worktree','create','--cwd',f.repo.main,'--branch','feat/add-login','--path',target,'--no-focus'],['agent','start',t.agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],
@@ -1909,7 +1836,7 @@ test('/wt -b with a branch that only origin has fetches it and creates a local b
 });
 test('a naming that fails falls back to a random worktree/ branch and the first reply says why: claude exits with an error, prints no usable BRANCH= line, cannot run or does not answer in time',async()=>{
  const cases=[[{code:1,stderr:'Not logged in\n'},'claude 退出码 1：Not logged in'],[{stdout:'BRANCH=Feature/Add Login\n'},'输出里没有可用的 BRANCH= 行：BRANCH=Feature/Add Login'],
-  [Error('spawn sh ENOENT'),'无法运行 claude：spawn sh ENOENT'],[Object.assign(Error('连接超时，请检查 SSH 与 Herdr 状态'),{timedOut:true}),'30 秒内没有返回']];
+  [Error('spawn claude ENOENT'),'无法运行 claude：spawn claude ENOENT'],[Object.assign(Error('claude 在 30 秒内没有结束，已终止'),{timedOut:true}),'30 秒内没有返回']];
  for(const [claude,reason] of cases){
   const f=wtFixture();try{
    f.h.claude=claude;await f.send({messageId:'om_1',content:'/wt 任务描述'});
@@ -1938,7 +1865,7 @@ test('/wt in a binding whose directory is in a linked worktree creates the new w
   await f.send({messageId:'om_1',content:'/wt from the side'});
   assert.deepEqual(f.h.calls[0],['worktree','create','--cwd',f.repo.main,'--branch','feat/add-login','--path',target,'--base',head,'--no-focus']);
   assert.equal(git(target,'rev-parse','HEAD'),head);assert.deepEqual(f.store.data.topics[0].worktree,{branch:'feat/add-login',path:target,root:f.repo.main});
-  assert.deepEqual(f.replies.map(r=>r[3]),[intro('feat/add-login',target,`绑定目录在 linked worktree 里，新分支基于它的 HEAD ${head.slice(0,12)}`)]);assert.deepEqual(f.naming[0].argv,namingArgs(f.repo.main));
+  assert.deepEqual(f.replies.map(r=>r[3]),[intro('feat/add-login',target,`绑定目录在 linked worktree 里，新分支基于它的 HEAD ${head.slice(0,12)}`)]);assert.deepEqual(f.naming[0].cwd,f.repo.main);
  }finally{f.close();}
 });
 test('/wt whose worktree directory exists already fails before anything is created and names the directory',async()=>{
@@ -1969,7 +1896,7 @@ test('the images and files of a /wt topic go under its worktree, those of the /w
  const f=wtFixture();try{
   await f.send({messageId:'om_1',rawContentType:'post',content:'/wt 看看这个报错 ![image](img_b)',resources:[{type:'image',fileKey:'img_b'}]});
   const t=f.store.data.topics[0],target=f.repo.target('feat/add-login'),root=`${target}/.herdr-bridge`,dir=`${root}/${t.id}`;
-  assert.equal(f.naming[0].input,namingPrompt('看看这个报错'));
+  assert.equal(f.naming[0].prompt,namingPrompt('看看这个报错'));
   assert.deepEqual(f.stored,[['m',root,t.id,'om_1-1.png','data:img_b']]);
   assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),[`看看这个报错 [图片 1：${dir}/om_1-1.png]`]);assert.deepEqual([t.title,t.attachmentDir],['看看这个报错',dir]);
   await f.send({messageId:'om_2',rootId:'om_1',...imageOf('img_c')});
@@ -2019,7 +1946,7 @@ test('a /wt topic whose agent is gone ends with a card that keeps the worktree a
   assert.deepEqual(topics.click(allowed,removeClick('om_bot_2',1)),{toast:{type:'info',content:'正在删除 worktree'}});
   await Promise.all(topics.answering.values());
   assert.deepEqual(f.h.calls,[['worktree','list','--cwd',f.repo.main],['worktree','remove','--workspace','w1']]);
-  assert.deepEqual(f.execs,[['m','test','-e',{path:target}],['m',...gitArgs(target,'-c','core.quotePath=false','status','--porcelain','--untracked-files=all')]]);
+  assert.deepEqual(f.execs,[['m','exists',target],['m',...gitArgs(target,'-c','core.quotePath=false','status','--porcelain','--untracked-files=all')]]);
   assert.equal(fs.existsSync(target),false);assert.equal(git(f.repo.main,'rev-parse','--verify','feat/add-login'),git(f.repo.main,'rev-parse','main'));assert.equal(f.h.workspaces.some(w=>w.checkout),false);
   assert.deepEqual(f.updated.at(-1),['a','om_bot_2',removalCardOf('话题已结束',endedText,'feat/add-login',target,{removed:'已删除 worktree，分支 feat/add-login 保留'})]);
   assert.equal(new Store(f.dir).data.topics[0].worktree.removed,true);
@@ -2839,7 +2766,7 @@ test('channel startup and shutdown do not revive a cancelled connection',async()
 });
 test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions, request cards, COT, the card of a worktree or a schedule waiting for confirmation',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
- fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'initialized'),'1');fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
+ fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
  const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},proposal:{id:'p1',kind:'add',fields:{mode:'new',cron:'0 9 * * *',timeZone:'UTC',task:'x'},messageId:'om_p',expiresAt:1},createdAt:1};
  const worktree={branch:'feat/x',path:'/src/r-worktrees/feat-x',root:'/src/r'};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
@@ -2848,12 +2775,16 @@ test('the server lists pending chats, saves bindings only through a link token, 
   bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'},claude,codex,agy],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready',worktree:{...worktree,card:{messageId:'om_wt',heading:'话题已结束',text:'x'}}}]}));
  fs.writeFileSync(herdr,`#!/bin/sh\nif [ "$3" = agent ]; then echo '${JSON.stringify({result:{agents}})}'; else echo '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'; fi\n`,{mode:0o700});
  const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
- const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:'http://127.0.0.1:'+port+'/'},stdio:['ignore','pipe','inherit']});
+ const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:'http://127.0.0.1:'+port+'/'},stdio:['ignore','pipe','inherit']});let client;
  try{
   await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim();
   const api=async(p,body)=>{const r=await fetch(`http://127.0.0.1:${port}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
-  const machineId=(await api('machines/save',{name:'fake',type:'local',binary:herdr,enabled:true})).body.id;
+  // A first start adds no machine; a new one is offline until its client is in, and connecting it then reports that.
+  assert.deepEqual((await api('state')).body.machines,[]);
+  const machineId=(await api('machines/save',{name:'fake',session:'default',type:'local',binary:herdr,enabled:true})).body.id;
+  const offline={state:'offline',agents:[],panes:[]};assert.deepEqual(await api('machines/connect',{id:machineId}),{status:200,body:offline});
+  let [m]=(await api('state')).body.machines;assert.deepEqual(m,{id:machineId,name:'fake',session:'default',enabled:true,hasToken:false,client:{state:'offline'},...offline});
   const input={token:'forged',name:'route',appId:'app-plain',machineId,chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:true};
   assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
   const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
@@ -2871,41 +2802,54 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.equal((await avatar('app-avatar',{})).status,401);for(const id of ['app-plain','unknown','../state.json'])assert.equal((await avatar(id)).status,404,id);
   assert.equal((await api('apps/remove',{id:'app-gone'})).status,200);assert.equal(fs.existsSync(path.join(state,'avatars','app-gone')),false);assert.ok(fs.existsSync(path.join(state,'avatars','app-avatar')));
   assert.equal((await api('apps/remove',{id:'../avatars/app-avatar'})).status,400);assert.ok(fs.existsSync(path.join(state,'avatars','app-avatar')));
-  const [m]=(await api('state')).body.machines;assert.equal(m.state,'connected');assert.deepEqual(m.agents,agents);assert.deepEqual(m.panes,[{pane_id:'w1:p1'}]);
-  assert.deepEqual(Object.keys(m).sort(),['agents','binary','checkedAt','client','enabled','hasToken','host','id','name','panes','port','session','state','type']);assert.deepEqual([m.client,m.hasToken],[{state:'offline'},false]);
+  // Once the client of the machine is in, Bridge polls Herdr there through it, with the Herdr of the client's config.
+  const {config}=(await api('machines/token',{id:machineId})).body;
+  client=bridgeClient(configFile(dir,'client.json',JSON.stringify({...JSON.parse(config),herdr})),{BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock')});
+  m=await until(async()=>{const [x]=(await api('state')).body.machines;return x.state==='connected'&&x;},'Herdr of the machine is polled');
+  assert.deepEqual(m.agents,agents);assert.deepEqual(m.panes,[{pane_id:'w1:p1'}]);
+  assert.deepEqual(Object.keys(m).sort(),['agents','checkedAt','client','enabled','hasToken','id','name','panes','session','state']);assert.deepEqual([m.client.state,m.hasToken],['online',true]);
+  assert.equal((await api('machines/connect',{id:machineId})).body.state,'connected');
+  // Disconnected from bridging, the machine is disabled whatever its client does; once its client is gone, it is offline.
+  assert.equal((await api('machines/disconnect',{id:machineId})).status,200);assert.deepEqual((({state,agents,panes})=>({state,agents,panes}))((await api('state')).body.machines[0]),{state:'disabled',agents:[],panes:[]});
+  assert.equal((await api('machines/connect',{id:machineId})).body.state,'connected');client.kill();await client.exited;
+  await until(async()=>(await api('state')).body.machines[0].state==='offline','the machine is offline without its client');
   assert.equal((await api('machines/install',{id:machineId})).status,404);
- }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
+ }finally{client?.kill();server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
-test('the server hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; the topic\'s agent reaches it with bridge-schedule through the client of its machine, and the same pane on another machine does not; removing the binding turns off remote answers for its topic and removes its attachment directory',async()=>{
+test('the server migrates machines of an older state file at start and polls Herdr through the client of each; it hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; the topic\'s agent reaches it with bridge-schedule through the client of its machine, and the same pane on another machine does not; removing the binding turns off remote answers for its topic and removes its attachment directory',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),calls=path.join(dir,'calls'),attachments=path.join(dir,'work','.herdr-bridge','t');
  const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',state_change_seq:2,reply_seq:1,request_ids:[1],remote_answers:true};
- fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
+ fs.mkdirSync(state);
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'fake',type:'local',session:'default',binary:herdr,enabled:true},{id:'m2',name:'other',type:'local',session:'default',binary:herdr,enabled:true}],
   apps:[{id:'app',name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false}],bindings:[{id:'b',name:'助手',appId:'app',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false,enabled:true}],
   topics:[{id:'t',bindingId:'b',appId:'app',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',state:'ready',error:'',messageIds:['om_1'],
    reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],attachmentDir:attachments,createdAt:1}]}));
  fs.mkdirSync(attachments,{recursive:true});fs.writeFileSync(path.join(attachments,'om_1-1.png'),'png');
- fs.writeFileSync(herdr,['#!/bin/sh',`echo "$*" >> ${quote(calls)}`,'case "$3 $4" in',
-  ` 'agent list') echo ${quote(JSON.stringify({result:{type:'agent_list',agents:[agent]}}))};;`,
-  ` 'agent replies') echo ${quote(JSON.stringify({result:{type:'agent_replies',agent,replies:[{seq:1,text:'hi'}]}}))};;`,
-  ` 'agent requests') echo ${quote(JSON.stringify({result:{type:'agent_requests',agent,requests:[bash]}}))};;`,
+ fs.writeFileSync(herdr,['#!/bin/sh',`echo "$*" >> ${quoted(calls)}`,'case "$3 $4" in',
+  ` 'agent list') echo ${quoted(JSON.stringify({result:{type:'agent_list',agents:[agent]}}))};;`,
+  ` 'agent replies') echo ${quoted(JSON.stringify({result:{type:'agent_replies',agent,replies:[{seq:1,text:'hi'}]}}))};;`,
+  ` 'agent requests') echo ${quoted(JSON.stringify({result:{type:'agent_requests',agent,requests:[bash]}}))};;`,
   ` *) echo '{"result":{"panes":[]}}';;`,'esac',''].join('\n'),{mode:0o700});
  const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});}),clients=[];
  const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:''},stdio:['ignore','pipe','inherit']});
  try{
   await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async p=>(await fetch(`http://127.0.0.1:${port}/api/${p}`,{headers:{authorization:'Bearer '+key}})).json();
+  // The machines lost what only SSH needed, and the log names the Herdr path that the clients have to be told.
+  const saved=JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8'));assert.deepEqual(saved.machines,[{id:'m',name:'fake',session:'default',enabled:true},{id:'m2',name:'other',session:'default',enabled:true}]);
+  assert.deepEqual(saved.logs.map(l=>l.message),[`机器改为经客户端连接，去掉了 fake、other 的连接方式、地址、端口和 Herdr 路径；fake 的 Herdr 在 ${herdr}，other 的 Herdr 在 ${herdr}，请写进对应机器客户端配置的 herdr`]);
+  // Nothing is polled until the client of a machine is in; each machine has a client with its own token and socket, and the Herdr of its config.
+  const post=async(p,body)=>(await fetch(`http://127.0.0.1:${port}/api/${p}`,{method:'POST',headers:{authorization:'Bearer '+key},body:JSON.stringify(body)})).json();
+  const [own,other]=['m','m2'].map(id=>path.join(dir,id+'.sock'));await later(300);assert.equal(fs.existsSync(calls),false);
+  for(const [id,socket] of [['m',own],['m2',other]])clients.push(bridgeClient(configFile(dir,id+'.json',JSON.stringify({...JSON.parse((await post('machines/token',{id})).config),herdr})),{BRIDGE_CLIENT_SOCKET:socket}));
+  await until(async()=>(await api('state')).machines.every(m=>m.client.state==='online'),'both clients are online');
   // The app is not connected, so the forward, the removal and the card fail and are logged; no Feishu request is made.
   let s;for(let i=0;i<100;i++){s=await api('state');if(s.logs.some(l=>l.kind==='请求卡片'))break;await later(50);}
   assert.equal(s.topics[0].replySeq,1);assert.deepEqual(s.logs.filter(l=>['回复转发','消息表情','请求卡片'].includes(l.kind)).map(l=>[l.level,l.message]),[['error','助手：feishu-1 的回复未发出，飞书未连接'],['error','feishu-1：未能取消表情，飞书未连接'],['error','feishu-1：请求 #1 的卡片未发出，飞书未连接']]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).topics[0].reactions,[]);
   assert.deepEqual(fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('replies')||l.includes('requests')),['--session default agent replies w1:p1 --after 0','--session default agent requests w1:p1']);
   // The agent of the topic reaches Bridge with bridge-schedule through the client of its machine, on a socket that only its user can open;
-  // Bridge takes the machine from the client's connection. Each machine has a client with its own token and socket.
-  const post=async(p,body)=>(await fetch(`http://127.0.0.1:${port}/api/${p}`,{method:'POST',headers:{authorization:'Bearer '+key},body:JSON.stringify(body)})).json();
-  const [own,other]=['m','m2'].map(id=>path.join(dir,id+'.sock'));
-  for(const [id,socket] of [['m',own],['m2',other]])clients.push(bridgeClient(configFile(dir,id+'.json',(await post('machines/token',{id})).config),{BRIDGE_CLIENT_SOCKET:socket}));
-  await until(async()=>(await api('state')).machines.every(m=>m.client.state==='online'),'both clients are online');
+  // Bridge takes the machine from the client's connection.
   assert.equal(fs.statSync(own).mode&0o777,0o600);
   const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_')&&!k.startsWith('BRIDGE_')));
   const cli=(socket,...args)=>spawned(process.execPath,[path.join(bridgeDir,'bin','bridge-schedule.mjs'),...args],{...env,BRIDGE_CLIENT_SOCKET:socket,HERDR_PANE_ID:'w1:p1'});
@@ -2961,7 +2905,7 @@ async function bridgeServer(state,port,env={}){
 }
 // Clients alone on an HTTP server of this process, with the machine cpu2 of the Herdr session default and its token.
 async function clientsFixture(options){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-clients-')),store=new Store(dir);store.data.machines.push({id:'m',name:'cpu2',type:'ssh',host:'cpu2',session:'default',port:22,binary:'~/.local/bin/herdr',enabled:false});
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-clients-')),store=new Store(dir);store.data.machines.push({id:'m',name:'cpu2',session:'default',enabled:true});
  const clients=new Clients(store,options),server=http.createServer((req,res)=>res.end()).on('upgrade',(...args)=>clients.upgrade(...args));
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const token=clients.issue(store.data.machines[0]);
  return {store,clients,token,url:`ws://127.0.0.1:${server.address().port}/api/client`,close(){clients.close();server.close();fs.rmSync(dir,{recursive:true});}};
@@ -3077,8 +3021,8 @@ test('the client and bridge-schedule run on Node alone: bin/bridge-client.mjs, b
    for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
   visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
  };
- assert.deepEqual(imports('bridge-client.mjs'),['bin/bridge-client.mjs','client.mjs','link.mjs']);
- assert.deepEqual(imports('bridge-schedule.mjs'),['bin/bridge-schedule.mjs','client.mjs','cron.mjs','link.mjs','request-cards.mjs','schedule-command.mjs']);
+ assert.deepEqual(imports('bridge-client.mjs'),['bin/bridge-client.mjs','client.mjs','link.mjs','machine.mjs']);
+ assert.deepEqual(imports('bridge-schedule.mjs'),['bin/bridge-schedule.mjs','client.mjs','cron.mjs','link.mjs','machine.mjs','request-cards.mjs','schedule-command.mjs']);
 });
 // Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
 async function stopClients(f,started){
@@ -3143,8 +3087,8 @@ test('without BRIDGE_CLIENT_SOCKET the client and bridge-schedule find the socke
 });
 test('a machine\'s client gets in with the token that the console generates and the state keeps only as a hash; the console shows it online with its host, refused with the reason of a version mismatch, or offline; a newer client of the machine replaces the older, which exits; a new token drops the client of the old one, which is refused from then on; the client reconnects after the control plane restarts, and removing the machine drops it',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),port=await freePort(),clients=[];
- fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
- fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu2',type:'ssh',host:'cpu2',session:'default',port:22,binary:'~/.local/bin/herdr',enabled:false}]}));
+ fs.mkdirSync(state);
+ fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu2',session:'default',enabled:false}]}));
  let server=await bridgeServer(state,port,{BRIDGE_URL:''});
  // The clients of the machine run on this one host, where bridge-schedule finds the socket of the one that is in.
  const socket=path.join(dir,'client.sock'),start=(config,env={BRIDGE_CLIENT_SOCKET:socket})=>{const c=bridgeClient(config,env);clients.push(c);return c;},origin=`http://127.0.0.1:${port}`;
@@ -3186,6 +3130,140 @@ test('a machine\'s client gets in with the token that the console generates and 
   const logs=(await api('state')).body.logs.filter(l=>l.kind==='机器连接').map(l=>l.message);
   for(const message of [`cpu2：客户端被拒绝，${mismatch}`,`cpu2 的客户端已连接（${os.hostname()}）`,`cpu2 的客户端已连接（${os.hostname()}），替换了之前的连接`,'cpu2：生成了新的客户端 token，旧 token 已失效','cpu2 的客户端已断开'])assert.ok(logs.includes(message),message);
  }finally{for(const c of clients)c.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
+});
+
+// What the control plane does on a machine through its client (core.mjs operations, Clients.call, machine.mjs).
+// A shell word that is s as it is.
+const quoted=s=>"'"+String(s).replaceAll("'","'\\''")+"'";
+// Whether no process has id pid any more.
+const gone=pid=>{try{process.kill(pid,0);return false;}catch(e){return e.code==='ESRCH';}};
+// A real client process of machine m (see clientsFixture) connected to the control plane of the tests, with herdr, when given, as the Herdr
+// of its config and env for its process, which gets a socket of its own; call is Clients.call, and ops are the operations of the control
+// plane through it (see operations in core.mjs).
+async function machineFixture({herdr,env={}}={}){
+ const f=await clientsFixture(),dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-machine-'));
+ const client=bridgeClient(configFile(dir,'client.json',JSON.stringify({url:f.url,token:f.token,...herdr&&{herdr}})),{BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock'),...env});
+ await until(()=>f.clients.online('m'),'the client is online');
+ const call=(...args)=>f.clients.call(...args);
+ return {...f,m:f.store.data.machines[0],client,call,ops:operations(call),async close(){await stopClients(f,[client]);fs.rmSync(dir,{recursive:true});}};
+}
+// A fake Herdr in dir whose third argument, the first after --session <name>, says what it does; hang records its pid and that of a child it
+// waits for in dir/pid and dir/child.
+function fakeHerdrBinary(dir){
+ const bin=path.join(dir,'herdr');
+ fs.writeFileSync(bin,['#!/bin/sh','case "$3" in',
+  ` blocked) echo 'warning: noise' >&2; echo '{"id":"cli:agent:prompt","error":{"code":"agent_blocked","message":"agent w1:p1 is blocked"}}' >&2; exit 1;;`,
+  ` usage) echo 'agent prompt requires text' >&2; exit 2;;`,
+  ` slow) sleep 0.3; echo '{"id":"x","result":{"type":"ok"}}';;`,
+  ` cwd) printf '{"result":{"cwd":"%s","text":"%s"}}' "$5" "$6";;`,
+  ` text) echo 'not json';;`,
+  ` hang) sleep 30 & echo $! > ${quoted(path.join(dir,'child'))}; echo $$ > ${quoted(path.join(dir,'pid'))}; wait;;`,
+  ` *) echo '{"id":"cli:agent:list","result":{"type":"agent_list","agents":[]}}';;`,'esac',''].join('\n'),{mode:0o700});
+ return bin;
+}
+test('Herdr commands run through the client of the machine with the Herdr of its config in the session of the machine, keep Herdr error codes, honor per-call timeouts and expand ~/ only in path arguments',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-herdr-')),f=await machineFixture({herdr:fakeHerdrBinary(dir)}),{herdr}=f.ops,m=f.m;
+ try{
+  assert.deepEqual(await herdr(m,['agent','list']),{type:'agent_list',agents:[]});
+  await assert.rejects(herdr(m,['blocked']),e=>e.code==='agent_blocked'&&e.message==='agent w1:p1 is blocked');
+  await assert.rejects(herdr(m,['usage']),e=>e.code===undefined&&/requires text/.test(e.message));
+  await assert.rejects(herdr(m,['slow'],{timeoutMs:100}),e=>e.timedOut===true&&e.message==='herdr 在 0.1 秒内没有结束，已终止');assert.deepEqual(await herdr(m,['slow'],{timeoutMs:5000}),{type:'ok'});
+  assert.deepEqual(await herdr(m,['cwd','--cwd',{path:'~/work'},'~/work']),{cwd:os.homedir()+'/work',text:'~/work'});
+  await assert.rejects(herdr(m,['text']),/^Error: 远程服务未返回有效 JSON$/);
+ }finally{await f.close();fs.rmSync(dir,{recursive:true});}
+});
+test('a command that runs past the timeout the control plane gave it is killed by the client with the processes it started, and the request fails as timed out; the control plane waits for an answer a little longer than that timeout',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-timeout-')),f=await machineFixture({herdr:fakeHerdrBinary(dir)});
+ try{
+  const started=Date.now();await assert.rejects(f.ops.herdr(f.m,['hang'],{timeoutMs:500}),e=>e.timedOut===true&&e.message==='herdr 在 0.5 秒内没有结束，已终止');assert.ok(Date.now()-started<3000);
+  const pids=['pid','child'].map(n=>Number(fs.readFileSync(path.join(dir,n),'utf8')));await until(()=>pids.every(gone),'the command and its child are gone');
+ }finally{await f.close();fs.rmSync(dir,{recursive:true});}
+ // A client that never answers: the request carries its timeout, and the control plane gives up graceMs after it.
+ const g=await clientsFixture({graceMs:300});
+ try{
+  const ws=await dial(g.url,g.token),got=[];await link(ws,{ping:()=>({}),herdr:params=>{got.push(params);return new Promise(()=>{});}}).call('hello',{protocol,host:'h'});
+  const started=Date.now();await assert.rejects(g.clients.call(g.store.data.machines[0],'herdr',{session:'default',args:['x']},{timeoutMs:200}),e=>e.timedOut===true&&e.message==='请求超时：herdr');
+  const waited=Date.now()-started;assert.ok(waited>=450&&waited<2000,String(waited));assert.deepEqual(got,[{session:'default',args:['x'],timeoutMs:200}]);
+  ws.close();await until(()=>!g.clients.online('m'),'the client is gone');
+ }finally{g.close();}
+});
+test('a request for a machine whose client is not in fails at once and says that the machine is offline; one whose connection ends before the answer fails then, and the client still ends the command at its timeout',async()=>{
+ const f=await clientsFixture(),m=f.store.data.machines[0];
+ try{
+  const started=Date.now(),offline=e=>e.code==='client_offline'&&e.message==='机器 cpu2 离线：它的 Bridge 客户端没有连上';
+  await assert.rejects(f.clients.call(m,'herdr',{session:'default',args:['agent','list']}),offline);await assert.rejects(operations((...a)=>f.clients.call(...a)).herdr(m,['agent','list']),offline);
+  assert.ok(Date.now()-started<200);assert.equal(f.clients.online('m'),false);
+ }finally{f.close();}
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-drop-')),g=await machineFixture({herdr:fakeHerdrBinary(dir)});
+ try{
+  const pending=g.ops.herdr(g.m,['hang'],{timeoutMs:1500});await until(()=>fs.existsSync(path.join(dir,'pid')),'the command runs');
+  g.clients.drop('m','测试断开');await assert.rejects(pending,/连接已断开/);
+  const pids=['pid','child'].map(n=>Number(fs.readFileSync(path.join(dir,n),'utf8')));await until(()=>pids.every(gone),'the command and its child are gone',5000);
+ }finally{await g.close();fs.rmSync(dir,{recursive:true});}
+});
+test('the client does only what its fixed set of methods names, none of which runs a command the control plane names, and refuses params of another shape',async()=>{
+ const f=await machineFixture();
+ try{
+  for(const method of ['exec','run','spawn','shell','constructor','__proto__'])await assert.rejects(f.call(f.m,method,{argv:['id']}),e=>e.code==='unknown_method',method);
+  const files={'a/SKILL.md':''},skills={store:'~/s',digest:'d',skills:'.claude/skills',as:'link',cwd:'~/w',names:['a'],files};
+  for(const [method,params] of [['herdr',{session:'default',args:'agent list'}],['herdr',{session:'default',args:[{cwd:'x'}]}],['herdr',{session:'default',args:[{path:'relative'}]}],['herdr',{args:[]}],
+   ['mkdir',{path:'relative/dir'}],['mkdir',{}],['git',{cwd:'~/x',args:[1]}],['git',{cwd:'x',args:[]}],['exists',{}],['nameBranch',{cwd:'~/x'}],
+   ['storeFile',{root:'~/w/.herdr-bridge',dir:'..',name:'a',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a/b',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a',body:1}],
+   ['placeSkills',{...skills,as:'move'}],['placeSkills',{...skills,names:['../a']}],['placeSkills',{...skills,files:{'../x':''}}],['placeSkills',{...skills,files:{'/x':''}}],['placeSkills',{...skills,skills:'/abs'}]])
+   await assert.rejects(f.call(f.m,method,params),e=>e.code==='invalid_params',method+' '+JSON.stringify(params));
+ }finally{await f.close();}
+});
+test('the client creates directories, stores attachments only under a .herdr-bridge directory and removes only a directory directly under one, as the control plane asks: files 0600 in directories 0700, a .gitignore of * and the clean-up of directories of other topics unchanged for 7 days',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-files-'))),home=path.join(dir,'home');fs.mkdirSync(home);
+ const f=await machineFixture({env:{HOME:home}}),{makeDirectory,storeFile,removeDirectory}=f.ops,m=f.m;
+ try{
+  const target=path.join(home,'a','b','c');
+  await makeDirectory(m,'~/a/b/c');assert.ok(fs.statSync(target).isDirectory());await makeDirectory(m,target);
+  fs.writeFileSync(path.join(home,'plain'),'');await assert.rejects(makeDirectory(m,'~/plain/x'),/mkdir/);
+  await storeFileBehaves(f.ops,m,home);
+  // A root that is not a .herdr-bridge directory, also once its links are resolved, gets nothing, and nothing of its own is cleaned up.
+  const keep=['work/.herdr-bridge/t2/sub','victim/t3','work/.herdr-bridge/file'];
+  for(const p of keep.slice(0,2))fs.mkdirSync(path.join(home,p),{recursive:true});fs.writeFileSync(path.join(home,keep[2]),'');fs.symlinkSync(path.join(home,'victim'),path.join(home,'link'));
+  fs.mkdirSync(path.join(home,'outer'));fs.symlinkSync(path.join(home,'victim'),path.join(home,'outer','.herdr-bridge'));age(path.join(home,'victim','t3'),30);
+  for(const root of ['~/','~/work','~/work/.herdr-bridge/t1','~/.herdr-bridge/../victim','~/outer/.herdr-bridge'])await assert.rejects(storeFile(m,root,'t','x.png',Buffer.from('x')),e=>e.code==='refused',root);
+  assert.deepEqual(fs.readdirSync(path.join(home,'victim')),['t3']);assert.equal(fs.existsSync(path.join(home,'t')),false);
+  // Only a directory directly under a .herdr-bridge directory, which is one also when its path is resolved, is removed.
+  for(const p of ['~/work','~/work/.herdr-bridge','~/work/.herdr-bridge/t2/sub','~/work/.herdr-bridge/../victim','~/work/.herdr-bridge/file','~/victim/t3','~/outer/.herdr-bridge/t3','~/link/t3','/','~/gone/x'])
+   await assert.rejects(removeDirectory(m,p),e=>e.code==='refused',p);
+  for(const p of [...keep,'victim','work/.herdr-bridge'])assert.ok(fs.existsSync(path.join(home,p)),p);
+  // A topic directory under a .herdr-bridge directory that is gone, or not there yet, is removed already.
+  await removeDirectory(m,'~/gone/.herdr-bridge/t1');await removeDirectory(m,'~/work/.herdr-bridge/t9');
+ }finally{await f.close();fs.rmSync(dir,{recursive:true});}
+});
+test('placing skills through the client links Claude\'s and Codex\'s skills to the store of the machine and copies them for Antigravity, writes only changed content, leaves skills that are not Bridge\'s alone and records the placed paths once in the info/exclude of a Git repository',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-'))),home=path.join(dir,'home');fs.mkdirSync(home);
+ const f=await machineFixture({env:{HOME:home}});
+ try{await placeSkillsBehaves(f.call,f.m,dir);}finally{await f.close();fs.rmSync(dir,{recursive:true});}
+});
+test('the client runs commands with the environment that the user\'s shell sets up as a login shell without a terminal, captured once at its start and without the HERDR_* variables: they find programs on the PATH of the shell\'s startup files, which the client\'s own PATH lacks, whatever those files print; git never prompts and speaks English, claude names a branch in the directory given with the prompt on stdin, and Herdr is ~/.local/bin/herdr unless the config says otherwise; a shell that fails leaves the client its own environment',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-env-'))),home=path.join(dir,'home'),bin=path.join(dir,'bin'),shell=path.join(dir,'shell'),repo=path.join(home,'repo');
+ for(const d of [repo,bin,path.join(home,'.local','bin')])fs.mkdirSync(d,{recursive:true});
+ // The user's shell: as a login shell, like bash with a ~/.profile, it prints a greeting and puts bin first on the PATH.
+ fs.writeFileSync(shell,['#!/bin/sh','[ "$1" = -l ] && { echo welcome; PATH='+quoted(bin)+':$PATH; export PATH; FROM_SHELL=1; export FROM_SHELL; shift; }','exec /bin/sh "$@"',''].join('\n'),{mode:0o700});
+ fs.writeFileSync(path.join(home,'.local','bin','herdr'),['#!/bin/sh','printf \'{"result":{"args":"%s","shell":"%s","pane":"%s","path":"%s"}}\' "$*" "$FROM_SHELL" "$HERDR_PANE_ID" "$PATH"',''].join('\n'),{mode:0o700});
+ fs.writeFileSync(path.join(bin,'git'),['#!/bin/sh','printf \'%s|%s|%s|%s\' "$*" "$GIT_TERMINAL_PROMPT" "$LC_ALL" "$HERDR_PANE_ID"',''].join('\n'),{mode:0o700});
+ fs.writeFileSync(path.join(bin,'claude'),['#!/bin/sh','echo "BRANCH=feat/from-shell $*"','pwd','cat',''].join('\n'),{mode:0o700});
+ const env={HOME:home,SHELL:shell,PATH:'/usr/bin:/bin',HERDR_PANE_ID:'w1:p1',HERDR_SESSION:'other'};
+ const f=await machineFixture({env});
+ try{
+  assert.deepEqual(await f.ops.herdr(f.m,['agent','list']),{args:'--session default agent list',shell:'1',pane:'',path:`${bin}:/usr/bin:/bin`});
+  assert.deepEqual(await f.ops.git(f.m,'~/repo',['status','--porcelain']),{code:0,stdout:`-C ${repo} status --porcelain|0|C|`,stderr:''});
+  assert.deepEqual(await f.ops.nameBranch(f.m,'~/repo','给登录页加验证码\n'),{code:0,stdout:`BRANCH=feat/from-shell -p --model haiku\n${repo}\n给登录页加验证码\n`,stderr:''});
+  assert.equal(await f.ops.exists(f.m,'~/repo'),true);assert.equal(await f.ops.exists(f.m,'~/none'),false);
+ }finally{await f.close();}
+ // A shell that fails: the client logs why and runs Herdr with its own environment, still without the HERDR_* variables, where claude is not found.
+ fs.writeFileSync(shell,'#!/bin/sh\necho broken >&2\nexit 3\n',{mode:0o700});
+ const g=await machineFixture({env});
+ try{
+  assert.deepEqual(await g.ops.herdr(g.m,['agent','list']),{args:'--session default agent list',shell:'',pane:'',path:'/usr/bin:/bin'});
+  assert.match(g.client.log,/没能取得登录 shell 的环境，命令按客户端自己的环境运行：.*退出码 3：broken/);
+  await assert.rejects(g.ops.nameBranch(g.m,'~/repo','x'),/ENOENT/);
+ }finally{await g.close();fs.rmSync(dir,{recursive:true});}
 });
 
 test('SDK cache isolates apps and honors namespaces and absolute expiry',async()=>{const a=channelCache(),b=channelCache();await a.set('same','seen',Date.now()+60000,{namespace:'dedup'});assert.equal(await a.get('same',{namespace:'dedup'}),'seen');assert.equal(await b.get('same',{namespace:'dedup'}),undefined);assert.equal(await a.get('same',{namespace:'token'}),undefined);await a.set('expired','old',Date.now()-1);assert.equal(await a.get('expired'),undefined);});

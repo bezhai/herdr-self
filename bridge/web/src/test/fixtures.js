@@ -48,22 +48,29 @@ export function sampleState() {
       },
       { id: 'app-2', name: '备用应用', appId: 'cli_spare', domain: 'lark', enabled: false, connection: 'disabled', allowedUsers: [], error: '' },
     ],
+    // As the server derives them: Herdr is polled only through an online client, so any other machine is disabled or offline.
     machines: [
       {
-        id: 'm-1', name: 'cpu2', type: 'ssh', host: 'cpu2', port: 22, session: 'default', binary: '~/.local/bin/herdr',
-        hasToken: true, client: { state: 'online', host: 'cpu2-host', since: 1 }, enabled: true, state: 'connected', checkedAt: 1, panes: [{}, {}, {}],
+        id: 'm-1', name: 'cpu2', session: 'default', enabled: true, hasToken: true, client: { state: 'online', host: 'cpu2-host', since: 1 },
+        state: 'connected', checkedAt: 1, panes: [{}, {}, {}],
         agents: [
           { name: 'reviewer', agent: 'claude', pane_id: 'w1:p2', cwd: '/work', agent_status: 'working', agent_session: { value: 'session-claude' } },
           { agent: 'codex', pane_id: 'w1:p3', cwd: '/other', agent_status: 'idle' },
           { agent: 'codex', pane_id: 'w1:p4', cwd: '/srv', agent_status: 'blocked', agent_session: { value: 'session-codex' } },
         ],
       },
-      { id: 'm-2', name: 'gpu1', type: 'ssh', host: 'gpu1', port: 2222, session: 'work', binary: '~/.local/bin/herdr', hasToken: false, client: { state: 'offline' }, enabled: true, state: 'connected', checkedAt: 1, panes: [], agents: [] },
-      { id: 'm-3', name: 'laptop', type: 'local', host: '', port: 22, session: 'default', binary: '~/.local/bin/herdr', hasToken: false, client: { state: 'offline' }, enabled: false, state: 'disabled', panes: [], agents: [] },
       {
-        id: 'm-4', name: 'cpu3', type: 'ssh', host: 'cpu3', port: 22, session: 'default', binary: '~/.local/bin/herdr',
-        hasToken: true, client: { state: 'refused', error: '版本不一致：控制面协议 1，客户端协议 2' },
-        enabled: true, state: 'error', checkedAt: 1, error: 'ssh: connection refused', panes: [], agents: [],
+        id: 'm-2', name: 'gpu1', session: 'work', enabled: true, hasToken: true, client: { state: 'online', host: 'gpu1-host', since: 1 },
+        state: 'connected', checkedAt: 1, panes: [], agents: [],
+      },
+      { id: 'm-3', name: 'laptop', session: 'default', enabled: false, hasToken: false, client: { state: 'offline' }, state: 'disabled', panes: [], agents: [] },
+      {
+        id: 'm-4', name: 'cpu3', session: 'default', enabled: true, hasToken: true, client: { state: 'refused', error: '版本不一致：控制面协议 1，客户端协议 2' },
+        state: 'offline', panes: [], agents: [],
+      },
+      {
+        id: 'm-5', name: 'gpu2', session: 'default', enabled: true, hasToken: true, client: { state: 'online', host: 'gpu2-host', since: 1 },
+        state: 'error', checkedAt: 1, error: 'herdr: session default not found', panes: [], agents: [],
       },
     ],
     bindings: [

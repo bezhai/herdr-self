@@ -1,6 +1,6 @@
 import { request } from '../api.js';
 import { AppAvatar } from '../components/AppAvatar.jsx';
-import { chatTypeLabel, connectedMachines } from '../model.js';
+import { chatTypeLabel, onlineMachines } from '../model.js';
 import { FormDialog, useFields } from './FormDialog.jsx';
 import { PermissionModeField } from './PermissionModeDialog.jsx';
 
@@ -11,14 +11,14 @@ const kinds = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' },
 const selected = (options, value) => (options.some((o) => o.id === value) ? value : options[0]?.id || '');
 
 // Route the pending chat that asked for a binding to a machine: each topic of the chat will start an agent of the chosen kind
-// in the working directory. The chat is fixed by its link token; only enabled, connected machines can be targets.
+// in the working directory. The chat is fixed by its link token; only enabled machines with their client online can be targets.
 // Mentions matter only in groups: a direct chat always triggers. Only Claude bindings have a permission mode.
 export function BindingDialog({ state, chat, onClose, onSaved }) {
   const group = chat.chatType === 'group';
   const { values, field, checkbox } = useFields({
     name: `飞书${chatTypeLabel(chat.chatType)}`, machineId: '', cwd: '', kind: 'claude', permissionMode: 'default', requireMention: true,
   });
-  const machines = connectedMachines(state);
+  const machines = onlineMachines(state);
   const machineId = selected(machines, values.machineId);
   const app = state.apps.find((a) => a.id === chat.appId);
 

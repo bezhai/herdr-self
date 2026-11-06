@@ -7,9 +7,11 @@ import {attachmentsOf,promptOf,fileName,titleOf,limits,label,reason} from './att
 import {slash} from './commands.mjs';
 import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,steps} from './cot.mjs';
 import {wtRequest,usage,notRetried,createWorktree,worktreeIntro,failedText,removeWorktree,dirtyText,removalFailed,removalCard} from './worktrees.mjs';
+import {attachmentFolder} from './machine.mjs';
 // One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, one that a /wt topic
 // starts in a new Git worktree (see worktrees.mjs), or one that already runs in any pane of any machine and that the topic adopted
-// (/adopt). Everything goes through the Herdr CLI, besides what worktrees, attachments and Bridge's skills need on the machine.
+// (/adopt). Everything goes through the Herdr CLI, besides what worktrees, attachments and Bridge's skills need on the machine; all of it
+// through the client of the machine (see operations in core.mjs).
 const workspaceLabel=b=>'飞书 · '+b.name;
 // Arguments that Herdr passes on to the agent it starts, after --, per binding kind. Claude gets the binding's permission mode. Codex runs
 // in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
@@ -18,6 +20,9 @@ const workspaceLabel=b=>'飞书 · '+b.name;
 // Antigravity (agy) gets nothing, not even the --.
 const agentArgs={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true'],agy:()=>[]};
 const brief=e=>publicText(e.message).split('\n')[0].slice(0,200);
+// What a topic says when the client of its machine is offline (see Clients.call): the error names the machine, and after says what that
+// meant for the message.
+const offline=(e,after)=>`${brief(e)}。${after}`;
 // While Herdr's remote answers setting is on for the agent of a pane, the permission and question hooks of Claude and Codex wait for an
 // answer from Feishu (see cards); Antigravity has no such hooks, its approvals and questions get the blocked notice (see blocked). Bridge
 // turns the setting on before a topic is ready and off when it lets go of an agent that keeps running. Herdr clears it when the agent
@@ -27,7 +32,7 @@ const remoteAnswers=(pane,on)=>['pane','remote-answers',pane,on?'on':'off'];
 const endedNotice='该话题的会话已结束，请发起新话题',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
 // Where the images and files of a topic go, under the working directory of its agent (see attach).
-const attachmentRoot=cwd=>cwd.replace(/\/+$/,'')+'/.herdr-bridge';
+const attachmentRoot=cwd=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;
 // Marks a message from the moment a topic accepts it until the agent's turn for it ends, unless a COT takes its place (see openCot).
 const reaction='OneSecond';
 // Whether the turn that a prompt with state_change_seq seq started has ended: the agent is idle or done and has changed state since.
@@ -45,19 +50,19 @@ const news=(t,agent)=>Boolean(t.cot)&&(agent.tool_call_seq!=null&&agent.tool_cal
 const run=t=>({threadId:t.rootId,runId:t.cot.origin});
 const toast=(type,content)=>({toast:{type,content}});
 export class Topics{
- // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path) creates a directory and its parents on machine m;
- // machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card}) answers in the topic thread with a card
- // and resolves to the message id; updateCard(app,messageId,card) replaces a card sent that way;
+ // On machine m, through its client (see operations in core.mjs): herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path)
+ // creates a directory and its parents; storeFile(m,root,dir,name,body) writes a file and resolves to its absolute path, and
+ // removeDirectory(m,dir) removes such a directory; git(m,cwd,args,{timeoutMs}), exists(m,path) and nameBranch(m,cwd,prompt,{timeoutMs})
+ // serve /wt topics (see worktrees.mjs). Each rejects with the code client_offline while the client of m is offline. placeSkills(m,cwd,kind)
+ // places Bridge's skills where an agent of binding kind kind reads them in directory cwd on machine m and resolves to the paths of
+ // same-name skills of others (see skills.mjs). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
+ // answers in the topic thread with a card and resolves to the message id; updateCard(app,messageId,card) replaces a card sent that way;
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
- // a resource of a received message, or rejects with code too_large past limit bytes; storeFile(m,root,dir,name,body) writes a file on
- // machine m and resolves to its absolute path, removeDirectory(m,dir) removes a directory there, and exec(m,argv,options) runs any other
- // command there and resolves to its {code, stdout, stderr} (see core.mjs). placeSkills(m,cwd,kind) places Bridge's skills where an agent of
- // binding kind kind reads them in directory cwd on machine m and resolves to the paths of same-name skills of others (see skills.mjs).
- // now() is the clock.
- constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact,request,download,storeFile,removeDirectory,exec,placeSkills,now=Date.now}){
+ // a resource of a received message, or rejects with code too_large past limit bytes. now() is the clock.
+ constructor(store,{herdr,makeDirectory,storeFile,removeDirectory,git,exists,nameBranch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}){
   this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.exec=exec;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.git=git;this.exists=exists;this.nameBranch=nameBranch;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>', '<topic id> adopt' or '<topic id> worktree' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
@@ -104,10 +109,14 @@ export class Topics{
  }
  // Gives message msg ({messageId, content, resources?}) to the agent of topic t in the topic's queue (see prompt). reaction is the id of the
  // message of a person that marks it, added right away: not behind the queue, where an earlier message may be starting the agent for a
- // minute. Resolves to the prompted agent, or to nothing. Never rejects.
+ // minute. A message that did not reach the agent since the client of its machine is offline gets a notice that says so. Resolves to the
+ // prompted agent, or to nothing. Never rejects.
  deliver(a,b,t,msg,{reaction,request}={}){
   const reacted=reaction&&this.addReaction(a,t,reaction);
-  return enqueue(this.topicQueues,t.id,()=>this.prompt(a,b,t,msg,{reacted,request})).catch(e=>{this.store.log('消息投递',`${a.name} → ${b.name}：${brief(e)}`,'error');});
+  return enqueue(this.topicQueues,t.id,()=>this.prompt(a,b,t,msg,{reacted,request})).catch(async e=>{
+   this.store.log('消息投递',`${a.name} → ${b.name}：${brief(e)}`,'error');
+   if(e.code==='client_offline')await this.notify(a,t,offline(e,'这条消息没有发给 Agent，请稍后重发'));
+  });
  }
  // Runs task in the queue of topic t, after what is queued there, and resolves or rejects like it.
  queue(t,task){return enqueue(this.topicQueues,t.id,task);}
@@ -264,7 +273,7 @@ export class Topics{
   try{
    m=this.target(t);
    if(t.worktree){
-    made=await createWorktree(m,b.cwd,request,{exec:this.exec,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
+    made=await createWorktree(m,b.cwd,request,{git:this.git,exists:this.exists,nameBranch:this.nameBranch,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
     this.update(t,{workspaceId:made.workspaceId,tabId:made.tabId,paneId:made.paneId});await this.notify(a,t,worktreeIntro(m,made));
    }else{Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();}
    await this.place(m,b,t.worktree?.path||b.cwd);
@@ -276,8 +285,9 @@ export class Topics{
    await this.herdr(m,remoteAnswers(t.paneId,true));
   }catch(e){
    this.update(t,{state:'failed',error:brief(e)});this.store.log('话题会话',`${b.name}：启动失败，${t.error}`,'error');
-   // Details can hold local paths and raw Herdr errors; they stay in the topic and the log. A /wt topic tells them, with what exists.
-   if(!t.worktree)await this.notify(a,t,'启动失败，请在 Bridge 管理台查看原因');
+   // Details can hold local paths and raw Herdr errors; they stay in the topic and the log, unless the client of the machine is offline,
+   // which the person can wait out. A /wt topic tells them, with what exists.
+   if(!t.worktree)await this.notify(a,t,e.code==='client_offline'?offline(e,'话题没有启动，请稍后重发消息'):'启动失败，请在 Bridge 管理台查看原因');
    else{
     const created=[...made?.created||e.created||[],...started?[`Agent ${t.agentName}（pane ${t.paneId}）`]:[]],text=failedText(e,created);
     if(made||e.kept)await this.offerRemoval(a,t,{heading:'启动失败',text});else await this.notify(a,t,text);
@@ -386,7 +396,7 @@ export class Topics{
  async removeWorktreeOf(a,t,operator){
   const w=t.worktree;let outcome;
   try{
-   const r=await removeWorktree(this.target(t),w,{exec:this.exec,herdr:this.herdr});
+   const r=await removeWorktree(this.target(t),w,{git:this.git,exists:this.exists,herdr:this.herdr});
    if(r.dirty){outcome={text:dirtyText(r.dirty)};this.store.log('worktree',`${t.agentName}：${w.path} 有未提交的改动，没有删除`);}
    else{
     this.update(t,{worktree:{...w,removed:true}});this.store.log('worktree',`${t.agentName}：${r.gone?`${w.path} 已不在，按已删除处理`:`已删除 ${w.path}`}`);
@@ -396,7 +406,7 @@ export class Topics{
   try{await this.updateCard(a,w.card.messageId,removalCard(w.card,w,++this.renders,outcome));}catch(e){this.store.log('worktree',`${t.agentName}：删除 worktree 的卡片未能更新，${brief(e)}`,'error');}
  }
  // A click on a request card by someone on the app's allowlist (see Platforms), which waits for the returned callback response: Feishu
- // gives it a few seconds, and Herdr over SSH can take longer. The answer goes to Herdr afterwards and outside the topic queue, where a
+ // gives it a few seconds, and Herdr on another machine can take longer. The answer goes to Herdr afterwards and outside the topic queue, where a
  // message may be starting the agent for a minute; the card then shows how it ended.
  click(a,evt){
   if(evt.action?.value?.adopt)return this.choose(a,evt);
