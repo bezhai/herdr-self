@@ -9,7 +9,7 @@ import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,s
 import {wtRequest,usage,notRetried,createWorktree,worktreeIntro,failedText,removeWorktree,dirtyText,removalFailed,removalCard} from './worktrees.mjs';
 // One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, one that a /wt topic
 // starts in a new Git worktree (see worktrees.mjs), or one that already runs in any pane of any machine and that the topic adopted
-// (/adopt). Everything goes through the Herdr CLI, besides what worktrees and attachments need on the machine.
+// (/adopt). Everything goes through the Herdr CLI, besides what worktrees, attachments and Bridge's skills need on the machine.
 const workspaceLabel=b=>'飞书 · '+b.name;
 // Arguments that Herdr passes on to the agent it starts, after --, per binding kind. Claude gets the binding's permission mode. Codex runs
 // in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
@@ -50,10 +50,12 @@ export class Topics{
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes; storeFile(m,root,dir,name,body) writes a file on
  // machine m and resolves to its absolute path, removeDirectory(m,dir) removes a directory there, and exec(m,argv,options) runs any other
- // command there and resolves to its {code, stdout, stderr} (see core.mjs). now() is the clock.
- constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact,request,download,storeFile,removeDirectory,exec,now=Date.now}){
+ // command there and resolves to its {code, stdout, stderr} (see core.mjs). placeSkills(m,cwd,kind) places Bridge's skills where an agent of
+ // binding kind kind reads them in directory cwd on machine m and resolves to the paths of same-name skills of others (see skills.mjs).
+ // now() is the clock.
+ constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact,request,download,storeFile,removeDirectory,exec,placeSkills,now=Date.now}){
   this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.exec=exec;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.exec=exec;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>', '<topic id> adopt' or '<topic id> worktree' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
@@ -253,8 +255,8 @@ export class Topics{
    this.store.log('话题会话',`${t.agentName}：已关闭 pane ${t.paneId}`);await this.end(a,t,text);
   });
  }
- // Opens a tab for the topic, or for a /wt topic the worktree of request with its first reply (see createWorktree), and starts its agent
- // there. Returns false when that failed; the topic is then failed and notified.
+ // Opens a tab for the topic, or for a /wt topic the worktree of request with its first reply (see createWorktree), places Bridge's skills
+ // there (see place) and starts its agent there. Returns false when that failed; the topic is then failed and notified.
  async open(a,b,t,request){
   this.update(t,{state:'starting',error:''});let m,made,started=false;
   try{
@@ -263,6 +265,7 @@ export class Topics{
     made=await createWorktree(m,b.cwd,request,{exec:this.exec,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
     this.update(t,{workspaceId:made.workspaceId,tabId:made.tabId,paneId:made.paneId});await this.notify(a,t,worktreeIntro(m,made));
    }else{Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();}
+   await this.place(m,b,t.worktree?.path||b.cwd);
    try{await this.herdr(m,['agent','start',t.agentName,'--kind',b.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs[b.kind](b)],{timeoutMs:70000});}
    // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
    catch(e){if(e.code!=='agent_not_ready')throw e;}
@@ -280,6 +283,13 @@ export class Topics{
    return false;
   }
   this.update(t,{state:'ready'});this.store.log('话题会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}`);return true;
+ }
+ // Places Bridge's skills for the agent of binding b in its working directory cwd on machine m, which exists by then, right before the agent
+ // starts and loads them (see skills.mjs). Same-name skills of others are left alone and logged. Never rejects: a failure is only logged, and
+ // the agent starts without the skills.
+ async place(m,b,cwd){
+  try{for(const p of await this.placeSkills(m,cwd,b.kind))this.store.log('skill',`${b.name}：${p} 已有同名 skill，不是 Bridge 放的，没有改动`);}
+  catch(e){this.store.log('skill',`${b.name}：未能在 ${cwd} 放置 skill，${brief(e)}`,'error');}
  }
  // The binding's workspace is created on first use and again after it was closed in Herdr; its root tab serves the topic that created it.
  // Herdr reuses workspace ids after a server restart, so the stored id counts only while the workspace still carries the binding's label.

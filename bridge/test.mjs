@@ -2,6 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';import fs f
 import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
 import {normalizeMachine,remoteInvocation,herdr,exec,makeDirectory,storeFile,removeDirectory,quote,Store} from './core.mjs';
+import {skillPlacer,bundledSkills} from './skills.mjs';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
@@ -330,6 +331,100 @@ test('storeFile on an SSH machine is one remote command under umask 077 that tak
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 
+// Skills for the placement tests in directory src: alpha, with a file in a subdirectory and text that a shell would change, and beta.
+function skillSource(src){
+ for(const [p,text] of [['alpha/SKILL.md',"---\nname: alpha\n---\nsecret-marker ' \" $(id) `id`\n"],['alpha/ref/notes.md','notes\n'],['beta/SKILL.md','---\nname: beta\n---\n']]){
+  fs.mkdirSync(path.dirname(path.join(src,p)),{recursive:true});fs.writeFileSync(path.join(src,p),text);
+ }
+}
+// What directory dir holds, through a link: {relative path: text} of its files.
+const tree=dir=>Object.fromEntries(fs.readdirSync(dir,{recursive:true,withFileTypes:true}).filter(e=>e.isFile()).map(e=>{const p=path.join(e.parentPath,e.name);return [path.relative(dir,p),fs.readFileSync(p,'utf8')];}));
+// What placing the skills of dir/skills does on any machine whose home directory is dir/home; resolves to the number of placements.
+async function placeSkillsBehaves(m,dir){
+ const home=path.join(dir,'home'),src=path.join(dir,'skills'),store=path.join(home,'.local/share/herdr-bridge/skills'),plain=path.join(home,'plain');let n=0;
+ const place=(...args)=>{n++;return skillPlacer(exec,src)(m,...args);};
+ // A copy holds the skill and Bridge's marker with the digest of the skills it was copied from.
+ const copied=p=>{const {'.herdr-bridge-skill':mark,...rest}=tree(p);assert.match(mark,/^[0-9a-f]{64}\n$/);return rest;};
+ skillSource(src);fs.mkdirSync(plain);
+ // Claude reads .claude/skills and Codex .agents/skills, here through links to the store of the machine, which holds the skills as Bridge has them.
+ assert.deepEqual(await place('~/plain','claude'),[]);assert.deepEqual(await place(plain,'codex'),[]);
+ for(const at of ['.claude/skills','.agents/skills'])for(const name of ['alpha','beta'])assert.equal(fs.readlinkSync(path.join(plain,at,name)),path.join(store,name));
+ for(const name of ['alpha','beta'])assert.deepEqual(tree(path.join(store,name)),tree(path.join(src,name)));
+ // Antigravity follows no link: Bridge's links become real directories with the same content, which Codex then keeps, as both read them.
+ assert.deepEqual(await place(plain,'agy'),[]);assert.deepEqual(await place(plain,'codex'),[]);
+ for(const name of ['alpha','beta']){const p=path.join(plain,'.agents/skills',name);assert.ok(fs.lstatSync(p).isDirectory(),p);assert.deepEqual(copied(p),tree(path.join(src,name)));}
+ // Unchanged content is not written again: what the store and a copy hold stays, each a file of its own, since a copy comes from the store.
+ const copy=path.join(plain,'.agents/skills/alpha'),extra=[path.join(store,'alpha','store-extra'),path.join(copy,'copy-extra')];for(const p of extra)fs.writeFileSync(p,'');
+ await place(plain,'claude');await place(plain,'agy');
+ for(const p of extra)assert.ok(fs.existsSync(p),p);
+ // Changed content replaces the store, which every link sees at once, and a copy at its next placement; nothing else is left behind.
+ fs.writeFileSync(path.join(src,'alpha/SKILL.md'),'changed\n');fs.rmSync(path.join(src,'alpha/ref'),{recursive:true});
+ await place(plain,'claude');assert.deepEqual(tree(path.join(plain,'.claude/skills/alpha')),{'SKILL.md':'changed\n'});assert.deepEqual(fs.readdirSync(path.dirname(store)),['skills']);
+ await place(plain,'agy');assert.deepEqual(copied(copy),{'SKILL.md':'changed\n'});
+ // Same-name skills that are not Bridge's stay as they are and are reported: a link elsewhere, a directory without Bridge's marker.
+ const other=path.join(home,'other'),theirs=path.join(dir,'theirs');fs.mkdirSync(theirs);fs.mkdirSync(path.join(other,'.claude/skills'),{recursive:true});fs.symlinkSync(theirs,path.join(other,'.claude/skills/alpha'));
+ fs.mkdirSync(path.join(other,'.agents/skills/beta'),{recursive:true});fs.writeFileSync(path.join(other,'.agents/skills/beta/SKILL.md'),'theirs\n');
+ assert.deepEqual(await place(other,'claude'),[path.join(other,'.claude/skills/alpha')]);assert.deepEqual(await place(other,'agy'),[path.join(other,'.agents/skills/beta')]);
+ assert.equal(fs.readlinkSync(path.join(other,'.claude/skills/alpha')),theirs);assert.deepEqual(fs.readdirSync(theirs),[]);assert.deepEqual(tree(path.join(other,'.agents/skills/beta')),{'SKILL.md':'theirs\n'});
+ assert.ok(fs.lstatSync(path.join(other,'.agents/skills/alpha')).isDirectory());
+ // In a Git repository each placed path goes into info/exclude once, as git sees it, and git status stays clean. Here .claude/skills is a
+ // link to ../.agents/skills, which holds a skill of the repository's own, beta: Claude's alpha is .agents/skills/alpha to git.
+ const repo=path.join(home,'repo'),worktree=path.join(home,'repo-wt'),exclude=path.join(repo,'.git','info','exclude');
+ fs.mkdirSync(path.join(repo,'.agents/skills/beta'),{recursive:true});fs.writeFileSync(path.join(repo,'.agents/skills/beta/SKILL.md'),'theirs\n');
+ fs.mkdirSync(path.join(repo,'.claude'));fs.symlinkSync('../.agents/skills',path.join(repo,'.claude/skills'));fs.mkdirSync(path.join(repo,'sub'));fs.writeFileSync(path.join(repo,'sub','x'),'');
+ git(repo,'init','-q','-b','main');git(repo,'add','.');git(repo,'commit','-q','-m','init');fs.writeFileSync(exclude,'# mine');
+ assert.deepEqual(await place(repo,'claude'),[path.join(repo,'.claude/skills/beta')]);assert.equal(fs.readlinkSync(path.join(repo,'.agents/skills/alpha')),path.join(store,'alpha'));
+ assert.equal(fs.readFileSync(exclude,'utf8'),'# mine\n/.agents/skills/alpha\n');assert.equal(git(repo,'status','--porcelain'),'');
+ // Again, for Codex, and in a linked worktree, which shares info/exclude, nothing is added; a subdirectory adds its own paths.
+ git(repo,'worktree','add','-q',worktree,'-b','wt');
+ await place(repo,'claude');await place(repo,'codex');await place(worktree,'agy');
+ assert.ok(fs.lstatSync(path.join(worktree,'.agents/skills/alpha')).isDirectory());assert.equal(fs.readFileSync(exclude,'utf8'),'# mine\n/.agents/skills/alpha\n');assert.equal(git(worktree,'status','--porcelain'),'');
+ await place(path.join(repo,'sub'),'claude');
+ assert.equal(fs.readFileSync(exclude,'utf8'),'# mine\n/.agents/skills/alpha\n/sub/.claude/skills/alpha\n/sub/.claude/skills/beta\n');assert.equal(git(repo,'status','--porcelain'),'');
+ // A directory where the skills directory cannot be created fails the placement with what failed.
+ fs.writeFileSync(path.join(home,'file'),'');await assert.rejects(place(path.join(home,'file'),'claude'),/file/);
+ return n;
+}
+test('placing skills on a local machine links Claude\'s and Codex\'s skills to the store of the machine and copies them for Antigravity, writes only changed content, leaves skills that are not Bridge\'s alone and records the placed paths once in the info/exclude of a Git repository',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-local-'))),home=path.join(dir,'home'),m=normalizeMachine({name:'local',type:'local'});
+ try{fs.mkdirSync(home);await withEnv('HOME',home,()=>placeSkillsBehaves(m,dir));}finally{fs.rmSync(dir,{recursive:true});}
+});
+test('placing skills on an SSH machine is one remote command, which takes the skills as a tar archive on stdin, never on its command line, and does there what it does locally',async()=>{
+ // A fake ssh records its arguments, each ended by a NUL since the script has several lines, and runs the remote command here, with its own home.
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-ssh-'))),bin=path.join(dir,'bin'),home=path.join(dir,'home'),args=path.join(dir,'args');
+ fs.mkdirSync(bin);fs.mkdirSync(home);
+ fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh',`printf '%s\\0' "$@" >> ${quote(args)}`,'for last; do :; done',`HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
+ const m=normalizeMachine({name:'cpu2',host:'cpu2'});
+ try{
+  const n=await withEnv('PATH',bin+':'+process.env.PATH,()=>placeSkillsBehaves(m,dir)),lines=fs.readFileSync(args,'utf8');
+  const prefix='env -u HERDR_SOCKET_PATH -u HERDR_CLIENT_SOCKET_PATH -u HERDR_SESSION -u HERDR_PANE_ID sh -c ',commands=lines.split('\0').filter(l=>l.startsWith(prefix)).map(l=>l.slice(prefix.length));
+  assert.equal(commands.length,n);assert.ok(!lines.includes('secret-marker'));
+  // The program is sh with a fixed script; the store and the working directory are its arguments, whose ~/ is the remote home.
+  const first=commands[0].slice(1,-1).replaceAll("'\\''","'");
+  assert.ok(first.startsWith("'sh' '-c' '")&&/' 'sh' "\$HOME"\/'\.local\/share\/herdr-bridge\/skills' '[0-9a-f]{64}' '\.claude\/skills' 'link' "\$HOME"\/'plain' 'alpha' 'beta'$/.test(first),first);
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('skill placements run one after another on a machine and at once on different machines; each sends the skills of its directory as a tar archive, resolves to the paths the command lists and rejects with what it reports when it fails',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-queue-')),src=path.join(dir,'skills'),calls=[],running={};let most=0,both=false;
+ // What the command prints besides the paths, such as what a login script of the remote shell prints, is not a path.
+ const fake=async(m,argv,{input})=>{
+  calls.push([m.id,argv,input]);running[m.id]=(running[m.id]||0)+1;most=Math.max(most,running[m.id]);both||=Object.values(running).filter(Boolean).length>1;
+  await later(20);running[m.id]--;return argv[8].path==='/broken'?{code:1,stdout:'',stderr:'mkdir: cannot create directory\n'}:{code:0,stdout:'welcome\n/w/.claude/skills/beta\n',stderr:''};
+ };
+ try{
+  skillSource(src);const place=skillPlacer(fake,src),one={id:'m1'},two={id:'m2'};
+  const results=await Promise.allSettled([place(one,'~/w','claude'),place(one,'/broken','codex'),place(one,'~/w','agy'),place(two,'/w','claude')]);
+  assert.deepEqual([most,both],[1,true]);
+  assert.deepEqual(results.map(r=>r.status==='fulfilled'?r.value:r.reason.message),[['/w/.claude/skills/beta'],'mkdir: cannot create directory',['/w/.claude/skills/beta'],['/w/.claude/skills/beta']]);
+  const on=id=>calls.filter(c=>c[0]===id).map(c=>c[1]),[first,second,third]=on('m1'),input=calls.find(c=>c[0]==='m1')[2];
+  assert.deepEqual(first.slice(0,2),['sh','-c']);assert.deepEqual(first.slice(3,5),['sh',{path:'~/.local/share/herdr-bridge/skills'}]);assert.match(first[5],/^[0-9a-f]{64}$/);
+  assert.deepEqual(first.slice(6),['.claude/skills','link',{path:'~/w'},'alpha','beta']);assert.deepEqual(second.slice(6,8),['.agents/skills','link']);assert.deepEqual(third.slice(6,8),['.agents/skills','copy']);
+  assert.deepEqual(execFileSync('tar',['-tf','-'],{input,encoding:'utf8'}).split('\n').filter(e=>e&&!e.endsWith('/')).sort(),['alpha/SKILL.md','alpha/ref/notes.md','beta/SKILL.md']);
+  // The digest follows the content.
+  assert.equal(on('m2')[0][5],first[5]);fs.writeFileSync(path.join(src,'beta/SKILL.md'),'changed\n');await place(two,'/w','claude');assert.notEqual(on('m2')[1][5],first[5]);
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+
 const coded=(code,message)=>Object.assign(Error(message),{code});
 // Git for the throwaway repositories of the tests: without the user's or the system's configuration and the HERDR_* variables, in English.
 const gitEnv={...Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_'))),GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',
@@ -414,16 +509,19 @@ const cotPath='/open-apis/im/v1/message_cot';
 // [machine id, root, dir, name, body as text], which resolves to its path with ~/ as /home/u/; f.removed every directory removed as
 // [machine id, dir]. f.execs records every other command run on a machine (see exec in core.mjs) as [machine id, ...argv]: claude answers
 // from f.h.claude, by default with BRANCH=feat/add-login, as {code, stdout, stderr} or an Error to reject with, and f.naming records each of
-// its calls as {argv, input, timeoutMs, shell}; anything else, git and test, runs here for real (see gitEnv).
+// its calls as {argv, input, timeoutMs, shell}; anything else, git and test, runs here for real (see gitEnv). f.placed records every placement
+// of Bridge's skills as [machine id, directory, agent kind, number of Herdr calls made before it]; it resolves to f.h.placing, by default
+// no skills of others, or rejects with it when it is an Error.
 function topicFixture({binding,machine,machines=[],cot=true,now}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies=[],reacted=[],unreacted=[],updated=[],api=[],m={id:'m',name:'cpu2',enabled:true,...machine};
- const downloads=[],resources={},stored=[],removed=[],execs=[],naming=[];
+ const downloads=[],resources={},stored=[],removed=[],execs=[],naming=[],placed=[];
  store.data.machines=[m,...machines];store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];let sent=0,cots=0;
  // Every reply resolves to the next message id om_bot_<n>.
  const deps={herdr:h.herdr,makeDirectory:h.makeDirectory,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
   download:async(a,messageId,r,limit)=>{downloads.push([a.id,messageId,r.type,r.fileKey,limit]);await null;const x=resources[r.fileKey];if(x instanceof Error)throw x;return x||{body:Buffer.from('data:'+r.fileKey),type:'image/png'};},
   storeFile:async(m,root,dir,name,body)=>{stored.push([m.id,root,dir,name,String(body)]);await null;return root.replace(/^~\//,'/home/u/')+'/'+dir+'/'+name;},
   removeDirectory:async(m,dir)=>{removed.push([m.id,dir]);await null;},
+  placeSkills:async(m,cwd,kind)=>{placed.push([m.id,cwd,kind,h.calls.length]);await null;if(h.placing instanceof Error)throw h.placing;return h.placing||[];},
   exec:async(m,argv,options={})=>{
    execs.push([m.id,...argv]);await null;const args=argv.map(a=>typeof a==='string'?a:a.path);
    if(args.some(a=>/\bclaude\b/.test(a))){naming.push({argv,input:options.input,timeoutMs:options.timeoutMs,shell:options.shell});if(h.claude instanceof Error)throw h.claude;return {code:0,stdout:'BRANCH=feat/add-login\n',stderr:'',...h.claude};}
@@ -436,7 +534,7 @@ function topicFixture({binding,machine,machines=[],cot=true,now}={}){
  const topics=new Topics(store,deps);
  const send=msg=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg});
  const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
- return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,execs,naming,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,execs,naming,placed,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
 }
 // The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
 // id, reason].
@@ -545,6 +643,27 @@ test('a working directory that cannot be created fails the start like any start 
   const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed',raw]);assert.equal(new Store(f.dir).data.topics[0].state,'failed');
   assert.deepEqual(f.h.calls,[]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')]);
   assert.deepEqual(f.unreacted,[['a','om_1','r_om_1']]);assert.match(f.store.data.logs.at(-1).message,/启动失败.*Permission denied/);
+ }finally{f.close();}
+});
+const skillLogs=f=>f.store.data.logs.filter(l=>l.kind==='skill').map(l=>[l.level,l.message]);
+test('right before a new topic starts its agent, Bridge\'s skills are placed for the binding\'s agent kind in its working directory on its machine: in a new workspace, in a tab of the existing one and in a topic that begin opens; a message in a ready topic places nothing',async()=>{
+ for(const kind of ['claude','codex','agy']){
+  const f=topicFixture({binding:{kind}});try{
+   await f.send({messageId:'om_1',content:'one'});await f.send({messageId:'om_2',content:'two'});
+   await f.topics.begin(allowed,f.b,'om_root',{title:'报告',msg:{messageId:'om_root',content:'写报告'}}).delivered;
+   await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
+   const starts=f.h.calls.flatMap((c,i)=>c[1]==='start'?[i]:[]);assert.equal(starts.length,3);
+   assert.deepEqual(f.placed,starts.map(i=>['m','~/work',kind,i]),kind);assert.deepEqual(skillLogs(f),[]);
+  }finally{f.close();}
+ }
+});
+test('a placement of skills that fails is only logged, and the topic starts and prompts its agent as usual; same-name skills that are not Bridge\'s are logged as left alone',async()=>{
+ const f=topicFixture(),raw="mkdir: cannot create directory '/home/u/work/.claude': Permission denied";try{
+  f.h.placing=Error(raw);await f.send({messageId:'om_1',content:'one'});
+  assert.equal(f.store.data.topics[0].state,'ready');assert.deepEqual(f.h.calls.at(-1),['agent','prompt','w1:p1','one']);assert.deepEqual(f.replies,[]);
+  f.h.placing=['/home/u/work/.claude/skills/bridge-schedule'];await f.send({messageId:'om_2',content:'two'});
+  assert.equal(f.store.data.topics[1].state,'ready');
+  assert.deepEqual(skillLogs(f),[['error',`个人助手：未能在 ~/work 放置 skill，${raw}`],['info','个人助手：/home/u/work/.claude/skills/bridge-schedule 已有同名 skill，不是 Bridge 放的，没有改动']]);
  }finally{f.close();}
 });
 test('a topic whose named agent is gone is closed with one notice and gets no further prompts',async()=>{
@@ -1754,6 +1873,12 @@ test('/wt with a description names the branch with Claude haiku on the binding m
   assert.deepEqual(f.reacted.map(r=>r[1]),['om_1']);assert.deepEqual(cotLog(f)[0],['create','om_1']);
  }finally{f.close();}
 });
+test('a /wt topic places Bridge\'s skills in its new worktree, once Herdr created it and right before its agent starts',async()=>{
+ const f=wtFixture({binding:{kind:'codex'}});try{
+  await f.send({messageId:'om_1',content:'/wt 给登录页加验证码'});
+  assert.deepEqual(f.h.calls.map(c=>c.slice(0,2)).slice(0,2),[['worktree','create'],['agent','start']]);assert.deepEqual(f.placed,[['m',f.repo.target('feat/add-login'),'codex',1]]);
+ }finally{f.close();}
+});
 test('/wt -b with a local branch uses it as it is, without naming or fetching; without a description the agent is asked to continue on the branch and the topic is named after it',async()=>{
  const f=wtFixture();try{
   git(f.repo.main,'branch','feat/local');git(f.repo.main,'branch','fix/crash');
@@ -2526,10 +2651,10 @@ test('on a machine that Bridge reaches over SSH, bridge-schedule-ssh runs bridge
   assert.equal(missing.status,2);assert.match(missing.stderr,/BRIDGE_HOST 和 BRIDGE_MACHINE/);assert.equal(fs.readFileSync(args,'utf8'),'');
  }finally{fs.rmSync(dir,{recursive:true});await bridge.close();}
 });
-test('the Claude skill for bridge-schedule carries the same instructions as the text for the global instructions of Codex and Antigravity, under a name and a description',()=>{
- const dir=path.join(path.dirname(fileURLToPath(import.meta.url)),'agent-instructions'),skill=fs.readFileSync(path.join(dir,'skills','bridge-schedule','SKILL.md'),'utf8');
+test('the bridge-schedule skill that Bridge places has a name and a description and names every operation of the command',()=>{
+ const skill=fs.readFileSync(path.join(bundledSkills,'bridge-schedule','SKILL.md'),'utf8');
  const [,front,body]=/^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(skill)||[];
- assert.match(front,/^name: bridge-schedule\ndescription: \S.+$/);assert.equal(body,fs.readFileSync(path.join(dir,'bridge-schedule.md'),'utf8'));
+ assert.match(front,/^name: bridge-schedule\ndescription: \S.+$/);
  // The instructions name the operations of the command as it takes them.
  for(const line of usage.split('\n').filter(l=>l.startsWith('  bridge-schedule ')))assert.ok(body.includes(line.trim().split(' ').slice(0,2).join(' ')),line);
 });
