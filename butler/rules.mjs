@@ -1,13 +1,15 @@
 // What a message is to butler, decided from the message alone and a few facts the caller looks up. Pure functions.
 
 // In the order a record lists them. Every category but stored says the message is about me (mention, dm, reply,
-// thread, own) or comes from a chat at the instant level since it became instant: batches take those (see
+// thread, own), comes from a chat at the instant level since it became instant, or is one of a daily chat that the
+// daily read flagged as something I may have to act on (flagged, see reading.mjs): batches take those (see
 // matters.mjs). own: a message I sent, in any chat the collector reads; what I answered, and where, shows what I
 // already took care of. stored: none of the others, kept only because its chat is not ignored, as context and for
-// later; it never joins another category (see Store.upsertMessage).
-export const CATEGORIES=['mention','dm','reply','thread','instant','own','stored'];
-// A chat's level: instant (every message goes to the batches), daily (kept for a daily look, not yet made), store
-// (kept, not looked at) or ignore (not kept). A chat without one goes by ungradedLevel until it is graded.
+// later; it never joins another category (see Store.upsertMessage and Store.flag). The collector never gives flagged.
+export const CATEGORIES=['mention','dm','reply','thread','instant','flagged','own','stored'];
+// A chat's level: instant (every message goes to the batches, and the daily read reads it for topics), daily (kept,
+// and read every day for topics, see reading.mjs), store (kept, not looked at) or ignore (not kept). A chat without
+// one goes by ungradedLevel until it is graded.
 export const LEVELS=['instant','daily','store','ignore'];
 // The level of a chat that has none yet, from when collection began: a direct chat is instant, so that what a bot or
 // an agent sends me goes to the model as it did before levels; a group of either kind is store.

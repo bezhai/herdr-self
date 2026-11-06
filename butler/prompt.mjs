@@ -1,4 +1,5 @@
-// What butler tells the model and how it reads the answer. Pure functions. Three kinds of run: a batch of new
+// What butler tells the model and how it reads the answer. Pure functions. Three kinds of run here (grading's is in
+// grader.mjs; the daily read's in reading.mjs, which shows messages as these do): a batch of new
 // messages, which the model turns into matters (new ones, messages attached to open ones, open ones that have ended);
 // a review of the open matters, which it closes or adjusts but never adds to; and 关于TA (see profile.mjs), a few
 // lines on my work and my interests that it writes from my own messages, where I take part, my notes and my
@@ -14,8 +15,8 @@ const at=ms=>new Date(ms).toLocaleString('sv-SE').slice(0,16);
 const short=ms=>at(ms).slice(5);
 
 // What every kind of run is told alike.
-const FACTS='每条消息带着这些事实：sender 是发送者；senderType 为 user 是人，bot 和 agent 是机器人；mine 表示是TA自己发的；categories 说明管家为什么收下这条消息：mention 是有人 @TA，dm 是真人发来的私聊（包括TA在私聊里发的），reply 是回复TA的消息，thread 是TA参与过的话题，instant 是即时级别的聊天里的消息（这些聊天的消息都交给你整理），own 是TA自己发的消息，stored 是和TA没有直接关系、只因为所在的聊天没有被忽略才存下的消息，只作为上下文；mentionsAll 表示 @所有人；mentions 是这条消息 @ 到的人，其中的 TA 是TA本人；myReactions 是TA给这条消息加的表情，reactions 是别人加的表情、人数和其中几个人的名字；thread 为 root 是话题的第一条，为 reply 是话题里的回复，root 和 replyTo 指向相关的那条消息。这些只是事实，怎么权衡由你决定。';
-const BAR='事项是需要TA本人去做、回复、决定或跟进的事；只需要TA知道的信息（包括状态变化、日程和会议的通知）、成功或完成的通知、没有要做的事的提醒、闲聊（哪怕是在问TA）和活动推广都不算事项。机器人、告警和系统发来的通知默认不是事项，除非内容明确要TA本人去做一件TA还没做的事；内容太少、看不出要TA做什么的（比如只有标题的卡片）不是事项。一条消息 @ 了好几个人，或者是即时级别的聊天（instant）里的讨论，只有明确要TA本人做什么时才是事项。消息发给了TA、@了TA或者私聊TA，本身不说明这件事归TA：要按「关于TA」（profile）、TA的说明（notes）和TA标记过不归TA的事项（notMine）判断是不是该TA去做，TA的说明优先于「关于TA」。';
+export const FACTS='每条消息带着这些事实：sender 是发送者；senderType 为 user 是人，bot 和 agent 是机器人；mine 表示是TA自己发的；categories 说明管家为什么收下这条消息：mention 是有人 @TA，dm 是真人发来的私聊（包括TA在私聊里发的），reply 是回复TA的消息，thread 是TA参与过的话题，instant 是即时级别的聊天里的消息（这些聊天的消息都交给你整理），flagged 是每日读取时从每日级别的聊天里标出、可能要TA去做什么的消息，own 是TA自己发的消息，stored 是和TA没有直接关系、只因为所在的聊天没有被忽略才存下的消息，只作为上下文；mentionsAll 表示 @所有人；mentions 是这条消息 @ 到的人，其中的 TA 是TA本人；myReactions 是TA给这条消息加的表情，reactions 是别人加的表情、人数和其中几个人的名字；thread 为 root 是话题的第一条，为 reply 是话题里的回复，root 和 replyTo 指向相关的那条消息。这些只是事实，怎么权衡由你决定。';
+const BAR='事项是需要TA本人去做、回复、决定或跟进的事；只需要TA知道的信息（包括状态变化、日程和会议的通知）、成功或完成的通知、没有要做的事的提醒、闲聊（哪怕是在问TA）和活动推广都不算事项。机器人、告警和系统发来的通知默认不是事项，除非内容明确要TA本人去做一件TA还没做的事；内容太少、看不出要TA做什么的（比如只有标题的卡片）不是事项。一条消息 @ 了好几个人，或者是即时级别的聊天（instant）里的讨论，只有明确要TA本人做什么时才是事项；每日读取标出的消息（flagged）也只有明确要TA本人做什么时才是事项。消息发给了TA、@了TA或者私聊TA，本身不说明这件事归TA：要按「关于TA」（profile）、TA的说明（notes）和TA标记过不归TA的事项（notMine）判断是不是该TA去做，TA的说明优先于「关于TA」。';
 // What the owner has answered, in words or with a reaction, the owner knows and follows up on; butler is for the rest.
 const RESPONDED='管家只跟踪TA还没回应的事。TA已经回应了的，不管是回复了消息（哪怕TA只是答应下来、还没做完），还是加了表示收到、知道、同意或完成的表情（比如 Get、OK、DONE、THUMBSUP；JOYFUL、ClownFace 这类通常只是表达情绪，不算回应），TA都已经知道了，会自己跟进：不要为它新建事项，已有的事项关掉，reason 写「TA已回应」并说明TA怎么回应的。一个表情算不算回应由你判断。';
 // 关于TA, my notes and the matters I marked as not mine come partly from the model reading messages, so they travel
@@ -73,7 +74,7 @@ export function profileSystemPrompt(me){
  return [
   `你替「${me}」写一段简短的「关于TA」，分工作和兴趣两部分：管家整理TA在飞书上收到的消息、判断一件事是不是该TA去做，以及给TA的聊天分级时，都按它判断。`,
   `你会收到一个 JSON：now 是现在的时间；previous 是上一版「关于TA」，用来对比这一版新加了什么，还没有写过时是 null；notes 是TA自己写下的说明，是TA的原话，用来更正管家对TA的理解；${NOT_MINE}corrections 是TA亲自定过级别的聊天，是TA对管家分级的纠正：level 是TA定的级别，was 是管家之前给的级别（没有这一项是管家还没给它分过级），reason 是TA说的理由（没说时没有）；missed 是管家最近一次不看TA定的级别、按「关于TA」和说明重新给这些聊天分级时分错的：level 是TA定的，answer 是管家分的（null 是没有分出来），why 是管家当时的理由；involvement 是TA参与的聊天，最近 30 天TA发过消息、被 @ 过或者加过表情的在前（TA发得多的在前），然后是最近一周有消息、TA设了免打扰的：name 是名称，kind 为 direct 是私聊、group 是群、topic 是话题群，members 是人数，muted 为 true 是TA设了免打扰（管家不知道时没有这两项），mine、mentions 和 reactions 是最近 30 天TA在这里发的消息数、被 @ 的次数和加的表情数，level 是它现在的级别（by 为 owner 是TA定的，model 是管家定的；null 是还没有分级）；chats 按聊天列出TA最近发过的消息（mine 为 true），连同每条回复的那条消息或者它前面的那条消息，供你理解TA在回应什么。`,
-  '级别的意思：instant（即时）是这个聊天的每条消息都马上交给整理待办的模型；daily（每日）是每天读一遍，挑出和TA的工作有关或者TA感兴趣的话题；store（只存不看）是存下来但不读；ignore（忽略）是连存都不存。',
+  '级别的意思：instant（即时）是这个聊天的每条消息都马上交给整理待办的模型，每天也读一遍、挑出话题；daily（每日）是每天读一遍，挑出和TA的工作有关或者TA感兴趣的话题，读到的可能要TA去做的事交给整理待办的模型；store（只存不看）是存下来但不读；ignore（忽略）是连存都不存。',
   FACTS,
   '工作写六项，一项一行，每行开头写这一项的名字：TA的角色；所在的团队；在做的项目和系统；常和TA一起做事的人；哪些事归TA（TA负责、要TA去做或决定的）；哪些事通常不归TA（TA只是被通知、被拉进群或者被 @ 到，实际由别人负责的）。兴趣写TA在工作以外关心的话题，一个话题一行。只写这些数据里看得出来的，看不出来的不要猜，看不出兴趣时 interests 写空字符串。写「哪些事通常不归TA」时参考 notMine。',
   'corrections 和 missed 说明TA看重什么、不看什么：把它们推广成一类聊天、通知或话题的说法，写进对应的那一项（哪些事归TA、哪些通常不归TA、兴趣），让管家以后遇到同类的聊天也能分对；不要逐个列出聊天的名称和级别。说明和这些不一致时以说明为准，说明里说的都要写进去。',
@@ -97,8 +98,8 @@ function othersReactions(reactions,me){
 // Messages by chat, the chats in the order of their first record, each chat oldest first, each message under a ref of
 // its own. fresh: the ids of the new ones. actions: reactions I added to some of these messages since they were
 // processed ({messageId, key, at}), new items in their message's chat, in time order; they get no ref. me, meId: my name
-// and user id. Returns the chats as the model sees them and what each ref stands for.
-function arrange(records,fresh,{textChars,me,meId,actions=[]}){
+// and user id. Returns the chats as the model sees them, their ids in the same order and what each ref stands for.
+export function arrange(records,fresh,{textChars,me,meId,actions=[]}){
  const chats=new Map(),byId=new Map();
  for(const r of records){
   if(!chats.has(r.chatId))chats.set(r.chatId,{record:r,messages:[],actions:[]});
@@ -131,7 +132,7 @@ function arrange(records,fresh,{textChars,me,meId,actions=[]}){
  const action=a=>({new:true,time:short(a.at),mine:true,reaction:a.key,on:refOf.get(a.messageId),
   ...((byId.get(a.messageId).reactions??[]).some(x=>x.key===a.key&&x.isMine)?{}:{cancelled:true})});
  const timeline=c=>[...c.messages.map(r=>({t:r.createdAt,item:message(r)})),...c.actions.map(a=>({t:a.at,item:action(a)}))].sort((a,b)=>a.t-b.t).map(x=>x.item);
- return {refs,refOf,chats:[...chats.values()].map(c=>({chat:c.record.chatName??c.record.chatId,kind:c.record.chatKind,messages:timeline(c)}))};
+ return {refs,refOf,chatIds:[...chats.keys()],chats:[...chats.values()].map(c=>({chat:c.record.chatName??c.record.chatId,kind:c.record.chatKind,messages:timeline(c)}))};
 }
 // A matter as the model sees it, with more facts after when it started; messages: those of its messages given, by ref.
 const facts=(x,refOf,more)=>({matter:x.id,title:x.title,who:x.who,ask:x.ask,due:x.due,urgency:x.urgency,since:short(x.since??x.openedAt),...more,chats:x.chats,

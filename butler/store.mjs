@@ -1,6 +1,6 @@
-// butler's own store: one SQLite file. The collector writes it; the CLI and the processor (other processes) read it
-// and set chat levels, so it runs in WAL mode with a busy timeout and the collector reads a chat's level on every
-// message. What grading is told of the chats (see grader.mjs) is read here too.
+// butler's own store: one SQLite file. The collector writes it; the CLI and the processor (other processes) read it,
+// set chat levels and flag messages for the batches (see flag), so it runs in WAL mode with a busy timeout and the
+// collector reads a chat's level on every message. What grading is told of the chats (see grader.mjs) is read here too.
 import fs from 'node:fs';
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
@@ -113,6 +113,17 @@ export class Store{
    if(r.reactions!=null)this.#ownerReacted(r.id,JSON.parse(r.reactions),now);
   });
  }
+ // Messages of a daily chat that the daily read took for something I may have to act on (see reading.mjs): a stored
+ // one becomes flagged, which batches take, as any other category does stored's place. One with another category
+ // already goes to the batches and stays as it is. The only category the processor gives; returns the ids flagged.
+ flag(ids){
+  return this.#tx(()=>{
+   const stored=this.#all("SELECT message_id id,created_at FROM message_categories WHERE category='stored' AND message_id IN (SELECT value FROM json_each(?))",JSON.stringify(ids));
+   const add=this.db.prepare("INSERT OR IGNORE INTO message_categories(message_id,category,created_at) VALUES(?,'flagged',?)"),drop=this.db.prepare("DELETE FROM message_categories WHERE message_id=? AND category='stored'");
+   for(const r of stored){add.run(r.id,r.created_at);drop.run(r.id);}
+   return stored.map(r=>r.id);
+  });
+ }
  // The current reactions of a message butler holds, as open-lark lists them (GET /messages/:id/reactions).
  setReactions(id,list,now=Date.now()){
   const reactions=reactionsOf(list)??[];
@@ -209,6 +220,12 @@ export class Store{
  static #level=r=>r&&{feedId:r.feed_id,level:r.level,reason:r.reason,by:r.set_by,since:r.since,modelLevel:r.model_level,modelReason:r.model_reason,modelAt:r.model_at??undefined};
  level(feedId){return Store.#level(this.#get('SELECT * FROM chat_levels WHERE feed_id=?',feedId));}
  instantSince(feedId){const l=this.level(feedId);return l?.level==='instant'?l.since:undefined;}
+ // The chat's level at time t (ms), from its changes: what the first change after t changed it from, or with no change
+ // since, the level it has; undefined for none (see rules.mjs ungradedLevel).
+ levelAt(feedId,t){
+  const next=this.#get('SELECT before_level FROM level_changes WHERE feed_id=? AND at>? ORDER BY at,id LIMIT 1',feedId,t);
+  return next?next.before_level??undefined:this.level(feedId)?.level;
+ }
  // Chats with a level and what butler knows of them, by level, then the latest to get theirs first.
  levels(){
   return this.#all(`SELECT l.*,c.name,c.chat_mode,c.member_count FROM chat_levels l LEFT JOIN chats c ON c.feed_id=l.feed_id

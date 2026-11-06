@@ -133,6 +133,7 @@ test('TA tracks what TA has responded to: both bars drop and close it, notices a
   assert.match(system,/Get、OK、DONE、THUMBSUP/);assert.match(system,/JOYFUL、ClownFace/);assert.match(system,/「TA已回应」/);
   assert.match(system,/机器人、告警和系统发来的通知默认不是事项/);assert.match(system,/只有标题的卡片/);
   assert.match(system,/@ 了好几个人，或者是即时级别的聊天（instant）里的讨论/);
+  assert.match(system,/每日读取标出的消息（flagged）也只有明确要TA本人做什么时才是事项/,'a flagged message only may be for TA');
   assert.match(system,/mentions 是这条消息 @ 到的人/);assert.match(system,/myReactions 是TA给这条消息加的表情/);
   assert.doesNotMatch(system,/\n/);assert.doesNotMatch(system,/[他她]/);
  }
@@ -213,6 +214,13 @@ test('the matters TA marked as not TA\'s travel in the data of batches, reviews 
  }
  for(const system of [systemPrompt('原智鸿'),reviewSystemPrompt('原智鸿')])assert.match(system,/要按「关于TA」（profile）、TA的说明（notes）和TA标记过不归TA的事项（notMine）判断/);
  assert.deepEqual(data(composePrompt({now:at('10:10'),me:'原智鸿',batch:[rec({id:'1'})],context:[],openMatters:[]}).prompt).notMine,[],'none marked: none shown');
+});
+
+test('the profile run is told what the levels do: daily and instant chats alike are read every day for topics',()=>{
+ const system=profileSystemPrompt('原智鸿');
+ assert.match(system,/instant（即时）是[^；]*每天也读一遍、挑出话题/,'keeping a discussion is no reason to choose daily over instant');
+ assert.match(system,/daily（每日）是每天读一遍，挑出[^；]*可能要TA去做的事交给整理待办的模型/);
+ assert.match(system,/store（只存不看）是存下来但不读/);
 });
 
 test('the profile run hands the model my messages with what they answered, and my notes; it reads back work and interests as one text in lines, and what is new',()=>{

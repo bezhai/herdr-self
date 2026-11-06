@@ -17,7 +17,7 @@ const message=e=>e?.message??String(e);
 // line); a chat without one, with the level it goes by until it is graded (see rules.mjs ungradedLevel).
 export const levelName=(l,chatMode,who='你')=>l?`${LEVEL_NAMES[l.level]}${l.by==='owner'?`（${who}定的）`:''}`:`未分级（按${LEVEL_NAMES[ungradedLevel(chatMode)]}）`;
 // What a level I set does from then on.
-export const LEVEL_EFFECT={instant:'它的全部消息交给模型',daily:'存下它的消息，每日的整理还没有做，现在和只存不看一样',store:'存下它的消息，不交给模型',ignore:'不再存它的消息'};
+export const LEVEL_EFFECT={instant:'它的全部消息交给模型，每天也读一遍、挑出话题',daily:'存下它的消息，每天读一遍、挑出话题，可能要我做的事交给模型',store:'存下它的消息，不交给模型',ignore:'不再存它的消息'};
 // A correction (see Store.levelChanges): I set a level, and it changed the chat's. Confirming the level a chat has, or
 // clearing mine, is none.
 export const isCorrection=c=>c.by==='owner'&&c.after?.by==='owner'&&c.before?.level!==c.after.level;

@@ -69,6 +69,13 @@ test('the model sees each chat\'s facts, what I did there, its level and its lat
  const [run]=matters.runs();assert.deepEqual([run.kind,run.ok,run.messages,run.startedAt],['grade',true,7,day(3)]);assert.match(run.output,/项目群的理由/);
 });
 
+test('grading is told what the levels do: daily and instant chats alike are read every day for topics, and what daily turns up may go to the batches',()=>{
+ const system=gradingSystemPrompt('原智鸿');
+ assert.match(system,/instant（即时）：[^。]*每天也读一遍、挑出话题/,'keeping a discussion is no reason to choose daily over instant');
+ assert.match(system,/daily（每日）：每天读一遍，挑出[^。]*可能要TA去做的事交给整理待办的模型/);
+ assert.doesNotMatch(system,/\n/);
+});
+
 test('the answer is taken chat by chat: an unknown chat, a level not among the four or no reason is left out and on record, and a chat left out stays as it was',async t=>{
  const {store,matters,grader}=setup(t,{answer:d=>{const id=name=>d.chats.find(c=>c.name===name).chat;
   return {chats:[{chat:id('项目群'),level:'store',reason:'多是 https://ci.example/x 的\n构建通知'},{chat:'c99',level:'daily',reason:'不存在的聊天'},{chat:id('张三'),level:'weekly',reason:'每周看'},

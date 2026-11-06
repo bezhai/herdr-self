@@ -35,14 +35,14 @@ export const NOT_MINE='不归我';
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
 // judged the matter ended) or owner (I closed it, on a card or on the command line). A model run's kind: batch (of
 // new messages), review (of the open matters, see review.mjs), profile (关于TA, see profile.mjs), grade or exam (see
-// grader.mjs); runs from before reviews were batches. Its matters: how many open matters it was shown, unknown for
+// grader.mjs), or read (the daily read, see reading.mjs); runs from before reviews were batches. Its matters: how many open matters it was shown, unknown for
 // runs from before. Its model: the name of the model claude was asked for (BUTLER_MODEL_NAME), unknown for claude's
 // default and for runs from before.
 const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER'],['model_runs','model','TEXT']];
 const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
 const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
-// What batches take: a message with a category other than stored, that is, about me or from an instant chat since
-// it became instant (see rules.mjs). Everything else the collector keeps, which is most of the store, is only ever
+// What batches take: a message with a category other than stored, that is, about me, from an instant chat since it
+// became instant, or flagged by the daily read (see rules.mjs). Everything else the collector keeps, which is most of the store, is only ever
 // context. WAITING goes through the index on those categories (see store.mjs), named so that no plan reads the rest;
 // a message with several of them comes once per category, hence DISTINCT. BATCHED is the same for one message (m)
 // found otherwise.
@@ -143,6 +143,17 @@ export class Matters{
   return this.#records(this.#all(`SELECT id FROM (SELECT m.id,m.created_at FROM messages m INDEXED BY messages_mine WHERE m.is_mine=1 AND ${where}
    UNION SELECT m.id,m.created_at FROM ${REACTIONS} WHERE ${where} AND EXISTS(SELECT 1 FROM json_each(m.reactions) j WHERE j.value->>'isMine')) ORDER BY created_at DESC,id DESC LIMIT ?`,
    ...args,...args,limit)).reverse();
+ }
+ // A chat's messages from since up to until (ms, not included), oldest first, ignored senders left out.
+ between(feedId,since,until){
+  return this.#records(this.#all(`SELECT id FROM messages m WHERE feed_id=? AND created_at>=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at,id`,feedId,since,until));
+ }
+ // The chats with messages from since up to until, ignored senders left out, the busiest first: how many, and what
+ // butler knows of each (no name yet for a chat seen only through push; its kind then from its messages).
+ chatsBetween(since,until){
+  return this.#all(`SELECT m.feed_id,max(m.chat_kind) chat_kind,count(*) n,c.name,c.chat_mode FROM messages m INDEXED BY messages_created LEFT JOIN chats c ON c.feed_id=m.feed_id
+   WHERE m.created_at>=? AND m.created_at<? AND ${NOT_IGNORED} GROUP BY m.feed_id ORDER BY n DESC,m.feed_id`,since,until)
+   .map(r=>({feedId:r.feed_id,name:r.name??undefined,kind:r.chat_mode??r.chat_kind,messages:r.n}));
  }
  // My own latest messages, newest first.
  mine(limit){return this.#records(this.#all('SELECT id FROM messages WHERE is_mine=1 ORDER BY created_at DESC,id DESC LIMIT ?',limit));}

@@ -10,6 +10,7 @@ import {Processor} from '../processor.mjs';
 import {Grader} from '../grader.mjs';
 import {Digests} from '../digest.mjs';
 import {DEFAULT_SCHEDULE} from '../schedule.mjs';
+import {dayOf,startOf,nextDay} from '../reading.mjs';
 
 const CLI=fileURLToPath(new URL('../cli.mjs',import.meta.url));
 // The CLI runs as its own process against the same store file; async so the in-process fake can answer it.
@@ -260,6 +261,10 @@ test('help lists every command and its flags, and nothing of a conversation in t
   'ignore remove <发送方名称或 id>... [--json]','bot create [--name 名称]','bot update','--config 配置文件'])
   assert.ok(r.stdout.includes(usage),`help shows: ${usage}`);
  assert.doesNotMatch(r.stdout,/私聊对话|私聊里让管家/);
+ assert.match(r.stdout,/instant 即时（全部消息交给模型，每天也读一遍）/);assert.match(r.stdout,/daily 每日（存下，每天读一遍、挑出话题）/);
+ assert.doesNotMatch(r.stdout,/每日整理还没有做/);
+ assert.match(r.stdout,/每天早上 6 点把前一天每日和即时的聊天读一遍/);assert.match(r.stdout,/不分级，不读/);
+ assert.match(r.stdout,/类别：mention dm reply thread instant flagged own stored/);
 });
 
 // A herdr executable for the CLI: a shell script that runs the fake with its state directory.
@@ -410,6 +415,25 @@ test('status shows 关于TA in one line and profile prints it with my notes; BUT
  const j=JSON.parse((await cli(every,'profile','--json')).stdout);
  assert.equal(j.profile.text,text);assert.deepEqual(j.notes.map(n=>[n.id,n.text]),[[note,'审批不归我管']]);
  r=await cli(writeConfig(dir,lark,0o600,'BUTLER_PROFILE_EVERY=1 day\n'),'status');assert.equal(r.code,1);assert.match(r.stderr,/写「关于TA」的间隔的格式不对/);
+});
+
+test('status shows the daily read: the last day read to the end with its topics picked and not, the messages flagged and the chats given up; a read that did not finish; the days passed over',async t=>{
+ const {lark,store,dir}=await setup(t),config=writeConfig(dir,lark),time=ms=>new Date(ms).toLocaleString('sv-SE');
+ const line=out=>out.split('\n').find(l=>l.startsWith('每日读取：'));
+ let r=await cli(config,'status');assert.equal(r.code,0,r.stderr);
+ assert.equal(line(r.stdout),'每日读取：还没有读完过一天；还没有开始收下全部消息，开始以后第一个完整的一天过完再读');
+ const now=Date.now(),kept=startOf(dayOf(now))-12*3600e3;post(store,{chat:'g2',text:'收下全部消息以后的第一条',at:kept,seen:kept,categories:['stored']});
+ r=await cli(config,'status');
+ assert.equal(line(r.stdout),`每日读取：还没有读完过一天；下一次读 ${dayOf(now)}，在 ${time(startOf(nextDay(dayOf(now)))+6*3600e3)} 之后`,'the first whole day, the morning after');
+ const at=Date.parse('2026-11-07T03:20:00+08:00');
+ store.setMeta('reading',{from:'2026-11-06',through:'2026-11-06',last:{day:'2026-11-06',at,chats:23,picked:12,notPicked:30,flagged:3,failed:[{feedId:'oc_x',name:'坏群',error:'模型的回复不是 JSON：x'}]}});
+ r=await cli(config,'status');
+ assert.ok(line(r.stdout).startsWith(`每日读取：上次读完 2026-11-06（${time(at)}，23 个聊天，挑出 12 个话题、没挑 30 个，3 条消息交给批次，1 个聊天读不成、放弃了：坏群）；`),r.stdout);
+ store.setMeta('reading',{...store.meta('reading'),through:'2026-11-09',skipped:['2026-11-07','2026-11-08'],failedAt:at+86400e3,failedDay:'2026-11-10',error:'herdr workspace create（cpu1-butler） 失败，退出码 1'});
+ r=await cli(config,'status');
+ assert.ok(line(r.stdout).endsWith(`；读 2026-11-10 没有完成：herdr workspace create（cpu1-butler） 失败，退出码 1，${time(at+86400e3+30*60e3)} 之后再试；停机期间没读的 2026-11-07、2026-11-08 不补读了`),r.stdout);
+ const j=JSON.parse((await cli(config,'status','--json')).stdout).reading;
+ assert.deepEqual([j.last.picked,j.last.notPicked,j.failedDay,j.retryAt],[12,30,'2026-11-10',at+86400e3+30*60e3]);
 });
 
 test('bot update needs a configured bot: it only ever updates that app',async t=>{

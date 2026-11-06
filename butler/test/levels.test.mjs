@@ -9,7 +9,7 @@ import {Digests} from '../digest.mjs';
 import {Bot} from '../bot.mjs';
 import {Grader} from '../grader.mjs';
 import {Processor} from '../processor.mjs';
-import {levelListCards,weekCards,LevelCards} from '../levels.mjs';
+import {levelListCards,weekCards,LevelCards,LEVEL_EFFECT} from '../levels.mjs';
 
 process.env.TZ='Asia/Shanghai';
 // 2026-10-19 and 10-26 are Mondays: the week of the weekly card is from 10-19 10:00 up to 10-26 10:00.
@@ -27,6 +27,13 @@ function plainOnly(cards){
  }
  assert.doesNotMatch(JSON.stringify(cards),/"(?:default_url|url)"/,'no links');
 }
+
+test('what a level I set does from then on: daily and instant chats alike are read every day for topics',()=>{
+ assert.match(LEVEL_EFFECT.instant,/全部消息交给模型，每天也读一遍、挑出话题/);
+ assert.match(LEVEL_EFFECT.daily,/存下它的消息，每天读一遍、挑出话题，可能要我做的事交给模型/);
+ assert.doesNotMatch(LEVEL_EFFECT.daily,/还没有做|和只存不看一样/);
+ assert.match(LEVEL_EFFECT.store,/不交给模型/);
+});
 
 test('the level list: a collapsed panel per level, instant first, each chat a line with its name and reason, mine marked; the active chats not graded yet last',t=>{
  const {store}=tempStore(t);

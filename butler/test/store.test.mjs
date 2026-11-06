@@ -119,6 +119,28 @@ test('stored stands for no other category: it gives way to one that comes later 
  assert.equal(store.counts().stored,0);
 });
 
+test('a stored message the daily read flags is flagged instead, which the batches take; one with another category stays as it is',t=>{
+ const {store}=tempStore(t),matters=new Matters(store);
+ const a=post(store,{text:'帮忙看下周报',at:min(1),categories:['stored']}),b=post(store,{text:'@原智鸿 看下',at:min(2),categories:['mention']});
+ assert.deepEqual(store.flag([a,b,'unknown']),[a],'only the stored one changes');
+ assert.deepEqual([cats(store,a),cats(store,b)],[['flagged'],['mention']]);
+ assert.deepEqual(matters.pending(40).map(m=>m.id),[a,b]);
+ assert.deepEqual(store.flag([a]),[],'flagged once');
+ post(store,{id:a,text:'帮忙看下周报',at:min(1),categories:['stored']});assert.deepEqual(cats(store,a),['flagged'],'a later read that sees no reason does not make it stored again');
+ assert.deepEqual([store.counts().flagged,store.counts().stored],[1,0]);
+});
+
+test('a chat\'s level at a time: what the first change after it changed from, or with none since, the level it has',t=>{
+ const {store}=tempStore(t);
+ assert.equal(store.levelAt('g1',min(0)),undefined,'no level');
+ store.setLevel('g1','store',{by:'model',now:min(10)});store.setLevel('g1','daily',{by:'owner',now:min(20)});store.clearLevel('g1',min(30));
+ assert.deepEqual([min(5),min(10),min(15),min(25),min(35)].map(t=>store.levelAt('g1',t)),[undefined,'store','store','daily','store']);
+ store.setLevel('g2','instant',{by:'owner',now:min(0)});store.clearLevel('g2',min(10));
+ assert.deepEqual([min(5),min(15)].map(t=>store.levelAt('g2',t)),['instant',undefined],'cleared to none');
+ store.db.prepare("INSERT INTO chat_levels(feed_id,level,set_by,since) VALUES('g3','daily','owner',?)").run(min(0));
+ assert.equal(store.levelAt('g3',min(5)),'daily','a level with no history is the one it has');
+});
+
 test('a store from before levels: watched groups are instant by me from when they were watched, their messages instant, and a bot\'s direct messages instant, not dm',async t=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-test-')),file=path.join(dir,'butler.db');t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const old=new DatabaseSync(file);
@@ -183,11 +205,12 @@ test('the queries that run often go through indexes: none reads every message, a
   responses:()=>matters.responses(['g1'],min(0),min(9),5),visible:()=>matters.visible(ask),mine:()=>matters.mine(1000),me:()=>matters.me(),meId:()=>matters.meId(),
   senders:()=>matters.senders(),level:()=>store.level('g1'),chatsMissingInfo:()=>store.chatsMissingInfo(20),open:()=>new Store(file,{linkBase:LINK_BASE}).close(),
   activity:()=>store.activity(min(0),min(1)),involvement:()=>store.involvement(min(0)),keptSince:()=>store.keptSince(),batchedByChat:()=>matters.batchedByChat(min(0)),
-  levelChanges:()=>store.levelChanges(min(0))};
+  levelChanges:()=>store.levelChanges(min(0)),levelAt:()=>store.levelAt('g1',min(0)),flag:()=>store.flag([ask]),
+  between:()=>matters.between('g1',min(0),min(9)),chatsBetween:()=>matters.chatsBetween(min(0),min(9))};
  for(const [name,call] of Object.entries(calls))for(const {sql,plan} of plans(store.db,call)){
   const full=plan.filter(l=>FULL.test(l));
   assert.deepEqual(full,[],`${name} scans:\n${sql}\n${plan.join('\n')}`);
-  if(name==='before')assert.ok(!plan.some(l=>/TEMP B-TREE FOR ORDER BY/.test(l)),`${name} sorts the whole chat:\n${plan.join('\n')}`);
+  if(name==='before'||name==='between')assert.ok(!plan.some(l=>/TEMP B-TREE FOR ORDER BY/.test(l)),`${name} sorts the whole chat:\n${plan.join('\n')}`);
   // What I did in a matter's chats is read from my messages and my reactions, never from all that was said there.
   if(name==='ownerWaiting'||name==='responses')assert.ok(!plan.some(l=>/messages_by_chat/.test(l)),`${name} reads the chats:\n${sql}\n${plan.join('\n')}`);
   if(name==='chatsMissingInfo')assert.ok(!plan.some(l=>/^SCAN .*messages_by_chat/.test(l)),`${name} reads every message's chat:\n${plan.join('\n')}`);

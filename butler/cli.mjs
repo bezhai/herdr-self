@@ -1,10 +1,10 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
-// butler's command line: runs the collector and the processor (with the bot and the grading), and is how the agent I
-// talk to butler through (see cards.mjs AGENT_GROUP) works butler, over ssh: it shows the status, what was collected,
-// the matters made of it, 关于TA and my notes; sets chat levels and has the model grade chats; closes and reopens
-// matters; keeps my notes and the ignored-sender list; and creates and updates the bot's Feishu app. Every command that
-// reads prints the store's records as JSON with --json, and every one that writes prints what it changed, before and
-// after, in words or with --json as JSON: the agent reads the one and tells me the other.
+// butler's command line: runs the collector and the processor (with the bot, the grading and the daily read), and is
+// how the agent I talk to butler through (see cards.mjs AGENT_GROUP) works butler, over ssh: it shows the status, what
+// was collected, the matters made of it, 关于TA and my notes; sets chat levels and has the model grade chats; closes
+// and reopens matters; keeps my notes and the ignored-sender list; and creates and updates the bot's Feishu app. Every
+// command that reads prints the store's records as JSON with --json, and every one that writes prints what it changed,
+// before and after, in words or with --json as JSON: the agent reads the one and tells me the other.
 import {parseArgs} from 'node:util';
 import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
 import {OpenLark} from './open-lark.mjs';
@@ -13,6 +13,8 @@ import {Matters} from './matters.mjs';
 import {Processor,DEFAULTS as PROCESSOR} from './processor.mjs';
 import {HerdrModel} from './herdr-model.mjs';
 import {Grader} from './grader.mjs';
+import {Reader} from './reading.mjs';
+import {Topics} from './topics.mjs';
 import {find} from './lookup.mjs';
 import {Digests,digestStatus,endReason} from './digest.mjs';
 import {levelName,LEVEL_EFFECT,isCorrection,LevelCards} from './levels.mjs';
@@ -32,15 +34,15 @@ const HELP=`用法：butler [--config 配置文件] <命令> [选项]
 before 和 after（没有时是 null）。
 
   run                              运行收集器（常驻，作为用户服务运行）
-  status [--json]                  收集器状态：推送、对账、open-lark 同步、各类消息数量，加工端、分级和机器人，最近的错误
+  status [--json]                  收集器状态：推送、对账、open-lark 同步、各类消息数量，加工端、分级、每日读取和机器人，最近的错误
   list [--category 类别] [--since 时间] [--until 时间] [--limit 条数] [--json]
                                    按类别和时间列出收到的消息，新的在前
                                    类别：${CATEGORIES.join(' ')}；时间：ISO 时间，或 30m、2h、7d 这样的相对时间
   groups [--search 文字] [--json]   列出我所在的群（级别、名称、人数、最近活跃）
   level [list] [--json]            有级别的聊天：级别、谁定的、从什么时候开始、理由
   level set <级别> <聊天名或 id>... [--reason 文字] [--json]
-                                   由我定聊天的级别，模型不改我定的：instant 即时（全部消息交给模型）、
-                                   daily 每日（存下，每日整理还没有做）、store 只存不看、ignore 忽略（不存）；
+                                   由我定聊天的级别，模型不改我定的：instant 即时（全部消息交给模型，每天也读一遍）、
+                                   daily 每日（存下，每天读一遍、挑出话题）、store 只存不看、ignore 忽略（不存）；
                                    和我有关的消息不看级别，照旧收、照旧交给模型；--reason 是我的理由，和级别一起记下
   level clear <聊天名或 id>... [--json]
                                    取消我定的级别，回到模型的判断，还没有判断时私聊按即时、群按只存不看
@@ -51,8 +53,9 @@ before 和 after（没有时是 null）。
                                    加工端也会自己分级：新的活跃聊天、每周一次、说明变了以后，以及即时的聊天消息突然变多时
   process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每天根据我发的消息
                                    写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍，在另一条模型通道上
-                                   给活跃的聊天分级；配置了机器人时也运行机器人：定时汇总、分级的卡片；--once 只运行
-                                   一轮（处理完积压，到了时间也写「关于TA」、整理事项）就退出，不运行机器人，不分级
+                                   给活跃的聊天分级，每天早上 6 点把前一天每日和即时的聊天读一遍、拆成话题存下；
+                                   配置了机器人时也运行机器人：定时汇总、分级的卡片；--once 只运行一轮（处理完积压，
+                                   到了时间也写「关于TA」、整理事项）就退出，不运行机器人，不分级，不读
   matters [list] [--all] [--json]  未结束的事项，紧急的在前；--all 连同已结束的
   matters close <编号> [--reason 文字] [--json]
                                    由我关掉一个未结束的事项，和卡片上的「完成」一样记为我关掉的；--reason 是我的理由，
@@ -134,6 +137,7 @@ function printStatus(s){
   :g.sampledAt===undefined?`还没有只存不看的消息，收下全部消息满 ${g.sampleDays} 天以后开始分级`
   :g.sampledAt>Date.now()?`收下全部消息满 ${g.sampleDays} 天（${time(g.sampledAt)}）以后开始分级`
   :g.next?`下一次在 ${time(g.next)} 之后`:'没有要分级的活跃聊天'}；模型定了级别的聊天 ${g.byModel} 个`);
+ lines.push(`每日读取：${reading(s.reading)}`);
  const d=s.digest;
  lines.push(`汇总：${d.at?`上次 ${time(d.at)}，共发出 ${d.sent} 份`:'还没有发过'}${d.failedAt?`；${time(d.failedAt)} 发送失败`:''}；下一份：${d.next
   ?`${time(d.next)}（新事项 ${d.fresh} 个，结束 ${d.ended} 个）`:'暂无（上次以来没有新的或结束的事项）'}`);
@@ -143,6 +147,15 @@ function printStatus(s){
  console.log(lines.join('\n'));
 }
 
+// The daily read (see reading.mjs): the last day read to the end, what comes next, and the days passed over.
+function reading(rd){
+ const last=rd.last,given=last?.failed??[];
+ return [last?`上次读完 ${last.day}（${time(last.at)}，${last.chats} 个聊天，挑出 ${last.picked} 个话题、没挑 ${last.notPicked} 个，${last.flagged} 条消息交给批次${
+   given.length?`，${given.length} 个聊天读不成、放弃了：${given.map(f=>f.name??f.feedId).join('、')}`:''}）`:'还没有读完过一天',
+  rd.failedAt?`读 ${rd.failedDay} 没有完成：${rd.error}，${time(rd.retryAt)} 之后再试`:rd.from===undefined?'还没有开始收下全部消息，开始以后第一个完整的一天过完再读'
+   :rd.due.length?`现在要读 ${rd.due.join('、')}`:`下一次读 ${rd.upcoming}，在 ${time(rd.next)} 之后`,
+  ...rd.skipped?.length?[`停机期间没读的 ${rd.skipped.join('、')} 不补读了`]:[]].join('；');
+}
 // What 关于TA was written from.
 const about=p=>`根据 ${p.messages} 条我发的消息和 ${p.notes?.length??0} 条说明`;
 function printNotes(notes){
@@ -231,6 +244,7 @@ async function main(argv){
      review:{...store.meta('review'),everyMs:config.reviewEveryMs??PROCESSOR.reviewEveryMs},profile:{...store.meta('profile'),everyMs:config.profileEveryMs??PROCESSOR.profileEveryMs},
      bot:{configured:Boolean(config.bot),...store.meta('bot')},digest:digestStatus({store,matters,schedule:config.schedule})};
     const grader=new Grader({store,matters});s.grading={...grader.status(),sampleDays:grader.options.sampleMs/86400e3};
+    s.reading=new Reader({store,matters,topics:new Topics(store)}).status();
     if(values.json)console.log(JSON.stringify(s,null,1));else printStatus(s);return 0;
    }
    case 'matters':{
@@ -390,8 +404,8 @@ async function main(argv){
 }
 
 // The processor, as a service or (once) for one round: the backlog, and 关于TA and the review of the open matters when
-// they are due, as a round of the service would. As a service it also grades the chats, on a timer of its own, and runs
-// the bot, when one is configured: digests and the level cards.
+// they are due, as a round of the service would. As a service it also grades the chats and reads the day before, each
+// on a timer of its own, and runs the bot, when one is configured: digests and the level cards.
 async function processCommand(config,once){
  const model=herdrModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
  const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
@@ -408,10 +422,11 @@ async function processCommand(config,once){
    return r.failures||p?.error||v?.error?1:0;
   }finally{store.close();}
  }
- // Grading runs beside the batches, the reviews and 关于TA, never behind them: a pass of many runs holds none of them up,
- // and two claudes may run at once, each in a herdr workspace of its own. After the first pass that graded chats, the
- // level list goes to me.
+ // Grading and the daily read run beside the batches, the reviews and 关于TA, never behind them: a pass or a read of
+ // many runs holds none of them up, and up to three claudes may run at once, each in a herdr workspace of its own.
+ // After the first pass that graded chats, the level list goes to me.
  const grader=new Grader({store,matters,model,log:m=>console.log(m),onPass:p=>levels?.passed(p)});
+ const reader=new Reader({store,matters,topics:new Topics(store),model,log:m=>console.log(m)});
  if(config.bot){
   const {Bot}=await feishu();
   bot=new Bot({store,...config.bot,log:m=>console.log(m)});
@@ -420,16 +435,17 @@ async function processCommand(config,once){
   // A choice on a weekly card's ⋯ is the level cards'; any other click, the digests'.
   bot.onCardAction=evt=>levels.click(evt)??digests.click(evt);
  }
- // The model runs under way (a batch, and a grading) are waited for, bounded; a grading cut off is done again.
+ // The model runs under way (a batch, a grading and a read) are waited for, bounded; a grading cut off is done again,
+ // and a read goes on from where it stopped.
  const stop=async()=>{
-  await Promise.race([Promise.all([processor.stop(),grader.stop(),digests?.stop(),levels?.stop()]),new Promise(r=>setTimeout(r,20_000))]);
+  await Promise.race([Promise.all([processor.stop(),grader.stop(),reader.stop(),digests?.stop(),levels?.stop()]),new Promise(r=>setTimeout(r,20_000))]);
   await Promise.race([bot?.stop(),new Promise(r=>setTimeout(r,5000))]);process.exit(0);
  };
  process.on('SIGTERM',stop);process.on('SIGINT',stop);
  console.log(`butler 加工端启动：模型在 herdr 机器 ${model.machine}，存储 ${store.file}`);
- // The processor's start closes the workspaces a crashed process left on the model machine, grading's too (they have
- // one label); grading starts after it, so that none of its own is closed.
- await processor.start();grader.start();
+ // The processor's start closes the workspaces a crashed process left on the model machine, grading's and the read's
+ // too (they have one label); these start after it, so that none of their own is closed.
+ await processor.start();grader.start();reader.start();
  if(bot){
   console.log(`管家机器人（${config.bot.appId}）正在连接飞书`);
   bot.start().catch(e=>store.addError('机器人',`机器人停了：${e?.message??e}`));digests.start();levels.start();
