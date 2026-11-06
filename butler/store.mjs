@@ -57,8 +57,10 @@ export class Store{
  // linkBase: open-lark's web address for message links. log: also gets every recorded error (the service's journal).
  constructor(file,{linkBase,log}){
   fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});
-  this.file=file;this.linkBase=linkBase;this.log=log;this.db=new DatabaseSync(file);
-  this.db.exec('PRAGMA journal_mode=WAL;PRAGMA busy_timeout=5000;PRAGMA foreign_keys=ON;');this.db.exec(SCHEMA);this.#upgrade();
+  // The busy timeout comes with the connection: its first statement already reads the file, and while another process
+  // that opened it at the same moment recovers the WAL the last run left, a read with no timeout fails at once.
+  this.file=file;this.linkBase=linkBase;this.log=log;this.db=new DatabaseSync(file,{timeout:5000});
+  this.db.exec('PRAGMA journal_mode=WAL;PRAGMA foreign_keys=ON;');this.db.exec(SCHEMA);this.#upgrade();
  }
  // A store created by an earlier version: chats.gap_retries became read_retries, later columns are added, my
  // messages recorded before the own category have it too, and the table of the conversation butler once held in my
