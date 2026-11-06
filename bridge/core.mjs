@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import {spawn} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 export const quote=s=>"'"+String(s).replaceAll("'","'\\''")+"'";
 export function text(v,max=200){if(typeof v!=='string'||!v.trim()||v.length>max)throw Error('字段为空或过长');return v.trim();}
 export const uuid=()=>crypto.randomUUID();
@@ -93,6 +94,10 @@ export async function removeDirectory(m,dir){
  else await fs.promises.rm(path.resolve(localPath(dir)),{recursive:true,force:true});
 }
 export function publicText(s){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}
+// Bridge's state directory: BRIDGE_STATE of env, else state in the Bridge directory.
+export const stateDir=(env=process.env)=>env.BRIDGE_STATE||path.join(path.dirname(fileURLToPath(import.meta.url)),'state');
+// The Unix socket in state directory dir on which Bridge takes the requests of agents (see bin/bridge-schedule.mjs).
+export const agentSocket=dir=>path.join(dir,'agent.sock');
 // Persisted collections. Keys of older state files outside this list are dropped on load; a collection they lack loads empty.
 const collections=['machines','apps','bindings','topics','schedules','logs'];
 export class Store{

@@ -1,12 +1,12 @@
 import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';
+import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
 import {normalizeMachine,remoteInvocation,herdr,exec,makeDirectory,storeFile,removeDirectory,quote,Store} from './core.mjs';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
-import {parseCron,zone,next,previous,upcoming,when} from './cron.mjs';import {Schedules} from './schedules.mjs';
-import {check} from './request-cards.mjs';import {nameOf} from './adoption.mjs';
+import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.mjs';import {Schedules} from './schedules.mjs';import {AgentSchedules} from './agent-schedules.mjs';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.mjs';
+import {check,card,plain} from './request-cards.mjs';import {fits} from './message-cards.mjs';import {nameOf} from './adoption.mjs';
 import {Registrations} from './registration.mjs';import {staticFile,sendStatic} from './web-assets.mjs';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
 
@@ -793,6 +793,11 @@ test('a truncated reply ends with a note pointing to Herdr, in plain text after 
 });
 // The bytes of the request that sends card into a thread: the card serialized, as the content string of a serialized body.
 const requestBytes=card=>Buffer.byteLength(JSON.stringify({content:JSON.stringify(card),msg_type:'interactive',reply_in_thread:true}));
+test('a card fits a message when its request stays within 30 KB, counting what serializing it twice adds',()=>{
+ // A quote takes 4 bytes serialized twice: 6900 of them fit, 7100 do not.
+ const of=n=>card('标题','blue',[plain('"'.repeat(n))]);
+ assert.equal(fits(of(6900)),true);assert.ok(requestBytes(of(6900))<30*1000);assert.equal(fits(of(7100)),false);
+});
 test('a reply too large for one card goes out as several cards in order, each request within 30 KB however much its text grows when serialized twice; a code block split between cards is closed and opened again with its info string, a line too long for a card is cut, and only the last card has the truncation note',async()=>{
  const f=await readyTopic();try{
   // Serialized twice, a quote or backslash takes 4 bytes and a CJK character 3.
@@ -1981,6 +1986,21 @@ test('a time zone is an IANA name that Intl knows, kept in its canonical form; t
  assert.equal(zone('asia/shanghai'),'Asia/Shanghai');assert.equal(zone('UTC'),'UTC');
  for(const tz of ['','Mars/Base',undefined,8])assert.throws(()=>zone(tz),/时区/,String(tz));
  assert.equal(when(at('2026-11-06T02:00:00Z'),'Asia/Shanghai'),'2026-11-06 10:00');assert.equal(when(at('2026-11-06T02:00:00Z'),'UTC'),'2026-11-06 02:00');
+ // With the day of the week of that wall date: 2026-11-08 is a Sunday in Shanghai and still a Saturday in UTC.
+ assert.equal(when(at('2026-11-07T16:30:00Z'),'Asia/Shanghai',{weekday:true}),'2026-11-08 周日 00:30');assert.equal(when(at('2026-11-07T16:30:00Z'),'UTC',{weekday:true}),'2026-11-07 周六 16:30');
+});
+test('an expression reads in plain words: the days, then the times of day or how often; what has no short form is listed field by field',()=>{
+ for(const [expression,words] of [
+  ['30 9 * * 1-5','每周一至周五 09:30'],['0 9 * * *','每天 09:00'],['0 9,18 * * *','每天 09:00、18:00'],['0 18 * * MON-FRI','每周一至周五 18:00'],
+  ['0 9 * * 1,3,5','每周一、周三、周五 09:00'],['0 10 * * 6,0','每周六、周日 10:00'],['0 10 * * 7','每周日 10:00'],
+  ['0 0 1 * *','每月 1 日 00:00'],['0 9 1,15 * *','每月 1、15 日 09:00'],['0 9 1-10 * *','每月 1 至 10 日 09:00'],['0 0 1 1 *','每年 1 月的 1 日 00:00'],['0 0 29 2 *','每年 2 月的 29 日 00:00'],
+  ['0,30 9-17/4 * JAN,nov *','每年 1、11 月的每天 09:00、09:30、13:00、13:30、17:00、17:30'],['5/20 10 * * *','每天 10:05、10:25、10:45'],
+  // Day of month and day of week both restricted: either one, unless one of them starts with *, which makes it both.
+  ['0 9 1 * 1','每月 1 日和每周一 09:00'],['0 0 */10 * 1','每月 1、11、21、31 日中的周一 00:00'],['0 0 1-31 * 1','每天 00:00'],
+  ['*/5 * * * *','每 5 分钟'],['2/5 * * * *','每 5 分钟（每小时第 2 分钟起）'],['*/15 9-17 * * 1-5','每周一至周五 09:00 至 17:45 每 15 分钟'],
+  ['0 * * * *','每小时整点'],['30 * * * *','每小时第 30 分钟'],['0 */2 * * *','每 2 小时，从 00:00 起'],['30 1/6 * * *','每天 01:30、07:30、13:30、19:30'],
+  ['0 9-17 * * *','每天 09:00 至 17:00 每小时一次'],['0 */5 * * *','每天 00:00、05:00、10:00、15:00、20:00'],['0 1,2,3,5,8,13,21 * * *','每天 1 至 3、5、8、13、21 点的第 0 分钟'],['0,20,40 8,12,16,20 * * *','每天 8、12、16、20 点的第 0、20、40 分钟'],
+ ])assert.equal(phrase(parseCron(expression)),words,expression);
 });
 // Schedules over the topics of a topic fixture (see topicFixture), with the clock of both at f.clock.now, which f.at(iso) sets. f.posted
 // records every message the bot posts into a chat outside a thread as [app id, chat id, content], which resolves to the next om_post_<n>;
@@ -2198,6 +2218,321 @@ test('the timer of the schedules checks them every interval from start until sto
   await later(30);assert.equal(ticks,seen);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
+// The agent schedules over a schedule fixture (see scheduleFixture), with its clock. f.call(op,fields,t) is a request of the agent of topic t
+// (the first topic by default) on its machine, cpu2; f.click(id,choice,openId) clicks 确认 or 取消 on the card of proposal id, and
+// f.drawn() waits for the cards being redrawn. f.open(messageId) opens a ready topic.
+function agentFixture(options){
+ const f=scheduleFixture(options);
+ const deps={topics:f.topics,schedules:f.schedules,app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},reply:(...args)=>f.topics.reply(...args),updateCard:(...args)=>f.topics.updateCard(...args),now:()=>f.clock.now};
+ const agents=new AgentSchedules(f.store,deps);
+ return Object.assign(f,{agents,deps,
+  call:(op,fields={},t=f.store.data.topics[0])=>agents.call(op,{machine:'cpu2',pane:t.paneId,...fields}),
+  click:(id,choice,openId='ou_user',a=agents)=>a.click(allowed,{messageId:'om_any',chatId:'oc_1',operator:{openId},action:{tag:'button',value:{schedule:choice,proposal:id}}}),
+  drawn:()=>Promise.all(agents.drawing.values()),
+  open:async messageId=>{await f.send({messageId,content:'topic '+messageId});return f.store.data.topics.find(t=>t.rootId===messageId);}});
+}
+const weekdays930={cron:'30 9 * * 1-5',timeZone:'Asia/Shanghai',task:'总结昨天的提交',mode:'new'};
+// The card of a confirmation with its two buttons for proposal id.
+const confirmButtons=id=>({tag:'column_set',horizontal_spacing:'8px',columns:[['确认','primary','confirm'],['取消','default','cancel']].map(([content,type,choice])=>({tag:'column',width:'auto',elements:[{tag:'button',text:{tag:'plain_text',content},type,behaviors:[{type:'callback',value:{schedule:choice,proposal:id}}]}]}))});
+const nextWeekdays=['2026-11-09 周一 09:30','2026-11-10 周二 09:30','2026-11-11 周三 09:30','2026-11-12 周四 09:30','2026-11-13 周五 09:30'];
+const aboutWeekdays=(task='总结昨天的提交')=>[plainText('时间：每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）'),plainText('接下来 5 次运行：\n'+nextWeekdays.join('\n')),plainText('任务：\n'+task)];
+const newTopicMode=plainText('模式：每次开新话题。每次运行时机器人在群里发一条消息，在它下面开一个新话题，交给一个新的 Agent'),intoThisMode=plainText('模式：发进这个话题。每次运行把任务发给这个话题里的 Agent，它记得之前的对话');
+const boundTo=plainText('绑定：个人助手（cpu2 · ~/work · Claude）');
+test('an agent is known by its machine and its pane: a ready topic there whose agent is still linked; any other pane, machine or topic is refused, and a topic whose agent is gone ends',async()=>{
+ const f=agentFixture();try{
+  const t=await f.open('om_1');
+  assert.deepEqual(await f.call('list'),{binding:{id:'b',name:'个人助手'},topicId:t.id,schedules:[]});
+  assert.deepEqual((await f.agents.call('list',{machine:'m',pane:t.paneId})).topicId,t.id);
+  const notTopic=/这个 pane 里的 Agent 不属于任何进行中的飞书话题/;
+  for(const [request,error] of [[{machine:'cpu2'},/缺少 pane/],[{machine:'cpu2',pane:''},/缺少 pane/],[{machine:'cpu2',pane:'w1:p9'},notTopic],[{machine:'cpu9',pane:t.paneId},/Bridge 没有连接名为 cpu9 的机器/],
+   [{pane:t.paneId},/Bridge 没有连接本机 session default 的 Herdr/]])
+   await assert.rejects(f.agents.call('list',request),error,JSON.stringify(request));
+  await assert.rejects(f.call('loop'),/未知的操作：loop/);
+  // A disabled machine is not connected.
+  f.m.enabled=false;await assert.rejects(f.call('list'),/Bridge 没有连接名为 cpu2 的机器/);f.m.enabled=true;
+  // The agent no longer reports remote answers: the topic ends, and the agent is refused.
+  delete f.h.agents[0].remote_answers;f.replies.length=0;
+  await assert.rejects(f.call('list'),notTopic);assert.equal(t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，请发起新话题')]);
+  await assert.rejects(f.call('list'),notTopic);
+ }finally{f.close();}
+ // A local machine needs no name: it is the one of the agent's Herdr session.
+ const g=agentFixture({machine:{type:'local',session:'default'}});try{
+  const t=await g.open('om_1');
+  assert.equal((await g.agents.call('list',{pane:t.paneId})).topicId,t.id);assert.equal((await g.agents.call('list',{pane:t.paneId,session:'default'})).topicId,t.id);
+  await assert.rejects(g.agents.call('list',{pane:t.paneId,session:'work'}),/Bridge 没有连接本机 session work 的 Herdr/);
+ }finally{g.close();}
+});
+test('list, runs, pause, resume and remove act at once on the schedules of the binding of the agent\'s topic, named by their id or its first characters; another binding\'s schedules do not exist for it',async()=>{
+ const f=agentFixture();try{
+  const t=await f.open('om_1'),other=await f.open('om_2');f.at('2026-11-06T10:00:00+08:00');
+  f.store.data.bindings.push({...route,id:'b2',chatId:'oc_2'});
+  const s=f.schedules.add({...daily,cron:'30 9 * * 1-5'}),into=f.schedules.add({...daily,mode:'into',topicId:other.id,cron:'0 18 * * *'}),foreign=f.schedules.add({...daily,bindingId:'b2'});
+  const entry=(x,more)=>{const {runs,...rest}=x;return {...rest,...more};};
+  const listed=await f.call('list');
+  assert.deepEqual(listed,{binding:{id:'b',name:'个人助手'},topicId:t.id,schedules:[
+   entry(s,{phrase:'每周一至周五 09:30',next:at('2026-11-09T09:30:00+08:00')}),entry(into,{phrase:'每天 18:00',next:at('2026-11-06T18:00:00+08:00'),here:false,topicTitle:other.title})]});
+  assert.deepEqual((await f.call('list',{},other)).schedules.map(x=>x.here),[undefined,true]);
+  assert.deepEqual(await f.call('runs',{id:s.id.slice(0,8)}),{schedule:listed.schedules[0],runs:[]});
+  const paused=await f.call('pause',{id:s.id.slice(0,4)});assert.deepEqual([paused.schedule.id,paused.schedule.paused,paused.schedule.next],[s.id,true,null]);assert.equal(f.store.data.schedules[0].paused,true);
+  f.at('2026-11-10T10:00:00+08:00');const resumed=await f.call('resume',{id:s.id});
+  assert.deepEqual([resumed.schedule.paused,resumed.schedule.next],[false,at('2026-11-11T09:30:00+08:00')]);
+  assert.deepEqual(await f.call('remove',{id:into.id}),{schedule:{...entry(into,{phrase:'每天 18:00',next:at('2026-11-10T18:00:00+08:00'),here:false,topicTitle:other.title})}});
+  assert.deepEqual(f.store.data.schedules.map(x=>x.id),[s.id,foreign.id]);
+  for(const op of ['runs','pause','resume','remove','update']){
+   await assert.rejects(f.call(op,{id:foreign.id,task:'x'}),/定时任务不存在/,op);await assert.rejects(f.call(op,{id:'nope'}),/定时任务不存在/,op);await assert.rejects(f.call(op,{}),/缺少定时任务 ID/,op);
+  }
+  assert.equal(f.store.data.schedules[1].paused,false);
+  // Ids that share their first characters need more of them.
+  const twin=f.schedules.add(daily);f.store.data.schedules.at(-1).id=s.id.slice(0,4)+twin.id.slice(4);
+  await assert.rejects(f.call('pause',{id:s.id.slice(0,4)}),new RegExp(`有多个定时任务的 ID 以 ${s.id.slice(0,4)} 开头`));
+  assert.equal((await f.call('pause',{id:s.id.slice(0,8)})).schedule.id,s.id);
+ }finally{f.close();}
+});
+test('an agent submits a schedule as a card in its topic\'s thread that shows it in plain words with its next runs, the task, the mode and the binding; only 确认 adds it, and the card then shows the outcome without buttons',async()=>{
+ const f=agentFixture();try{
+  const t=await f.open('om_1');f.at('2026-11-06T10:00:00+08:00');f.replies.length=0;
+  const r=await f.call('add',{...weekdays930,task:' 总结昨天的提交\n'}),id=t.proposal.id;
+  assert.deepEqual(r,{proposal:{id,kind:'add',expiresAt:at('2026-11-06T10:30:00+08:00'),timeZone:'Asia/Shanghai',phrase:'每周一至周五 09:30',next:nextWeekdays.map(x=>at(x.replace(/ 周. /,'T')+':00+08:00'))}});
+  assert.deepEqual(f.replies,[['a','oc_1','om_1',{card:cardOf('确认定时任务','blue',[plainText('这个话题里的 Agent 提交了一个定时任务，核对无误后点「确认」才会生效。'),...aboutWeekdays(),newTopicMode,boundTo,
+   plainText('到 2026-11-06 周五 10:30 前有效，过期没有确认就不会生效'),confirmButtons(id)])}]]);
+  // The proposal is on disk with the topic; nothing is added yet.
+  assert.deepEqual(new Store(f.dir).data.topics[0].proposal,{id,kind:'add',fields:{mode:'new',cron:'30 9 * * 1-5',timeZone:'Asia/Shanghai',task:'总结昨天的提交'},messageId:'om_bot_1',expiresAt:at('2026-11-06T10:30:00+08:00')});
+  assert.deepEqual(f.schedules.list(),[]);
+  f.at('2026-11-06T10:05:00+08:00');assert.deepEqual(f.click(id,'confirm'),{toast:{type:'success',content:'定时任务已生效'}});await f.drawn();
+  const [s]=f.store.data.schedules;
+  assert.deepEqual([s.bindingId,s.mode,s.cron,s.timeZone,s.task,s.createdBy,s.handledUntil,s.paused],['b','new','30 9 * * 1-5','Asia/Shanghai','总结昨天的提交',{topicId:t.id,openId:'ou_user'},at('2026-11-06T10:05:00+08:00'),false]);
+  assert.equal('proposal' in t,false);assert.equal('proposal' in new Store(f.dir).data.topics[0],false);
+  assert.deepEqual(f.updated,[['a','om_bot_1',cardOf('定时任务已生效 · '+s.id.slice(0,8),'green',[...aboutWeekdays(),newTopicMode,boundTo,{tag:'markdown',content:'已确认 · <at id=ou_user></at>'}])]]);
+  // A second click finds nothing to confirm.
+  assert.deepEqual(f.click(id,'confirm'),{toast:{type:'info',content:'这张卡片已失效'}});assert.equal(f.store.data.schedules.length,1);
+  assert.deepEqual(scheduleLogs(f).map(l=>l[1].replace(/[0-9a-f]{8}/g,'<id>')),['个人助手：已发出定时任务的确认卡片','个人助手：已添加定时任务 <id>（30 9 * * 1-5，Asia/Shanghai，每次开新话题）']);
+ }finally{f.close();}
+});
+test('取消 drops a submitted schedule, a mode into schedule goes into the agent\'s own topic, and a card whose topic has ended by then adds nothing; a click without a proposal behind it does nothing',async()=>{
+ const f=agentFixture();try{
+  const t=await f.open('om_1');f.at('2026-11-06T10:00:00+08:00');
+  await f.call('add',weekdays930);const first=t.proposal;
+  assert.deepEqual(f.click(first.id,'cancel','ou_other'),{toast:{type:'info',content:'已取消'}});await f.drawn();
+  assert.deepEqual(f.store.data.schedules,[]);assert.deepEqual(f.updated.at(-1),['a',first.messageId,cardOf('定时任务已取消','grey',[aboutWeekdays()[0],aboutWeekdays()[2],newTopicMode,boundTo,{tag:'markdown',content:'已取消 · <at id=ou_other></at>'}])]);
+  // Mode into: this topic.
+  await f.call('add',{...weekdays930,mode:'into'});const into=t.proposal;
+  assert.deepEqual(f.replies.at(-1)[3].card.body.elements.slice(4,6),[intoThisMode,boundTo]);
+  f.click(into.id,'confirm');await f.drawn();
+  assert.deepEqual(f.store.data.schedules.map(s=>[s.mode,s.topicId]),[['into',t.id]]);assert.equal(f.updated.at(-1)[2].body.elements[3].text.content,intoThisMode.text.content);
+  // The topic ends while its card waits: confirming adds nothing and the card says why.
+  await f.call('add',{...weekdays930,mode:'into',task:'再看一次'});const late=t.proposal;
+  await f.topics.end(allowed,t,'结束');
+  assert.deepEqual(f.click(late.id,'confirm'),{toast:{type:'error',content:'没有生效：这个话题的会话已结束，定时任务不能发进来'}});await f.drawn();
+  assert.equal(f.store.data.schedules.length,1);
+  assert.deepEqual(f.updated.at(-1),['a',late.messageId,cardOf('定时任务没有生效','red',[aboutWeekdays()[0],plainText('任务：\n再看一次'),intoThisMode,boundTo,plainText('没有生效：这个话题的会话已结束，定时任务不能发进来')])]);
+  // Mode new does not need the topic.
+  const n=await f.open('om_2');await f.call('add',weekdays930,n);const later=n.proposal;await f.topics.end(allowed,n,'结束');
+  f.click(later.id,'confirm');await f.drawn();assert.deepEqual(f.store.data.schedules.map(s=>s.mode),['into','new']);
+  for(const [value,label] of [[{schedule:'confirm',proposal:'gone'},'gone'],[{schedule:'later',proposal:late.id},'choice'],[{},'empty']])
+   assert.deepEqual(f.agents.click(allowed,{messageId:'om_x',chatId:'oc_1',operator:{openId:'ou_user'},action:{tag:'button',value}}),{toast:{type:'info',content:'这张卡片已失效'}},label);
+  // Another app does not reach the topic's card.
+  const o=await f.open('om_3');await f.call('add',weekdays930,o);
+  assert.deepEqual(f.agents.click({...allowed,id:'a2'},{messageId:'om_x',chatId:'oc_1',operator:{openId:'ou_user'},action:{tag:'button',value:{schedule:'confirm',proposal:o.proposal.id}}}),{toast:{type:'info',content:'这张卡片已失效'}});
+  assert.ok(o.proposal);
+ }finally{f.close();}
+});
+test('a topic has one card waiting at a time: another submission is refused until the card is clicked or expires after 30 minutes, when the card shows that it expired; other topics have their own',async()=>{
+ const f=agentFixture();try{
+  const t=await f.open('om_1'),u=await f.open('om_2');f.at('2026-11-06T10:00:00+08:00');const s=f.schedules.add(daily);
+  await f.call('add',weekdays930);const first=t.proposal;
+  const busy=/这个话题已有一张等待确认的定时任务卡片，到 2026-11-06 周五 10:30 过期。请主人先在卡片上点确认或取消，再重新提交/;
+  await assert.rejects(f.call('add',{...weekdays930,task:'另一个'}),busy);await assert.rejects(f.call('update',{id:s.id,task:'另一个'}),busy);
+  await f.call('add',weekdays930,u);assert.ok(u.proposal);
+  // The timer draws cards that expired; one that has not expired stays.
+  f.at('2026-11-06T10:29:59+08:00');await f.agents.expire();assert.equal(t.proposal,first);
+  f.at('2026-11-06T10:30:00+08:00');await f.agents.expire();
+  assert.equal('proposal' in t,false);assert.equal('proposal' in u,false);
+  assert.deepEqual(f.updated.find(x=>x[1]===first.messageId),['a',first.messageId,cardOf('定时任务的确认已过期','grey',[aboutWeekdays()[0],aboutWeekdays()[2],newTopicMode,boundTo,plainText('过期前没有确认，没有生效')])]);
+  assert.deepEqual(f.click(first.id,'confirm'),{toast:{type:'info',content:'这张卡片已失效'}});
+  await f.call('add',weekdays930);const second=t.proposal;
+  // A click after the card expired, before the timer saw it, adds nothing; a submission then replaces the expired card.
+  f.at('2026-11-06T11:00:00+08:00');assert.deepEqual(f.click(second.id,'confirm'),{toast:{type:'info',content:'这张卡片已过期，定时任务没有生效'}});await f.drawn();
+  assert.equal(f.updated.at(-1)[2].header.title.content,'定时任务的确认已过期');
+  await f.call('add',weekdays930);const third=t.proposal;f.at('2026-11-06T11:31:00+08:00');f.updated.length=0;
+  await f.call('add',{...weekdays930,task:'新的'});await f.drawn();
+  assert.deepEqual(f.updated.map(x=>[x[1],x[2].header.title.content]),[[third.messageId,'定时任务的确认已过期']]);assert.equal(t.proposal.fields.task,'新的');
+  assert.deepEqual(f.schedules.list().map(x=>x.id),[s.id]);
+ }finally{f.close();}
+});
+test('a submission that is invalid, too long for its card or whose card cannot be posted is refused, and leaves nothing waiting',async()=>{
+ const f=agentFixture();try{
+  const t=await f.open('om_1');f.at('2026-11-06T10:00:00+08:00');f.replies.length=0;
+  for(const [fields,error] of [[{mode:'loop'},/模式无效/],[{mode:undefined},/模式无效/],[{cron:'61 * * * *'},/分钟/],[{cron:'0 0 31 2 *'},/不会再运行/],[{timeZone:'Mars/Base'},/时区无效/],[{timeZone:undefined},/时区无效/],[{task:' '},/任务文字/],
+   // Serialized twice a quote takes 4 bytes: 8000 of them make a card over 30 KB.
+   [{task:'"'.repeat(8000)},/任务文字太长，确认卡片放不下/]])
+   await assert.rejects(f.call('add',{...weekdays930,...fields}),error,JSON.stringify(fields).slice(0,40));
+  assert.deepEqual(f.replies,[]);assert.equal('proposal' in t,false);
+  f.topics.reply=async()=>{throw Error('飞书未连接');};
+  await assert.rejects(f.call('add',weekdays930),/确认卡片没有发出去，请稍后重试/);assert.equal('proposal' in t,false);assert.equal('proposal' in new Store(f.dir).data.topics[0],false);
+  assert.deepEqual(scheduleLogs(f).at(-1),['error','个人助手：确认卡片未发出，飞书未连接']);
+ }finally{f.close();}
+});
+test('an agent changes the time or the task of a schedule through a card that shows what it was; confirming changes it unless it was removed meanwhile',async()=>{
+ const f=agentFixture();try{
+  const t=await f.open('om_1');f.at('2026-11-06T10:00:00+08:00');
+  const s=f.schedules.add({...daily,cron:'0 9 * * *'});f.replies.length=0;
+  await assert.rejects(f.call('update',{id:s.id}),/没有要修改的内容/);
+  const r=await f.call('update',{id:s.id.slice(0,8),cron:'30 9 * * 1-5'}),p=t.proposal,short=s.id.slice(0,8);
+  assert.deepEqual([r.proposal.kind,r.proposal.scheduleId,p.scheduleId,p.before,p.fields],['update',s.id,s.id,{cron:'0 9 * * *',timeZone:'Asia/Shanghai',task:'总结昨天的提交'},{mode:'new',cron:'30 9 * * 1-5',timeZone:'Asia/Shanghai',task:'总结昨天的提交'}]);
+  assert.deepEqual(f.replies[0][3].card,cardOf('确认修改定时任务 · '+short,'blue',[plainText(`这个话题里的 Agent 提交了对定时任务 ${short} 的修改，核对无误后点「确认」才会生效。`),
+   plainText('时间：每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）\n原来的时间：每天 09:00（Asia/Shanghai，cron：0 9 * * *）'),...aboutWeekdays().slice(1),newTopicMode,boundTo,plainText('到 2026-11-06 周五 10:30 前有效，过期没有确认就不会生效'),confirmButtons(p.id)]));
+  f.at('2026-11-06T10:01:00+08:00');assert.deepEqual(f.click(p.id,'confirm'),{toast:{type:'success',content:'定时任务已修改'}});await f.drawn();
+  assert.deepEqual([f.store.data.schedules[0].cron,f.store.data.schedules[0].handledUntil],['30 9 * * 1-5',at('2026-11-06T10:01:00+08:00')]);
+  assert.equal(f.updated[0][2].header.title.content,'定时任务已修改 · '+short);
+  // A task alone: the card marks the task as changed and keeps the time as it was.
+  await f.call('update',{id:short,task:'新的任务'});
+  assert.deepEqual(f.replies.at(-1)[3].card.body.elements.slice(1,4),[aboutWeekdays()[0],aboutWeekdays()[1],plainText('任务（已修改）：\n新的任务')]);
+  f.schedules.remove(s.id);
+  assert.deepEqual(f.click(t.proposal.id,'confirm'),{toast:{type:'error',content:'没有生效：定时任务不存在'}});await f.drawn();
+  assert.equal(f.updated.at(-1)[2].header.title.content,'修改没有生效 · '+short);assert.deepEqual(f.store.data.schedules,[]);
+ }finally{f.close();}
+});
+test('a click that comes before the post of its card has resolved draws the card it came from',async()=>{
+ const f=agentFixture();try{
+  await f.open('om_1');f.at('2026-11-06T10:00:00+08:00');let posted;f.topics.reply=()=>new Promise(r=>{posted=r;});
+  const sent=f.call('add',weekdays930);for(let i=0;i<50&&!posted;i++)await later(5);
+  assert.deepEqual(f.click(f.store.data.topics[0].proposal.id,'confirm'),{toast:{type:'success',content:'定时任务已生效'}});await f.drawn();
+  posted('om_card');await sent;
+  assert.deepEqual(f.updated.map(u=>[u[1],u[2].header.title.content]),[['om_any','定时任务已生效 · '+f.store.data.schedules[0].id.slice(0,8)]]);
+ }finally{f.close();}
+});
+test('a card waiting for its click survives a restart of Bridge: the click is answered from the state file',async()=>{
+ const f=agentFixture();try{
+  await f.open('om_1');f.at('2026-11-06T10:00:00+08:00');await f.call('add',weekdays930);const id=f.store.data.topics[0].proposal.id;
+  const {store,topics}=f.restart(),schedules=new Schedules(store,{topics,app:f.deps.app,send:async()=>'om_post',reply:f.deps.reply,now:f.deps.now});
+  const agents=new AgentSchedules(store,{...f.deps,topics,schedules});
+  assert.deepEqual(f.click(id,'confirm','ou_user',agents),{toast:{type:'success',content:'定时任务已生效'}});await Promise.all(agents.drawing.values());
+  assert.equal(store.data.schedules.length,1);assert.equal(new Store(f.dir).data.schedules.length,1);
+ }finally{f.close();}
+});
+test('the timer of the agent schedules checks for expired cards every interval from start until stop; starting twice keeps one timer',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-agent-schedules-'));try{
+  const agents=new AgentSchedules(new Store(dir),{every:5});let checks=0;agents.expire=()=>{checks++;};
+  agents.start();agents.start();await later(40);agents.stop();const seen=checks;assert.ok(seen>=2&&seen<=10,String(seen));
+  await later(30);assert.equal(checks,seen);
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+// A Bridge that answers the requests of bridge-schedule on agent.sock in a state directory of its own: answer(op,body) returns [status,
+// data]. f.requests records each as [method, path, content type, body].
+async function fakeBridge(answer){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-agent-')),socket=path.join(dir,'agent.sock'),requests=[];
+ const server=http.createServer(async(req,res)=>{
+  let s='';for await(const c of req)s+=c;const body=JSON.parse(s);requests.push([req.method,req.url,req.headers['content-type'],body]);
+  const [code,data]=await answer(req.url.replace('/schedules/',''),body);res.writeHead(code,{'content-type':'application/json'});res.end(JSON.stringify(data));
+ });
+ await new Promise(r=>server.listen(socket,r));
+ return {dir,socket,requests,close:()=>new Promise(r=>server.close(()=>{fs.rmSync(dir,{recursive:true});r();}))};
+}
+// Runs bridge-schedule with args in env (its state directory that of bridge, its pane w1:p1) and resolves to {code, out, err}; stdin, when
+// given, is what it reads.
+async function schedule(bridge,args,{env={},stdin}={}){
+ let out='',err='';
+ const code=await runCommand(args,{env:{BRIDGE_STATE:bridge.dir,HERDR_PANE_ID:'w1:p1',...env},stdin:stdin==null?Readable.from([]):Readable.from([Buffer.from(stdin)]),stdout:{write:s=>{out+=s;}},stderr:{write:s=>{err+=s;}},timeZone:'Asia/Shanghai'});
+ return {code,out,err};
+}
+const sid=n=>`${n}0000000-0000-4000-8000-00000000000${n}`.slice(0,36);
+test('bridge-schedule reads its operation, the id and options in any order, with a value after the option or after =; anything else is a usage error',()=>{
+ assert.deepEqual(parseCommand(['add','--cron','30 9 * * 1-5','--mode=new','--task','--看起来像选项','--tz','UTC','--json']),{op:'add',json:true,cron:'30 9 * * 1-5',mode:'new',task:'--看起来像选项',timeZone:'UTC'});
+ assert.deepEqual(parseCommand(['--machine','cpu2','pause','1a2b3c4d','--pane','w1:p2','--session=work']),{op:'pause',id:'1a2b3c4d',json:false,machine:'cpu2',pane:'w1:p2',session:'work'});
+ assert.deepEqual(parseCommand(['--help']),{json:false,help:true});
+ for(const [args,error] of [[['add','--cron'],/--cron 缺少值/],[['list','--loop'],/未知的参数：--loop/],[['pause','a','b'],/多余的参数：b/]])
+  assert.throws(()=>parseCommand(args),error,args.join(' '));
+});
+test('bridge-schedule sends its request to Bridge\'s agent socket with the pane of its agent and the time zone of its machine, and prints what Bridge answers for the agent to read, or the answer itself with --json',async()=>{
+ const due=iso=>at(iso);
+ const list={binding:{id:'b',name:'个人助手'},topicId:'t1',schedules:[
+  {id:sid(1),bindingId:'b',mode:'new',cron:'30 9 * * 1-5',timeZone:'Asia/Shanghai',task:'总结昨天的提交\n第二行',paused:false,next:due('2026-11-09T09:30:00+08:00'),phrase:'每周一至周五 09:30'},
+  {id:sid(2),bindingId:'b',mode:'into',topicId:'t1',here:true,topicTitle:'看看',cron:'0 18 * * *',timeZone:'Asia/Shanghai',task:'看一下',paused:true,next:null,phrase:'每天 18:00'},
+  {id:sid(3),bindingId:'b',mode:'into',topicId:'t2',here:false,topicTitle:'另一个话题',cron:'0 8 * * *',timeZone:'UTC',task:'x'.repeat(300),paused:false,next:null,phrase:'每天 08:00'}]};
+ const [first]=list.schedules,runs={schedule:first,runs:[
+  {due:due('2026-11-06T09:30:00+08:00'),at:due('2026-11-06T09:30:05+08:00'),outcome:'started',n:1,topicId:'t3'},
+  {due:due('2026-11-09T09:30:00+08:00'),at:due('2026-11-09T10:15:00+08:00'),outcome:'started',n:2,topicId:'t4'},
+  {due:due('2026-11-10T09:30:00+08:00'),at:due('2026-11-10T09:30:00+08:00'),outcome:'skipped',reason:'上次还没结束，跳过'},
+  {due:due('2026-11-11T09:30:00+08:00'),last:due('2026-11-12T09:30:00+08:00'),at:due('2026-11-12T12:00:00+08:00'),outcome:'missed',reason:'Bridge 停机，错过'},
+  {due:due('2026-11-13T09:30:00+08:00'),at:due('2026-11-13T09:30:00+08:00'),outcome:'failed',n:3,topicId:'t5',reason:'Agent 启动失败'}]};
+ const proposal=(kind,more)=>({proposal:{id:'p1',kind,...more,expiresAt:due('2026-11-06T10:30:00+08:00'),timeZone:'Asia/Shanghai',phrase:'每周一至周五 09:30',next:[due('2026-11-09T09:30:00+08:00'),due('2026-11-10T09:30:00+08:00')]}});
+ const answers={list:list,runs,pause:{schedule:{...first,paused:true,next:null}},resume:{schedule:first},remove:{schedule:first},add:proposal('add'),update:proposal('update',{scheduleId:sid(1)})};
+ const bridge=await fakeBridge(op=>[200,answers[op]]);try{
+  const text={
+   list:['绑定「个人助手」上有 3 个定时任务：',
+    `${sid(1).slice(0,8)} · 每次开新话题 · 每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）`,'  下次运行：2026-11-09 周一 09:30','  任务：总结昨天的提交 第二行',
+    `${sid(2).slice(0,8)} · 发进这个话题 · 每天 18:00（Asia/Shanghai，cron：0 18 * * *） · 已暂停`,'  任务：看一下',
+    `${sid(3).slice(0,8)} · 发进话题「另一个话题」 · 每天 08:00（UTC，cron：0 8 * * *）`,'  下次运行：不会再运行',`  任务：${'x'.repeat(199)}…`],
+   runs:[`定时任务 ${sid(1).slice(0,8)}（每周一至周五 09:30，Asia/Shanghai）最近 5 次运行：`,'2026-11-06 周五 09:30 · 已运行 · 第 1 次','2026-11-09 周一 09:30 · 已运行 · 第 2 次 · 补跑于 2026-11-09 周一 10:15',
+    '2026-11-10 周二 09:30 · 跳过：上次还没结束，跳过','2026-11-11 周三 09:30 至 2026-11-12 周四 09:30 · 错过：Bridge 停机，错过','2026-11-13 周五 09:30 · 失败：Agent 启动失败 · 第 3 次'],
+   pause:[`已暂停定时任务 ${sid(1).slice(0,8)}（每周一至周五 09:30）。恢复之前不会运行，暂停期间的时间恢复后也不补跑。`],
+   resume:[`已恢复定时任务 ${sid(1).slice(0,8)}，下次运行：2026-11-09 周一 09:30。`],
+   remove:[`已删除定时任务 ${sid(1).slice(0,8)}（每周一至周五 09:30）。它开过的话题保留。`],
+   add:['已在这个话题里发了确认卡片：每周一至周五 09:30（Asia/Shanghai），下次运行 2026-11-09 周一 09:30。主人在卡片上点「确认」后才生效；到 2026-11-06 周五 10:30 还没有确认就作废。'],
+   update:[`已在这个话题里发了修改定时任务 ${sid(1).slice(0,8)} 的确认卡片：每周一至周五 09:30（Asia/Shanghai），下次运行 2026-11-09 周一 09:30。主人在卡片上点「确认」后才生效；到 2026-11-06 周五 10:30 还没有确认就作废。`]};
+  const args={list:['list'],runs:['runs','1a2b'],pause:['pause','1a2b'],resume:['resume','1a2b'],remove:['remove','1a2b'],add:['add','--cron','30 9 * * 1-5','--mode','new','--task','总结'],update:['update','1a2b','--task','新的']};
+  for(const op of Object.keys(text)){
+   assert.deepEqual(await schedule(bridge,args[op]),{code:0,out:text[op].join('\n')+'\n',err:''},op);
+   assert.deepEqual(await schedule(bridge,[...args[op],'--json']),{code:0,out:JSON.stringify(answers[op],null,2)+'\n',err:''},op);
+  }
+  // Each request: the operation in the path, JSON, the agent's pane and Herdr session; a new schedule without --tz takes the machine's time zone.
+  assert.deepEqual(bridge.requests.filter((r,i)=>i%2===0).map(r=>[r[0],r[1],r[2]]),Object.keys(text).map(op=>['POST','/schedules/'+op,'application/json']));
+  assert.deepEqual(bridge.requests.map(r=>r[3]).filter((r,i)=>i%2===0),[{pane:'w1:p1'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},
+   {pane:'w1:p1',cron:'30 9 * * 1-5',mode:'new',task:'总结',timeZone:'Asia/Shanghai'},{pane:'w1:p1',id:'1a2b',task:'新的'}]);
+  bridge.requests.length=0;
+  await schedule(bridge,['list','--machine','cpu2','--pane','w2:p3'],{env:{HERDR_SESSION:'work'}});await schedule(bridge,['add','--tz','UTC','--cron','0 9 * * *','--mode','into','--task','t']);
+  assert.deepEqual(bridge.requests.map(r=>r[3]),[{machine:'cpu2',pane:'w2:p3',session:'work'},{pane:'w1:p1',timeZone:'UTC',cron:'0 9 * * *',mode:'into',task:'t'}]);
+  // With --stdin the arguments come NUL-separated on stdin, before those on the command line, which take precedence.
+  bridge.requests.length=0;
+  assert.equal((await schedule(bridge,['--stdin','--machine','pinned'],{env:{HERDR_PANE_ID:''},stdin:['--machine','claimed','--pane','w9:p9','add','--cron','0 9 * * *','--mode','new','--task',"带 '引号'\n和换行",''].join('\0')})).code,0);
+  assert.deepEqual(bridge.requests.map(r=>r[3]),[{machine:'pinned',pane:'w9:p9',cron:'0 9 * * *',mode:'new',task:"带 '引号'\n和换行",timeZone:'Asia/Shanghai'}]);
+ }finally{await bridge.close();}
+});
+test('bridge-schedule prints what Bridge refused and exits 1, a usage error with the usage and exits 2, and says so when no Bridge listens on its machine',async()=>{
+ const bridge=await fakeBridge(()=>[400,{error:'定时任务不存在'}]);try{
+  assert.deepEqual(await schedule(bridge,['pause','x']),{code:1,out:'',err:'bridge-schedule: 定时任务不存在\n'});
+  for(const args of [[],['loop'],['list','--loop']]){const r=await schedule(bridge,args);assert.equal(r.code,2,args.join(' '));assert.match(r.err,/用法：\n  bridge-schedule add --cron/);}
+  const help=await schedule(bridge,['--help']);assert.equal(help.code,0);assert.match(help.out,/^用法：/);assert.deepEqual(bridge.requests.map(r=>r[1]),['/schedules/pause']);
+  const gone={dir:path.join(bridge.dir,'none')},r=await schedule(gone,['list']);
+  assert.deepEqual(r,{code:1,out:'',err:`bridge-schedule: 连不上 Bridge（${path.join(gone.dir,'agent.sock')}）：Bridge 没有运行，或者这台机器不是 Bridge 所在的机器\n`});
+  // A socket it may not open, as in the sandbox of an agent that forbids connections.
+  fs.chmodSync(bridge.socket,0);
+  if(process.getuid?.()!==0)assert.deepEqual(await schedule(bridge,['list']),{code:1,out:'',err:`bridge-schedule: 没有权限连接 Bridge（${bridge.socket}）：如果命令运行在 Agent 的沙箱里，需要在沙箱外运行这条命令\n`});
+ }finally{await bridge.close();}
+});
+// Runs program with args in env without blocking, so that a fake Bridge of this process can answer it; resolves to {status, stdout, stderr}.
+function spawned(program,args,env){
+ return new Promise((resolve,reject)=>{const p=spawn(program,args,{env});let stdout='',stderr='';p.stdout.on('data',d=>{stdout+=d;});p.stderr.on('data',d=>{stderr+=d;});p.on('error',reject);p.on('close',status=>resolve({status,stdout,stderr}));});
+}
+test('on a machine that Bridge reaches over SSH, bridge-schedule-ssh runs bridge-schedule on the Bridge host over ssh, with this machine\'s name, its agent\'s pane and the arguments on stdin, never on the remote command line',async()=>{
+ const bridge=await fakeBridge((op,body)=>body.id==='gone'?[400,{error:'定时任务不存在'}]:[200,{binding:{id:'b',name:'个人助手'},topicId:'t',schedules:[]}]);
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-ssh-agent-')),bin=path.join(dir,'bin'),home=path.join(dir,'bridge home'),args=path.join(dir,'args');
+ try{
+  // A fake ssh records its arguments and runs the remote command in its home, with what it reads on stdin; there bridge-schedule is installed.
+  fs.mkdirSync(bin);fs.mkdirSync(path.join(home,'.local','bin'),{recursive:true});
+  fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh',`printf '%s\\n' "$@" >> ${quote(args)}`,'for last; do :; done',`cd ${quote(home)} && HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
+  fs.writeFileSync(path.join(home,'.local','bin','bridge-schedule'),['#!/bin/sh',`BRIDGE_STATE=${quote(bridge.dir)} exec ${quote(process.execPath)} ${quote(path.join(path.dirname(fileURLToPath(import.meta.url)),'bin','bridge-schedule.mjs'))} "$@"`,''].join('\n'),{mode:0o700});
+  const wrapper=path.join(path.dirname(fileURLToPath(import.meta.url)),'bin','bridge-schedule-ssh'),task="带 '单引号' \"双引号\" $(id) `id` \\ 和\n换行";
+  const env={...Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_')&&!k.startsWith('BRIDGE_'))),PATH:bin+':'+process.env.PATH,BRIDGE_HOST:'bridge-host',BRIDGE_MACHINE:'cpu2',HERDR_PANE_ID:'w3:p2'};
+  const r=await spawned(wrapper,['add','--cron','0 9 * * *','--mode','new','--task',task,'--tz','UTC','--json'],env);
+  assert.equal(r.status,0,r.stderr);assert.deepEqual(JSON.parse(r.stdout),{binding:{id:'b',name:'个人助手'},topicId:'t',schedules:[]});
+  assert.deepEqual(bridge.requests.map(x=>x[3]),[{machine:'cpu2',pane:'w3:p2',cron:'0 9 * * *',mode:'new',task,timeZone:'UTC'}]);
+  const sent=fs.readFileSync(args,'utf8');assert.ok(!sent.includes('单引号'));assert.deepEqual(sent.trim().split('\n').slice(-2),['bridge-host','.local/bin/bridge-schedule --stdin']);
+  assert.match(sent,/BatchMode=yes/);
+  // What Bridge refuses comes back with its exit status; without the host or the machine name nothing runs.
+  const refused=await spawned(wrapper,['pause','gone'],env);assert.deepEqual([refused.status,refused.stdout,refused.stderr],[1,'','bridge-schedule: 定时任务不存在\n']);
+  bridge.requests.length=0;fs.writeFileSync(args,'');
+  const missing=await spawned(wrapper,['list'],{...env,BRIDGE_HOST:''});
+  assert.equal(missing.status,2);assert.match(missing.stderr,/BRIDGE_HOST 和 BRIDGE_MACHINE/);assert.equal(fs.readFileSync(args,'utf8'),'');
+ }finally{fs.rmSync(dir,{recursive:true});await bridge.close();}
+});
+test('the Claude skill for bridge-schedule carries the same instructions as the text for the global instructions of Codex and Antigravity, under a name and a description',()=>{
+ const dir=path.join(path.dirname(fileURLToPath(import.meta.url)),'agent-instructions'),skill=fs.readFileSync(path.join(dir,'skills','bridge-schedule','SKILL.md'),'utf8');
+ const [,front,body]=/^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(skill)||[];
+ assert.match(front,/^name: bridge-schedule\ndescription: \S.+$/);assert.equal(body,fs.readFileSync(path.join(dir,'bridge-schedule.md'),'utf8'));
+ // The instructions name the operations of the command as it takes them.
+ for(const line of usage.split('\n').filter(l=>l.startsWith('  bridge-schedule ')))assert.ok(body.includes(line.trim().split(' ').slice(0,2).join(' ')),line);
+});
 const minutes=n=>n*60000;
 function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-pending-')),store=new Store(dir),replies=[],bound=[],clock={now:1000};
@@ -2401,10 +2736,10 @@ test('channel startup and shutdown do not revive a cancelled connection',async()
  const store=new Store(dir),messages=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}}),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true};
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety.batch.text.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions, request cards, COT or the card of a worktree',async()=>{
+test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions, request cards, COT, the card of a worktree or a schedule waiting for confirmation',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
  fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'initialized'),'1');fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
- const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},createdAt:1};
+ const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},proposal:{id:'p1',kind:'add',fields:{mode:'new',cron:'0 9 * * *',timeZone:'UTC',task:'x'},messageId:'om_p',expiresAt:1},createdAt:1};
  const worktree={branch:'feat/x',path:'/src/r-worktrees/feat-x',root:'/src/r'};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
  const claude={id:'b-claude',name:'助手',appId:'x',machineId:'m',chatId:'oc_8',cwd:'~/work',kind:'claude',requireMention:false,enabled:true},codex={...claude,id:'b-codex',chatId:'oc_7',kind:'codex'},agy={...claude,id:'b-agy',chatId:'oc_6',kind:'agy'};
@@ -2422,7 +2757,7 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
   const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
   assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old','b-claude','b-codex','b-agy']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
-  const {messageIds,reactions,cards,cot,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards','cot'])assert.equal(key in s.topics[1],false,key);
+  const {messageIds,reactions,cards,cot,proposal,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards','cot','proposal'])assert.equal(key in s.topics[1],false,key);
   assert.deepEqual(s.topics[1].worktree,worktree);
   // Other fields sent along are ignored; a refused change keeps the saved bindings as they are.
   assert.deepEqual(await api('bindings/permission-mode',{id:'b-claude',permissionMode:'auto',name:'改名',cwd:'/etc',kind:'codex'}),{status:200,body:{ok:true}});
@@ -2440,7 +2775,7 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.equal((await api('machines/install',{id:machineId})).status,404);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
-test('the server hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; removing the binding turns off remote answers for its topic and removes its attachment directory',async()=>{
+test('the server hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; the topic\'s agent reaches it with bridge-schedule; removing the binding turns off remote answers for its topic and removes its attachment directory',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),calls=path.join(dir,'calls'),attachments=path.join(dir,'work','.herdr-bridge','t');
  const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',state_change_seq:2,reply_seq:1,request_ids:[1],remote_answers:true};
  fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
@@ -2464,10 +2799,29 @@ test('the server hands every refreshed agent list to the topics, which forward n
   assert.equal(s.topics[0].replySeq,1);assert.deepEqual(s.logs.filter(l=>['回复转发','消息表情','请求卡片'].includes(l.kind)).map(l=>[l.level,l.message]),[['error','助手：feishu-1 的回复未发出，飞书未连接'],['error','feishu-1：未能取消表情，飞书未连接'],['error','feishu-1：请求 #1 的卡片未发出，飞书未连接']]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).topics[0].reactions,[]);
   assert.deepEqual(fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('replies')||l.includes('requests')),['--session default agent replies w1:p1 --after 0','--session default agent requests w1:p1']);
+  // The agent of the topic reaches Bridge with bridge-schedule on the socket in the state directory, which only Bridge's user can open.
+  assert.equal(fs.statSync(path.join(state,'agent.sock')).mode&0o777,0o600);
+  const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_')&&!k.startsWith('BRIDGE_')));
+  const cli=(...args)=>spawned(process.execPath,[path.join(path.dirname(fileURLToPath(import.meta.url)),'bin','bridge-schedule.mjs'),...args],{...env,BRIDGE_STATE:state,HERDR_PANE_ID:'w1:p1'});
+  assert.deepEqual(await cli('list'),{status:0,stdout:'绑定「助手」上没有定时任务。\n',stderr:''});
+  // The app is not connected, so the card cannot be posted; another pane is no topic's agent.
+  assert.deepEqual(await cli('add','--cron','0 9 * * *','--mode','new','--task','x'),{status:1,stdout:'',stderr:'bridge-schedule: 确认卡片没有发出去，请稍后重试\n'});
+  assert.deepEqual(await cli('list','--pane','w1:p9'),{status:1,stdout:'',stderr:'bridge-schedule: 这个 pane 里的 Agent 不属于任何进行中的飞书话题：bridge-schedule 只能由飞书话题里的 Agent 运行\n'});
   const removed=await fetch(`http://127.0.0.1:${port}/api/bindings/remove`,{method:'POST',headers:{authorization:'Bearer '+key},body:JSON.stringify({id:'b'})});assert.equal(removed.status,200);
   const off=()=>fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('remote-answers'));for(let i=0;i<100&&!off().length;i++)await later(50);
   assert.deepEqual(off(),['--session default pane remote-answers w1:p1 off']);assert.deepEqual((await api('state')).topics,[]);
   for(let i=0;i<100&&fs.existsSync(attachments);i++)await later(50);assert.equal(fs.existsSync(attachments),false);assert.ok(fs.existsSync(path.dirname(attachments)));
+ }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
+});
+test('the server runs without the agent socket when it cannot open it, such as in a state directory too long for a socket path, and logs why',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'s'.repeat(120));fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
+ const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
+ const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1'},stdio:['ignore','pipe','inherit']});
+ try{
+  await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async()=>(await fetch(`http://127.0.0.1:${port}/api/state`,{headers:{authorization:'Bearer '+key}})).json();
+  let s;for(let i=0;i<100;i++){s=await api();if(s.logs.some(l=>l.kind==='定时任务'))break;await later(50);}
+  assert.deepEqual(s.logs.filter(l=>l.kind==='定时任务').map(l=>[l.level,l.message.split('，')[0]]),[['error','Agent 的请求接口没有打开']]);assert.equal(server.exitCode,null);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
 test('the server refuses to start with a BRIDGE_URL that is not an http(s) origin',async()=>{

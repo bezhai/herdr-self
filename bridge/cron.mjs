@@ -83,5 +83,48 @@ export function upcoming(c,timeZone,after,count){
  const out=[];for(let t=after;out.length<count&&(t=next(c,timeZone,t))!=null;)out.push(t);return out;
 }
 const pad=n=>String(n).padStart(2,'0');
-// Instant ms as the wall time of timeZone, such as 2026-11-09 09:30.
-export function when(ms,timeZone){const [year,month,day,hour,minute]=wall(ms,timeZone);return `${year}-${pad(month)}-${pad(day)} ${pad(hour)}:${pad(minute)}`;}
+const weekdays=['日','一','二','三','四','五','六'];
+// Instant ms as the wall time of timeZone, such as 2026-11-09 09:30, or with weekday 2026-11-09 周一 09:30.
+export function when(ms,timeZone,{weekday=false}={}){
+ const [year,month,day,hour,minute]=wall(ms,timeZone),date=`${year}-${pad(month)}-${pad(day)}`;
+ return `${date} ${weekday?'周'+weekdays[new Date(Date.UTC(year,month-1,day)).getUTCDay()]+' ':''}${pad(hour)}:${pad(minute)}`;
+}
+// values (ascending) in words joined by 、, three or more consecutive ones as a range from one to the other joined by to.
+function spans(values,name=String,to=' 至 '){
+ const out=[];
+ for(let i=0;i<values.length;){
+  let j=i;while(j+1<values.length&&values[j+1]===values[j]+1)j++;
+  if(j-i>=2)out.push(name(values[i])+to+name(values[j]));else for(let k=i;k<=j;k++)out.push(name(values[k]));
+  i=j+1;
+ }
+ return out.join('、');
+}
+// The step of values (ascending, of a field from min to max) when they are every step-th value of the field from the first, the first
+// below step, and step divides the field, so that the step holds across the end of the field too: */5 in minutes, 2/5, */2 in hours. 0 else.
+function step(values,min,max){
+ const s=values[1]-values[0];
+ return values.length>1&&values[0]-min<s&&(max-min+1)%s===0&&values.every((v,i)=>v===values[0]+i*s)&&values.at(-1)+s>max?s:0;
+}
+const consecutive=values=>values.every((v,i)=>!i||v===values[i-1]+1);
+const sorted=set=>[...set].sort((x,y)=>x-y);
+// The days of cron c in words: every day, the days of month, the days of week (Monday first), or both, within the months it names.
+function days(c){
+ const month=c.months.size<12,dom=c.days.size<31,dow=c.weekdays.size<7,within=month?`每年 ${spans(sorted(c.months))} 月的`:'';
+ const dates=`${month?' ':'每月 '}${spans(sorted(c.days))} 日`,week=spans(sorted(new Set([...c.weekdays].map(d=>d||7))),d=>'周'+weekdays[d%7],'至');
+ // Both restricted and neither starting with *: either one, so one that names every day makes it every day (see runsOn).
+ const either=!c.anyDay&&!c.anyWeekday;
+ return within+(either&&!(dom&&dow)?'每天':dom&&dow?(either?`${dates}和每${week}`:`${dates}中的${week}`):dom?dates:dow?'每'+week:'每天');
+}
+// The times of day of cron c in words: up to six times as such, a step of minutes or hours, once an hour, or else the hours and minutes.
+function times(c){
+ const {minutes:m,hours:h}=c,ms=step(m,0,59),hs=m.length===1&&step(h,0,23);
+ if(m.length*h.length<=6)return h.flatMap(x=>m.map(y=>`${pad(x)}:${pad(y)}`)).join('、');
+ if(ms&&h.length===24)return `每 ${ms} 分钟${m[0]?`（每小时第 ${m[0]} 分钟起）`:''}`;
+ if(ms&&consecutive(h))return `${pad(h[0])}:${pad(m[0])} 至 ${pad(h.at(-1))}:${pad(m.at(-1))} 每 ${ms} 分钟`;
+ if(hs===1)return m[0]?`每小时第 ${m[0]} 分钟`:'每小时整点';
+ if(hs)return `每 ${hs} 小时，从 ${pad(h[0])}:${pad(m[0])} 起`;
+ if(m.length===1&&consecutive(h))return `${pad(h[0])}:${pad(m[0])} 至 ${pad(h.at(-1))}:${pad(m[0])} 每小时一次`;
+ return `${spans(h)} 点的第 ${spans(m)} 分钟`;
+}
+// Cron c in plain words, such as 每周一至周五 09:30 or 每 5 分钟, for a person to check against what they asked for (see schedule-cards.mjs).
+export function phrase(c){const d=days(c),t=times(c);return d==='每天'&&t.startsWith('每')?t:`${d} ${t}`;}

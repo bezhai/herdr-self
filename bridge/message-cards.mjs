@@ -15,6 +15,8 @@ export const linkNotice=(text,url)=>untitled(text,[plain(text),{tag:'markdown',c
 const maxBytes=28000;
 // The bytes of x as that content field: serialized, then serialized again as a string inside the body.
 const size=x=>Buffer.byteLength(JSON.stringify(JSON.stringify(x)));
+// Whether card fits one message.
+export const fits=card=>size(card)<=maxBytes;
 // What string s adds to that size where a card holds it. Serializing escapes each character on its own and a surrogate pair as a whole,
 // so the costs of pieces that split no pair add up to the cost of the whole.
 const cost=s=>size(s)-6;

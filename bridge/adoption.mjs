@@ -6,7 +6,7 @@ import {slash} from './commands.mjs';
 // Agent states as the console labels them.
 const statuses={idle:'空闲',working:'运行中',blocked:'等待确认',done:'已完成',unknown:'未知'};
 // The kinds that bindings start, named as in the console; other agents go by what Herdr calls them.
-const kinds={claude:'Claude',codex:'Codex',agy:'Antigravity'};
+export const kinds={claude:'Claude',codex:'Codex',agy:'Antigravity'};
 // A path under a home directory starts with ~. Display only: the machine's home is not known, so the usual home locations count, also
 // below a mount point such as /data00/home/<user>.
 export const home=path=>path.replace(/^(?:.*?\/home\/[^/]+|\/Users\/[^/]+|\/root)(?=\/|$)/,'~');

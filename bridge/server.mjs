@@ -1,12 +1,13 @@
-import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';import {fileURLToPath} from 'node:url';
-import {Store,normalizeMachine,herdr,exec,makeDirectory,storeFile,removeDirectory,publicText} from './core.mjs';
+import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';
+import {Store,normalizeMachine,herdr,exec,makeDirectory,storeFile,removeDirectory,publicText,stateDir,agentSocket} from './core.mjs';
 import {Platforms,normalizeApp,setPermissionMode} from './platform.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';
 import {Topics} from './topics.mjs';
 import {Schedules} from './schedules.mjs';
+import {AgentSchedules} from './agent-schedules.mjs';
 import {staticFile,sendStatic} from './web-assets.mjs';
-const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),root=path.dirname(fileURLToPath(import.meta.url)),dir=process.env.BRIDGE_STATE||path.join(root,'state'),store=new Store(dir),live=new Map(),refreshes=new Map();
+const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Store(dir),live=new Map(),refreshes=new Map();
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map(),attempts=new Map();
 if(!store.data.machines.length&&!fs.existsSync(path.join(dir,'initialized'))){store.data.machines.push(normalizeMachine({name:'本机',type:'local',session:'default',enabled:true}));store.save();fs.writeFileSync(path.join(dir,'initialized'),'1');}
 function machine(id){const m=store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;}
@@ -17,7 +18,7 @@ async function refresh(m){if(refreshes.has(m.id))return refreshes.get(m.id);cons
  topics.sync(m,agents);
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
 const topics=new Topics(store,{herdr,exec,makeDirectory,storeFile,removeDirectory,download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
-const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>pending.open(...args),onCardAction:(...args)=>topics.click(...args)}),registrations=new Registrations(store,{connect:async a=>{
+const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>pending.open(...args),onCardAction:(a,evt)=>(evt.action?.value?.schedule?agentSchedules:topics).click(a,evt)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
  if(!a.enabled||platforms.status(a).connection!=='connected'){await platforms.start(a);a.enabled=true;store.save();}
  for(let i=0;i<20;i++){if(platforms.status(a).connection==='connected')return true;await new Promise(r=>setTimeout(r,750));}
@@ -25,7 +26,8 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 }});
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
-function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(m=>({...m,...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
+const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
+function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(m=>({...m,...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
 function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
@@ -58,7 +60,18 @@ const server=http.createServer(async(req,res)=>{try{
  else return json(res,404,{error:'接口不存在'});
  return json(res,200,result);
  }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});
+// The requests of agents (see AgentSchedules and bin/bridge-schedule.mjs), on a Unix socket in the state directory instead of the console's
+// port: only processes of Bridge's own user can open it, it is never on the network nor behind a proxy in front of the console, and no
+// browser can send to it. Agents on other machines reach it over ssh (see bin/bridge-schedule-ssh). A socket left by a previous run goes.
+const socket=agentSocket(dir),agents=http.createServer(async(req,res)=>{try{
+ const op=/^\/schedules\/([a-z]+)$/.exec(new URL(req.url,'http://localhost').pathname)?.[1];
+ if(req.method!=='POST'||!op)return json(res,404,{error:'接口不存在'});
+ json(res,200,await agentSchedules.call(op,await body(req)));
+ }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});
 const poll=setInterval(()=>{for(const m of store.data.machines)if(m.enabled)refresh(m);},5000);
-for(const m of store.data.machines)if(m.enabled)refresh(m);for(const a of store.data.apps)if(a.enabled)platforms.start(a).catch(e=>store.log('平台连接',a.name+'：'+e.message,'error'));schedules.start();
+for(const m of store.data.machines)if(m.enabled)refresh(m);for(const a of store.data.apps)if(a.enabled)platforms.start(a).catch(e=>store.log('平台连接',a.name+'：'+e.message,'error'));schedules.start();agentSchedules.start();
+// Without it Bridge runs on, and only bridge-schedule fails.
+agents.on('error',e=>store.log('定时任务',`Agent 的请求接口没有打开，${socket}：${e.message}`,'error'));
+fs.rmSync(socket,{force:true});agents.listen(socket,()=>fs.chmodSync(socket,0o600));
 server.listen(Number(process.env.PORT||8080),process.env.BIND||'0.0.0.0',()=>console.log('herdr-bridge listening on '+(process.env.PORT||8080)));
-process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});
+process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();agentSchedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);agents.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});

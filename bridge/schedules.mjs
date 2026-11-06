@@ -7,7 +7,7 @@ import {titleOf} from './attachments.mjs';
 // its time zone (see cron.mjs) a schedule either opens a new topic for its task (mode new: the bot posts the run's card into the chat and
 // the topic opens under it, see Topics.begin) or gives its task to the agent of one topic of the binding, as a person's message in its
 // thread would (mode into). Bridge only decides when and where; what the task means is the agent's.
-const modes={new:'每次开新话题',into:'发进话题'};
+export const modes={new:'每次开新话题',into:'发进话题'};
 // The latest time due runs only when it is at most this late; the times before it, which only a Bridge that was down leaves, are missed.
 const grace=2*3600000;
 // Mode new keeps the topics of its latest runs, and of the older runs those in which a person wrote within the quiet time (see prune).
@@ -16,7 +16,8 @@ const kept=3,quiet=24*3600000;
 const history=20;
 // The longest task: as long as a message that a person can prompt an agent with (see forwardable in platform.mjs).
 const taskLimit=16000;
-const short=s=>s.id.slice(0,8);
+// What cards and logs call schedule s: the first 8 characters of its id, which bridge-schedule also takes (see AgentSchedules).
+export const short=s=>s.id.slice(0,8);
 const brief=e=>publicText(e?.message).split('\n')[0].slice(0,200);
 const busyReason='上次还没结束，跳过',endedReason='话题已结束，定时任务已暂停',unboundReason='绑定已移除，定时任务已暂停',missedReason='Bridge 停机，错过';
 // Whether an agent of an agent list works or waits for a confirmation.
