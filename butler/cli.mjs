@@ -1,8 +1,9 @@
 #!/usr/bin/env -S node --disable-warning=ExperimentalWarning
 // butler's command line: runs the collector and the processor (with the bot, the grading and the daily read), and is
 // how the agent I talk to butler through (see cards.mjs AGENT_GROUP) works butler, over ssh: it shows the status, what
-// was collected, the matters made of it, 关于TA and my notes; sets chat levels and has the model grade chats; closes
-// and reopens matters; keeps my notes and the ignored-sender list; and creates and updates the bot's Feishu app. Every
+// was collected, a chat's messages, the matters made of it, the daily read's topics, 关于TA and my notes; sets chat
+// levels and has the model grade chats; closes and reopens matters; keeps my notes, my corrections of the daily read
+// and the ignored-sender list; and creates and updates the bot's Feishu app. Every
 // command that reads prints the store's records as JSON with --json, and every one that writes prints what it changed,
 // before and after, in words or with --json as JSON: the agent reads the one and tells me the other.
 import {parseArgs} from 'node:util';
@@ -13,7 +14,7 @@ import {Matters} from './matters.mjs';
 import {Processor,DEFAULTS as PROCESSOR} from './processor.mjs';
 import {HerdrModel} from './herdr-model.mjs';
 import {Grader} from './grader.mjs';
-import {Reader} from './reading.mjs';
+import {Reader,dayOf,startOf,nextDay} from './reading.mjs';
 import {Topics} from './topics.mjs';
 import {find} from './lookup.mjs';
 import {Digests,digestStatus,endReason} from './digest.mjs';
@@ -31,13 +32,31 @@ const feishu=async()=>({...await import('./bot.mjs'),...await import('./bot-app.
 const HELP=`用法：butler [--config 配置文件] <命令> [选项]
 
 读的命令加 --json 时输出存储里的记录（JSON）；写的命令打印改了什么（原来 → 现在），加 --json 时输出每个改动的
-before 和 after（没有时是 null）。
+before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时是那天 0 点）或 30m、2h、7d 这样的相对时间（多久以前）；
+日期写 2026-11-06 这样的本地日期。
 
   run                              运行收集器（常驻，作为用户服务运行）
   status [--json]                  收集器状态：推送、对账、open-lark 同步、各类消息数量，加工端、分级、每日读取和机器人，最近的错误
   list [--category 类别] [--since 时间] [--until 时间] [--limit 条数] [--json]
-                                   按类别和时间列出收到的消息，新的在前
-                                   类别：${CATEGORIES.join(' ')}；时间：ISO 时间，或 30m、2h、7d 这样的相对时间
+                                   按类别和时间列出收到的消息，新的在前，正文只显示一行
+                                   类别：${CATEGORIES.join(' ')}
+  messages <聊天名或 id> [--day 日期] [--since 时间] [--until 时间] [--search 文字] [--limit 条数] [--json]
+                                   一个聊天的原始消息，从早到晚，正文完整，每条带链接：--day 是一整天，--search 只列正文里
+                                   有这段文字的，多于 --limit 条（默认 100）时列最近的那些。还没有话题的消息（今天的、
+                                   不读的聊天的）用它读；忽略名单上的发送方的消息也列出
+  topics [<聊天名或 id>] [--day 日期] [--since 时间] [--until 时间] [--search 文字] [--picked | --not-picked] [--limit 条数] [--json]
+                                   每日读取拆出的话题，新的日子在前：编号、日子、聊天、标题、要点、工作还是兴趣、挑没挑和
+                                   理由、消息数、第一条消息的链接，有纠正时带上最新的一条。--since 和 --until 选那段时间里的
+                                   日子，--search 找标题、要点和消息里的文字，--picked 只列挑出的、--not-picked 只列没挑的
+                                   （纠正过的按我的纠正），默认最多 50 个。每天早上读完前一天才有话题，只读每日和即时的聊天
+  corrections [list] [--json]      我对每日读取挑没挑的纠正：编号、哪个话题（或哪个聊天哪一天）、我说的、我的原话
+  corrections pick <话题编号> <我的原话> [--json]
+                                   这个话题该挑，按我的原话记下；模型挑没挑照旧留着，纠正另外记
+  corrections unpick <话题编号> <我的原话> [--json]
+                                   这个话题不该挑
+  corrections missed <聊天名或 id> <日期> <我的原话> [--json]
+                                   这个聊天这一天有该挑的事，却没有拆成话题（先用 topics 看没挑的话题里有没有它）
+  corrections remove <编号> [--json]  删掉一条纠正（我说错了或者记错了时），话题回到上一条纠正或模型的判断
   groups [--search 文字] [--json]   列出我所在的群（级别、名称、人数、最近活跃）
   level [list] [--json]            有级别的聊天：级别、谁定的、从什么时候开始、理由
   level set <级别> <聊天名或 id>... [--reason 文字] [--json]
@@ -96,11 +115,30 @@ function number(value,what){
  return Number(m[1]);
 }
 
+// A day as I write it, 2026-11-06, a local one (see reading.mjs dayOf).
+function day(value,what){
+ if(!/^\d{4}-\d\d-\d\d$/.test(value??'')||dayOf(startOf(value))!==value)throw new UsageError(`${what}要写 2026-11-06 这样的日期${value===undefined?'':`，不是 ${value}`}`);
+ return value;
+}
+// A time as I write it: an ISO time, a date alone, which is that day's local midnight (Date.parse would take UTC's), or
+// how long ago, 30m, 2h, 7d.
 function parseTime(value,flag){
  if(value===undefined)return undefined;
  const m=/^(\d+)([mhd])$/.exec(value);
  if(m)return Date.now()-Number(m[1])*{m:60e3,h:3600e3,d:86400e3}[m[2]];
+ if(/^\d{4}-\d\d-\d\d$/.test(value))return startOf(day(value,`${flag} `));
  const t=Date.parse(value);if(Number.isNaN(t))throw new UsageError(`${flag} 的时间格式不对：${value}`);return t;
+}
+// The span a read command looks at, since up to until (ms, either open): a whole day with --day, else --since and
+// --until.
+function span(values){
+ if(values.day===undefined)return {since:parseTime(values.since,'--since'),until:parseTime(values.until,'--until')};
+ if(values.since!==undefined||values.until!==undefined)throw new UsageError('--day 是一整天，不能和 --since、--until 一起用');
+ const d=day(values.day,'--day ');return {since:startOf(d),until:startOf(nextDay(d))};
+}
+function limitOf(value,fallback){
+ const n=value===undefined?fallback:Number(value);if(!Number.isInteger(n)||n<1)throw new UsageError('--limit 要是正整数');
+ return n;
 }
 
 function printStatus(s){
@@ -169,13 +207,45 @@ function printProfile(profile,notes){
 // What a note does once it is added or removed: the processor and grading find it in the store.
 const NOTE_EFFECT='加工端下一轮会按说明重写「关于TA」，再把未结束的事项整理一遍；说明一小时内不再变时，分级的模型重新给聊天分级';
 
+// What a message's text does not say: recalled, edited, unreadable, @all, mine.
+function marks(r){
+ const flags=[r.isRecalled&&'已撤回',r.isEdited&&'已编辑',r.unreadable&&'内容不可读',r.mentionsAll&&'@所有人',r.isMine&&'我发的'].filter(Boolean);
+ return flags.length?`（${flags.join('，')}）`:'';
+}
 function printRecords(records){
  if(!records.length){console.log('没有符合条件的消息');return;}
- for(const r of records){
-  const flags=[r.isRecalled&&'已撤回',r.isEdited&&'已编辑',r.unreadable&&'内容不可读',r.mentionsAll&&'@所有人',r.isMine&&'我发的'].filter(Boolean);
-  const text=r.text.replace(/\s+/g,' ').slice(0,200);
-  console.log(`${time(r.createdAt)}  [${r.categories.join(',')}]  ${r.chatName||r.chatId} · ${r.senderName??r.senderId}：${text}${flags.length?`（${flags.join('，')}）`:''}\n  ${r.link}`);
+ for(const r of records)console.log(`${time(r.createdAt)}  [${r.categories.join(',')}]  ${r.chatName||r.chatId} · ${r.senderName??r.senderId}：${r.text.replace(/\s+/g,' ').slice(0,200)}${marks(r)}\n  ${r.link}`);
+}
+// A chat's messages (see Matters.chatMessages), to be read as the conversation they are: whole, oldest first.
+function printMessages(chat,{since,until,search},total,records){
+ const bounds=[since!==undefined&&`${time(since)} 起`,until!==undefined&&`${time(until)} 前`].filter(Boolean);
+ const head=`${chat.name||chat.feedId}${bounds.length?`（${bounds.join('，')}）`:''}${search?`含「${search}」的`:'的'}消息`;
+ if(!total){console.log(`${head}：没有`);return;}
+ console.log(`${head}：共 ${total} 条${total>records.length?`，下面是最近的 ${records.length} 条`:''}，从早到晚：`);
+ for(const r of records)console.log(`${time(r.createdAt)}  ${r.senderName??r.senderId}：${r.text.replace(/\s+/g,' ').trim()}${marks(r)}\n  ${r.link}`);
+}
+
+// The daily read's topics (see topics.mjs) and my corrections of its picks.
+const AREA={work:'工作',interest:'兴趣',other:'其他'};
+const SAID={pick:'该挑',unpick:'不该挑',missed:'漏挑'};
+// Where a topic's pick stands: as my latest correction says, else as the model picked.
+const judged=t=>t.correction?`我说${SAID[t.correction.kind]}（纠正 #${t.correction.id}）`:t.picked?'模型挑出':'模型没挑';
+// A topic by its number and title; where a topic or a correction is: its chat and day.
+const topicName=t=>`话题 #${t.id} ${t.title}`,place=t=>`${t.chatName??t.chatId} ${t.day}`;
+function printTopics(list,total){
+ if(!list.length){console.log('没有符合条件的话题。话题在每天早上读完前一天以后才有，只读每日和即时级别的聊天；今天的消息和不读的聊天，用 butler messages 读原始消息');return;}
+ for(const t of list){
+  const k=t.correction;
+  console.log(`#${t.id} ${t.day} ${t.chatName??t.chatId}：${t.title}（${t.picked?'挑出':'没挑'} · ${AREA[t.area]??t.area}）\n  ${t.summary}\n  理由：${t.reason??'—'} · ${t.messageIds.length} 条消息${
+   k?`\n  我的纠正 #${k.id}（${time(k.at)}）：${SAID[k.kind]}：${k.words}`:''}\n  ${t.link??''}`);
  }
+ if(total>list.length)console.log(`共 ${total} 个话题，只列出了 ${list.length} 个：缩小范围，或者用 --limit 列出更多`);
+}
+// A correction: what it is about, what I said and my words.
+const described=k=>`${k.topic?`${topicName(k.topic)}（${place(k.topic)}，${k.topic.picked?'模型挑出':'模型没挑'}）`:`${place(k)} `}${SAID[k.kind]}：${k.words}`;
+function printCorrections(list){
+ if(!list.length){console.log('还没有纠正。我说话题挑错了、漏挑了时，用 butler corrections pick、unpick 或 missed 按我的原话记下');return;}
+ for(const k of list)console.log(`#${k.id} ${described(k)}（${time(k.at)}）`);
 }
 
 // Every group I am in, from open-lark's conversation list, into the store's chat table.
@@ -216,7 +286,8 @@ function printMatters(list,all){
 async function main(argv){
  process.umask(0o077);
  const {values,positionals}=parseArgs({args:argv,allowPositionals:true,options:{config:{type:'string'},json:{type:'boolean'},once:{type:'boolean'},all:{type:'boolean'},category:{type:'string'},
-  since:{type:'string'},until:{type:'string'},limit:{type:'string'},search:{type:'string'},name:{type:'string'},reason:{type:'string'},help:{type:'boolean',short:'h'}}});
+  since:{type:'string'},until:{type:'string'},day:{type:'string'},limit:{type:'string'},search:{type:'string'},picked:{type:'boolean'},'not-picked':{type:'boolean'},
+  name:{type:'string'},reason:{type:'string'},help:{type:'boolean',short:'h'}}});
  const [command,...rest]=positionals;
  if(values.help||!command){console.log(HELP);return 0;}
  // A reason given where none is kept would be lost without a word.
@@ -315,9 +386,66 @@ async function main(argv){
    }
    case 'list':{
     if(values.category&&!CATEGORIES.includes(values.category))throw new UsageError(`没有这个类别：${values.category}（可选 ${CATEGORIES.join(' ')}）`);
-    const limit=values.limit===undefined?50:Number(values.limit);if(!Number.isInteger(limit)||limit<1)throw new UsageError('--limit 要是正整数');
-    const records=store.list({category:values.category,since:parseTime(values.since,'--since'),until:parseTime(values.until,'--until'),limit});
+    const records=store.list({category:values.category,since:parseTime(values.since,'--since'),until:parseTime(values.until,'--until'),limit:limitOf(values.limit,50)});
     if(values.json)console.log(JSON.stringify(records,null,1));else printRecords(records);return 0;
+   }
+   // A chat's own messages, whole, as they were said: what has no topics (today's, a chat that is not read), or what a
+   // topic leaves out. Not list: that is the newest first, by category, a line each.
+   case 'messages':{
+    if(rest[0]===undefined)throw new UsageError('messages 需要聊天名或 id');if(rest.length>1)throw new UsageError('messages 只能写一个聊天');
+    const chat=pick(store.chats(),rest[0],CHATS),{since,until}=span(values),search=values.search||undefined;
+    const {total,records}=matters.chatMessages(chat.feedId,{since,until,search,limit:limitOf(values.limit,100)});
+    if(values.json)json(records);else printMessages(chat,{since,until,search},total,records);return 0;
+   }
+   // The daily read's topics: the days a span takes in are those that start before it ends and end after it starts.
+   case 'topics':{
+    if(rest.length>1)throw new UsageError('topics 只能写一个聊天');
+    if(values.picked&&values['not-picked'])throw new UsageError('--picked 和 --not-picked 只能用一个');
+    const topics=new Topics(store),chat=rest[0]===undefined?undefined:pick(store.chats(),rest[0],CHATS),{since,until}=span(values);
+    const filter={feedId:chat?.feedId,from:since===undefined?undefined:dayOf(since),to:until===undefined?undefined:dayOf(until-1),
+     picked:values.picked?true:values['not-picked']?false:undefined,search:values.search||undefined};
+    const list=topics.list(filter,limitOf(values.limit,50));
+    if(values.json)json(list);else printTopics(list,topics.count(filter));return 0;
+   }
+   // My corrections of the daily read's picks, in my own words (see Topics corrections). On a topic: before and after
+   // are the topic, whose latest correction is what I say of it; on a missed topic, and removed, the correction.
+   case 'corrections':{
+    const [action,...args]=rest,topics=new Topics(store);
+    if(action==='list'||action===undefined){const list=topics.corrections();if(values.json)json(list);else printCorrections(list);return 0;}
+    if(action==='pick'||action==='unpick'){
+     const id=number(args[0],`corrections ${action} 的话题`),before=topics.topic(id);
+     if(!before)throw new UsageError(`没有 #${id} 这个话题（butler topics 列出话题）`);
+     const text=words(args.slice(1).join(' '),'我的原话'),k=before.correction,what=`${topicName(before)}（${place(before)}）`;
+     // Already as I say: in a correction in the same words, or, with none, as the model picked it.
+     if(k?k.kind===action&&k.words===text:before.picked===(action==='pick')){
+      if(values.json)json({before,after:before});
+      else console.log(k?`${what}：已经记过同样的纠正 #${k.id}，没有改动`:`${what}：模型${before.picked?'已经挑出了它':'本来就没挑它'}，不用纠正，没有改动`);
+      return 0;
+     }
+     topics.addCorrection({kind:action,topicId:id,words:text});const after=topics.topic(id);
+     if(values.json)json({before,after});else console.log(`${what}：${judged(before)} → ${judged(after)}：${text}`);
+     return 0;
+    }
+    if(action==='missed'){
+     const [query,date,...said]=args;if(query===undefined)throw new UsageError('corrections missed 需要聊天名或 id、日期和我的原话');
+     const chat=pick(store.chats(),query,CHATS),d=day(date,'corrections missed 的日期'),text=words(said.join(' '),'我的原话'),name=chat.name||chat.feedId;
+     if(d>=dayOf(Date.now()))throw new UsageError(`${d} 还没有读：每天早上才读前一天，今天的话题明天才有`);
+     const same=topics.corrections().find(k=>k.kind==='missed'&&k.chatId===chat.feedId&&k.day===d&&k.words===text);
+     if(same){if(values.json)json({before:same,after:same});else console.log(`${name} ${d}：已经记过同样的纠正 #${same.id}，没有改动`);return 0;}
+     // Recorded all the same: what I said is still what I want picked.
+     const warning=topics.reading(d,chat.feedId)?undefined:`注意：每日读取没有读过 ${name} 在 ${d} 的消息（只读那天结束时级别是每日或即时的聊天），纠正照样记下；要它以后每天被读，用 butler level set daily ${name}`;
+     const id=topics.addCorrection({kind:'missed',feedId:chat.feedId,day:d,words:text}),after=topics.correction(id);
+     if(values.json){json({before:null,after,...warning&&{warning}});return 0;}
+     console.log(`${name} ${d}：记下漏挑（纠正 #${id}）：${text}`);if(warning)console.log(warning);
+     return 0;
+    }
+    if(action==='remove'){
+     const id=number(args[0],'corrections remove '),before=topics.removeCorrection(id);
+     if(!before)throw new UsageError(`没有纠正 #${id}（butler corrections 列出纠正）`);
+     if(values.json)json({before,after:null});else console.log(`已删除纠正 #${id}：${described(before)}${before.topic?`；这个话题现在：${judged(topics.topic(before.topicId))}`:''}`);
+     return 0;
+    }
+    throw new UsageError(`corrections 没有这个操作：${action}`);
    }
    case 'groups':{
     await refreshGroups(store,openLark());

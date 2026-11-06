@@ -6,6 +6,7 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {setup,waitFor,sleep,post,LINK_BASE} from './helpers.mjs';
 import {Matters,NOT_MINE} from '../matters.mjs';
+import {Topics} from '../topics.mjs';
 import {Processor} from '../processor.mjs';
 import {Grader} from '../grader.mjs';
 import {Digests} from '../digest.mjs';
@@ -251,6 +252,134 @@ test('notes: my notes in my words, listed, added and removed by number; one from
  r=await cli(config,'profile');assert.match(r.stdout,/notes add/,'where notes come from now');assert.doesNotMatch(r.stdout,/私聊/);
 });
 
+// A local time of a day (YYYY-MM-DD), hh:mm, and as the command line prints it.
+const on=(day,hm)=>{const [h,m]=hm.split(':').map(Number);return startOf(day)+h*3600e3+m*60e3;};
+const shown=ms=>new Date(ms).toLocaleString('sv-SE');
+// Someone else's message in chat that the collector only kept.
+const said=(store,chat,text,day,hm,more)=>post(store,{chat,sender:'u5',name:'王五',text,at:on(day,hm),categories:['stored'],...more});
+// Topics the daily read made of a day, as it stores them (created: each feedId, title, summary, area, picked, reason,
+// messageIds), and the chats it read that day; returns their numbers.
+const made=(topics,day,created,read=[])=>topics.apply({day,created,read:read.map(feedId=>({feedId,level:'daily',messages:1,done:true}))});
+// The topic numbers a topics listing shows, in order.
+const numbered=out=>[...out.matchAll(/^#(\d+) /gm)].map(x=>Number(x[1]));
+
+test('topics lists the daily read\'s topics by chat, by day or days, by words and by pick, the latest day first, each with its link',async t=>{
+ const {lark,store,dir}=await setup(t),config=writeConfig(dir,lark),topics=new Topics(store);
+ const m1=said(store,'g1','接口方案评审定在周五','2026-11-03','10:00'),m2=post(store,{chat:'g1',mine:true,text:'我会准备材料',at:on('2026-11-03','10:05'),categories:['own']});
+ const m3=said(store,'g1','中午吃啥','2026-11-04','12:00'),m4=said(store,'g2','GEO 数据周报出来了','2026-11-04','09:00'),m5=said(store,'g2','周报里提到 Redis 迁移','2026-11-04','09:10');
+ const m6=said(store,'g2','周六团建去爬山','2026-11-05','15:00');
+ const [a]=made(topics,'2026-11-03',[{feedId:'g1',title:'接口方案评审',summary:'评审定在周五，TA准备材料',area:'work',picked:true,reason:'TA负责的接口',messageIds:[m1,m2]}]);
+ const [b,c]=made(topics,'2026-11-04',[{feedId:'g1',title:'午饭',summary:'中午吃什么',area:'other',picked:false,reason:'闲聊',messageIds:[m3]},
+  {feedId:'g2',title:'GEO 周报',summary:'本周的数据',area:'work',picked:false,reason:'例行通知',messageIds:[m4,m5]}]);
+ const [d]=made(topics,'2026-11-05',[{feedId:'g2',title:'团建',summary:'周六去爬山',area:'interest',picked:true,reason:'TA喜欢爬山',messageIds:[m6]}]);
+ let r=await cli(config,'topics');assert.equal(r.code,0,r.stderr);
+ assert.deepEqual(numbered(r.stdout),[d,b,c,a],'the latest day first, in the order made within a day');
+ assert.ok(r.stdout.includes(`#${a} 2026-11-03 项目群：接口方案评审（挑出 · 工作）\n  评审定在周五，TA准备材料\n  理由：TA负责的接口 · 2 条消息\n  ${store.message(m1).link}\n`),r.stdout);
+ assert.ok(r.stdout.includes(`#${c} 2026-11-04 大群：GEO 周报（没挑 · 工作）\n`),r.stdout);assert.ok(r.stdout.includes(`#${d} 2026-11-05 大群：团建（挑出 · 兴趣）\n`),r.stdout);
+ assert.doesNotMatch(r.stdout,/共 \d+ 个话题/,'all of them are listed');
+ r=await cli(config,'topics','项目群');assert.equal(r.code,0,r.stderr);assert.deepEqual(numbered(r.stdout),[b,a]);
+ r=await cli(config,'topics','--day','2026-11-04');assert.deepEqual(numbered(r.stdout),[b,c]);
+ r=await cli(config,'topics','--since','2026-11-04','--until','2026-11-05');assert.deepEqual(numbered(r.stdout),[b,c],'the days that start before until');
+ r=await cli(config,'topics','--since','2026-11-04');assert.deepEqual(numbered(r.stdout),[d,b,c]);
+ r=await cli(config,'topics','g2','--since','2026-11-04');assert.deepEqual(numbered(r.stdout),[d,c]);
+ r=await cli(config,'topics','--search','redis');assert.deepEqual(numbered(r.stdout),[c],'the words of its messages too, in any case');
+ r=await cli(config,'topics','--search','评审');assert.deepEqual(numbered(r.stdout),[a]);r=await cli(config,'topics','--search','爬山');assert.deepEqual(numbered(r.stdout),[d]);
+ r=await cli(config,'topics','--picked');assert.deepEqual(numbered(r.stdout),[d,a]);r=await cli(config,'topics','--not-picked');assert.deepEqual(numbered(r.stdout),[b,c]);
+ r=await cli(config,'topics','--limit','1');assert.deepEqual(numbered(r.stdout),[d]);assert.match(r.stdout,/共 4 个话题，只列出了 1 个/);
+ r=await cli(config,'topics','--day','2026-11-04','--json');assert.equal(r.code,0,r.stderr);
+ const [x]=JSON.parse(r.stdout);
+ assert.deepEqual(x,{id:b,day:'2026-11-04',chatId:'g1',chatName:'项目群',title:'午饭',summary:'中午吃什么',area:'other',picked:false,reason:'闲聊',messageIds:[m3],link:store.message(m3).link,at:x.at,updatedAt:x.updatedAt});
+ r=await cli(config,'topics','--day','2026-11-01');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/没有符合条件的话题/);assert.match(r.stdout,/butler messages/);
+ r=await cli(config,'topics','--day','2026-11-01','--json');assert.deepEqual(JSON.parse(r.stdout),[]);
+ for(const [args,error] of [[['不存在的群'],/没有找到聊天/],[['--day','2026-13-01'],/--day/],[['--day','2026-11-04','--since','1d'],/--day/],[['--picked','--not-picked'],/只能用一个/],
+  [['--limit','0'],/--limit/],[['项目群','大群'],/一个聊天/]]){
+  r=await cli(config,'topics',...args);assert.equal(r.code,1,args.join(' '));assert.match(r.stderr,error);
+ }
+});
+
+test('messages reads a chat\'s own messages, whole and oldest first, of a day or a time span, with given words in them, the latest when there are more than the limit',async t=>{
+ const {lark,store,dir}=await setup(t),config=writeConfig(dir,lark);
+ const long=`接口的 API 文档在这里，${'细节'.repeat(150)}`;
+ const a=said(store,'g1','早上好','2026-11-04','00:30'),b=said(store,'g1',long,'2026-11-04','09:00'),c=said(store,'g1','下班了','2026-11-04','23:50');
+ // An ignored sender's message is read too: the agent reads a chat to answer me, not to make matters.
+ const d=said(store,'g1','投放完成','2026-11-04','12:00',{sender:'zebra',name:'Zebra',type:'bot'});new Matters(store).ignore('zebra','Zebra');
+ const e=said(store,'g1','第二天','2026-11-05','01:00');said(store,'g2','大群的消息','2026-11-04','10:00');
+ const line=(id,who,text)=>`${shown(store.message(id).createdAt)}  ${who}：${text}\n  ${store.message(id).link}\n`;
+ const order=out=>out.split('\n').filter(l=>/^\d{4}-/.test(l)).map(l=>l.slice(21).split('：')[1].slice(0,4));
+ let r=await cli(config,'messages','项目群','--day','2026-11-04');assert.equal(r.code,0,r.stderr);
+ assert.ok(r.stdout.startsWith('项目群（2026-11-04 00:00:00 起，2026-11-05 00:00:00 前）的消息：共 4 条，从早到晚：\n'),r.stdout);
+ assert.ok(r.stdout.includes(line(a,'王五','早上好')+line(b,'王五',long)+line(d,'Zebra','投放完成')+line(c,'王五','下班了')),r.stdout);
+ r=await cli(config,'messages','项目群','--since','2026-11-04','--until','2026-11-05');assert.equal(r.code,0,r.stderr);
+ assert.deepEqual(order(r.stdout),['早上好','接口的 ','投放完成','下班了'],'a date alone is that day\'s local midnight');
+ r=await cli(config,'messages','g1','--day','2026-11-04','--search','api');assert.equal(r.code,0,r.stderr);
+ assert.ok(r.stdout.startsWith('项目群（2026-11-04 00:00:00 起，2026-11-05 00:00:00 前）含「api」的消息：共 1 条，从早到晚：\n'),r.stdout);assert.ok(r.stdout.includes(line(b,'王五',long)));
+ r=await cli(config,'messages','项目群','--day','2026-11-04','--limit','2');
+ assert.ok(r.stdout.startsWith('项目群（2026-11-04 00:00:00 起，2026-11-05 00:00:00 前）的消息：共 4 条，下面是最近的 2 条，从早到晚：\n'),r.stdout);
+ assert.deepEqual(order(r.stdout),['投放完成','下班了']);
+ r=await cli(config,'messages','项目群');assert.ok(r.stdout.startsWith('项目群的消息：共 5 条，从早到晚：\n'),r.stdout);assert.equal(order(r.stdout).at(-1),'第二天');
+ r=await cli(config,'messages','项目群','--day','2026-11-04','--json');assert.equal(r.code,0,r.stderr);
+ const j=JSON.parse(r.stdout);assert.deepEqual(j.map(m=>m.id),[a,b,d,c]);assert.deepEqual([j[1].text,j[1].link,j[1].senderName,j[1].chatName],[long,store.message(b).link,'王五','项目群']);
+ r=await cli(config,'messages','项目群','--day','2026-11-01');assert.equal(r.code,0,r.stderr);assert.equal(r.stdout,'项目群（2026-11-01 00:00:00 起，2026-11-02 00:00:00 前）的消息：没有\n');
+ for(const [args,error] of [[[],/聊天名或 id/],[['不存在的群'],/没有找到聊天/],[['项目群','--day','2026-11-04','--until','1h'],/--day/],[['项目群','--limit','abc'],/--limit/],
+  [['项目群','--since','2026-02-30'],/--since/],[['项目群','大群'],/一个聊天/]]){
+  r=await cli(config,'messages',...args);assert.equal(r.code,1,args.join(' '));assert.match(r.stderr,error);
+ }
+ assert.ok(e);
+});
+
+test('corrections: what I say of the read\'s picks in my words, on a topic or on a chat and a day no topic holds; a topic shows the latest, and its pick goes by it; listed and removed by number',async t=>{
+ const {lark,store,dir}=await setup(t),config=writeConfig(dir,lark),topics=new Topics(store);
+ const [a,b,c]=made(topics,'2026-11-04',[
+  {feedId:'g1',title:'接口方案评审',summary:'评审定在周五',area:'work',picked:true,reason:'TA负责的接口',messageIds:[said(store,'g1','评审定在周五','2026-11-04','10:00')]},
+  {feedId:'g1',title:'午饭',summary:'中午吃什么',area:'other',picked:false,reason:'闲聊',messageIds:[said(store,'g1','中午吃啥','2026-11-04','12:00')]},
+  {feedId:'g2',title:'GEO 周报',summary:'本周的数据',area:'work',picked:true,reason:'TA的项目',messageIds:[said(store,'g2','GEO 周报','2026-11-04','09:00')]}],['g1','g2']);
+ said(store,'g2','李四说 Redis 迁移下周做','2026-11-04','15:00');post(store,{chat:'d1',sender:'u3',name:'张三',text:'明天开个会',at:on('2026-11-04','16:00')});
+ const A=`话题 #${a} 接口方案评审（项目群 2026-11-04）`;
+ let r=await cli(config,'corrections');assert.equal(r.code,0,r.stderr);assert.match(r.stdout,/还没有纠正/);
+ r=await cli(config,'corrections','list','--json');assert.deepEqual(JSON.parse(r.stdout),[]);
+ r=await cli(config,'corrections','unpick',String(a),'这是别的组的事');assert.equal(r.code,0,r.stderr);
+ assert.equal(r.stdout,`${A}：模型挑出 → 我说不该挑（纠正 #1）：这是别的组的事\n`);
+ r=await cli(config,'corrections','unpick',`#${a}`,'这是别的组的事');assert.equal(r.stdout,`${A}：已经记过同样的纠正 #1，没有改动\n`);
+ r=await cli(config,'corrections','unpick',String(a),'这是别的组的事','--json');let j=JSON.parse(r.stdout);
+ assert.deepEqual(j.before,j.after,'the same words again: nothing new');assert.equal(j.after.correction.id,1);
+ r=await cli(config,'corrections','pick',String(b),'午饭的事','我也要知道','--json');assert.equal(r.code,0,r.stderr);j=JSON.parse(r.stdout);
+ assert.deepEqual([j.before.id,j.before.picked,j.before.correction,j.after.picked],[b,false,undefined,false],'the model\'s pick stays as it was');
+ assert.deepEqual(j.after.correction,{id:2,kind:'pick',topicId:b,day:'2026-11-04',chatId:'g1',chatName:'项目群',words:'午饭的事 我也要知道',at:j.after.correction.at});
+ r=await cli(config,'corrections','pick',String(c),'本来就该挑');assert.equal(r.code,0,r.stderr);
+ assert.equal(r.stdout,`话题 #${c} GEO 周报（大群 2026-11-04）：模型已经挑出了它，不用纠正，没有改动\n`);
+ r=await cli(config,'topics','--picked');assert.deepEqual(numbered(r.stdout),[b,c],'as I said, else as the model did');
+ r=await cli(config,'topics','--not-picked');assert.deepEqual(numbered(r.stdout),[a]);
+ r=await cli(config,'corrections','pick',String(a),'还是该挑');assert.equal(r.stdout,`${A}：我说不该挑（纠正 #1） → 我说该挑（纠正 #3）：还是该挑\n`);
+ r=await cli(config,'topics','项目群');assert.ok(r.stdout.includes(`理由：TA负责的接口 · 1 条消息\n  我的纠正 #3（${shown(topics.correction(3).at)}）：该挑：还是该挑\n`),r.stdout);
+ r=await cli(config,'topics','--picked');assert.deepEqual(numbered(r.stdout),[a,b,c]);
+
+ r=await cli(config,'corrections','missed','大群','2026-11-04','李四说的 Redis 迁移没挑出来');assert.equal(r.code,0,r.stderr);
+ assert.equal(r.stdout,'大群 2026-11-04：记下漏挑（纠正 #4）：李四说的 Redis 迁移没挑出来\n');
+ r=await cli(config,'corrections','missed','g2','2026-11-04','李四说的 Redis 迁移没挑出来','--json');j=JSON.parse(r.stdout);assert.deepEqual([j.before,j.after.id],[j.after,4]);
+ r=await cli(config,'corrections','missed','张三','2026-11-04','张三约的会','--json');assert.equal(r.code,0,r.stderr);j=JSON.parse(r.stdout);
+ assert.deepEqual([j.before,j.after],[null,{id:5,kind:'missed',day:'2026-11-04',chatId:'d1',chatName:'张三',words:'张三约的会',at:j.after.at,topic:null}]);
+ assert.match(j.warning,/没有读过/,'a chat the read did not take up that day');
+ r=await cli(config,'corrections','missed','张三','2026-11-04','张三约的另一个会');assert.match(r.stdout,/^注意：.*没有读过.*level set daily 张三/m);
+
+ r=await cli(config,'corrections');assert.equal(r.code,0,r.stderr);
+ const lines=r.stdout.trim().split('\n');
+ assert.equal(lines[0],`#1 话题 #${a} 接口方案评审（项目群 2026-11-04，模型挑出）不该挑：这是别的组的事（${shown(topics.correction(1).at)}）`);
+ assert.equal(lines[3],`#4 大群 2026-11-04 漏挑：李四说的 Redis 迁移没挑出来（${shown(topics.correction(4).at)}）`);
+ r=await cli(config,'corrections','--json');j=JSON.parse(r.stdout);
+ assert.deepEqual(j.map(k=>[k.id,k.kind,k.topicId??null,k.chatId,k.topic?.title??null]),[[1,'unpick',a,'g1','接口方案评审'],[2,'pick',b,'g1','午饭'],[3,'pick',a,'g1','接口方案评审'],[4,'missed',null,'g2',null],[5,'missed',null,'d1',null],[6,'missed',null,'d1',null]]);
+ r=await cli(config,'corrections','remove','3');assert.equal(r.code,0,r.stderr);
+ assert.equal(r.stdout,`已删除纠正 #3：话题 #${a} 接口方案评审（项目群 2026-11-04，模型挑出）该挑：还是该挑；这个话题现在：我说不该挑（纠正 #1）\n`);
+ r=await cli(config,'corrections','remove','#4','--json');j=JSON.parse(r.stdout);assert.deepEqual([j.before.id,j.before.kind,j.before.topic,j.after],[4,'missed',null,null]);
+ assert.deepEqual(topics.corrections().map(k=>k.id),[1,2,5,6]);assert.equal(topics.topic(a).picked,true,'a correction never changes the topic');
+
+ for(const [args,error] of [[['pick','99','x'],/没有 #99 这个话题/],[['pick','abc','x'],/编号/],[['unpick',String(a)],/不能是空的/],[['pick',String(a),'长'.repeat(201)],/200/],
+  [['missed','大群',dayOf(Date.now()),'x'],/还没有读/],[['missed','不存在的群','2026-11-04','x'],/没有找到聊天/],[['missed','大群','11-04','x'],/日期/],[['missed'],/聊天名或 id/],
+  [['remove','99'],/没有纠正 #99/],[['remove'],/编号/],[['fix','1'],/corrections 没有这个操作/]]){
+  r=await cli(config,'corrections',...args);assert.equal(r.code,1,args.join(' '));assert.match(r.stderr,error);
+ }
+ assert.deepEqual(topics.corrections().map(k=>k.id),[1,2,5,6],'nothing written when refused');
+});
+
 test('help lists every command and its flags, and nothing of a conversation in the direct chat',async t=>{
  const {lark,dir}=await setup(t);
  const r=await cli(writeConfig(dir,lark),'--help');assert.equal(r.code,0,r.stderr);
@@ -258,8 +387,13 @@ test('help lists every command and its flags, and nothing of a conversation in t
   'level [list] [--json]','level set <级别> <聊天名或 id>... [--reason 文字] [--json]','level clear <聊天名或 id>... [--json]','level history [--since 时间] [--json]',
   'level grade [<聊天名或 id>...] [--json]','process [--once]','matters [list] [--all] [--json]','matters close <编号> [--reason 文字] [--json]','matters reopen <编号> [--json]',
   'notes [list] [--json]','notes add <文字> [--json]','notes remove <编号> [--json]','profile [--json]','ignore [list] [--json]','ignore add <发送方名称或 id>... [--json]',
-  'ignore remove <发送方名称或 id>... [--json]','bot create [--name 名称]','bot update','--config 配置文件'])
+  'ignore remove <发送方名称或 id>... [--json]','bot create [--name 名称]','bot update','--config 配置文件',
+  'topics [<聊天名或 id>] [--day 日期] [--since 时间] [--until 时间] [--search 文字] [--picked | --not-picked] [--limit 条数] [--json]',
+  'messages <聊天名或 id> [--day 日期] [--since 时间] [--until 时间] [--search 文字] [--limit 条数] [--json]','corrections [list] [--json]',
+  'corrections pick <话题编号> <我的原话> [--json]','corrections unpick <话题编号> <我的原话> [--json]','corrections missed <聊天名或 id> <日期> <我的原话> [--json]',
+  'corrections remove <编号> [--json]'])
   assert.ok(r.stdout.includes(usage),`help shows: ${usage}`);
+ assert.match(r.stdout,/只写日期时是那天 0 点/);
  assert.doesNotMatch(r.stdout,/私聊对话|私聊里让管家/);
  assert.match(r.stdout,/instant 即时（全部消息交给模型，每天也读一遍）/);assert.match(r.stdout,/daily 每日（存下，每天读一遍、挑出话题）/);
  assert.doesNotMatch(r.stdout,/每日整理还没有做/);

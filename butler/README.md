@@ -239,6 +239,8 @@ open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启
 
 **另一条模型通道。** 读取和分级一样，在加工端的进程里有自己的定时器，一次一个，不等批次、整理、「关于TA」和分级，它们也不等它，所以模型机器上最多同时运行三个 claude。上次读完的一天和它的结果（时间、几个聊天、挑出和没挑的话题数、标出的消息数、放弃了的聊天）、没读完时的错误和时间，以及停机后没补读的日子，记在 `meta` 里的 `reading`，`status` 显示它们和下一次读哪一天、什么时候读。
 
+**查话题、读原始消息和纠正。** 话题由和管家说话的 agent 经命令行取用（见「和管家说话」和「命令行」）：`topics` 按聊天、日子、文字和挑没挑查话题，回答「这几天 X 群有什么值得看的」「这周有没有人讨论过 Y」；当天的消息要到第二天早上才有话题，只存不看的聊天从来不读，这些用 `messages` 读一个聊天的原始消息。我说某个话题该挑、不该挑，或者某个聊天某一天有该挑的事却没有拆成话题时，agent 用 `corrections` 按我的原话记一条纠正。纠正存在 `topic_corrections` 表里，每条一行：`kind`（`pick` 该挑、`unpick` 不该挑、`missed` 漏挑）、指向的话题（漏挑的没有话题可指，是空的）、哪一天、哪个聊天、我的原话和记下的时间。话题上的纠正也存它的日子和聊天，这样按聊天或日子找纠正时不用经过话题，漏挑的也一样能找到。话题自己的 `picked` 一直是模型的判断，不随纠正改：重做纠正题时把话题的标题、要点和聊天交给模型，藏起答案再问挑不挑，答案就是最新的那条纠正。纠正和说明一样只增删、不修改，删掉的编号不再给别的纠正：同一个话题可以有几条纠正，最新的一条算数，删掉它就回到上一条，没有了就回到模型的判断；编号也就能说明一次读取或一次重做用了哪些纠正。现在纠正只记下、能查，进入下一次读取的提示、「关于TA」的输入和纠正题是下一步的事。
+
 ### 忽略名单
 
 按发送方 id 记录。名单上的发送方的消息不交给模型，也不出现在上下文里。它们被跳过时就记为已处理，所以之后把发送方移出名单，不会把它在名单上期间发的消息补交给模型。
@@ -392,7 +394,7 @@ ssh <cpu1 的 SSH 地址> 'mkdir -p -m 700 ~/.local/share/butler-model'
 
 ### 和管家说话
 
-和管家说话不在机器人的私聊里，而在 herdr bridge 里绑定了管家 agent 的飞书群里：bridge（本仓库的 `bridge/`，部署在 cpu1）把这个群绑到 cpu1 上的一个 herdr Claude agent，agent 经一个包装脚本用 ssh 在 cpu2 上运行管家的命令行（见「命令行」），用它查看和修改事项（`matters`、`matters close`、`matters reopen`）、说明（`notes`）、级别（`level`）、忽略名单（`ignore`），读「关于TA」（`profile`）和状态。命令行的读命令都能输出 JSON，写命令都打印改了什么（原来 → 现在），agent 据此回答我。包装脚本和 agent 的配置不在管家里。
+和管家说话不在机器人的私聊里，而在 herdr bridge 里绑定了管家 agent 的飞书群里：bridge（本仓库的 `bridge/`，部署在 cpu1）把这个群绑到 cpu1 上的一个 herdr Claude agent，agent 经一个包装脚本用 ssh 在 cpu2 上运行管家的命令行（见「命令行」），用它查看和修改事项（`matters`、`matters close`、`matters reopen`）、说明（`notes`）、级别（`level`）、忽略名单（`ignore`），查每日读取的话题（`topics`）、读一个聊天的原始消息（`messages`）、记下和删掉我对挑没挑的纠正（`corrections`），读「关于TA」（`profile`）和状态。命令行的读命令都能输出 JSON，写命令都打印改了什么（原来 → 现在），agent 据此回答我。包装脚本和 agent 的配置不在管家里。
 
 机器人的私聊只用来发卡片。我在私聊里发的每条消息，不管是文字、图片还是别的，都只得到一句固定的回复（回复在这条消息下面），不调用模型：
 
@@ -454,6 +456,12 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 ./cli.mjs run
 ./cli.mjs status [--json]
 ./cli.mjs list [--category mention|dm|reply|thread|instant|flagged|own|stored] [--since 2h] [--until 2026-10-22T18:00] [--limit 50] [--json]
+./cli.mjs messages <聊天名或 id> [--day 2026-11-06] [--since 2h] [--until 2026-11-06T18:00] [--search 文字] [--limit 100] [--json]
+./cli.mjs topics [<聊天名或 id>] [--day 2026-11-06] [--since 7d] [--until 2026-11-06] [--search 文字] [--picked | --not-picked] [--limit 50] [--json]
+./cli.mjs corrections [list] [--json]
+./cli.mjs corrections pick|unpick <话题编号> <我的原话> [--json]
+./cli.mjs corrections missed <聊天名或 id> <日期> <我的原话> [--json]
+./cli.mjs corrections remove <编号> [--json]
 ./cli.mjs groups [--search 文字] [--json]
 ./cli.mjs level [list] [--json]
 ./cli.mjs level set instant|daily|store|ignore <聊天名或 id>... [--reason 文字] [--json]
@@ -479,15 +487,19 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 
 命令行也是和管家说话的 agent 的工具（见「和管家说话」），所以输出分两种，规则对每个命令都一样：
 
-- 读的命令（`status`、`list`、`groups`、`level [list]`、`level history`、`matters [list]`、`notes [list]`、`profile`、`ignore [list]`）打印给人看的文字；加 `--json` 时输出存储里的记录（JSON），形状见下表。
-- 写的命令（`level set`、`level clear`、`level grade`、`matters close`、`matters reopen`、`notes add`、`notes remove`、`ignore add`、`ignore remove`）打印改了什么，每项一行，写成「原来 → 现在」；加 `--json` 时输出同样的内容：每个改动的 `before` 和 `after`，没有的一边是 `null`。要改的已经是那个样子时（关掉已经结束的事项、加一条已经有的说明、再定一次我定的同一个级别）什么都不改，照样输出，`before` 和 `after` 相同，退出码是 0。找不到要改的（编号不存在、名称没有对应或对应多个）、参数不对时什么都不改，原因写在标准错误里，退出码是 1。
-- 我的话（`--reason` 的理由、`notes add` 的说明）里的空白合成一个空格，不能是空的，最长 200 字：它们要放进每个交给模型的提示，截断了就不是我的原话，所以更长的拒绝，不截断。`--reason` 只用于 `level set` 和 `matters close`，带在别的命令上会报错，免得理由不声不响地丢掉。
-- 事项和说明的编号写 `12` 或 `#12`。
+- 读的命令（`status`、`list`、`messages`、`topics`、`corrections [list]`、`groups`、`level [list]`、`level history`、`matters [list]`、`notes [list]`、`profile`、`ignore [list]`）打印给人看的文字；加 `--json` 时输出存储里的记录（JSON），形状见下表。
+- 写的命令（`level set`、`level clear`、`level grade`、`matters close`、`matters reopen`、`notes add`、`notes remove`、`corrections pick`、`corrections unpick`、`corrections missed`、`corrections remove`、`ignore add`、`ignore remove`）打印改了什么，每项一行，写成「原来 → 现在」；加 `--json` 时输出同样的内容：每个改动的 `before` 和 `after`，没有的一边是 `null`。要改的已经是那个样子时（关掉已经结束的事项、加一条已经有的说明、再定一次我定的同一个级别、再记一条同样的纠正）什么都不改，照样输出，`before` 和 `after` 相同，退出码是 0。找不到要改的（编号不存在、名称没有对应或对应多个）、参数不对时什么都不改，原因写在标准错误里，退出码是 1。
+- 我的话（`--reason` 的理由、`notes add` 的说明、`corrections` 的原话）里的空白合成一个空格，不能是空的，最长 200 字：它们要放进每个交给模型的提示，截断了就不是我的原话，所以更长的拒绝，不截断。`--reason` 只用于 `level set` 和 `matters close`，带在别的命令上会报错，免得理由不声不响地丢掉。
+- 事项、说明、话题和纠正的编号写 `12` 或 `#12`。
+- 时间（`--since`、`--until`）写 ISO 时间或 `30m`、`2h`、`7d` 这样的相对时间（多久以前）；只写日期（`2026-11-06`）时是那天本地的 0 点，而不是 `Date.parse` 理解的 UTC 0 点。日期（`--day` 和 `corrections missed` 的日期）写 `2026-11-06` 这样的本地日期。
 
 | 命令 | `--json` 输出 |
 | --- | --- |
 | `status` | 一个对象，和文字的各行对应：`collector`、`events`、`reconcile`、`sync`、`counts`、`levels`、`processing`、`review`、`profile`、`grading`、`reading`、`bot`、`digest`、`errors`、`file`、`sizeBytes` 等 |
 | `list` | 消息记录的数组，新的在前：`id`、`chatId`、`chatName`、`senderId`、`senderName`、`senderType`、`createdAt`、`text`、`categories`、`isMine`、`reactions`、`link` 等 |
+| `messages` | 消息记录的数组，旧的在前，形状同 `list` |
+| `topics` | 话题的数组，顺序同文字：`id`、`day`、`chatId`、`chatName`、`title`、`summary`、`area`（`work`、`interest` 或 `other`）、`picked`（模型挑没挑）、`reason`、`messageIds`（旧的在前）、`link`（第一条消息的链接）、`at`、`updatedAt`，有纠正时还有 `correction`：最新的一条纠正，同 `corrections` 的一项，但没有 `topic` |
+| `corrections [list]` | 纠正的数组，旧的在前：`id`、`kind`（`pick`、`unpick` 或 `missed`）、`topicId`（漏挑的没有）、`day`、`chatId`、`chatName`、`words`（我的原话）、`at`，`topic` 是它指向的话题（同 `topics` 的一项），漏挑的是 `null` |
 | `groups` | 群的数组：`feedId`、`name`、`chatMode`、`memberCount`、`isMuted`、`lastActiveAt` 等，`level` 是它的级别记录（同 `level list`），没有级别时是 `null` |
 | `level [list]` | 有级别的聊天的数组，顺序同文字：`feedId`、`name`、`chatMode`、`memberCount`、`level`、`by`（`owner` 我定的，`model` 模型定的）、`reason`、`since`、`modelLevel`、`modelReason`、`modelAt` |
 | `level history` | 改动的数组，新的在前：`id`、`feedId`、`name`、`chatMode`、`at`、`by`、`before` 和 `after`（`{level, by}`，没有级别时是 `null`）、`reason`（改完以后的理由）、`correction`（是不是一次纠正，见「聊天级别」） |
@@ -500,10 +512,19 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 | `level grade` | `{chats, runs, graded, left, error}`：交给模型的聊天数、模型运行次数、分成的聊天（每个 `feedId`、`name`、`before`、`after`，级别记录）、没分成的聊天（每个 `feedId`、`name`）和最后的错误（没有时不出现）；有没分成的聊天时退出码是 1 |
 | `matters close`、`matters reopen` | `{before, after}`：改动前后的事项，同 `matters --json` 的一项 |
 | `notes add`、`notes remove` | `{before, after}`：说明（`{id, text, at}`）或 `null` |
+| `corrections pick`、`corrections unpick` | `{before, after}`：改动前后的话题，同 `topics` 的一项，`correction` 是它最新的纠正 |
+| `corrections missed` | `{before, after}`：`before` 是 `null`，`after` 是记下的纠正，同 `corrections` 的一项（同样的已经记过时两边都是它）；那个聊天那一天没有读过时还有 `warning` |
+| `corrections remove` | `{before, after}`：删掉的纠正（同 `corrections` 的一项）和 `null` |
 | `ignore add`、`ignore remove` | 数组，每个发送方一项：`senderId`、`name`、`before`、`after`（忽略名单上的一项，同 `ignore --json`，不在名单上时是 `null`） |
 
 - `status`：收集器是否在运行（看心跳）、推送是否连接和最近一次收到推送的时间、最近一次对账的完成和成功时间、open-lark 的同步状态、@我补扫和话题列表扫到哪里、各类消息的数量、待补取的 @我、各级别的聊天数（其中我定的有几个；没有级别的私聊按即时、群按只存不看）、存储位置和大小，以及最近的错误。
-- `list`：按类别和时间列出消息，新的在前，每条带链接；`--since` 和 `--until` 接受 ISO 时间或 `30m`、`2h`、`7d` 这样的相对时间。
+- `list`：按类别和时间列出消息，新的在前，每条带链接，正文只显示一行（最多 200 字）；`--since` 和 `--until` 的写法见上面。
+- `messages <聊天名或 id>`：一个聊天的原始消息，旧的在前，正文完整，每条带时间、发送者、撤回编辑这类标记和链接；第一行写这段时间里一共几条。`--day` 是一整天，`--since`、`--until` 是一段时间，都不写时不限时间；`--search` 只列正文里有这段文字的（不分大小写）；多于 `--limit` 条（默认 100）时列最近的那些，第一行说明。忽略名单上的发送方的消息也列出：忽略名单管的是交给加工端模型的消息，agent 读聊天是为了回答我。聊天的找法和 `level grade` 一样，只在存储里找。读一个聊天不放进 `list`：`list` 是按类别看最近收到了什么，新的在前、正文一行，读一段对话要旧的在前、正文完整，放进一个命令的话，顺序和截断都得跟着参数变。
+- `topics [<聊天名或 id>]`：每日读取拆出的话题（见「每日读取」），新的日子在前，同一天里按拆出的顺序，默认最多 50 个，更多时最后一行写一共几个。每个话题一段：编号、日子、聊天、标题、模型挑没挑、属于工作还是兴趣，然后是要点、理由和消息数，有纠正时是我最新的一条纠正，最后是第一条消息的链接。可以只看一个聊天；`--day` 是一天，`--since`、`--until` 选这段时间碰到的日子（`--since 7d` 从 7 天前那一天起，`--until 2026-11-06` 到 11-05 为止）；`--search` 找标题、要点和组成它的消息里的文字（不分大小写）；`--picked` 只列挑出的、`--not-picked` 只列没挑的，纠正过的话题按我最新的纠正算。
+- `corrections`（或 `corrections list`）：我对每日读取挑没挑的纠正，旧的在前：编号、哪个话题（标题、聊天、日子、模型挑没挑）或者漏挑的聊天和日子、我说该挑、不该挑还是漏挑、我的原话和记下的时间。
+- `corrections pick <话题编号> <我的原话>`、`corrections unpick <话题编号> <我的原话>`：这个话题该挑、不该挑，按我的原话记一条纠正（几个参数用空格连起来）。打印「话题 #12 标题（聊天 日子）：模型挑出 → 我说不该挑（纠正 #3）：原话」，有过纠正时左边是上一条纠正。和最新的一条纠正说的一样、原话也一样，或者没有纠正而模型本来就是这样挑的，什么都不改。话题的 `picked` 不变，纠正另外记（见「每日读取」）。
+- `corrections missed <聊天名或 id> <日期> <我的原话>`：这个聊天这一天有该挑的事，却没有拆成话题，没有话题可指。先用 `topics` 看那一天没挑的话题里有没有它，有的话用 `corrections pick`。日期是今天或以后时拒绝（那天还没有读）；那个聊天那一天没有读过（级别不是每日或即时，或者还没读到）时照样记下，提示一句怎样让它以后每天被读。同一个聊天、同一天、同样的原话记过时不再记。
+- `corrections remove <编号>`：删掉一条纠正（我说错了，或者 agent 记错了），编号不会再给别的纠正；话题回到上一条纠正，没有了就回到模型的判断，打印它现在的样子。
 - `groups`：从 open-lark 读出我所在的全部群，显示级别（我定的写「我定的」，没有级别的写「未分级（按只存不看）」）、名称、人数、最近活跃时间；`--json` 里每个群带着它的级别记录，没有级别时是 null。
 - `level`（或 `level list`）：有级别的聊天，按级别排列，每个带着谁定的、从什么时候开始、理由，我定的还带着模型的判断（如果有）。
 - `level set <级别> <聊天名或 id>... [--reason 文字]`：由我定聊天的级别（`instant`、`daily`、`store`、`ignore`，见上面「聊天级别」），模型以后不改它。聊天按完整名称、id 或名称中唯一的一段文字找，私聊（比如和某个机器人的私聊，定为只存不看就不再把它发的消息交给模型）也可以，名称对应多个聊天时列出它们并拒绝；存储里找不到时先从 open-lark 读一遍我所在的群。每个聊天打印原来的级别和现在的级别，没有级别时写它按什么级别处理（「未分级（按即时）」），有理由时接着写理由。`--reason` 是我的理由，作为这个级别的理由记下（`level list`、`level history` 和写「关于TA」时的纠正题里都看得到），定了几个聊天就给几个聊天；不带时理由为空。已经是我定的这个级别、又没有新的理由时什么都不改，原来的理由留着；只换理由时级别和开始的时间不变，也不算一次级别的改动。定为即时的时刻起这个聊天的消息交给模型，之前的不补；定为即时的是话题群时照样定，但会提示：话题群只能收到推送来的消息（见上面「话题群」）。改动直接写进存储，正在运行的收集器处理下一条消息时就按新的级别判断，不需要重启。
@@ -632,7 +653,7 @@ npm test
 - 告诉机器人分级的结果：每次分成了至少一个聊天的分级之后，交给机器人这次的时间、它是自己开始的（`schedule`）还是我要求的（`request`）、分成和没分成的聊天数、模型给的级别变了的聊天（第一次分级的没有原来的级别），级别没变的不在里面；一个也没分成时不告诉；机器人出错只记一条错误。
 - 纠正题：题是我定过级别的聊天，包括最近一周没有消息的；模型看到的提示和分级的一样，只是这些聊天都显示为还没有分级，我的级别、我的理由和模型以前的级别都不在提示里；回答不改级别；和我定的一样算做对，回答里没有的算做错、没有回答；记下时间、题数、做对数和做错的题，最新的在前，运行记在 `model_runs` 里（`exam`）。什么时候做：没有「关于TA」、没有我定的级别时不做；第一次有就做；之后「关于TA」重写了，文字变了或者题库变了才做，文字一样、别的没变不做；我新定的级别等下一次「关于TA」；说明变了要等「关于TA」按新的说明写完才做；两次之间至少 1 小时。有要分级的聊天时先分级；分级失败后等待重试的期间照样做。失败时不记结果，记错误和失败的运行，1 小时后再试，成功后清掉失败。
 - 存储里每个模型定的级别带着那次分级的时间，我定、取消级别时不变，旧的存储打开时加上这一列；开始全收的时刻、每个活跃聊天的消息数和机器人消息数、第一条消息的时间、我在各聊天里的消息、@我 和表情，以及每个聊天交给批次的消息数，都由走索引的查询得到（同样用 `EXPLAIN QUERY PLAN` 检查）。
-- 命令行的 `ignore`（`--json` 的名单和每个改动的前后，已经在名单上的不改）、`process --once`（经假的 herdr，包括这一轮的整理）、`level grade`（经假的 herdr：点名的聊天和全部活跃的聊天，我定了级别的拒绝，没分成的列出并退出码 1，`--json` 的结果）、`level set --reason`（理由和级别一起记下，模型的判断留着；同一个级别、没有新理由时不改，原来的理由留着；只换理由不算级别的改动；空的和超过 200 字的拒绝）、`level list`、`level set`、`level clear` 和 `level history` 的 `--json`、`matters`、`matters close` 和 `matters reopen`（按编号、带 `#` 也行，记为我关掉的，理由是我的，理由「不归我」时算作不归我；已经是那个状态时不改；编号不存在或不是编号时退出码 1；运行中的加工端在一次快速检查之内让最新那份汇总的卡片跟上，没有改动时不更新）、`notes`（按原话记下、几个参数连起来、同样的话不重复记、按编号删掉，`--json` 的前后；空的、超过 200 字的、不存在的编号都拒绝；命令行加的说明和删的说明让加工端下一轮按它重写「关于TA」再整理事项，分级记下说明变化的时间）、`profile` 和 `status` 里加工端、整理、「关于TA」和分级的四行、帮助里每个命令和参数、`--reason` 只用于 `level set` 和 `matters close`，以及 `BUTLER_REVIEW_EVERY`、`BUTLER_PROFILE_EVERY`、`BUTLER_MODEL_NAME`（交给 claude 的参数和运行记录里的模型）和 `BUTLER_MODEL_EFFORT`（交给 claude 的参数，不认识的强度让配置加载失败）。
+- 命令行的 `topics`（按聊天、`--day`、`--since` 和 `--until` 碰到的日子、标题要点和消息里的文字、挑没挑，纠正过的按最新的纠正，新的日子在前，`--limit` 和一共几个，`--json` 的记录，找不到的聊天、不对的日期、`--day` 和 `--since` 一起、`--picked` 和 `--not-picked` 一起都拒绝）、`messages`（旧的在前、正文完整、带链接，一天或一段时间，只写日期时是本地 0 点，正文里的文字不分大小写，多于 `--limit` 时列最近的、第一行写一共几条，忽略名单上的发送方也列出，`--json` 的记录）、`corrections`（`pick` 和 `unpick` 打印话题原来和现在的判断、话题的 `picked` 不变，同样的纠正和模型本来就这样挑时不改，`missed` 记下没有话题的纠正、没读过的聊天照样记并提示、今天以后的日期拒绝，列出、`--json`，按编号删掉后话题回到上一条纠正；不存在的话题和纠正、不是编号、空的和超过 200 字的原话、找不到的聊天都拒绝，拒绝时什么都不写），命令行的 `ignore`（`--json` 的名单和每个改动的前后，已经在名单上的不改）、`process --once`（经假的 herdr，包括这一轮的整理）、`level grade`（经假的 herdr：点名的聊天和全部活跃的聊天，我定了级别的拒绝，没分成的列出并退出码 1，`--json` 的结果）、`level set --reason`（理由和级别一起记下，模型的判断留着；同一个级别、没有新理由时不改，原来的理由留着；只换理由不算级别的改动；空的和超过 200 字的拒绝）、`level list`、`level set`、`level clear` 和 `level history` 的 `--json`、`matters`、`matters close` 和 `matters reopen`（按编号、带 `#` 也行，记为我关掉的，理由是我的，理由「不归我」时算作不归我；已经是那个状态时不改；编号不存在或不是编号时退出码 1；运行中的加工端在一次快速检查之内让最新那份汇总的卡片跟上，没有改动时不更新）、`notes`（按原话记下、几个参数连起来、同样的话不重复记、按编号删掉，`--json` 的前后；空的、超过 200 字的、不存在的编号都拒绝；命令行加的说明和删的说明让加工端下一轮按它重写「关于TA」再整理事项，分级记下说明变化的时间）、`profile` 和 `status` 里加工端、整理、「关于TA」和分级的四行、帮助里每个命令和参数、`--reason` 只用于 `level set` 和 `matters close`，以及 `BUTLER_REVIEW_EVERY`、`BUTLER_PROFILE_EVERY`、`BUTLER_MODEL_NAME`（交给 claude 的参数和运行记录里的模型）和 `BUTLER_MODEL_EFFORT`（交给 claude 的参数，不认识的强度让配置加载失败）。
 
 机器人的测试用假的飞书通道（`test/fake-channel.mjs`，按 SDK 0.7.1 `LarkChannel` 的形状：注册事件、连接、发送、断开，测试可以让它送来消息、连接失败或发送失败）和可控的时钟。覆盖：
 

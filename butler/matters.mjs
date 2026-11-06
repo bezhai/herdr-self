@@ -155,6 +155,15 @@ export class Matters{
    WHERE m.created_at>=? AND m.created_at<? AND ${NOT_IGNORED} GROUP BY m.feed_id ORDER BY n DESC,m.feed_id`,since,until)
    .map(r=>({feedId:r.feed_id,name:r.name??undefined,kind:r.chat_mode??r.chat_kind,messages:r.n}));
  }
+ // A chat's messages as the command line reads them (see cli.mjs messages): from since up to until (ms, not included),
+ // those whose text holds search (in any case) when it is given, the latest limit of them, oldest first (records), and
+ // how many there are in all (total). Ignored senders' too: the agent reads a chat to answer me, which is not what the
+ // ignore list is about.
+ chatMessages(feedId,{since=0,until=Number.MAX_SAFE_INTEGER,search,limit}){
+  const where=`feed_id=? AND created_at>=? AND created_at<?${search?' AND instr(lower(text),lower(?))>0':''}`,p=[feedId,since,until,...search?[search]:[]];
+  return {total:this.#get(`SELECT count(*) n FROM messages WHERE ${where}`,...p).n,
+   records:this.#records(this.#all(`SELECT id FROM messages WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT ?`,...p,limit)).reverse()};
+ }
  // My own latest messages, newest first.
  mine(limit){return this.#records(this.#all('SELECT id FROM messages WHERE is_mine=1 ORDER BY created_at DESC,id DESC LIMIT ?',limit));}
  // One message for the model, unless it is unknown or its sender is ignored.
