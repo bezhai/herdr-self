@@ -4,13 +4,14 @@ import {modes,short} from './schedules.mjs';
 import {pendingCard,settledCard} from './schedule-cards.mjs';
 import {fits} from './message-cards.mjs';
 import {kinds} from './adoption.mjs';
-// Schedules as the agent of a topic manages them with bridge-schedule (see schedule-command.mjs). The agent is known by its machine and its
-// pane, which resolve to a ready topic whose agent is still linked (see Topics.alive), and it reaches only the schedules of that topic's
-// binding. Listing, the runs, pausing, resuming and removing act at once: they can only make schedules run less. Adding one or changing
-// its time or task posts a card into the topic's thread, and takes effect only when a person on the app's allowlist clicks 确认 on it (see
-// Platforms): the agent may have misread the time, or have been talked into it by what it read, and a click reaches Bridge from Feishu,
-// past the agent. No secret proves the pane: an agent that claims another pane reaches that topic's schedules, which it can then read,
-// pause or remove, and its cards go to that topic, where they still need the click.
+// Schedules as the agent of a topic manages them with bridge-schedule (see schedule-command.mjs). The agent is known by its machine, the one
+// whose client passed its request on (see Clients), and its pane, which resolve to a ready topic whose agent is still linked (see
+// Topics.alive), and it reaches only the schedules of that topic's binding. Listing, the runs, pausing, resuming and removing act at once:
+// they can only make schedules run less. Adding one or changing its time or task posts a card into the topic's thread, and takes effect
+// only when a person on the app's allowlist clicks 确认 on it (see Platforms): the agent may have misread the time, or have been talked
+// into it by what it read, and a click reaches Bridge from Feishu, past the agent. The token of the client proves the machine, but no
+// secret proves the pane: an agent that claims another pane of its machine reaches that topic's schedules, which it can then read, pause
+// or remove, and its cards go to that topic, where they still need the click.
 // How long a card waits for its click: enough to read it and to come back from a short interruption, short enough that the runs it lists
 // still lie ahead, that a card left alone soon stops blocking the next submission of its topic, and that a card the agent was talked into
 // does not stay clickable for long.
@@ -32,27 +33,22 @@ export class AgentSchedules{
  }
  start(){this.timer??=setInterval(()=>this.expire(),this.every);}
  stop(){clearInterval(this.timer);this.timer=null;}
- // Request op of the agent in pane pane of machine, a machine's name or id, or without one the local machine of Herdr session session
- // (default). op is one of ops: id names a schedule for runs, update, pause, resume and remove; add takes mode, cron, timeZone and task,
- // update any of the last three. Resolves to what the agent reads, and rejects with what to tell it.
- async call(op,request={}){
+ // Request op of the agent in pane pane of Herdr session session (default) on machine m, the machine whose client passed the request on:
+ // any machine the request names does not count. op is one of ops: id names a schedule for runs, update, pause, resume and remove; add
+ // takes mode, cron, timeZone and task, update any of the last three. Resolves to what the agent reads, and rejects with what to tell it.
+ async call(m,op,request){
   if(!ops.includes(op))throw Error('未知的操作：'+op);
-  return this[op](await this.caller(request),request);
+  if(!request||typeof request!=='object'||Array.isArray(request))throw Error('请求内容无效');
+  return this[op](await this.caller(m,request),request);
  }
- // The enabled machine called machine (by name or id), or else the enabled local one of Herdr session session: Bridge can have local
- // machines of several sessions, and pane ids repeat across machines and sessions.
- machineOf({machine,session}){
-  const enabled=this.store.data.machines.filter(m=>m.enabled),name=session||'default';
-  const found=machine?enabled.filter(m=>m.name===machine||m.id===machine):enabled.filter(m=>m.type==='local'&&m.session===name);
-  if(found.length===1)return found[0];
-  if(machine)throw Error(found.length?`有多台机器叫 ${machine}，请用机器 ID`:`Bridge 没有连接名为 ${machine} 的机器`);
-  throw Error(found.length?`本机有多个 session ${name} 的 Herdr 连接，请用 --machine 指定机器`:`Bridge 没有连接本机 session ${name} 的 Herdr`);
- }
- // The ready topic of the agent of a request, whose agent is still linked: read in the topic's queue, where a topic whose agent is gone
- // ends (see Topics.alive).
- async caller(request){
-  const {pane}=request;if(typeof pane!=='string'||!pane)throw Error('缺少 pane：bridge-schedule 要由 Herdr pane 里的 Agent 运行（HERDR_PANE_ID）');
-  const m=this.machineOf(request),t=this.store.data.topics.find(x=>x.machineId===m.id&&x.paneId===pane&&x.state==='ready');
+ // The ready topic of the agent in pane pane of Herdr session session on machine m, whose agent is still linked: read in the topic's queue,
+ // where a topic whose agent is gone ends (see Topics.alive). Pane ids repeat across machines and sessions, and Bridge reaches one session
+ // of a machine.
+ async caller(m,{pane,session}){
+  if(typeof pane!=='string'||!pane)throw Error('缺少 pane：bridge-schedule 要由 Herdr pane 里的 Agent 运行（HERDR_PANE_ID）');
+  if(!m.enabled)throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
+  if((session||'default')!==m.session)throw Error(`这个 Agent 在 Herdr session ${session||'default'} 里，Bridge 连接的是这台机器的 session ${m.session}`);
+  const t=this.store.data.topics.find(x=>x.machineId===m.id&&x.paneId===pane&&x.state==='ready');
   if(!t||!await this.topics.queue(t,()=>this.topics.alive(this.app(t.appId),t)))throw Error(notTopic);
   return t;
  }

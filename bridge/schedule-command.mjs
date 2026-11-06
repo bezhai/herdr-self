@@ -1,12 +1,13 @@
 import http from 'node:http';
-import {agentSocket,stateDir} from './core.mjs';
+import {clientSocket,forwardMs} from './client.mjs';
 import {when} from './cron.mjs';
 import {clip} from './request-cards.mjs';
 // bridge-schedule, the command line through which the agent of a Feishu topic manages the schedules of the topic's binding (see
-// AgentSchedules). It sends each request to Bridge's agent socket in the state directory, so it runs on the Bridge host: there directly,
-// and from a machine that Bridge reaches over SSH through bin/bridge-schedule-ssh. The agent is its pane (HERDR_PANE_ID, which Herdr puts
-// into the environment of a pane) on its machine: the one --machine names, else the local machine of its Herdr session (HERDR_SESSION).
-// Reads print text for the agent, or with --json Bridge's answer.
+// AgentSchedules). It sends each request to the Bridge client of the machine it runs on (see client.mjs), which passes it on to the control
+// plane over its connection; the control plane takes the machine from that connection, so the command names none. It runs on Node alone,
+// like the client. The agent is its pane (HERDR_PANE_ID, which Herdr puts into the environment of a pane) in its Herdr session
+// (HERDR_SESSION, which Herdr sets in the panes of a session other than default). Reads print text for the agent, or with --json Bridge's
+// answer.
 export const usage=`用法：
   bridge-schedule add --cron <cron 表达式> --mode new|into --task <任务文字> [--tz <IANA 时区>]
   bridge-schedule list
@@ -18,10 +19,10 @@ export const usage=`用法：
 add 和 update 在这个话题里发确认卡片，主人点「确认」后才生效；其他操作立即生效。
 --mode new 每次运行开一个新话题，into 每次运行发进这个话题。--tz 默认取这台机器的时区。
 ID 可以只写开头几位（例如卡片上的 8 位）。--json 输出 Bridge 的原始结果。
---machine <机器名>、--pane <pane> 和 --session <Herdr session> 默认取本机、HERDR_PANE_ID 和 HERDR_SESSION。
+--pane <pane> 和 --session <Herdr session> 默认取 HERDR_PANE_ID 和 HERDR_SESSION。
 `;
 const ops=['add','list','runs','update','pause','resume','remove'];
-const options={'--cron':'cron','--tz':'timeZone','--task':'task','--mode':'mode','--machine':'machine','--pane':'pane','--session':'session'};
+const options={'--cron':'cron','--tz':'timeZone','--task':'task','--mode':'mode','--pane':'pane','--session':'session'};
 const usageError=message=>Object.assign(Error(message),{usage:true});
 // The operation, the id and the options of args: an option takes the next argument, or what follows its =, whatever it looks like.
 export function parse(args){
@@ -37,23 +38,19 @@ export function parse(args){
  if(positional.length>2)throw usageError('多余的参数：'+positional.slice(2).join(' '));
  const [op,id]=positional;return {...op!=null&&{op},...id!=null&&{id},...out};
 }
-// The arguments that come NUL-separated on stdin.
-async function stdinArgs(stdin){
- const chunks=[];for await(const c of stdin)chunks.push(c);
- const parts=Buffer.concat(chunks).toString('utf8').split('\0');if(parts.at(-1)==='')parts.pop();return parts;
-}
-// Sends request op with body to Bridge on socket, on a connection of its own, and resolves to its answer; rejects with what Bridge refused,
-// when Bridge is not there, or when the agent's sandbox forbids the connection (Codex runs commands in one that forbids connections).
+// Sends request op with body to the client on socket, on a connection of its own, and resolves to Bridge's answer; rejects with what Bridge
+// or the client refused, when no client listens there, or when the agent's sandbox forbids the connection (that of a Codex started without
+// its network, see Topics). The client answers within forwardMs; this waits 5 seconds longer, for a client that does not answer at all.
 export function send(socket,op,body){
  return new Promise((resolve,reject)=>{
   const data=JSON.stringify(body);
-  const req=http.request({socketPath:socket,agent:false,path:'/schedules/'+op,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)},timeout:60000},res=>{
+  const req=http.request({socketPath:socket,agent:false,path:'/schedules/'+op,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)},timeout:forwardMs+5000},res=>{
    let s='';res.setEncoding('utf8');res.on('data',d=>{s+=d;});
-   res.on('end',()=>{let r;try{r=JSON.parse(s);}catch{return reject(Error('Bridge 的回答不是 JSON'));}if(res.statusCode!==200)return reject(Error(r.error||'Bridge 回答 '+res.statusCode));resolve(r);});
+   res.on('end',()=>{let r;try{r=JSON.parse(s);}catch{return reject(Error('本机的 Bridge 客户端的回答不是 JSON'));}if(res.statusCode!==200)return reject(Error(r.error||'本机的 Bridge 客户端回答 '+res.statusCode));resolve(r);});
   });
-  req.on('timeout',()=>req.destroy(Error('Bridge 没有回答')));
-  req.on('error',e=>reject(['ENOENT','ECONNREFUSED'].includes(e.code)?Error(`连不上 Bridge（${socket}）：Bridge 没有运行，或者这台机器不是 Bridge 所在的机器`)
-   :['EACCES','EPERM'].includes(e.code)?Error(`没有权限连接 Bridge（${socket}）：如果命令运行在 Agent 的沙箱里，需要在沙箱外运行这条命令`):e));
+  req.on('timeout',()=>req.destroy(Error('本机的 Bridge 客户端没有回答')));
+  req.on('error',e=>reject(['ENOENT','ECONNREFUSED'].includes(e.code)?Error(`连不上本机的 Bridge 客户端（${socket}）：客户端没有运行，或者没有打开这个 socket`)
+   :['EACCES','EPERM'].includes(e.code)?Error(`没有权限连接本机的 Bridge 客户端（${socket}）：如果命令运行在 Agent 的沙箱里，需要在沙箱外运行这条命令`):e));
   req.end(data);
  });
 }
@@ -86,16 +83,15 @@ export function format(op,r){
  }
 }
 // Runs bridge-schedule with argv in env, and resolves to its exit status: 0, 1 when Bridge refused or cannot be reached, 2 for a usage
-// error. With --stdin, the arguments on stdin go before the others, which therefore take precedence: an SSH forced command can pin
-// --machine that way (see bin/bridge-schedule-ssh). timeZone is that of a new schedule without --tz: the machine's.
-export async function main(argv,{env=process.env,stdin=process.stdin,stdout=process.stdout,stderr=process.stderr,timeZone=Intl.DateTimeFormat().resolvedOptions().timeZone}={}){
+// error. timeZone is that of a new schedule without --tz: the machine's.
+export async function main(argv,{env=process.env,stdout=process.stdout,stderr=process.stderr,timeZone=Intl.DateTimeFormat().resolvedOptions().timeZone}={}){
  try{
-  const args=argv.includes('--stdin')?[...await stdinArgs(stdin),...argv.filter(a=>a!=='--stdin')]:argv,o=parse(args);
+  const o=parse(argv);
   if(o.help){stdout.write(usage);return 0;}
   if(!ops.includes(o.op))throw usageError(o.op?'未知的操作：'+o.op:'缺少操作');
   const {op,json,help,...fields}=o,pane=fields.pane??env.HERDR_PANE_ID,session=fields.session??env.HERDR_SESSION;
   const body={...fields,...pane&&{pane},...session&&{session},...op==='add'&&{timeZone:fields.timeZone??timeZone}};
-  const r=await send(agentSocket(stateDir(env)),op,body);
+  const r=await send(clientSocket(env),op,body);
   stdout.write((json?JSON.stringify(r,null,2):format(op,r))+'\n');return 0;
  }catch(e){stderr.write(`bridge-schedule: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
 }

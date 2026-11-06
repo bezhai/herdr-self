@@ -96,8 +96,6 @@ export async function removeDirectory(m,dir){
 export function publicText(s){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}
 // Bridge's state directory: BRIDGE_STATE of env, else state in the Bridge directory.
 export const stateDir=(env=process.env)=>env.BRIDGE_STATE||path.join(path.dirname(fileURLToPath(import.meta.url)),'state');
-// The Unix socket in state directory dir on which Bridge takes the requests of agents (see bin/bridge-schedule.mjs).
-export const agentSocket=dir=>path.join(dir,'agent.sock');
 // Persisted collections. Keys of older state files outside this list are dropped on load; a collection they lack loads empty.
 const collections=['machines','apps','bindings','topics','schedules','logs'];
 export class Store{

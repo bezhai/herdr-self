@@ -11,7 +11,7 @@ import {check,card,plain} from './request-cards.mjs';import {fits} from './messa
 import {Registrations} from './registration.mjs';import {staticFile,sendStatic} from './web-assets.mjs';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
 import crypto from 'node:crypto';import {WebSocketServer} from 'ws';
-import {link,protocol,closeCodes} from './link.mjs';import {Clients} from './clients.mjs';import {configText} from './client.mjs';
+import {link,protocol,closeCodes} from './link.mjs';import {Clients} from './clients.mjs';import {configText,serve} from './client.mjs';
 
 function platformFixture(options){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-platform-')),store=new Store(dir),messages=[],unbound=[];return {dir,store,messages,unbound,platforms:new Platforms(store,{onMessage:(...args)=>messages.push(args),onUnbound:(...args)=>unbound.push(args),...options}),close(){fs.rmSync(dir,{recursive:true});}};}
 const route={id:'b',name:'个人助手',enabled:true,appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false};
@@ -572,8 +572,9 @@ test('another topic opens a tab in the same workspace and turns on remote answer
   assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>[t.cot.origin,t.reactions.map(r=>r.messageId)]),[['om_1',['om_3']],['om_2',[]]]);
  }finally{f.close();}
 });
-test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding starts its agent with -- --no-daemon; an Antigravity binding passes nothing on',async()=>{
- for(const [binding,args] of [[{},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],[{kind:'codex'},['--','--no-daemon']],[{kind:'agy'},[]]]){
+test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding starts its agent with -- --no-daemon and the network of its sandbox on, so that bridge-schedule reaches the client of its machine; an Antigravity binding passes nothing on',async()=>{
+ for(const [binding,args] of [[{},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],
+  [{kind:'codex'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true']],[{kind:'agy'},[]]]){
   const f=topicFixture({binding});try{
    await f.send({messageId:'om_1',content:'one'});
    assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',f.b.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(binding));
@@ -2345,15 +2346,16 @@ test('the timer of the schedules checks them every interval from start until sto
   await later(30);assert.equal(ticks,seen);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-// The agent schedules over a schedule fixture (see scheduleFixture), with its clock. f.call(op,fields,t) is a request of the agent of topic t
-// (the first topic by default) on its machine, cpu2; f.click(id,choice,openId) clicks 确认 or 取消 on the card of proposal id, and
-// f.drawn() waits for the cards being redrawn. f.open(messageId) opens a ready topic.
-function agentFixture(options){
- const f=scheduleFixture(options);
+// The agent schedules over a schedule fixture (see scheduleFixture), with its clock; its machine cpu2 is of the Herdr session default.
+// f.call(op,fields,t) is a request of the agent of topic t (the first topic by default) that the client of its machine passed on;
+// f.click(id,choice,openId) clicks 确认 or 取消 on the card of proposal id, and f.drawn() waits for the cards being redrawn. f.open(messageId)
+// opens a ready topic.
+function agentFixture(options={}){
+ const f=scheduleFixture({...options,machine:{session:'default',...options.machine}});
  const deps={topics:f.topics,schedules:f.schedules,app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},reply:(...args)=>f.topics.reply(...args),updateCard:(...args)=>f.topics.updateCard(...args),now:()=>f.clock.now};
  const agents=new AgentSchedules(f.store,deps);
  return Object.assign(f,{agents,deps,
-  call:(op,fields={},t=f.store.data.topics[0])=>agents.call(op,{machine:'cpu2',pane:t.paneId,...fields}),
+  call:(op,fields={},t=f.store.data.topics[0])=>agents.call(f.m,op,{pane:t.paneId,...fields}),
   click:(id,choice,openId='ou_user',a=agents)=>a.click(allowed,{messageId:'om_any',chatId:'oc_1',operator:{openId},action:{tag:'button',value:{schedule:choice,proposal:id}}}),
   drawn:()=>Promise.all(agents.drawing.values()),
   open:async messageId=>{await f.send({messageId,content:'topic '+messageId});return f.store.data.topics.find(t=>t.rootId===messageId);}});
@@ -2365,29 +2367,25 @@ const nextWeekdays=['2026-11-09 周一 09:30','2026-11-10 周二 09:30','2026-11
 const aboutWeekdays=(task='总结昨天的提交')=>[plainText('时间：每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）'),plainText('接下来 5 次运行：\n'+nextWeekdays.join('\n')),plainText('任务：\n'+task)];
 const newTopicMode=plainText('模式：每次开新话题。每次运行时机器人在群里发一条消息，在它下面开一个新话题，交给一个新的 Agent'),intoThisMode=plainText('模式：发进这个话题。每次运行把任务发给这个话题里的 Agent，它记得之前的对话');
 const boundTo=plainText('绑定：个人助手（cpu2 · ~/work · Claude）');
-test('an agent is known by its machine and its pane: a ready topic there whose agent is still linked; any other pane, machine or topic is refused, and a topic whose agent is gone ends',async()=>{
- const f=agentFixture();try{
+test('an agent is known by the machine whose client passed its request on and by its pane: a ready topic there whose agent is still linked; any other pane, machine, Herdr session or topic is refused, and a topic whose agent is gone ends',async()=>{
+ const other={id:'m2',name:'cpu1',session:'default',enabled:true};
+ const f=agentFixture({machines:[other]});try{
   const t=await f.open('om_1');
   assert.deepEqual(await f.call('list'),{binding:{id:'b',name:'个人助手'},topicId:t.id,schedules:[]});
-  assert.deepEqual((await f.agents.call('list',{machine:'m',pane:t.paneId})).topicId,t.id);
+  assert.equal((await f.call('list',{session:'default'})).topicId,t.id);
   const notTopic=/这个 pane 里的 Agent 不属于任何进行中的飞书话题/;
-  for(const [request,error] of [[{machine:'cpu2'},/缺少 pane/],[{machine:'cpu2',pane:''},/缺少 pane/],[{machine:'cpu2',pane:'w1:p9'},notTopic],[{machine:'cpu9',pane:t.paneId},/Bridge 没有连接名为 cpu9 的机器/],
-   [{pane:t.paneId},/Bridge 没有连接本机 session default 的 Herdr/]])
-   await assert.rejects(f.agents.call('list',request),error,JSON.stringify(request));
+  // The same pane on another machine is another agent, whatever machine the request names.
+  for(const [m,request,error] of [[f.m,{},/缺少 pane/],[f.m,{pane:''},/缺少 pane/],[f.m,{pane:'w1:p9'},notTopic],[other,{pane:t.paneId},notTopic],[other,{pane:t.paneId,machine:'cpu2',machineId:'m'},notTopic],
+   [f.m,{pane:t.paneId,session:'work'},/这个 Agent 在 Herdr session work 里，Bridge 连接的是这台机器的 session default/]])
+   await assert.rejects(f.agents.call(m,'list',request),error,JSON.stringify(request));
+  for(const request of [null,[],'list'])await assert.rejects(f.agents.call(f.m,'list',request),/请求内容无效/,JSON.stringify(request));
   await assert.rejects(f.call('loop'),/未知的操作：loop/);
-  // A disabled machine is not connected.
-  f.m.enabled=false;await assert.rejects(f.call('list'),/Bridge 没有连接名为 cpu2 的机器/);f.m.enabled=true;
+  f.m.enabled=false;await assert.rejects(f.call('list'),/Bridge 已断开机器 cpu2 的桥接/);f.m.enabled=true;
   // The agent no longer reports remote answers: the topic ends, and the agent is refused.
   delete f.h.agents[0].remote_answers;f.replies.length=0;
   await assert.rejects(f.call('list'),notTopic);assert.equal(t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，请发起新话题')]);
   await assert.rejects(f.call('list'),notTopic);
  }finally{f.close();}
- // A local machine needs no name: it is the one of the agent's Herdr session.
- const g=agentFixture({machine:{type:'local',session:'default'}});try{
-  const t=await g.open('om_1');
-  assert.equal((await g.agents.call('list',{pane:t.paneId})).topicId,t.id);assert.equal((await g.agents.call('list',{pane:t.paneId,session:'default'})).topicId,t.id);
-  await assert.rejects(g.agents.call('list',{pane:t.paneId,session:'work'}),/Bridge 没有连接本机 session work 的 Herdr/);
- }finally{g.close();}
 });
 test('list, runs, pause, resume and remove act at once on the schedules of the binding of the agent\'s topic, named by their id or its first characters; another binding\'s schedules do not exist for it',async()=>{
  const f=agentFixture();try{
@@ -2544,10 +2542,10 @@ test('the timer of the agent schedules checks for expired cards every interval f
   await later(30);assert.equal(checks,seen);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-// A Bridge that answers the requests of bridge-schedule on agent.sock in a state directory of its own: answer(op,body) returns [status,
-// data]. f.requests records each as [method, path, content type, body].
-async function fakeBridge(answer){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-agent-')),socket=path.join(dir,'agent.sock'),requests=[];
+// The Bridge client of a machine as bridge-schedule sees it: an HTTP server on a Unix socket in a directory of its own, where answer(op,body)
+// returns [status, data]. f.requests records each request as [method, path, content type, body].
+async function fakeClient(answer){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-agent-')),socket=path.join(dir,'client.sock'),requests=[];
  const server=http.createServer(async(req,res)=>{
   let s='';for await(const c of req)s+=c;const body=JSON.parse(s);requests.push([req.method,req.url,req.headers['content-type'],body]);
   const [code,data]=await answer(req.url.replace('/schedules/',''),body);res.writeHead(code,{'content-type':'application/json'});res.end(JSON.stringify(data));
@@ -2555,22 +2553,22 @@ async function fakeBridge(answer){
  await new Promise(r=>server.listen(socket,r));
  return {dir,socket,requests,close:()=>new Promise(r=>server.close(()=>{fs.rmSync(dir,{recursive:true});r();}))};
 }
-// Runs bridge-schedule with args in env (its state directory that of bridge, its pane w1:p1) and resolves to {code, out, err}; stdin, when
-// given, is what it reads.
-async function schedule(bridge,args,{env={},stdin}={}){
+// Runs bridge-schedule with args in env (the socket that of client, its pane w1:p1) and resolves to {code, out, err}.
+async function schedule(client,args,{env={}}={}){
  let out='',err='';
- const code=await runCommand(args,{env:{BRIDGE_STATE:bridge.dir,HERDR_PANE_ID:'w1:p1',...env},stdin:stdin==null?Readable.from([]):Readable.from([Buffer.from(stdin)]),stdout:{write:s=>{out+=s;}},stderr:{write:s=>{err+=s;}},timeZone:'Asia/Shanghai'});
+ const code=await runCommand(args,{env:{BRIDGE_CLIENT_SOCKET:client.socket,HERDR_PANE_ID:'w1:p1',...env},stdout:{write:s=>{out+=s;}},stderr:{write:s=>{err+=s;}},timeZone:'Asia/Shanghai'});
  return {code,out,err};
 }
 const sid=n=>`${n}0000000-0000-4000-8000-00000000000${n}`.slice(0,36);
 test('bridge-schedule reads its operation, the id and options in any order, with a value after the option or after =; anything else is a usage error',()=>{
  assert.deepEqual(parseCommand(['add','--cron','30 9 * * 1-5','--mode=new','--task','--看起来像选项','--tz','UTC','--json']),{op:'add',json:true,cron:'30 9 * * 1-5',mode:'new',task:'--看起来像选项',timeZone:'UTC'});
- assert.deepEqual(parseCommand(['--machine','cpu2','pause','1a2b3c4d','--pane','w1:p2','--session=work']),{op:'pause',id:'1a2b3c4d',json:false,machine:'cpu2',pane:'w1:p2',session:'work'});
+ assert.deepEqual(parseCommand(['pause','1a2b3c4d','--pane','w1:p2','--session=work']),{op:'pause',id:'1a2b3c4d',json:false,pane:'w1:p2',session:'work'});
  assert.deepEqual(parseCommand(['--help']),{json:false,help:true});
- for(const [args,error] of [[['add','--cron'],/--cron 缺少值/],[['list','--loop'],/未知的参数：--loop/],[['pause','a','b'],/多余的参数：b/]])
+ // The machine is the one it runs on, which its client vouches for: no option names another.
+ for(const [args,error] of [[['add','--cron'],/--cron 缺少值/],[['list','--loop'],/未知的参数：--loop/],[['pause','a','b'],/多余的参数：b/],[['list','--machine','cpu2'],/未知的参数：--machine/],[['--stdin','list'],/未知的参数：--stdin/]])
   assert.throws(()=>parseCommand(args),error,args.join(' '));
 });
-test('bridge-schedule sends its request to Bridge\'s agent socket with the pane of its agent and the time zone of its machine, and prints what Bridge answers for the agent to read, or the answer itself with --json',async()=>{
+test('bridge-schedule sends its request to the Bridge client of its machine with the pane and the Herdr session of its agent and the time zone of its machine, and prints what Bridge answers for the agent to read, or the answer itself with --json',async()=>{
  const due=iso=>at(iso);
  const list={binding:{id:'b',name:'个人助手'},topicId:'t1',schedules:[
   {id:sid(1),bindingId:'b',mode:'new',cron:'30 9 * * 1-5',timeZone:'Asia/Shanghai',task:'总结昨天的提交\n第二行',paused:false,next:due('2026-11-09T09:30:00+08:00'),phrase:'每周一至周五 09:30'},
@@ -2584,7 +2582,7 @@ test('bridge-schedule sends its request to Bridge\'s agent socket with the pane 
   {due:due('2026-11-13T09:30:00+08:00'),at:due('2026-11-13T09:30:00+08:00'),outcome:'failed',n:3,topicId:'t5',reason:'Agent 启动失败'}]};
  const proposal=(kind,more)=>({proposal:{id:'p1',kind,...more,expiresAt:due('2026-11-06T10:30:00+08:00'),timeZone:'Asia/Shanghai',phrase:'每周一至周五 09:30',next:[due('2026-11-09T09:30:00+08:00'),due('2026-11-10T09:30:00+08:00')]}});
  const answers={list:list,runs,pause:{schedule:{...first,paused:true,next:null}},resume:{schedule:first},remove:{schedule:first},add:proposal('add'),update:proposal('update',{scheduleId:sid(1)})};
- const bridge=await fakeBridge(op=>[200,answers[op]]);try{
+ const client=await fakeClient(op=>[200,answers[op]]);try{
   const text={
    list:['绑定「个人助手」上有 3 个定时任务：',
     `${sid(1).slice(0,8)} · 每次开新话题 · 每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）`,'  下次运行：2026-11-09 周一 09:30','  任务：总结昨天的提交 第二行',
@@ -2599,60 +2597,36 @@ test('bridge-schedule sends its request to Bridge\'s agent socket with the pane 
    update:[`已在这个话题里发了修改定时任务 ${sid(1).slice(0,8)} 的确认卡片：每周一至周五 09:30（Asia/Shanghai），下次运行 2026-11-09 周一 09:30。主人在卡片上点「确认」后才生效；到 2026-11-06 周五 10:30 还没有确认就作废。`]};
   const args={list:['list'],runs:['runs','1a2b'],pause:['pause','1a2b'],resume:['resume','1a2b'],remove:['remove','1a2b'],add:['add','--cron','30 9 * * 1-5','--mode','new','--task','总结'],update:['update','1a2b','--task','新的']};
   for(const op of Object.keys(text)){
-   assert.deepEqual(await schedule(bridge,args[op]),{code:0,out:text[op].join('\n')+'\n',err:''},op);
-   assert.deepEqual(await schedule(bridge,[...args[op],'--json']),{code:0,out:JSON.stringify(answers[op],null,2)+'\n',err:''},op);
+   assert.deepEqual(await schedule(client,args[op]),{code:0,out:text[op].join('\n')+'\n',err:''},op);
+   assert.deepEqual(await schedule(client,[...args[op],'--json']),{code:0,out:JSON.stringify(answers[op],null,2)+'\n',err:''},op);
   }
   // Each request: the operation in the path, JSON, the agent's pane and Herdr session; a new schedule without --tz takes the machine's time zone.
-  assert.deepEqual(bridge.requests.filter((r,i)=>i%2===0).map(r=>[r[0],r[1],r[2]]),Object.keys(text).map(op=>['POST','/schedules/'+op,'application/json']));
-  assert.deepEqual(bridge.requests.map(r=>r[3]).filter((r,i)=>i%2===0),[{pane:'w1:p1'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},
+  assert.deepEqual(client.requests.filter((r,i)=>i%2===0).map(r=>[r[0],r[1],r[2]]),Object.keys(text).map(op=>['POST','/schedules/'+op,'application/json']));
+  assert.deepEqual(client.requests.map(r=>r[3]).filter((r,i)=>i%2===0),[{pane:'w1:p1'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},{pane:'w1:p1',id:'1a2b'},
    {pane:'w1:p1',cron:'30 9 * * 1-5',mode:'new',task:'总结',timeZone:'Asia/Shanghai'},{pane:'w1:p1',id:'1a2b',task:'新的'}]);
-  bridge.requests.length=0;
-  await schedule(bridge,['list','--machine','cpu2','--pane','w2:p3'],{env:{HERDR_SESSION:'work'}});await schedule(bridge,['add','--tz','UTC','--cron','0 9 * * *','--mode','into','--task','t']);
-  assert.deepEqual(bridge.requests.map(r=>r[3]),[{machine:'cpu2',pane:'w2:p3',session:'work'},{pane:'w1:p1',timeZone:'UTC',cron:'0 9 * * *',mode:'into',task:'t'}]);
-  // With --stdin the arguments come NUL-separated on stdin, before those on the command line, which take precedence.
-  bridge.requests.length=0;
-  assert.equal((await schedule(bridge,['--stdin','--machine','pinned'],{env:{HERDR_PANE_ID:''},stdin:['--machine','claimed','--pane','w9:p9','add','--cron','0 9 * * *','--mode','new','--task',"带 '引号'\n和换行",''].join('\0')})).code,0);
-  assert.deepEqual(bridge.requests.map(r=>r[3]),[{machine:'pinned',pane:'w9:p9',cron:'0 9 * * *',mode:'new',task:"带 '引号'\n和换行",timeZone:'Asia/Shanghai'}]);
- }finally{await bridge.close();}
+  client.requests.length=0;
+  await schedule(client,['list','--pane','w2:p3'],{env:{HERDR_SESSION:'work'}});await schedule(client,['add','--tz','UTC','--cron','0 9 * * *','--mode','into','--task','t']);
+  assert.deepEqual(client.requests.map(r=>r[3]),[{pane:'w2:p3',session:'work'},{pane:'w1:p1',timeZone:'UTC',cron:'0 9 * * *',mode:'into',task:'t'}]);
+ }finally{await client.close();}
 });
-test('bridge-schedule prints what Bridge refused and exits 1, a usage error with the usage and exits 2, and says so when no Bridge listens on its machine',async()=>{
- const bridge=await fakeBridge(()=>[400,{error:'定时任务不存在'}]);try{
-  assert.deepEqual(await schedule(bridge,['pause','x']),{code:1,out:'',err:'bridge-schedule: 定时任务不存在\n'});
-  for(const args of [[],['loop'],['list','--loop']]){const r=await schedule(bridge,args);assert.equal(r.code,2,args.join(' '));assert.match(r.err,/用法：\n  bridge-schedule add --cron/);}
-  const help=await schedule(bridge,['--help']);assert.equal(help.code,0);assert.match(help.out,/^用法：/);assert.deepEqual(bridge.requests.map(r=>r[1]),['/schedules/pause']);
-  const gone={dir:path.join(bridge.dir,'none')},r=await schedule(gone,['list']);
-  assert.deepEqual(r,{code:1,out:'',err:`bridge-schedule: 连不上 Bridge（${path.join(gone.dir,'agent.sock')}）：Bridge 没有运行，或者这台机器不是 Bridge 所在的机器\n`});
+test('bridge-schedule prints what was refused and exits 1, a usage error with the usage and exits 2, and names the Bridge client of its machine when it cannot reach it: no socket, a socket nothing listens on, or one it may not open',async()=>{
+ const client=await fakeClient(()=>[400,{error:'定时任务不存在'}]);try{
+  assert.deepEqual(await schedule(client,['pause','x']),{code:1,out:'',err:'bridge-schedule: 定时任务不存在\n'});
+  for(const args of [[],['loop'],['list','--loop']]){const r=await schedule(client,args);assert.equal(r.code,2,args.join(' '));assert.match(r.err,/用法：\n  bridge-schedule add --cron/);}
+  const help=await schedule(client,['--help']);assert.equal(help.code,0);assert.match(help.out,/^用法：/);assert.deepEqual(client.requests.map(r=>r[1]),['/schedules/pause']);
+  // A socket that a client left when it ended.
+  const gone={socket:path.join(client.dir,'none.sock')},stale={socket:path.join(client.dir,'stale.sock')};
+  execFileSync(process.execPath,['-e',`require('node:net').createServer().listen(${JSON.stringify(stale.socket)},()=>process.exit(0))`]);assert.ok(fs.existsSync(stale.socket));
+  for(const c of [gone,stale])assert.deepEqual(await schedule(c,['list']),{code:1,out:'',err:`bridge-schedule: 连不上本机的 Bridge 客户端（${c.socket}）：客户端没有运行，或者没有打开这个 socket\n`},c.socket);
   // A socket it may not open, as in the sandbox of an agent that forbids connections.
-  fs.chmodSync(bridge.socket,0);
-  if(process.getuid?.()!==0)assert.deepEqual(await schedule(bridge,['list']),{code:1,out:'',err:`bridge-schedule: 没有权限连接 Bridge（${bridge.socket}）：如果命令运行在 Agent 的沙箱里，需要在沙箱外运行这条命令\n`});
- }finally{await bridge.close();}
+  fs.chmodSync(client.socket,0);
+  if(process.getuid?.()!==0)assert.deepEqual(await schedule(client,['list']),{code:1,out:'',err:`bridge-schedule: 没有权限连接本机的 Bridge 客户端（${client.socket}）：如果命令运行在 Agent 的沙箱里，需要在沙箱外运行这条命令\n`});
+ }finally{await client.close();}
 });
 // Runs program with args in env without blocking, so that a fake Bridge of this process can answer it; resolves to {status, stdout, stderr}.
 function spawned(program,args,env){
  return new Promise((resolve,reject)=>{const p=spawn(program,args,{env});let stdout='',stderr='';p.stdout.on('data',d=>{stdout+=d;});p.stderr.on('data',d=>{stderr+=d;});p.on('error',reject);p.on('close',status=>resolve({status,stdout,stderr}));});
 }
-test('on a machine that Bridge reaches over SSH, bridge-schedule-ssh runs bridge-schedule on the Bridge host over ssh, with this machine\'s name, its agent\'s pane and the arguments on stdin, never on the remote command line',async()=>{
- const bridge=await fakeBridge((op,body)=>body.id==='gone'?[400,{error:'定时任务不存在'}]:[200,{binding:{id:'b',name:'个人助手'},topicId:'t',schedules:[]}]);
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-ssh-agent-')),bin=path.join(dir,'bin'),home=path.join(dir,'bridge home'),args=path.join(dir,'args');
- try{
-  // A fake ssh records its arguments and runs the remote command in its home, with what it reads on stdin; there bridge-schedule is installed.
-  fs.mkdirSync(bin);fs.mkdirSync(path.join(home,'.local','bin'),{recursive:true});
-  fs.writeFileSync(path.join(bin,'ssh'),['#!/bin/sh',`printf '%s\\n' "$@" >> ${quote(args)}`,'for last; do :; done',`cd ${quote(home)} && HOME=${quote(home)} exec sh -c "$last"`,''].join('\n'),{mode:0o700});
-  fs.writeFileSync(path.join(home,'.local','bin','bridge-schedule'),['#!/bin/sh',`BRIDGE_STATE=${quote(bridge.dir)} exec ${quote(process.execPath)} ${quote(path.join(path.dirname(fileURLToPath(import.meta.url)),'bin','bridge-schedule.mjs'))} "$@"`,''].join('\n'),{mode:0o700});
-  const wrapper=path.join(path.dirname(fileURLToPath(import.meta.url)),'bin','bridge-schedule-ssh'),task="带 '单引号' \"双引号\" $(id) `id` \\ 和\n换行";
-  const env={...Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_')&&!k.startsWith('BRIDGE_'))),PATH:bin+':'+process.env.PATH,BRIDGE_HOST:'bridge-host',BRIDGE_MACHINE:'cpu2',HERDR_PANE_ID:'w3:p2'};
-  const r=await spawned(wrapper,['add','--cron','0 9 * * *','--mode','new','--task',task,'--tz','UTC','--json'],env);
-  assert.equal(r.status,0,r.stderr);assert.deepEqual(JSON.parse(r.stdout),{binding:{id:'b',name:'个人助手'},topicId:'t',schedules:[]});
-  assert.deepEqual(bridge.requests.map(x=>x[3]),[{machine:'cpu2',pane:'w3:p2',cron:'0 9 * * *',mode:'new',task,timeZone:'UTC'}]);
-  const sent=fs.readFileSync(args,'utf8');assert.ok(!sent.includes('单引号'));assert.deepEqual(sent.trim().split('\n').slice(-2),['bridge-host','.local/bin/bridge-schedule --stdin']);
-  assert.match(sent,/BatchMode=yes/);
-  // What Bridge refuses comes back with its exit status; without the host or the machine name nothing runs.
-  const refused=await spawned(wrapper,['pause','gone'],env);assert.deepEqual([refused.status,refused.stdout,refused.stderr],[1,'','bridge-schedule: 定时任务不存在\n']);
-  bridge.requests.length=0;fs.writeFileSync(args,'');
-  const missing=await spawned(wrapper,['list'],{...env,BRIDGE_HOST:''});
-  assert.equal(missing.status,2);assert.match(missing.stderr,/BRIDGE_HOST 和 BRIDGE_MACHINE/);assert.equal(fs.readFileSync(args,'utf8'),'');
- }finally{fs.rmSync(dir,{recursive:true});await bridge.close();}
-});
 test('the bridge-schedule skill that Bridge places has a name and a description and names every operation of the command',()=>{
  const skill=fs.readFileSync(path.join(bundledSkills,'bridge-schedule','SKILL.md'),'utf8');
  const [,front,body]=/^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(skill)||[];
@@ -2902,11 +2876,11 @@ test('the server lists pending chats, saves bindings only through a link token, 
   assert.equal((await api('machines/install',{id:machineId})).status,404);
  }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
-test('the server hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; the topic\'s agent reaches it with bridge-schedule; removing the binding turns off remote answers for its topic and removes its attachment directory',async()=>{
+test('the server hands every refreshed agent list to the topics, which forward new replies, remove the reactions of ended turns and send cards for new requests; the topic\'s agent reaches it with bridge-schedule through the client of its machine, and the same pane on another machine does not; removing the binding turns off remote answers for its topic and removes its attachment directory',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),calls=path.join(dir,'calls'),attachments=path.join(dir,'work','.herdr-bridge','t');
  const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',state_change_seq:2,reply_seq:1,request_ids:[1],remote_answers:true};
  fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
- fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'fake',type:'local',session:'default',binary:herdr,enabled:true}],
+ fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'fake',type:'local',session:'default',binary:herdr,enabled:true},{id:'m2',name:'other',type:'local',session:'default',binary:herdr,enabled:true}],
   apps:[{id:'app',name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false}],bindings:[{id:'b',name:'助手',appId:'app',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false,enabled:true}],
   topics:[{id:'t',bindingId:'b',appId:'app',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',state:'ready',error:'',messageIds:['om_1'],
    reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],attachmentDir:attachments,createdAt:1}]}));
@@ -2916,8 +2890,8 @@ test('the server hands every refreshed agent list to the topics, which forward n
   ` 'agent replies') echo ${quote(JSON.stringify({result:{type:'agent_replies',agent,replies:[{seq:1,text:'hi'}]}}))};;`,
   ` 'agent requests') echo ${quote(JSON.stringify({result:{type:'agent_requests',agent,requests:[bash]}}))};;`,
   ` *) echo '{"result":{"panes":[]}}';;`,'esac',''].join('\n'),{mode:0o700});
- const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
- const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1'},stdio:['ignore','pipe','inherit']});
+ const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});}),clients=[];
+ const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:''},stdio:['ignore','pipe','inherit']});
  try{
   await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async p=>(await fetch(`http://127.0.0.1:${port}/api/${p}`,{headers:{authorization:'Bearer '+key}})).json();
@@ -2926,30 +2900,27 @@ test('the server hands every refreshed agent list to the topics, which forward n
   assert.equal(s.topics[0].replySeq,1);assert.deepEqual(s.logs.filter(l=>['回复转发','消息表情','请求卡片'].includes(l.kind)).map(l=>[l.level,l.message]),[['error','助手：feishu-1 的回复未发出，飞书未连接'],['error','feishu-1：未能取消表情，飞书未连接'],['error','feishu-1：请求 #1 的卡片未发出，飞书未连接']]);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).topics[0].reactions,[]);
   assert.deepEqual(fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('replies')||l.includes('requests')),['--session default agent replies w1:p1 --after 0','--session default agent requests w1:p1']);
-  // The agent of the topic reaches Bridge with bridge-schedule on the socket in the state directory, which only Bridge's user can open.
-  assert.equal(fs.statSync(path.join(state,'agent.sock')).mode&0o777,0o600);
+  // The agent of the topic reaches Bridge with bridge-schedule through the client of its machine, on a socket that only its user can open;
+  // Bridge takes the machine from the client's connection. Each machine has a client with its own token and socket.
+  const post=async(p,body)=>(await fetch(`http://127.0.0.1:${port}/api/${p}`,{method:'POST',headers:{authorization:'Bearer '+key},body:JSON.stringify(body)})).json();
+  const [own,other]=['m','m2'].map(id=>path.join(dir,id+'.sock'));
+  for(const [id,socket] of [['m',own],['m2',other]])clients.push(bridgeClient(configFile(dir,id+'.json',(await post('machines/token',{id})).config),{BRIDGE_CLIENT_SOCKET:socket}));
+  await until(async()=>(await api('state')).machines.every(m=>m.client.state==='online'),'both clients are online');
+  assert.equal(fs.statSync(own).mode&0o777,0o600);
   const env=Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_')&&!k.startsWith('BRIDGE_')));
-  const cli=(...args)=>spawned(process.execPath,[path.join(path.dirname(fileURLToPath(import.meta.url)),'bin','bridge-schedule.mjs'),...args],{...env,BRIDGE_STATE:state,HERDR_PANE_ID:'w1:p1'});
-  assert.deepEqual(await cli('list'),{status:0,stdout:'绑定「助手」上没有定时任务。\n',stderr:''});
-  // The app is not connected, so the card cannot be posted; another pane is no topic's agent.
-  assert.deepEqual(await cli('add','--cron','0 9 * * *','--mode','new','--task','x'),{status:1,stdout:'',stderr:'bridge-schedule: 确认卡片没有发出去，请稍后重试\n'});
-  assert.deepEqual(await cli('list','--pane','w1:p9'),{status:1,stdout:'',stderr:'bridge-schedule: 这个 pane 里的 Agent 不属于任何进行中的飞书话题：bridge-schedule 只能由飞书话题里的 Agent 运行\n'});
+  const cli=(socket,...args)=>spawned(process.execPath,[path.join(bridgeDir,'bin','bridge-schedule.mjs'),...args],{...env,BRIDGE_CLIENT_SOCKET:socket,HERDR_PANE_ID:'w1:p1'});
+  assert.deepEqual(await cli(own,'list'),{status:0,stdout:'绑定「助手」上没有定时任务。\n',stderr:''});
+  // The app is not connected, so the card cannot be posted; another pane is no topic's agent, and neither is the same pane on another machine.
+  assert.deepEqual(await cli(own,'add','--cron','0 9 * * *','--mode','new','--task','x'),{status:1,stdout:'',stderr:'bridge-schedule: 确认卡片没有发出去，请稍后重试\n'});
+  const notTopic={status:1,stdout:'',stderr:'bridge-schedule: 这个 pane 里的 Agent 不属于任何进行中的飞书话题：bridge-schedule 只能由飞书话题里的 Agent 运行\n'};
+  assert.deepEqual(await cli(own,'list','--pane','w1:p9'),notTopic);assert.deepEqual(await cli(other,'list'),notTopic);
+  // What the agent reads of a refusal is cleaned like the console's errors.
+  assert.deepEqual(await cli(own,'list','--session','token=abc'),{status:1,stdout:'',stderr:'bridge-schedule: 这个 Agent 在 Herdr session token=[已隐藏] 里，Bridge 连接的是这台机器的 session default\n'});
   const removed=await fetch(`http://127.0.0.1:${port}/api/bindings/remove`,{method:'POST',headers:{authorization:'Bearer '+key},body:JSON.stringify({id:'b'})});assert.equal(removed.status,200);
   const off=()=>fs.readFileSync(calls,'utf8').split('\n').filter(l=>l.includes('remote-answers'));for(let i=0;i<100&&!off().length;i++)await later(50);
   assert.deepEqual(off(),['--session default pane remote-answers w1:p1 off']);assert.deepEqual((await api('state')).topics,[]);
   for(let i=0;i<100&&fs.existsSync(attachments);i++)await later(50);assert.equal(fs.existsSync(attachments),false);assert.ok(fs.existsSync(path.dirname(attachments)));
- }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
-});
-test('the server runs without the agent socket when it cannot open it, such as in a state directory too long for a socket path, and logs why',async()=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'s'.repeat(120));fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
- const port=await new Promise(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address();s.close(()=>r(port));});});
- const server=spawn(process.execPath,['server.mjs'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1'},stdio:['ignore','pipe','inherit']});
- try{
-  await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
-  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async()=>(await fetch(`http://127.0.0.1:${port}/api/state`,{headers:{authorization:'Bearer '+key}})).json();
-  let s;for(let i=0;i<100;i++){s=await api();if(s.logs.some(l=>l.kind==='定时任务'))break;await later(50);}
-  assert.deepEqual(s.logs.filter(l=>l.kind==='定时任务').map(l=>[l.level,l.message.split('，')[0]]),[['error','Agent 的请求接口没有打开']]);assert.equal(server.exitCode,null);
- }finally{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
+ }finally{for(const c of clients)c.kill();server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));fs.rmSync(dir,{recursive:true});}
 });
 test('the server refuses to start with a BRIDGE_URL that is not an http(s) origin',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-'));try{
@@ -2975,9 +2946,11 @@ const hello=(ws,params)=>ws.send(JSON.stringify({id:1,method:'hello',params}));
 const configFile=(dir,name,text,mode=0o600)=>{const file=path.join(dir,name);fs.writeFileSync(file,text,{mode});fs.chmodSync(file,mode);return file;};
 // The environment of a client process: none of the test's Bridge, Herdr or proxy variables, then every proxy variable pointing at a closed port.
 const clientEnv=env=>({...Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(BRIDGE_|HERDR_)|proxy$/i.test(k))),...Object.fromEntries(['http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','all_proxy'].map(k=>[k,'http://127.0.0.1:9'])),...env});
-// A client process (bin/bridge-client.mjs) with the config file given; log collects its stderr and exited resolves to its exit code.
-function bridgeClient(config){
- const p=spawn(process.execPath,[path.join(bridgeDir,'bin','bridge-client.mjs')],{env:clientEnv({BRIDGE_CLIENT_CONFIG:config}),stdio:['ignore','ignore','pipe']});
+// A client process (bin/bridge-client.mjs) with the config file given and env, which names a socket of its own with BRIDGE_CLIENT_SOCKET
+// or HOME: the default one may belong to the client of this machine. log collects its stderr and exited resolves to its exit code.
+function bridgeClient(config,env){
+ assert.ok(env?.BRIDGE_CLIENT_SOCKET||env?.HOME,'a client of a test needs a socket of its own');
+ const p=spawn(process.execPath,[path.join(bridgeDir,'bin','bridge-client.mjs')],{env:clientEnv({BRIDGE_CLIENT_CONFIG:config,...env}),stdio:['ignore','ignore','pipe']});
  p.log='';p.stderr.on('data',d=>{p.log+=d;});p.exited=new Promise(r=>p.once('exit',code=>r(code)));return p;
 }
 // Bridge (server.mjs) on port with the state directory state, once it listens; stop() ends it.
@@ -2986,7 +2959,7 @@ async function bridgeServer(state,port,env={}){
  await new Promise((resolve,reject)=>{server.stdout.on('data',d=>{if(String(d).includes('listening'))resolve();});server.on('exit',()=>reject(Error('server exited')));});
  server.stop=async()=>{server.kill();if(server.exitCode===null&&server.signalCode===null)await new Promise(r=>server.once('exit',r));};return server;
 }
-// Clients alone on an HTTP server of this process, with the machine cpu2 and its token.
+// Clients alone on an HTTP server of this process, with the machine cpu2 of the Herdr session default and its token.
 async function clientsFixture(options){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-clients-')),store=new Store(dir);store.data.machines.push({id:'m',name:'cpu2',type:'ssh',host:'cpu2',session:'default',port:22,binary:'~/.local/bin/herdr',enabled:false});
  const clients=new Clients(store,options),server=http.createServer((req,res)=>res.end()).on('upgrade',(...args)=>clients.upgrade(...args));
@@ -3060,7 +3033,7 @@ test('the control plane pings each client every heartbeat and drops one that doe
 test('the client dials the URL of its config with its token, says hello with its protocol and host, answers pings and refuses other methods; it reconnects after the control plane drops it or goes silent, logs why, ignores proxy variables and exits once another client of its machine replaces it',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-')),wss=new WebSocketServer({port:0,host:'127.0.0.1'}),connections=[];await new Promise(r=>wss.once('listening',r));
  wss.on('connection',(ws,req)=>connections.push({ws,req,frames:framesOf(ws)}));
- const client=bridgeClient(configFile(dir,'client.json',configText(`http://127.0.0.1:${wss.address().port}`,'machine-token')));
+ const client=bridgeClient(configFile(dir,'client.json',configText(`http://127.0.0.1:${wss.address().port}`,'machine-token')),{BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock')});
  const connection=n=>until(()=>connections[n],'connection '+(n+1)),welcome=(c,h,heartbeatMs)=>c.ws.send(JSON.stringify({id:h.id,result:{machine:{id:'m',name:'cpu2'},heartbeatMs}}));
  try{
   let c=await connection(0);assert.equal(c.req.url,'/api/client');assert.equal(c.req.headers.authorization,'Bearer machine-token');
@@ -3098,18 +3071,83 @@ test('the client does not start without a config file it can use or with Node\'s
   ]){const [status,stderr]=run(env);assert.equal(status,1,stderr);assert.ok(stderr.startsWith('bridge-client: ')&&stderr.includes(error),stderr);}
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the client runs on Node alone: bin/bridge-client.mjs and everything it imports load only Node\'s built-in modules and each other, never a package',()=>{
- const seen=new Set(),visit=file=>{if(seen.has(file))return;seen.add(file);
-  for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:\bfrom|\bimport)\s*\(?\s*['"]([^'"]+)['"]/g)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
- visit(path.join(bridgeDir,'bin','bridge-client.mjs'));
- assert.deepEqual([...seen].map(f=>path.relative(bridgeDir,f)).sort(),['bin/bridge-client.mjs','client.mjs','link.mjs']);
+test('the client and bridge-schedule run on Node alone: bin/bridge-client.mjs, bin/bridge-schedule.mjs and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
+ const imports=bin=>{
+  const seen=new Set(),visit=file=>{if(seen.has(file))return;seen.add(file);
+   for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
+  visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
+ };
+ assert.deepEqual(imports('bridge-client.mjs'),['bin/bridge-client.mjs','client.mjs','link.mjs']);
+ assert.deepEqual(imports('bridge-schedule.mjs'),['bin/bridge-schedule.mjs','client.mjs','cron.mjs','link.mjs','request-cards.mjs','schedule-command.mjs']);
+});
+// Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
+async function stopClients(f,started){
+ for(const c of started)c.kill();await Promise.all(started.map(c=>c.exited));
+ await until(()=>f.store.data.machines.every(m=>f.clients.status(m.id).state!=='online'),'the clients are gone');f.close();
+}
+// What bridge-schedule prints while the client of its machine is not connected to the control plane.
+const notConnected='bridge-schedule: 本机的 Bridge 客户端没有连上控制面：请稍后重试，一直这样时请主人查看这台机器上客户端的日志\n';
+test('the client answers bridge-schedule on its socket, 0600 in a directory 0700 that it creates and in place of a socket left by an earlier client: POST /schedules/<op> with a JSON body goes to the control plane as the request schedules {op, body} with 60 seconds to answer; it answers 200 with the result, 400 with what the control plane refused or when it did not answer in time, 503 while the client is not connected, and 404 for anything else',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-')),socket=path.join(dir,'state','herdr-bridge','client.sock'),stale=path.join(dir,'stale.sock'),calls=[];let peer=null,answer;
+ const server=await serve(socket,()=>peer);
+ const raw=(method,p,body)=>new Promise((resolve,reject)=>{const req=http.request({socketPath:socket,method,path:p,agent:false},res=>{let s='';res.on('data',d=>{s+=d;});res.on('end',()=>resolve([res.statusCode,JSON.parse(s)]));});req.on('error',reject);req.end(body);});
+ try{
+  assert.equal(fs.statSync(socket).mode&0o777,0o600);assert.equal(fs.statSync(path.dirname(socket)).mode&0o777,0o700);
+  // A socket that an earlier client left when it ended.
+  execFileSync(process.execPath,['-e',`require('node:net').createServer().listen(${JSON.stringify(stale)},()=>process.exit(0))`]);assert.ok(fs.existsSync(stale));
+  const replaced=await serve(stale,()=>null);assert.deepEqual(await schedule({socket:stale},['list']),{code:1,out:'',err:notConnected});replaced.close();
+  assert.deepEqual(await schedule({socket},['list']),{code:1,out:'',err:notConnected});assert.equal((await raw('POST','/schedules/list','{}'))[0],503);
+  peer={call:async(...args)=>{calls.push(args);return answer();}};answer=()=>({binding:{id:'b',name:'助手'},topicId:'t',schedules:[]});
+  assert.deepEqual(await schedule({socket},['list','--json'],{env:{HERDR_SESSION:'work'}}),{code:0,out:JSON.stringify(answer(),null,2)+'\n',err:''});
+  assert.deepEqual(calls,[['schedules',{op:'list',body:{pane:'w1:p1',session:'work'}},{timeoutMs:60000}]]);
+  answer=()=>{throw Object.assign(Error('定时任务不存在'),{code:'x'});};assert.deepEqual(await schedule({socket},['pause','x']),{code:1,out:'',err:'bridge-schedule: 定时任务不存在\n'});
+  answer=()=>{throw Object.assign(Error('请求超时：schedules'),{timedOut:true});};assert.deepEqual(await schedule({socket},['list']),{code:1,out:'',err:'bridge-schedule: 控制面 60 秒内没有回答\n'});
+  for(const [method,p] of [['GET','/schedules/list'],['POST','/schedules/'],['POST','/schedules/LIST'],['POST','/run'],['POST','/schedules/list/x']])assert.deepEqual(await raw(method,p,'{}'),[404,{error:'接口不存在'}],method+' '+p);
+  assert.deepEqual(await raw('POST','/schedules/list','not json'),[400,{error:'请求内容不是 JSON'}]);assert.deepEqual(await raw('POST','/schedules/list','x'.repeat(100001)),[400,{error:'请求内容过大'}]);
+  assert.equal(calls.length,3);
+  // A body that arrives in pieces, one of them ending inside a character, is read as the text it is.
+  answer=()=>({});const text=Buffer.from(JSON.stringify({task:'定时任务'}));
+  await new Promise((resolve,reject)=>{const req=http.request({socketPath:socket,method:'POST',path:'/schedules/add',agent:false},res=>{res.resume();res.on('end',resolve);});req.on('error',reject);req.write(text.subarray(0,10));setTimeout(()=>req.end(text.subarray(10)),50);});
+  assert.deepEqual(calls.at(-1)[1],{op:'add',body:{task:'定时任务'}});
+ }finally{server.close();fs.rmSync(dir,{recursive:true});}
+});
+test('a client passes bridge-schedule on over its connection, and the control plane answers it for the machine of that connection: the clients of two machines each reach their own, what the control plane refuses comes back as it is, a connection must say hello first, and a client that is not connected says so',async()=>{
+ const seen=[],f=await clientsFixture({methods:{schedules:(m,params)=>{seen.push([m.id,params]);if(params.body.id==='gone')throw Error('定时任务不存在');return {binding:{id:'b',name:m.name},topicId:'t',schedules:[]};}}});
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-')),started=[];
+ const start=(name,token)=>{const socket=path.join(dir,name+'.sock');started.push(bridgeClient(configFile(dir,name+'.json',JSON.stringify({url:f.url,token})),{BRIDGE_CLIENT_SOCKET:socket}));return {socket};};
+ try{
+  const raw=await dial(f.url,f.token);await assert.rejects(link(raw,{}).call('schedules',{op:'list',body:{}}),/客户端还没有完成握手/);raw.close();
+  const m2={id:'m2',name:'cpu1',session:'default',enabled:true};f.store.data.machines.push(m2);
+  const a=start('a',f.token),b=start('b',f.clients.issue(m2)),wrong=start('wrong','not-the-token');
+  await until(()=>['m','m2'].every(id=>f.clients.status(id).state==='online')&&fs.existsSync(wrong.socket),'both clients are online and the third has its socket');
+  const listed=name=>({code:0,out:JSON.stringify({binding:{id:'b',name},topicId:'t',schedules:[]},null,2)+'\n',err:''});
+  assert.deepEqual(await schedule(a,['list','--json'],{env:{HERDR_SESSION:'work'}}),listed('cpu2'));assert.deepEqual(await schedule(b,['list','--json']),listed('cpu1'));
+  assert.deepEqual(await schedule(b,['pause','gone']),{code:1,out:'',err:'bridge-schedule: 定时任务不存在\n'});
+  assert.deepEqual(await schedule(wrong,['list']),{code:1,out:'',err:notConnected});
+  assert.deepEqual(seen,[['m',{op:'list',body:{pane:'w1:p1',session:'work'}}],['m2',{op:'list',body:{pane:'w1:p1'}}],['m2',{op:'pause',body:{pane:'w1:p1',id:'gone'}}]]);
+ }finally{await stopClients(f,started);fs.rmSync(dir,{recursive:true});}
+});
+test('without BRIDGE_CLIENT_SOCKET the client and bridge-schedule find the socket from the home directory alone, so that the service and the panes of Herdr agree whatever XDG_RUNTIME_DIR or XDG_STATE_HOME each has; a client that cannot open its socket logs why and stays connected',async()=>{
+ const f=await clientsFixture({methods:{schedules:m=>({binding:{id:'b',name:m.name},topicId:'t',schedules:[]})}}),dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-home-')),started=[];
+ const config=configFile(dir,'client.json',JSON.stringify({url:f.url,token:f.token})),socket=path.join(dir,'.local','state','herdr-bridge','client.sock');
+ try{
+  const first=bridgeClient(config,{HOME:dir,XDG_RUNTIME_DIR:path.join(dir,'run-service'),XDG_STATE_HOME:path.join(dir,'state-service')});started.push(first);
+  await until(()=>f.clients.status('m').state==='online'&&fs.existsSync(socket),'the client is online with its socket');
+  const r=await spawned(process.execPath,[path.join(bridgeDir,'bin','bridge-schedule.mjs'),'list'],clientEnv({HOME:dir,XDG_RUNTIME_DIR:path.join(dir,'run-pane'),XDG_STATE_HOME:path.join(dir,'state-pane'),HERDR_PANE_ID:'w1:p1'}));
+  assert.deepEqual(r,{status:0,stdout:'绑定「cpu2」上没有定时任务。\n',stderr:''});
+  first.kill();await first.exited;await until(()=>f.clients.status('m').state==='offline','the first client is gone');
+  const long=path.join(dir,'s'.repeat(120),'client.sock'),second=bridgeClient(config,{BRIDGE_CLIENT_SOCKET:long});started.push(second);
+  await until(()=>f.clients.status('m').state==='online','the second client is online');
+  assert.ok(second.log.includes(`bridge-client: 没能打开 bridge-schedule 用的 socket ${long}：`),second.log);
+ }finally{await stopClients(f,started);fs.rmSync(dir,{recursive:true});}
 });
 test('a machine\'s client gets in with the token that the console generates and the state keeps only as a hash; the console shows it online with its host, refused with the reason of a version mismatch, or offline; a newer client of the machine replaces the older, which exits; a new token drops the client of the old one, which is refused from then on; the client reconnects after the control plane restarts, and removing the machine drops it',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),port=await freePort(),clients=[];
  fs.mkdirSync(state);fs.writeFileSync(path.join(state,'initialized'),'1');
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu2',type:'ssh',host:'cpu2',session:'default',port:22,binary:'~/.local/bin/herdr',enabled:false}]}));
  let server=await bridgeServer(state,port,{BRIDGE_URL:''});
- const start=config=>{const c=bridgeClient(config);clients.push(c);return c;},origin=`http://127.0.0.1:${port}`;
+ // The clients of the machine run on this one host, where bridge-schedule finds the socket of the one that is in.
+ const socket=path.join(dir,'client.sock'),start=(config,env={BRIDGE_CLIENT_SOCKET:socket})=>{const c=bridgeClient(config,env);clients.push(c);return c;},origin=`http://127.0.0.1:${port}`;
  try{
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim();
   const api=async(p,body)=>{const r=await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
@@ -3128,11 +3166,13 @@ test('a machine\'s client gets in with the token that the console generates and 
   // The client with the token gets in; one with another token does not.
   const config=configFile(dir,'client.json',issued.body.config),first=start(config);
   m=await until(online,'the client is online');assert.equal(m.client.host,os.hostname());
-  const wrong=start(configFile(dir,'wrong.json',configText(origin,'not-the-token')));
+  const wrong=start(configFile(dir,'wrong.json',configText(origin,'not-the-token')),{BRIDGE_CLIENT_SOCKET:path.join(dir,'wrong.sock')});
   await until(()=>wrong.log.includes('（4001：token 无效）'),'the wrong token is refused');wrong.kill();
-  // A second client of the machine replaces the first, which stops.
+  // A second client of the machine replaces the first, which stops; the socket is the second's, and it reaches the control plane, which
+  // answers for the machine of its connection (disconnected from bridging).
   const second=start(config);assert.equal(await first.exited,0);assert.match(first.log,/这台机器的另一个客户端已连接/);
   await until(()=>second.log.includes('已连接控制面'),'the second client is in');assert.equal((await machine()).client.state,'online');
+  assert.deepEqual(await schedule({socket},['list']),{code:1,out:'',err:'bridge-schedule: Bridge 已断开机器 cpu2 的桥接\n'});
   // A new token drops the client of the old one, which is refused from then on.
   const renewed=JSON.parse((await api('machines/token',{id:'m'})).body.config);assert.notEqual(renewed.token,token);
   await until(()=>second.log.includes('（4001：token 已重新生成）'),'the client of the old token is dropped');

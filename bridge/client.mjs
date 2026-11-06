@@ -1,11 +1,12 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import {link,protocol,closeCodes} from './link.mjs';
 // The Bridge client of a machine (bin/bridge-client.mjs runs it, one per machine, as a user service). It dials the control plane at
-// the url of its config with the machine's token and stays connected over one WebSocket (see link.mjs and clients.mjs). It uses only
-// Node's built-in modules, Node's own WebSocket among them, so a copy of the Bridge directory without node_modules runs it. It logs to
-// stderr.
+// the url of its config with the machine's token and stays connected over one WebSocket (see link.mjs and clients.mjs), and passes the
+// requests of bridge-schedule on this machine on to it (see serve). It uses only Node's built-in modules, Node's own WebSocket among them,
+// so a copy of the Bridge directory without node_modules runs it. It logs to stderr.
 
 // The config file: BRIDGE_CLIENT_CONFIG, else herdr-bridge/client.json in the user's config directory.
 export const configPath=(env=process.env)=>env.BRIDGE_CLIENT_CONFIG||path.join(env.XDG_CONFIG_HOME||path.join(os.homedir(),'.config'),'herdr-bridge','client.json');
@@ -21,15 +22,45 @@ export function readConfig(file){
  if(typeof c.token!=='string'||!c.token)throw Error(`配置文件 ${file} 缺少 token`);
  return {url:url.href,token:c.token};
 }
+// The Unix socket on which the client takes the requests of bridge-schedule: BRIDGE_CLIENT_SOCKET, else herdr-bridge/client.sock in
+// ~/.local/state. Both find it from the home directory alone, not from XDG_RUNTIME_DIR or XDG_STATE_HOME: the user service of the client and
+// the panes of Herdr where agents run bridge-schedule may have different values of them, or only one of them may have one.
+export const clientSocket=(env=process.env)=>env.BRIDGE_CLIENT_SOCKET||path.join(os.homedir(),'.local','state','herdr-bridge','client.sock');
+// How long the client waits for the control plane to answer a request of bridge-schedule; bridge-schedule waits a little longer for the client.
+export const forwardMs=60000;
+const notConnected='本机的 Bridge 客户端没有连上控制面：请稍后重试，一直这样时请主人查看这台机器上客户端的日志';
+// Takes the requests of bridge-schedule on socket, which only this user may open, in a directory that it creates 0700: POST /schedules/<op>
+// with a JSON body. While the client is connected (peer() returns the link of its connection, else null), each goes to the control plane
+// as the request schedules {op, body}, which the control plane answers for the machine of that connection (see Clients); the client does not
+// look into it. Answers 200 with the result, 400 with what the control plane refused or when it did not answer within forwardMs, 503 while
+// the client is not connected. A socket already at that path is one that an earlier client left (see run). Resolves to the server once it
+// listens.
+export async function serve(socket,peer){
+ const answer=(res,code,data)=>{res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
+ const server=http.createServer(async(req,res)=>{
+  const op=req.method==='POST'&&/^\/schedules\/([a-z]+)$/.exec(new URL(req.url,'http://localhost').pathname)?.[1];if(!op)return answer(res,404,{error:'接口不存在'});
+  let s='',body;req.setEncoding('utf8');for await(const b of req)if(s.length<=100000)s+=b;
+  if(s.length>100000)return answer(res,400,{error:'请求内容过大'});
+  try{body=JSON.parse(s||'{}');}catch{return answer(res,400,{error:'请求内容不是 JSON'});}
+  const p=peer();if(!p)return answer(res,503,{error:notConnected});
+  try{answer(res,200,await p.call('schedules',{op,body},{timeoutMs:forwardMs}));}
+  catch(e){answer(res,400,{error:e.timedOut?`控制面 ${forwardMs/1000} 秒内没有回答`:String(e.message)});}
+ });
+ await fs.promises.mkdir(path.dirname(socket),{recursive:true,mode:0o700});await fs.promises.rm(socket,{force:true});
+ await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(socket,resolve);});
+ fs.chmodSync(socket,0o600);return server;
+}
 // What the client does for the control plane: a fixed set, with no operation that runs any command.
 const methods={ping:()=>({})};
 // Connects and stays connected until the process ends. After a connection ends or fails it dials again 1 s later, doubling the wait up
 // to 30 s, and from 1 s again once a hello succeeds. It dials again after a refusal too (a wrong token or another protocol version), so
 // it gets in by itself once the other side is fixed. A connection on which nothing arrives for three heartbeats, which the control plane
 // names in its answer to the hello, is given up as dead. A client that another client of its machine replaced stops: two clients with
-// one token would otherwise take the machine from each other again and again.
+// one token would otherwise take the machine from each other again and again. It ends the process then with process.exit, which unlike closing
+// the server of serve leaves its socket where it is: the client that replaced it may run on this machine and have put its own socket at
+// that path already. Returns a function that returns the link of the connection while one is in, else null (see serve).
 export function run({url,token},log){
- let wait=1000;
+ let wait=1000,current=null;
  const connect=()=>{
   const ws=new WebSocket(url,{headers:{authorization:'Bearer '+token}}),peer=link(ws,methods);let opened=false,done=false,silence=0,timer;
   const again=what=>{done=true;clearTimeout(timer);const s=wait;wait=Math.min(wait*2,30000);log(`${what}，${s/1000} 秒后重连`);setTimeout(connect,s);};
@@ -37,15 +68,16 @@ export function run({url,token},log){
   ws.addEventListener('message',watch);
   ws.addEventListener('open',async()=>{
    opened=true;
-   try{const r=await peer.call('hello',{protocol,host:os.hostname()},{timeoutMs:10000});wait=1000;silence=3*r.heartbeatMs;watch();log(`已连接控制面，机器「${r.machine.name}」`);}
+   try{const r=await peer.call('hello',{protocol,host:os.hostname()},{timeoutMs:10000});wait=1000;silence=3*r.heartbeatMs;watch();current={ws,peer};log(`已连接控制面，机器「${r.machine.name}」`);}
    catch{ws.close();}
   });
   ws.addEventListener('close',e=>{
    if(done)return;const what=opened?`与控制面的连接断开（${e.code}${e.reason?'：'+e.reason:''}）`:`没有连上控制面 ${url}`;
-   if(e.code===closeCodes.replaced){done=true;clearTimeout(timer);log(what+'，不再重连');}else again(what);
+   if(e.code===closeCodes.replaced){done=true;clearTimeout(timer);log(what+'，不再重连');process.exit(0);}else again(what);
   });
  };
  connect();
+ return ()=>current?.ws.readyState===WebSocket.OPEN?current.peer:null;
 }
 // Node 24 sends fetch and WebSocket through http_proxy and the like only when NODE_USE_ENV_PROXY=1 or --use-env-proxy turns that on.
 // The client connects to the control plane directly (a machine's proxy is for the outside, and may not reach it), so it does not run
@@ -55,5 +87,6 @@ export function main(env=process.env){
  const log=s=>console.error('bridge-client: '+s),proxy=envProxy(env);
  if(proxy){log(`客户端要直接连接控制面，不能经过代理：去掉 ${proxy} 再启动`);process.exitCode=1;return;}
  let config;try{config=readConfig(configPath(env));}catch(e){log(e.message);process.exitCode=1;return;}
- run(config,log);
+ // Without its socket the client runs on, and only bridge-schedule fails on this machine.
+ const socket=clientSocket(env);serve(socket,run(config,log)).catch(e=>log(`没能打开 bridge-schedule 用的 socket ${socket}：${e.message}`));
 }

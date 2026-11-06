@@ -13,8 +13,10 @@ import {wtRequest,usage,notRetried,createWorktree,worktreeIntro,failedText,remov
 const workspaceLabel=b=>'飞书 · '+b.name;
 // Arguments that Herdr passes on to the agent it starts, after --, per binding kind. Claude gets the binding's permission mode. Codex runs
 // in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
-// that server. Antigravity (agy) gets nothing, not even the --.
-const agentArgs={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon'],agy:()=>[]};
+// that server, and with the network of its workspace-write sandbox on: without it the sandbox refuses connect() on every socket, that of
+// the Bridge client too (see client.mjs), which bridge-schedule needs; the network is all or nothing, and the limits on writing files stay.
+// Antigravity (agy) gets nothing, not even the --.
+const agentArgs={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true'],agy:()=>[]};
 const brief=e=>publicText(e.message).split('\n')[0].slice(0,200);
 // While Herdr's remote answers setting is on for the agent of a pane, the permission and question hooks of Claude and Codex wait for an
 // answer from Feishu (see cards); Antigravity has no such hooks, its approvals and questions get the blocked notice (see blocked). Bridge

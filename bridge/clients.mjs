@@ -7,14 +7,18 @@ import {link,protocol,closeCodes} from './link.mjs';
 // hello with the client's protocol version; one of another version is refused, and the machine shows why until a client gets in. A
 // machine has one client at a time: a newer one that gets in replaces the older, which then stops (see client.mjs), so a restarted
 // client takes over at once instead of after the old connection times out. Whatever the control plane refuses or ends, it does with a
-// close code and a short reason (see closeCodes) that the client logs, never with a plain HTTP error that it could not see.
+// close code and a short reason (see closeCodes) that the client logs, never with a plain HTTP error that it could not see. What a client
+// asks of the control plane (see methods) is for the machine of its connection: the token proves the machine, and nothing the client
+// sends can name another.
 const digest=token=>crypto.createHash('sha256').update(String(token)).digest();
 const same=(a,b)=>a.length===b.length&&crypto.timingSafeEqual(a,b);
 export class Clients{
- // allowedHost(req): whether the Host of the request is one the console answers to. Every heartbeatMs the control plane pings each
- // client, which must answer within the next heartbeatMs; a connection must say hello within helloMs.
- constructor(store,{allowedHost=()=>true,heartbeatMs=15000,helloMs=10000}={}){
-  Object.assign(this,{store,allowedHost,heartbeatMs,helloMs});this.live=new Map();this.refusals=new Map();this.server=new WebSocketServer({noServer:true});
+ // allowedHost(req): whether the Host of the request is one the console answers to. methods: what a client may ask of the control
+ // plane once it said hello, by name (see link.mjs): functions of the machine of its connection, as the state has it then, and the params.
+ // Every heartbeatMs the control plane pings each client, which must answer within the next heartbeatMs; a connection must say hello within
+ // helloMs.
+ constructor(store,{allowedHost=()=>true,methods={},heartbeatMs=15000,helloMs=10000}={}){
+  Object.assign(this,{store,allowedHost,methods,heartbeatMs,helloMs});this.live=new Map();this.refusals=new Map();this.server=new WebSocketServer({noServer:true});
   this.timer=setInterval(()=>{for(const c of this.live.values())c.peer.call('ping',{},{timeoutMs:heartbeatMs}).catch(e=>{if(e.timedOut)c.ws.terminate();});},heartbeatMs);
  }
  // Makes a new token for machine m and returns it, keeping only its hash; the client that used the old one is dropped.
@@ -35,14 +39,15 @@ export class Clients{
    if(!this.allowedHost(req))return ws.close(closeCodes.host,'不允许的 Host');
    const token=req.headers.authorization?.replace(/^Bearer /,'')||'';
    if(!this.machineOf(token))return ws.close(closeCodes.token,'token 无效');
-   const timer=setTimeout(()=>ws.close(closeCodes.hello,'没有及时完成握手'),this.helloMs),peer=link(ws,{hello:params=>{clearTimeout(timer);return this.hello(token,ws,peer,params);}});
-   ws.on('close',()=>{clearTimeout(timer);for(const [id,c] of this.live)if(c.ws===ws){this.live.delete(id);this.store.log('机器连接',c.name+' 的客户端已断开');}});
+   const asked=Object.fromEntries(Object.entries(this.methods).map(([name,f])=>[name,params=>f(this.machineOn(ws),params)]));
+   const timer=setTimeout(()=>ws.close(closeCodes.hello,'没有及时完成握手'),this.helloMs),peer=link(ws,{...asked,hello:params=>{clearTimeout(timer);return this.hello(token,ws,peer,params);}});
+   ws.on('close',()=>{clearTimeout(timer);const id=this.idOn(ws);if(id==null)return;this.store.log('机器连接',this.live.get(id).name+' 的客户端已断开');this.live.delete(id);});
   });
  }
  // The token is looked up again: a new token, or the machine's removal, may have come since the upgrade.
  hello(token,ws,peer,{protocol:version,host}){
   const m=this.machineOf(token);if(!m){ws.close(closeCodes.token,'token 无效');throw Error('token 无效');}
-  if([...this.live.values()].some(c=>c.ws===ws))throw Error('已经完成握手');
+  if(this.idOn(ws)!=null)throw Error('已经完成握手');
   if(version!==protocol){
    const reason=`版本不一致：控制面协议 ${protocol}，客户端协议 ${Number.isSafeInteger(version)?version:'未知'}`;
    if(this.refusals.get(m.id)!==reason)this.store.log('机器连接',`${m.name}：客户端被拒绝，${reason}`,'error');
@@ -52,6 +57,13 @@ export class Clients{
   this.live.set(m.id,c);this.refusals.delete(m.id);old?.ws.close(closeCodes.replaced,'这台机器的另一个客户端已连接');
   this.store.log('机器连接',`${m.name} 的客户端已连接（${c.host}）${old?'，替换了之前的连接':''}`);
   return {machine:{id:m.id,name:m.name},heartbeatMs:this.heartbeatMs};
+ }
+ // The id of the machine whose client is in on ws, if any.
+ idOn(ws){for(const [id,c] of this.live)if(c.ws===ws)return id;}
+ // The machine of the client on ws; throws before its hello, and once the machine is removed.
+ machineOn(ws){
+  const id=this.idOn(ws);if(id==null)throw Error('客户端还没有完成握手');
+  const m=this.store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;
  }
  drop(id,reason){this.live.get(id)?.ws.close(closeCodes.token,reason);}
  // Drops the client of a machine that is being removed.

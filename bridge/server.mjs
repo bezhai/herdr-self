@@ -1,5 +1,5 @@
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';
-import {Store,normalizeMachine,herdr,exec,makeDirectory,storeFile,removeDirectory,publicText,stateDir,agentSocket} from './core.mjs';
+import {Store,normalizeMachine,herdr,exec,makeDirectory,storeFile,removeDirectory,publicText,stateDir} from './core.mjs';
 import {Platforms,normalizeApp,setPermissionMode} from './platform.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';
@@ -31,8 +31,11 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
-// Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients).
-const allowedHost=req=>['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(req.headers.host?.split(':')[0]),clients=new Clients(store,{allowedHost});
+// Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
+// requests of bridge-schedule on its machine (see client.mjs), which are answered for the machine of its connection; what the agent reads
+// of a refusal goes through publicText, like the console's errors.
+const allowedHost=req=>['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(req.headers.host?.split(':')[0]);
+const clients=new Clients(store,{allowedHost,methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(e=>{throw Error(publicText(e.message).slice(0,1200));})}});
 function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
@@ -67,19 +70,8 @@ const server=http.createServer(async(req,res)=>{try{
  else return json(res,404,{error:'接口不存在'});
  return json(res,200,result);
  }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});
-// The requests of agents (see AgentSchedules and bin/bridge-schedule.mjs), on a Unix socket in the state directory instead of the console's
-// port: only processes of Bridge's own user can open it, it is never on the network nor behind a proxy in front of the console, and no
-// browser can send to it. Agents on other machines reach it over ssh (see bin/bridge-schedule-ssh). A socket left by a previous run goes.
-const socket=agentSocket(dir),agents=http.createServer(async(req,res)=>{try{
- const op=/^\/schedules\/([a-z]+)$/.exec(new URL(req.url,'http://localhost').pathname)?.[1];
- if(req.method!=='POST'||!op)return json(res,404,{error:'接口不存在'});
- json(res,200,await agentSchedules.call(op,await body(req)));
- }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});
 const poll=setInterval(()=>{for(const m of store.data.machines)if(m.enabled)refresh(m);},5000);
 for(const m of store.data.machines)if(m.enabled)refresh(m);for(const a of store.data.apps)if(a.enabled)platforms.start(a).catch(e=>store.log('平台连接',a.name+'：'+e.message,'error'));schedules.start();agentSchedules.start();
-// Without it Bridge runs on, and only bridge-schedule fails.
-agents.on('error',e=>store.log('定时任务',`Agent 的请求接口没有打开，${socket}：${e.message}`,'error'));
-fs.rmSync(socket,{force:true});agents.listen(socket,()=>fs.chmodSync(socket,0o600));
 server.on('upgrade',(req,socket,head)=>clients.upgrade(req,socket,head));
 server.listen(Number(process.env.PORT||8080),process.env.BIND||'0.0.0.0',()=>console.log('herdr-bridge listening on '+(process.env.PORT||8080)));
-process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();agentSchedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);agents.close();clients.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});
+process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();agentSchedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);clients.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});
