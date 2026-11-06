@@ -4,6 +4,7 @@ import {Platforms,normalizeApp,setPermissionMode} from './platform.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';
 import {Topics} from './topics.mjs';
+import {Schedules} from './schedules.mjs';
 import {staticFile,sendStatic} from './web-assets.mjs';
 const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),root=path.dirname(fileURLToPath(import.meta.url)),dir=process.env.BRIDGE_STATE||path.join(root,'state'),store=new Store(dir),live=new Map(),refreshes=new Map();
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map(),attempts=new Map();
@@ -22,6 +23,8 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
  for(let i=0;i<20;i++){if(platforms.status(a).connection==='connected')return true;await new Promise(r=>setTimeout(r,750));}
  throw Error('connection_timeout');
 }});
+// Its first check comes one interval after the start, once the apps have had time to connect.
+const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(m=>({...m,...(m.enabled?live.get(m.id):{state:'disabled',agents:[],panes:[]})})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
 function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
@@ -56,6 +59,6 @@ const server=http.createServer(async(req,res)=>{try{
  return json(res,200,result);
  }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});
 const poll=setInterval(()=>{for(const m of store.data.machines)if(m.enabled)refresh(m);},5000);
-for(const m of store.data.machines)if(m.enabled)refresh(m);for(const a of store.data.apps)if(a.enabled)platforms.start(a).catch(e=>store.log('平台连接',a.name+'：'+e.message,'error'));
+for(const m of store.data.machines)if(m.enabled)refresh(m);for(const a of store.data.apps)if(a.enabled)platforms.start(a).catch(e=>store.log('平台连接',a.name+'：'+e.message,'error'));schedules.start();
 server.listen(Number(process.env.PORT||8080),process.env.BIND||'0.0.0.0',()=>console.log('herdr-bridge listening on '+(process.env.PORT||8080)));
-process.on('SIGTERM',()=>{clearInterval(poll);registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});
+process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});

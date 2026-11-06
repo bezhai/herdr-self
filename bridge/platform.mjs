@@ -155,6 +155,9 @@ export class Platforms{
  // A reply inside the topic thread; replying in thread is what turns a plain group message into a topic. content is {card} with a card
  // JSON, which goes out as one message whatever its size; resolves to the id of the message sent.
  async reply(a,chatId,rootId,content){return (await this.connected(a).send(chatId,content,{replyTo:rootId,replyInThread:true})).messageId;}
+ // A message of the bot in the chat itself, outside any thread, which can be the root of a topic (see schedules.mjs). content is {card} like
+ // for reply; resolves to the id of the message sent.
+ async send(a,chatId,content){return (await this.connected(a).send(chatId,content)).messageId;}
  // Replaces the whole content of a card the bot sent.
  async updateCard(a,messageId,card){await this.connected(a).updateCard(messageId,card);}
  // The bot's emoji reaction on a message. Resolves to the reaction id, which is the only way to remove it again.

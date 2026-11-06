@@ -6,6 +6,11 @@ import {spawn} from 'node:child_process';
 export const quote=s=>"'"+String(s).replaceAll("'","'\\''")+"'";
 export function text(v,max=200){if(typeof v!=='string'||!v.trim()||v.length>max)throw Error('字段为空或过长');return v.trim();}
 export const uuid=()=>crypto.randomUUID();
+// Keyed queues: tasks with the same key run one after another; a failed task does not block the next one.
+export function enqueue(queues,key,task){
+ const run=(queues.get(key)||Promise.resolve()).then(task),tail=run.catch(()=>{});
+ queues.set(key,tail);tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});return run;
+}
 // A path on the Herdr host: absolute or under ~/, without shell metacharacters.
 export function hostPath(v,label){const p=text(v,300);if(!/^(~\/|\/)[a-zA-Z0-9_./-]+$/.test(p))throw Error(label+'必须为绝对路径或 ~/ 开头');return p;}
 export function normalizeMachine(b){
@@ -88,8 +93,8 @@ export async function removeDirectory(m,dir){
  else await fs.promises.rm(path.resolve(localPath(dir)),{recursive:true,force:true});
 }
 export function publicText(s){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}
-// Persisted collections. Keys of older state files outside this list are dropped on load.
-const collections=['machines','apps','bindings','topics','logs'];
+// Persisted collections. Keys of older state files outside this list are dropped on load; a collection they lack loads empty.
+const collections=['machines','apps','bindings','topics','schedules','logs'];
 export class Store{
  constructor(dir){this.dir=dir;fs.mkdirSync(dir,{recursive:true,mode:0o700});this.file=path.join(dir,'state.json');const saved=fs.existsSync(this.file)?JSON.parse(fs.readFileSync(this.file)):{};this.data=Object.fromEntries(collections.map(k=>[k,saved[k]||[]]));}
  save(){fs.writeFileSync(this.file+'.tmp',JSON.stringify(this.data),{mode:0o600});fs.renameSync(this.file+'.tmp',this.file);}

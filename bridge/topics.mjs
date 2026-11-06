@@ -1,4 +1,4 @@
-import {uuid,publicText} from './core.mjs';
+import {uuid,publicText,enqueue} from './core.mjs';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.mjs';
 import {picker,adoptedPicker,intro,nameOf,stillChosen,chosen} from './adoption.mjs';
 import {notice,replyCards} from './message-cards.mjs';
@@ -42,11 +42,6 @@ const news=(t,agent)=>Boolean(t.cot)&&(agent.tool_call_seq!=null&&agent.tool_cal
 // The AG-UI run of the open COT of topic t.
 const run=t=>({threadId:t.rootId,runId:t.cot.origin});
 const toast=(type,content)=>({toast:{type,content}});
-// Keyed queues: tasks with the same key run one after another; a failed task does not block the next one.
-function enqueue(queues,key,task){
- const run=(queues.get(key)||Promise.resolve()).then(task),tail=run.catch(()=>{});
- queues.set(key,tail);tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});return run;
-}
 export class Topics{
  // herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path) creates a directory and its parents on machine m;
  // machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card}) answers in the topic thread with a card
@@ -55,10 +50,10 @@ export class Topics{
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes; storeFile(m,root,dir,name,body) writes a file on
  // machine m and resolves to its absolute path, removeDirectory(m,dir) removes a directory there, and exec(m,argv,options) runs any other
- // command there and resolves to its {code, stdout, stderr} (see core.mjs).
- constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact,request,download,storeFile,removeDirectory,exec}){
+ // command there and resolves to its {code, stdout, stderr} (see core.mjs). now() is the clock.
+ constructor(store,{herdr,makeDirectory,machine,app,reply,updateCard,react,unreact,request,download,storeFile,removeDirectory,exec,now=Date.now}){
   this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.exec=exec;this.topicQueues=new Map();this.workspaceQueues=new Map();
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.exec=exec;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>', '<topic id> adopt' or '<topic id> worktree' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
@@ -73,37 +68,56 @@ export class Topics{
   // A binding that requires the mention drops every message without it, in a topic thread and its commands too, as if it never came.
   if(b.requireMention&&!msg.mentionedBot)return;
   if(!supported(msg))return this.unsupported(a,b,msg);
-  const rootId=msg.rootId||msg.messageId;let t=this.store.data.topics.find(x=>x.bindingId===b.id&&x.rootId===rootId);
+  const rootId=msg.rootId||msg.messageId,t=this.store.data.topics.find(x=>x.bindingId===b.id&&x.rootId===rootId);
   if(!msg.messageId||t?.messageIds.includes(msg.messageId))return;
-  const text=msg.content.trim();let request;
+  const text=msg.content.trim();
   if(!t){
    // A root message has no root id; in a thread the command is a message to the agent like any other.
    if(!msg.rootId&&text===slash.adopt)return this.offer(a,b,msg);
    if(!msg.rootId&&text===slash.stop)return this.stopChat(a,b,msg);
-   request=msg.rootId?null:wtRequest(text);
+   const request=msg.rootId?null:wtRequest(text);
    if(request?.usage)return this.answerRoot(a,b,msg,usage);
-   // Recorded before the first await, so messages arriving meanwhile join this topic instead of opening another tab. worktree marks a /wt
-   // topic; it gets the branch and the path of its worktree once they are known (see createWorktree).
-   const id=uuid();
-   t={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:b.machineId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
-    title:request?titleOf({...msg,content:request.description})||request.branch:titleOf(msg),state:'starting',error:'',messageIds:[],replySeq:0,reactions:[],cards:[],
-    ...request&&{worktree:{}},createdAt:Date.now()};
-   this.store.data.topics.push(t);
+   // The /wt message prompts its task, without the command.
+   return this.begin(a,b,rootId,{title:request?titleOf({...msg,content:request.description})||request.branch:titleOf(msg),msg:request?{...msg,content:request.prompt}:msg,reaction:msg.messageId,request}).delivered;
   }
-  // At most once: the id is on disk before Herdr is called, and a message seen before is dropped.
-  t.messageIds=[...t.messageIds,msg.messageId].slice(-50);this.store.save();
+  // At most once: the id is on disk before Herdr is called, and a message seen before is dropped. A topic that a schedule opened keeps the
+  // time of the latest message of a person, who may still be talking to its agent (see schedules.mjs).
+  t.messageIds=[...t.messageIds,msg.messageId].slice(-50);if(t.scheduled)t.scheduled.messageAt=this.now();this.store.save();
   if(t.adopted&&t.state==='ready'&&text===slash.release)return enqueue(this.topicQueues,t.id,()=>this.release(a,b,t)).catch(e=>this.store.log('话题接管',`${b.name}：${brief(e)}`,'error'));
   if(t.state==='ready'&&text===slash.stop)return enqueue(this.topicQueues,t.id,()=>this.stop(a,t));
-  // Not behind the topic queue, where an earlier message may be starting the agent for a minute.
-  const reacted=this.addReaction(a,t,msg.messageId);
-  await enqueue(this.topicQueues,t.id,async()=>{
-   // The /wt message prompts its task, without the command.
-   let agent;try{agent=await this.forward(a,b,t,request?{...msg,content:request.prompt}:msg,request);}
-   // Settled in the queue, so a later message that closes the topic finds this record. A prompted message keeps its reaction
-   // until its turn ends (see sync) or its COT takes its place; any other message loses it now.
-   finally{const r=await reacted;if(agent&&r){r.stateSeq=agent.state_change_seq;this.store.save();}else await this.dropReaction(t,r);}
-   if(agent)await this.openCot(a,t,msg.messageId,agent);
-  }).catch(e=>this.store.log('消息投递',`${a.name} → ${b.name}：${brief(e)}`,'error'));
+  return this.deliver(a,b,t,msg,{reaction:msg.messageId});
+ }
+ // Opens a topic of binding b whose root is message rootId and gives its agent message msg (see deliver): the one way into a new topic, for
+ // a person's message and for a schedule's run alike (see schedules.mjs). The record is on disk before the first await, so messages arriving
+ // meanwhile join this topic instead of opening another tab; it holds the id of msg, which is not handled again, and fields, such as the
+ // schedule run that opened it. A /wt topic has request (see wtRequest) and is marked by worktree, which gets the branch and the path of its
+ // worktree once they are known (see createWorktree). Returns {topic, delivered}: the record, and what deliver resolves to.
+ begin(a,b,rootId,{title,msg,reaction,request,fields}){
+  const id=uuid(),t={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:b.machineId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
+   title,state:'starting',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],...request&&{worktree:{}},...fields,createdAt:this.now()};
+  this.store.data.topics.push(t);this.store.save();
+  return {topic:t,delivered:this.deliver(a,b,t,msg,{reaction,request})};
+ }
+ // Gives message msg ({messageId, content, resources?}) to the agent of topic t in the topic's queue (see prompt). reaction is the id of the
+ // message of a person that marks it, added right away: not behind the queue, where an earlier message may be starting the agent for a
+ // minute. Resolves to the prompted agent, or to nothing. Never rejects.
+ deliver(a,b,t,msg,{reaction,request}={}){
+  const reacted=reaction&&this.addReaction(a,t,reaction);
+  return enqueue(this.topicQueues,t.id,()=>this.prompt(a,b,t,msg,{reacted,request})).catch(e=>{this.store.log('消息投递',`${a.name} → ${b.name}：${brief(e)}`,'error');});
+ }
+ // Runs task in the queue of topic t, after what is queued there, and resolves or rejects like it.
+ queue(t,task){return enqueue(this.topicQueues,t.id,task);}
+ // In the queue of topic t: sends message msg to its agent (see forward), opening the topic first when it is new or failed, and opens the
+ // COT of the turn under msg. A message with reacted, the promise of its reaction record (see addReaction), keeps its reaction until its turn
+ // ends (see sync) or its COT takes its place, when it was prompted; any other message loses it now. Resolves to the prompted agent, or to
+ // nothing; rejects when Herdr fails.
+ async prompt(a,b,t,msg,{reacted,request}={}){
+  let agent;
+  // Settled in the queue, so a later message that closes the topic finds this record.
+  try{agent=await this.forward(a,b,t,msg,request);}
+  finally{const r=await reacted;if(agent&&r){r.stateSeq=agent.state_change_seq;this.store.save();}else await this.dropReaction(t,r);}
+  if(agent)await this.openCot(a,t,msg.messageId,agent);
+  return agent;
  }
  // A prompted message gets a COT in the thread, unless the topic has one open: messages prompted meanwhile keep their reactions. Its record
  // holds the COT, the message it answers, the prompt's state_change_seq that tells when the turn ends (see turnEnded), the seq of the latest
@@ -226,6 +240,18 @@ export class Topics{
   for(const r of t.reactions||[])await this.dropReaction(t,r);
   for(const c of this.gone(t,[]))await this.dropCard(a,t,c);
   await this.clean(t);
+ }
+ // Ends ready topic t with text and closes the pane of its agent, which takes its tab along when it is the tab's only pane and the
+ // workspace when that is its last tab. The pane is closed only while the agent is linked to the topic: once the agent is gone Herdr may
+ // have given its pane id to another pane, which is not Bridge's to close, and the topic just ends (see alive). A pane that cannot be closed
+ // leaves the topic as it was, for another try. In the topic's queue. Never rejects.
+ retire(t,text){
+  return enqueue(this.topicQueues,t.id,async()=>{
+   if(t.state!=='ready')return;let a;
+   try{a=this.app(t.appId);if(!await this.alive(a,t))return;await this.herdr(this.target(t),['pane','close',t.paneId]);}
+   catch(e){this.store.log('话题会话',`${t.agentName}：未能关闭 pane，${brief(e)}`,'error');return;}
+   this.store.log('话题会话',`${t.agentName}：已关闭 pane ${t.paneId}`);await this.end(a,t,text);
+  });
  }
  // Opens a tab for the topic, or for a /wt topic the worktree of request with its first reply (see createWorktree), and starts its agent
  // there. Returns false when that failed; the topic is then failed and notified.
@@ -393,7 +419,7 @@ export class Topics{
  // once an agent is adopted also the agent's kind and its session where the agent reports one. Never rejects.
  offer(a,b,msg){
   const t={id:uuid(),bindingId:b.id,appId:a.id,chatId:b.chatId,rootId:msg.messageId,machineId:'',workspaceId:'',tabId:'',paneId:'',agentName:'',title:'接管 Agent',
-   state:'choosing',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],adopted:{},createdAt:Date.now()};
+   state:'choosing',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],adopted:{},createdAt:this.now()};
   this.store.data.topics.push(t);this.store.save();
   return enqueue(this.topicQueues,t.id,async()=>{
    const card=picker(await this.candidates(),++this.renders);
