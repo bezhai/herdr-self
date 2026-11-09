@@ -7,6 +7,7 @@ import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranc
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
+import {registerCommands,commands} from './commands.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules,isMode} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
 import {Registrations} from './registration.ts';import {staticFile,sendStatic} from './web-assets.ts';import {fileURLToPath} from 'node:url';
@@ -3203,8 +3204,9 @@ test('BRIDGE_URL must be an http(s) origin; a trailing slash is dropped',()=>{
 const png=Buffer.from('89504e470d0a1a0a0000','hex');
 // The app's slash commands as Feishu lists them, by default the bridge's own with their descriptions.
 const slashPath='/open-apis/application/v7/app_slash_commands',described=(text:string)=>({default_value:text,i18n:{zh_cn:text}});
-const registered=[{command_id:'c-adopt',command:'adopt',description:described('接管正在运行的 Agent')},{command_id:'c-release',command:'release',description:described('结束接管')},{command_id:'c-stop',command:'stop',description:described('停止 Agent 当前这一轮')},
- {command_id:'c-wt',command:'wt',description:described('在新的 Git worktree 里开一个话题')}];
+const registered=[{command_id:'c-adopt',command:'adopt',description:described('接管正在运行的 Agent')},{command_id:'c-release',command:'release',description:described('结束接管')},{command_id:'c-stop',command:'stop',description:described('停止 Agent 当前这一轮')}];
+// The /wt that earlier versions registered, which an app may still list.
+const oldWt={command_id:'c-wt',command:'wt',description:described('在新的 Git worktree 里开一个话题')};
 // A connected channel whose bot info comes from info() and whose slash command calls are answered by commands(request); every avatar
 // download is answered by avatar(url).
 type BotOptions={info?:()=>unknown,avatar?:(url:string)=>Response|Promise<Response>,commands?:(o:ApiRequest)=>unknown};
@@ -3267,9 +3269,8 @@ test('connecting offers the commands in the slash command panel of the app: a mi
  const items=[registered[0],{...registered[1],description:described('旧的说明')},{command_id:'c-deploy',command:'deploy',description:described('部署')}];
  const f=botFixture({info:botInfo({avatar_url:''}),avatar:()=>assert.fail('no download'),commands:o=>o.method==='GET'?{code:0,data:{items}}:{code:0,data:{command_id:'c-new'}}});try{
   await f.platforms.start(f.a);
-  assert.deepEqual(f.requests.slice(1),[{method:'GET',url:slashPath},{method:'PATCH',url:slashPath+'/c-release',data:{command:'release',description:described('结束接管')}},{method:'POST',url:slashPath,data:{command:'stop',description:described('停止 Agent 当前这一轮')}},
-   {method:'POST',url:slashPath,data:{command:'wt',description:described('在新的 Git worktree 里开一个话题')}}]);
-  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]),[['info','飞书机器人：已注册斜杠命令 /release、/stop、/wt']]);
+  assert.deepEqual(f.requests.slice(1),[{method:'GET',url:slashPath},{method:'PATCH',url:slashPath+'/c-release',data:{command:'release',description:described('结束接管')}},{method:'POST',url:slashPath,data:{command:'stop',description:described('停止 Agent 当前这一轮')}}]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]),[['info','飞书机器人：已注册斜杠命令 /release、/stop']]);
  }finally{f.close();}
 });
 test('without the slash command scopes, or when Feishu refuses a command, connecting logs one line and the app stays connected; every connection tries again',async()=>{
@@ -4073,4 +4074,27 @@ test('built admin pages load only files the server serves and stay within the CS
  assert.doesNotMatch(read('theme.js'),/^\s*(?:import|export)\b/m,'theme.js must stay a classic script');
  for(const name of assets.filter(n=>n.endsWith('.css'))){const css=read('assets/'+name);assert.doesNotMatch(css,/@import/,name);for(const [,url] of css.matchAll(/url\(\s*['"]?([^'")\s]+)/g))assert.match(url,/^(?:data:image\/svg\+xml|\/assets\/)/,`${name} loads ${url}`);}
  for(const name of assets.filter(n=>n.endsWith('.js'))){const js=read('assets/'+name);for(const [,from,dynamic] of js.matchAll(/\bfrom\s*["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']/g)){const spec=from??dynamic,file=spec.replace(/^\.\//,'');assert.ok(/^[\w.-]+\.js$/.test(file)&&assets.includes(file),`${name} imports ${spec}`);}}
+});
+
+// Binding a chat from the chat (task 3 of bridge-projects: the binding half). The commands of the slash command panel come first.
+test('connecting deletes the /wt that earlier versions registered and keeps every command of the app: the deletion is logged apart from the registrations',async()=>{
+ const seen:ApiRequest[]=[];
+ const f=botFixture({info:botInfo({avatar_url:''}),avatar:()=>assert.fail('no download'),commands:o=>{seen.push(o);return o.method==='GET'?{code:0,data:{items:[...registered,oldWt,{command_id:'c-deploy',command:'deploy',description:described('部署')}]}}:{code:0,data:{}};}});try{
+  await f.platforms.start(f.a);
+  assert.deepEqual(seen,[{method:'GET',url:slashPath},{method:'DELETE',url:slashPath+'/c-wt'}]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]),[['info','飞书机器人：已删除斜杠命令 /wt']]);
+ }finally{f.close();}
+});
+test('a command that is not Bridge\'s to delete stays: a wt of the app with a description of its own, and the commands Bridge offers; an app without a wt gets no deletion',async()=>{
+ const own={...oldWt,description:described('我们自己的 wt')},seen:ApiRequest[]=[];
+ const request:Parameters<typeof registerCommands>[0]=async o=>{seen.push(o as ApiRequest);return {items:[...registered,own]};};
+ assert.deepEqual(await registerCommands(request),{registered:[],removed:[]});assert.deepEqual(seen.map(o=>o.method),['GET']);
+ seen.length=0;const none=await registerCommands(async o=>{seen.push(o as ApiRequest);return {items:registered};});assert.deepEqual(none,{registered:[],removed:[]});assert.deepEqual(seen.map(o=>o.method),['GET']);
+});
+test('the panel offers adopt, release and stop and no wt; a wt with the description Bridge gave it is deleted by its command id, and a failing deletion rejects like a failing registration',async()=>{
+ const seen:ApiRequest[]=[];
+ const done=await registerCommands(async o=>{seen.push(o as ApiRequest);return o.method==='GET'?{items:[oldWt]}:{};});
+ assert.deepEqual(done,{registered:['adopt','release','stop'],removed:['wt']});assert.deepEqual(Object.keys(commands),['adopt','release','stop']);
+ assert.deepEqual(seen.filter(o=>o.method==='POST').map(o=>(o.data as Sent).command),['adopt','release','stop']);assert.deepEqual(seen.at(-1),{method:'DELETE',url:slashPath+'/c-wt'});
+ await assert.rejects(registerCommands(async o=>{if(o.method==='DELETE')throw Error('denied');return {items:[...registered,oldWt]};}),/denied/);
 });

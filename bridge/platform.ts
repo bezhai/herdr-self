@@ -173,10 +173,14 @@ export class Platforms{
   await this.syncCommands(a,channel);
   })();return rt.connecting;
  }
- // Offers the bridge's commands in the slash command panel of the app on every connection. Never rejects: without the scopes, or when
- // Feishu refuses, one line is logged and the commands still work when typed.
+ // Offers the bridge's commands in the slash command panel of the app on every connection and deletes those it no longer has. Never rejects:
+ // without the scopes, or when Feishu refuses, one line is logged and the commands still work when typed.
  async syncCommands(a:App,channel:LarkChannel){
-  try{const changed=await registerCommands(o=>openApi(channel,o));if(changed.length)this.store.log('斜杠命令',`${a.name}：已注册斜杠命令 ${changed.map(c=>'/'+c).join('、')}`);}
+  try{
+   const {registered,removed}=await registerCommands(o=>openApi(channel,o)),list=(names:string[])=>names.map(c=>'/'+c).join('、');
+   if(registered.length)this.store.log('斜杠命令',`${a.name}：已注册斜杠命令 ${list(registered)}`);
+   if(removed.length)this.store.log('斜杠命令',`${a.name}：已删除斜杠命令 ${list(removed)}`);
+  }
   catch(e){this.store.log('斜杠命令',`${a.name}：未能注册斜杠命令，${missingScope.includes(e.code)?'应用缺少权限 application:app_slash_command:read / write；命令仍可手动输入':e.message}`,'error');}
  }
  receive(a:App,msg:NormalizedMessage){if(!a.enabled||!a.allowedUsers.includes(msg.senderId)||!routable(msg))return;
