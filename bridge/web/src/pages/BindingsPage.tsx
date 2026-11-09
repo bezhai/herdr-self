@@ -1,21 +1,18 @@
 import { Fragment } from 'react';
-import type { ConsoleTopic } from '../../../console-state.ts';
-import type { Binding } from '../../../state.ts';
+import type { ConsoleBinding, ConsoleTopic } from '../../../console-state.ts';
 import { request } from '../api.ts';
 import { ActionButton } from '../components/ActionButton.tsx';
 import { AppAvatar } from '../components/AppAvatar.tsx';
 import { Badge } from '../components/Badge.tsx';
-import { bindingStatus, formatDateTime, permissionModeOf, topicStatus } from '../model.ts';
+import { bindingStatus, chatTypeLabel, formatDateTime, topicStatus } from '../model.ts';
 import type { BridgeState } from '../useBridge.ts';
 import type { PageProps } from './pageInfo.ts';
-
-type Props = PageProps & { openPermissionMode: (binding: Binding) => void };
 
 // The topics of one binding, newest first: each is an agent session in its own Herdr tab, or one it adopted from any pane (/adopt).
 function TopicsRow({ topics, state }: { topics: ConsoleTopic[], state: BridgeState }) {
   return (
     <tr className="topics-row">
-      <td colSpan={5}>
+      <td colSpan={6}>
         <ul className="topics">
           {topics.map((t) => {
             const status = topicStatus(t.state);
@@ -36,10 +33,11 @@ function TopicsRow({ topics, state }: { topics: ConsoleTopic[], state: BridgeSta
   );
 }
 
-// A Claude binding shows its permission mode, which openPermissionMode(binding) changes.
-function BindingRow({ binding: b, state, refresh, toast, openPermissionMode }: Props & { binding: Binding }) {
-  const claude = b.kind === 'claude';
-  const machine = state.machines.find((m) => m.id === b.machineId);
+// The chat a binding is for, with the project and the agent configuration its topics start with. A direct chat has no project: each of its
+// topics gets the one that fits its task.
+function BindingRow({ binding: b, state, refresh, toast }: PageProps & { binding: ConsoleBinding }) {
+  const project = state.projects.find((p) => p.id === b.defaultProjectId);
+  const config = state.agentConfigs.find((c) => c.id === b.defaultAgentConfigId);
   const app = state.apps.find((a) => a.id === b.appId);
   const status = bindingStatus(b, state);
   async function remove() {
@@ -52,34 +50,28 @@ function BindingRow({ binding: b, state, refresh, toast, openPermissionMode }: P
         <div>
           <strong>{b.name}</strong>
           <small className="app-name"><AppAvatar app={app} />{app?.name}</small>
-          <code>{b.chatId}</code>
+          <code>{`${chatTypeLabel(b.chatType)} · ${b.chatId}`}</code>
         </div>
       </td>
-      <td data-label="目标">
-        <div>
-          <strong>{machine?.name}</strong>
-          <code>{`${b.kind} · ${b.cwd}`}</code>
-          {claude && <small>{`权限模式：${permissionModeOf(b)}`}</small>}
-        </div>
-      </td>
+      <td data-label="默认项目"><div>{b.chatType === 'p2p' ? '按任务自动选择' : project?.name}</div></td>
+      <td data-label="默认 Agent 配置"><div>{config?.name}</div></td>
       <td data-label="触发方式"><div>{b.requireMention ? '@机器人' : '全部消息'}</div></td>
       <td data-label="状态"><div><Badge tone={status.tone}>{status.label}</Badge></div></td>
       <td className="row-action">
-        {claude && <button type="button" className="text-button" onClick={() => openPermissionMode(b)}>修改权限模式</button>}
         <ActionButton className="text-button danger" run={remove} onError={toast}>解除</ActionButton>
       </td>
     </tr>
   );
 }
 
-export function BindingsPage({ state, refresh, toast, openPermissionMode }: Props) {
+export function BindingsPage({ state, refresh, toast }: PageProps) {
   return (
     <section className="page">
       <div className="section-heading"><h2>消息路由</h2></div>
       <div className="table-wrap">
         <table>
           <thead>
-            <tr><th>来源</th><th>目标</th><th>触发方式</th><th>状态</th><th><span className="sr-only">操作</span></th></tr>
+            <tr><th>来源</th><th>默认项目</th><th>默认 Agent 配置</th><th>触发方式</th><th>状态</th><th><span className="sr-only">操作</span></th></tr>
           </thead>
           <tbody>
             {state.bindings.length
@@ -87,12 +79,12 @@ export function BindingsPage({ state, refresh, toast, openPermissionMode }: Prop
                 const topics = state.topics.filter((t) => t.bindingId === b.id).sort((x, y) => y.createdAt - x.createdAt);
                 return (
                   <Fragment key={b.id}>
-                    <BindingRow binding={b} state={state} refresh={refresh} toast={toast} openPermissionMode={openPermissionMode} />
+                    <BindingRow binding={b} state={state} refresh={refresh} toast={toast} />
                     {topics.length > 0 && <TopicsRow topics={topics} state={state} />}
                   </Fragment>
                 );
               })
-              : <tr><td colSpan={5} className="table-empty">暂无会话绑定</td></tr>}
+              : <tr><td colSpan={6} className="table-empty">暂无会话绑定</td></tr>}
           </tbody>
         </table>
       </div>

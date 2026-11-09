@@ -5,10 +5,8 @@ import type { ReactElement } from 'react';
 import { expect, test, vi } from 'vitest';
 import type { ConsoleState } from '../../../console-state.ts';
 import { AppDialog } from './AppDialog.tsx';
-import { BindingDialog } from './BindingDialog.tsx';
 import { ClientTokenDialog } from './ClientTokenDialog.tsx';
 import { MachineDialog } from './MachineDialog.tsx';
-import { PermissionModeDialog } from './PermissionModeDialog.tsx';
 import { RegistrationDialog } from './RegistrationDialog.tsx';
 import { SkillDialog } from './SkillDialog.tsx';
 import { base64, bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.ts';
@@ -24,8 +22,6 @@ test('form dialogs head with their title next to the close button and hold no ex
   const forms: [ReactElement, string][] = [
     [<AppDialog onClose={vi.fn()} onSaved={vi.fn()} />, '应用配置'],
     [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加机器'],
-    [<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '连接聊天与会话'],
-    [<PermissionModeDialog binding={state.bindings[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '修改权限模式'],
     [<SkillDialog onClose={vi.fn()} onSaved={vi.fn()} />, '新建 skill'],
     [<SkillDialog skill={{ ...state.skills[1], files: { 'SKILL.md': base64('---\n'), 'run.sh': base64('') } }} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑 deploy-notes'],
   ];
@@ -129,134 +125,6 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
   expect(await screen.findByText('该应用已添加')).toBeTruthy();
   expect(bodyOf(fetch, '/api/apps/save')).toEqual({ id: 'app-2', name: '备用应用', appId: 'cli_spare', appSecret: 'new-secret', domain: 'lark', allowedUsers: ['ou_a', 'ou_b', 'ou_c'] });
   expect(screen.getByLabelText<HTMLInputElement>('App Secret').value).toBe('');
-});
-
-test('binding form shows its chat read-only, lists only enabled machines with their client online and saves a group route with the link token', async () => {
-  const fetch = stubFetch({ '/api/bindings/save': { id: 'b-2' } });
-  const onSaved = vi.fn();
-  const user = userEvent.setup();
-  const state = sampleState();
-  // Disabled with its client online: not a target.
-  state.machines[2].client = { state: 'online', host: 'laptop-host', since: 1 };
-  render(<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={onSaved} />);
-  const source = screen.getByRole('group', { name: '来源 · 飞书' });
-  expect(within(source).getByText('工作助手')).toBeTruthy();
-  expect(within(source).getByText('群聊')).toBeTruthy();
-  expect(within(source).getByText('oc_group')).toBeTruthy();
-  expect(source.querySelector('img')!.getAttribute('src')).toBe('/api/apps/avatar?id=app-1&v=1700000000000');
-  expect(source.querySelectorAll('input, select')).toHaveLength(0);
-  expect(screen.queryByLabelText('飞书应用')).toBeNull();
-  expect(screen.queryByLabelText('Chat ID')).toBeNull();
-  expect(screen.getByLabelText<HTMLInputElement>('绑定名称').value).toBe('飞书群聊');
-  expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work', 'gpu2 / default']);
-  expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
-  expect([...screen.getByLabelText<HTMLSelectElement>('Agent 类型').options].map((option) => option.value)).toEqual(['claude', 'codex', 'agy']);
-  expect(screen.getByLabelText<HTMLSelectElement>('Agent 类型').value).toBe('claude');
-  expect(document.querySelectorAll('select')).toHaveLength(3);
-  expect(screen.getByLabelText<HTMLInputElement>('仅 @机器人时触发').checked).toBe(true);
-  expect(screen.queryByText(/私聊请取消/)).toBeNull();
-  expect(prose()).toEqual([]);
-
-  await user.clear(screen.getByLabelText('绑定名称'));
-  await user.type(screen.getByLabelText('绑定名称'), '团队群');
-  await user.selectOptions(screen.getByLabelText('机器 / Herdr 实例'), 'm-2');
-  await user.type(screen.getByLabelText('工作目录'), '~/code/bridge');
-  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
-  expect(screen.queryByLabelText('权限模式')).toBeNull();
-  await user.click(screen.getByLabelText('仅 @机器人时触发'));
-  await user.click(screen.getByRole('button', { name: '保存绑定' }));
-  await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-group', name: '团队群', machineId: 'm-2', cwd: '~/code/bridge', kind: 'codex', requireMention: false });
-});
-
-test('binding form for a direct chat has no mention option and never requires one; an expired link shows the server error', async () => {
-  const fetch = stubFetch({ '/api/bindings/save': reply({ error: '绑定链接已失效，请在飞书里重新发消息' }, 400) });
-  const onSaved = vi.fn();
-  const user = userEvent.setup();
-  const state = sampleState();
-  render(<BindingDialog state={state} chat={state.pendingChats[1]} onClose={vi.fn()} onSaved={onSaved} />);
-  expect(within(screen.getByRole('group', { name: '来源 · 飞书' })).getByText('私聊')).toBeTruthy();
-  expect(screen.getByLabelText<HTMLInputElement>('绑定名称').value).toBe('飞书私聊');
-  expect(screen.queryByLabelText('仅 @机器人时触发')).toBeNull();
-  expect(document.querySelector('input[type="checkbox"]')).toBeNull();
-
-  await user.type(screen.getByLabelText('工作目录'), '~/work');
-  await user.click(screen.getByRole('button', { name: '保存绑定' }));
-  expect(await screen.findByText('绑定链接已失效，请在飞书里重新发消息')).toBeTruthy();
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-p2p', name: '飞书私聊', machineId: 'm-1', cwd: '~/work', kind: 'claude', permissionMode: 'default', requireMention: false });
-  expect(onSaved).not.toHaveBeenCalled();
-});
-
-test('binding form offers the permission mode only for Claude, explains both modes, starts from default and saves the mode chosen', async () => {
-  const fetch = stubFetch({ '/api/bindings/save': { id: 'b-2' } });
-  const onSaved = vi.fn();
-  const user = userEvent.setup();
-  const state = sampleState();
-  render(<BindingDialog state={state} chat={state.pendingChats[1]} onClose={vi.fn()} onSaved={onSaved} />);
-  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
-  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('default');
-
-  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
-  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
-  expect(screen.queryByLabelText('权限模式')).toBeNull();
-  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'claude');
-  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('auto');
-
-  await user.type(screen.getByLabelText('工作目录'), '~/work');
-  await user.click(screen.getByRole('button', { name: '保存绑定' }));
-  await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-p2p', name: '飞书私聊', machineId: 'm-1', cwd: '~/work', kind: 'claude', permissionMode: 'auto', requireMention: false });
-});
-
-test('binding form for Antigravity hides the permission mode and saves kind agy without one', async () => {
-  const fetch = stubFetch({ '/api/bindings/save': { id: 'b-2' } });
-  const onSaved = vi.fn();
-  const user = userEvent.setup();
-  const state = sampleState();
-  render(<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={onSaved} />);
-  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
-  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'agy');
-  expect(screen.getByLabelText<HTMLSelectElement>('Agent 类型').value).toBe('agy');
-  expect(screen.queryByLabelText('权限模式')).toBeNull();
-  expect(document.querySelectorAll('select')).toHaveLength(2);
-
-  await user.type(screen.getByLabelText('工作目录'), '~/code/agy');
-  await user.click(screen.getByRole('button', { name: '保存绑定' }));
-  await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ token: 'tok-group', name: '飞书群聊', machineId: 'm-1', cwd: '~/code/agy', kind: 'agy', requireMention: true });
-});
-
-test('permission mode form starts from the mode of the binding, default without one, and saves only the mode', async () => {
-  const save = deferred();
-  const fetch = stubFetch({ '/api/bindings/permission-mode': () => save.promise });
-  const onSaved = vi.fn();
-  const user = userEvent.setup();
-  const binding = sampleState().bindings[0];
-  const { unmount } = render(<PermissionModeDialog binding={{ ...binding, permissionMode: 'auto' }} onClose={vi.fn()} onSaved={vi.fn()} />);
-  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('auto');
-  unmount();
-
-  render(<PermissionModeDialog binding={binding} onClose={vi.fn()} onSaved={onSaved} />);
-  expect(screen.getByRole('heading', { name: '修改权限模式' })).toBeTruthy();
-  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('default');
-  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
-  expect(prose()).toEqual([]);
-
-  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
-  await user.click(screen.getByRole('button', { name: '保存' }));
-  expect(bodyOf(fetch, '/api/bindings/permission-mode')).toEqual({ id: 'b-1', permissionMode: 'auto' });
-  save.resolve(reply({ error: '会话绑定不存在' }, 400));
-  expect(await screen.findByText('会话绑定不存在')).toBeTruthy();
-  expect(onSaved).not.toHaveBeenCalled();
-});
-
-test('the source of a chat whose app has no avatar shows the Feishu icon', () => {
-  const state = sampleState();
-  render(<BindingDialog state={state} chat={{ ...state.pendingChats[0], appId: 'app-2' }} onClose={vi.fn()} onSaved={vi.fn()} />);
-  const source = screen.getByRole('group', { name: '来源 · 飞书' });
-  expect(within(source).getByText('备用应用')).toBeTruthy();
-  expect(source.querySelector('img')).toBeNull();
-  expect(source.querySelector('use')!.getAttribute('href')).toBe('#i-feishu');
 });
 
 // Replaces the text of a field with text, which may hold characters that user.type would read as keys.

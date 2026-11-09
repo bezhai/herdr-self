@@ -1,10 +1,10 @@
 import fs from 'node:fs';import path from 'node:path';
 import {createLarkChannel} from '@larksuite/channel';
 import type {LarkChannel,LarkChannelOptions,NormalizedMessage,CardActionEvent,CardActionResponse} from '@larksuite/channel';
-import {text,uuid,hostPath,oneOf} from './core.ts';
+import {text,uuid,oneOf} from './core.ts';
 import type {Store} from './core.ts';
 import {registerCommands} from './commands.ts';
-import type {App,Binding,Kind,PermissionMode} from './state.ts';
+import type {App,Binding,State} from './state.ts';
 import type {Click} from './request-cards.ts';
 import type {Attachment} from './attachments.ts';
 const domains:Record<App['domain'],string>={feishu:'https://open.feishu.cn',lark:'https://open.larksuite.com',bytedance:'https://fsopen.bytedance.net'},avatarLimit=1024*1024;
@@ -36,24 +36,45 @@ export function normalizeApp(b:{name?:unknown,appId?:unknown,appSecret?:unknown,
  if(!secret)throw Error('请填写 App Secret');
  return {id:old.id||uuid(),name:text(b.name,60),appId,appSecret:secret,domain:oneOf(['feishu','lark','bytedance'],b.domain)?b.domain:'feishu',allowedUsers,enabled:false,verifiedAt:null};
 }
-// Claude permission modes a binding starts its topic agents with: default sends the confirmations Claude asks for to Feishu as cards,
-// auto lets Claude decide and rarely asks. Codex and Antigravity (agy) bindings have none.
-const permissionModes:PermissionMode[]=['default','auto'];
-function claudeMode(v:unknown){if(!oneOf(permissionModes,v))throw Error('权限模式无效');return v;}
-// The permission mode of a Claude binding; one saved before bindings had a mode has none and uses default.
-export const permissionMode=<T>(b:{permissionMode?:T})=>b.permissionMode||'default';
-// Herdr agent kinds a binding can start in its topics.
-const agentKinds:Kind[]=['claude','codex','agy'];
-// A binding routes one chat of an app; every topic in that chat gets its own agent session in Herdr (see topics.ts).
-// chat is the pending chat that asked for it (see pending-chats.ts): app and chat never come from the client, and a direct chat needs no mention.
-export function normalizeBinding(b:{name?:unknown,machineId:string,cwd?:unknown,kind?:unknown,permissionMode?:unknown,requireMention?:unknown,[field:string]:unknown},
- chat:{appId:string,chatId:string,chatType:'p2p'|'group'},bindings:Pick<Binding,'appId'|'chatId'>[]):Binding{
- if(!oneOf(agentKinds,b.kind))throw Error('Agent 类型无效');
- if(bindings.some(x=>x.appId===chat.appId&&x.chatId===chat.chatId))throw Error('该聊天已有绑定，请先移除旧绑定');
- return {id:uuid(),name:text(b.name,60),appId:chat.appId,machineId:b.machineId,chatId:chat.chatId,cwd:hostPath(b.cwd,'工作目录'),kind:b.kind,...b.kind==='claude'&&{permissionMode:claudeMode(permissionMode(b))},requireMention:chat.chatType==='group'&&b.requireMention!==false,enabled:true};
+// What a binding is made of, every field still to be checked: the defaults of its chat. name is the chat's name in Feishu.
+export type BindingFields={name?:unknown,defaultProjectId?:unknown,defaultAgentConfigId?:unknown,requireMention?:unknown,enabled?:unknown,[field:string]:unknown};
+type BindingData=Pick<State,'bindings'|'projects'|'agentConfigs'>;
+// The default project and agent configuration of a binding of a chat of chatType, once checked: the configuration must exist, a group has
+// a project that exists and a direct chat has none.
+function defaults(chatType:Binding['chatType'],projectId:unknown,configId:unknown,data:BindingData){
+ const config=data.agentConfigs.find(c=>c.id===configId);if(!config)throw Error('Agent 配置不存在');
+ if(chatType==='p2p'){if(projectId!=null&&projectId!=='')throw Error('私聊不固定项目');return {defaultAgentConfigId:config.id};}
+ const project=data.projects.find(p=>p.id===projectId);if(!project)throw Error('项目不存在');
+ return {defaultProjectId:project.id,defaultAgentConfigId:config.id};
 }
-// Topics already open keep the mode their agent started with; the next topics start with the new one.
-export function setPermissionMode(binding:Binding,mode:unknown){if(binding.kind!=='claude')throw Error('只有 Claude 绑定可以设置权限模式');binding.permissionMode=claudeMode(mode);}
+// A binding routes one chat of an app to a default project and a default agent configuration; every topic in that chat gets its own agent
+// session in Herdr (see topics.ts). app, chat and its type come from Feishu, never from the client, and a direct chat needs no mention.
+export function normalizeBinding(b:BindingFields,chat:{appId:string,chatId:string,chatType:Binding['chatType']},data:BindingData):Binding{
+ if(data.bindings.some(x=>x.appId===chat.appId&&x.chatId===chat.chatId))throw Error('该聊天已有绑定，请先移除旧绑定');
+ return {id:uuid(),name:text(b.name,60),appId:chat.appId,chatId:chat.chatId,chatType:chat.chatType,requireMention:chat.chatType==='group'&&b.requireMention!==false,enabled:true,
+  ...defaults(chat.chatType,b.defaultProjectId,b.defaultAgentConfigId,data)};
+}
+// Creates the binding that b describes for chat, stores it and remembers its agent configuration as the one the next binding offers first.
+export function addBinding(store:Store,b:BindingFields,chat:Parameters<typeof normalizeBinding>[1]){
+ const binding=normalizeBinding(b,chat,store.data);
+ store.data.bindings.push(binding);store.data.lastAgentConfigId=binding.defaultAgentConfigId;store.save();
+ store.log('会话绑定',`${binding.name} → ${bindingTarget(binding,store.data)}`);return binding;
+}
+// What a binding sends its topics to, as people read it: its project, or for a direct chat that the project is chosen per task, and its
+// agent configuration.
+export const bindingTarget=(b:Binding,data:Pick<State,'projects'|'agentConfigs'>)=>
+ `${b.defaultProjectId?data.projects.find(p=>p.id===b.defaultProjectId)?.name??'?':'按任务自动选择'} · ${data.agentConfigs.find(c=>c.id===b.defaultAgentConfigId)?.name??'?'}`;
+// Changes the defaults of a binding: the project (a group's), the agent configuration, whether a group needs the mention and whether the
+// binding is on. A field that b lacks stays as it is, and nothing else changes: the name follows Feishu, the chat is fixed. Topics already
+// open keep the project and configuration they started with. Nothing changes when a field is invalid.
+export function changeBinding(binding:Binding,b:BindingFields,data:BindingData){
+ const given=(k:keyof BindingFields)=>Object.hasOwn(b,k);
+ const next=defaults(binding.chatType,given('defaultProjectId')?b.defaultProjectId:binding.defaultProjectId,given('defaultAgentConfigId')?b.defaultAgentConfigId:binding.defaultAgentConfigId,data);
+ for(const k of ['requireMention','enabled'] as const)if(given(k)&&typeof b[k]!=='boolean')throw Error('字段无效：'+k);
+ binding.defaultAgentConfigId=next.defaultAgentConfigId;if('defaultProjectId' in next)binding.defaultProjectId=next.defaultProjectId;
+ if(given('requireMention')&&binding.chatType==='group')binding.requireMention=b.requireMention as boolean;
+ if(given('enabled'))binding.enabled=b.enabled as boolean;
+}
 // Bridge takes every message of a person. Mentions are left to routing and topic handling.
 export const routable=(msg:Pick<NormalizedMessage,'senderType'|'senderId'>)=>msg.senderType==='user'&&Boolean(msg.senderId);
 // The kinds of messages whose content Bridge can hand to an agent: text, and rich text with its images and files, an image and a file (see

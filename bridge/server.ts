@@ -1,6 +1,6 @@
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';
 import {Store,normalizeMachine,migrateMachines,operations,publicText,stateDir} from './core.ts';
-import {Platforms,normalizeApp,setPermissionMode} from './platform.ts';
+import {Platforms,normalizeApp,changeBinding,bindingTarget} from './platform.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
 import {Registrations} from './registration.ts';
 import {Topics} from './topics.ts';
@@ -20,6 +20,7 @@ migrateMachines(store);
 // What Bridge does on a machine goes through the client of the machine (see operations and Clients.call).
 const call:Call=(...args)=>clients.call(...args),ops=operations(call),skills=new Skills(store,call);
 function machine(id:unknown){const m=store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;}
+function binding(id:unknown){const b=store.data.bindings.find(x=>x.id===id);if(!b)throw Error('会话绑定不存在');return b;}
 // The Herdr status of machine m for the console: disabled, offline while its client is not in, else what the latest poll through the client
 // found (see refresh), connecting until the first one.
 function herdrStatus(m:Machine):HerdrStatus{
@@ -32,7 +33,7 @@ async function refresh(m:Machine){if(refreshes.has(m.id))return refreshes.get(m.
  // Topic agents' new replies and requests go back to Feishu; this does not wait for them and never throws.
  topics.sync(m,agents);
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
-const topics=new Topics(store,{...ops,placeSkills:(...args)=>skills.place(...args),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
+const topics=new Topics(store,{...ops,placeSkills:(...args)=>skills.place(...args),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args)});
 const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>pending.open(...args),onCardAction:(a,evt)=>(evt.action?.value?.schedule?agentSchedules:topics).click(a,evt)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
  if(!a.enabled||platforms.status(a).connection!=='connected'){await platforms.start(a);a.enabled=true;store.save();}
@@ -42,7 +43,7 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
-function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),skills:skills.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
+function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
 // requests of bridge-schedule and bridge-skill on its machine (see client.ts), which are answered for the machine of its connection: the
 // schedules of its agents, and reads of the skills of the platform alone (see Skills.answer). What the agent reads of a refusal goes through
@@ -74,7 +75,7 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/machines/save'){const m=normalizeMachine(b);if(b.id){const old=machine(b.id);if(old.enabled)throw Error('请先断开机器再编辑');Object.assign(old,m);}else store.data.machines.push(m);store.save();if(m.enabled&&clients.online(m.id))await refresh(m);result={id:m.id};}
  else if(p==='/api/machines/connect'){const m=machine(b.id);m.enabled=true;store.save();if(clients.online(m.id))await refresh(m);result=herdrStatus(m);}
  else if(p==='/api/machines/disconnect'){const m=machine(b.id);m.enabled=false;store.save();store.log('机器连接',m.name+' 已断开桥接，Herdr 任务继续运行');}
- else if(p==='/api/machines/remove'){if(store.data.bindings.some(x=>x.machineId===b.id))throw Error('请先移除该机器的会话绑定');machine(b.id);store.data.machines=store.data.machines.filter(x=>x.id!==b.id);live.delete(b.id);clients.remove(b.id);store.save();}
+ else if(p==='/api/machines/remove'){if(store.data.agentConfigs.some(x=>x.machineId===b.id))throw Error('请先移除该机器上的 Agent 配置');if(store.data.projects.some(x=>x.adopted?.machineId===b.id))throw Error('请先移除该机器上的项目');machine(b.id);store.data.machines=store.data.machines.filter(x=>x.id!==b.id);live.delete(b.id);clients.remove(b.id);store.save();}
  // The config of the machine's client with a new token, shown once: for the control plane at BRIDGE_URL, else where the browser reached it.
  else if(p==='/api/machines/token'){result={config:configText(bridgeUrl||'http://'+req.headers.host,clients.issue(machine(b.id)))};}
  else if(p==='/api/apps/registration/start'){result=registrations.start(b);}
@@ -83,8 +84,7 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/apps/test'){result=await platforms.verify(platforms.app(b.id));store.log('凭证验证',platforms.app(b.id).name+' 验证通过');}
  else if(p==='/api/apps/toggle'){const a=platforms.app(b.id);if(b.enabled){await platforms.start(a);a.enabled=true;}else{a.enabled=false;await platforms.stop(a.id);}store.save();}
  else if(p==='/api/apps/remove'){if(store.data.bindings.some(x=>x.appId===b.id))throw Error('请先移除该应用的会话绑定');await platforms.remove(b.id);}
- else if(p==='/api/bindings/save'){result={id:pending.bind(b).id};}
- else if(p==='/api/bindings/permission-mode'){const x=store.data.bindings.find(y=>y.id===b.id);if(!x)throw Error('会话绑定不存在');setPermissionMode(x,b.permissionMode);store.save();store.log('会话绑定',`${x.name}：权限模式改为 ${x.permissionMode}，之后新开的话题生效`);}
+ else if(p==='/api/bindings/save'){const x=binding(b.id);changeBinding(x,b,store.data);store.save();store.log('会话绑定',`${x.name}：${bindingTarget(x,store.data)}，之后新开的话题生效`);}
  else if(p==='/api/bindings/remove'){store.data.bindings=store.data.bindings.filter(x=>x.id!==b.id);store.save();topics.unbind(b.id);}
  // Writes to skills come only from the console and the access key, never from an agent: a skill goes into every later topic, and an
  // agent can be talked into anything by what it reads.

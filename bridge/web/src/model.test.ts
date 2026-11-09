@@ -3,7 +3,7 @@ import type { ClientStatus } from '../../clients.ts';
 import type { ConsoleState } from '../../console-state.ts';
 import type { Agent } from '../../core.ts';
 import {
-  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, minutesLeft, onlineMachines, permissionModeOf, registrationView, statusLabel,
+  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, onlineMachines, registrationView, statusLabel,
   skillText, statusTone, topicStatus,
 } from './model.ts';
 import type { ConsoleApp } from './model.ts';
@@ -62,31 +62,27 @@ test('metrics count online machines, connected platforms, bindings and the agent
   expect(metrics(state).agents).toBe(4);
 });
 
-test('a binding is usable while its platform app is connected and its machine online', () => {
+test('a binding is usable while its platform app is connected and the machine of its default agent configuration is online', () => {
   const state = sampleState();
   const binding = state.bindings[0];
   const machineDown = { tone: 'neutral', label: '机器未连接' };
+  const onMachine = (machineId: string) => {
+    state.agentConfigs[0] = { ...state.agentConfigs[0], machineId };
+    return bindingStatus(binding, state);
+  };
   expect(bindingStatus(binding, state)).toEqual({ tone: 'ok', label: '可用' });
-  expect(bindingStatus({ ...binding, machineId: 'm-5' }, state)).toEqual({ tone: 'ok', label: '可用' });
-  expect(bindingStatus({ ...binding, machineId: 'm-3' }, state)).toEqual(machineDown);
-  expect(bindingStatus({ ...binding, machineId: 'm-4' }, state)).toEqual(machineDown);
-  expect(bindingStatus({ ...binding, machineId: 'removed' }, state)).toEqual(machineDown);
+  expect(onMachine('m-5')).toEqual({ tone: 'ok', label: '可用' });
+  expect(onMachine('m-3')).toEqual(machineDown);
+  expect(onMachine('m-4')).toEqual(machineDown);
+  expect(onMachine('removed')).toEqual(machineDown);
+  expect(bindingStatus({ ...binding, defaultAgentConfigId: 'removed' }, state)).toEqual(machineDown);
+  state.agentConfigs[0] = { ...state.agentConfigs[0], machineId: 'm-1' };
   state.apps[0].connection = 'reconnecting';
   expect(bindingStatus(binding, state)).toEqual({ tone: 'neutral', label: '等待平台连接' });
 });
 
-test('a Claude binding saved before bindings had a permission mode uses default', () => {
-  const [binding] = sampleState().bindings;
-  expect(permissionModeOf(binding)).toBe('default');
-  expect(permissionModeOf({ ...binding, permissionMode: 'auto' })).toBe('auto');
-});
-
-test('pending chats show their chat type and the whole minutes left, rounded up', () => {
+test('a chat type is labelled direct or group', () => {
   expect(['p2p', 'group'].map(chatTypeLabel)).toEqual(['私聊', '群聊']);
-  expect(minutesLeft(10 * 60000, 0)).toBe(10);
-  expect(minutesLeft(10 * 60000, 1)).toBe(10);
-  expect(minutesLeft(10 * 60000 + 1, 0)).toBe(11);
-  expect(minutesLeft(0, 5)).toBe(0);
 });
 
 test('an app avatar is served by the console API and versioned by its update time', () => {

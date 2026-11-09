@@ -1,9 +1,8 @@
-import type {Machine,Binding,Topic,Skill,Log} from './state.ts';
+import type {Machine,Binding,Project,AgentConfig,Topic,Skill,Log} from './state.ts';
 import type {Agent} from './core.ts';
 import type {ClientStatus} from './clients.ts';
 import type {Platforms} from './platform.ts';
 import type {Registrations} from './registration.ts';
-import type {PendingChats} from './pending-chats.ts';
 // What the console reads from /api/state (see state in server.ts, and web/src). Types only: the server builds it and the console reads it,
 // both with these types.
 
@@ -14,5 +13,9 @@ export type HerdrStatus={state:'disabled'|'offline'|'connecting'|'connected'|'er
 export type ConsoleMachine=Omit<Machine,'tokenHash'>&{hasToken:boolean,client:ClientStatus}&HerdrStatus;
 // A topic without what only Bridge reads: the messages, reactions, cards, COT and proposal, and the card of its worktree.
 export type ConsoleTopic=Omit<Topic,'messageIds'|'reactions'|'cards'|'cot'|'proposal'|'worktree'>&{worktree?:Omit<NonNullable<Topic['worktree']>,'card'>};
+// A binding without the Herdr workspaces of its topics, which only Bridge reads.
+export type ConsoleBinding=Omit<Binding,'workspaces'>;
+// A project tells whether it adopted a directory (a migrated project), never which: the machines decide where a project's files are.
+export type ConsoleProject=Omit<Project,'adopted'>&{adopted:boolean};
 export type ConsoleState={host:string,version:string,registration:ReturnType<Registrations['status']>,machines:ConsoleMachine[],apps:ReturnType<Platforms['status']>[],
- bindings:Binding[],pendingChats:ReturnType<PendingChats['list']>,skills:Skill[],topics:ConsoleTopic[],logs:Log[]};
+ projects:ConsoleProject[],agentConfigs:AgentConfig[],bindings:ConsoleBinding[],skills:Skill[],topics:ConsoleTopic[],logs:Log[]};

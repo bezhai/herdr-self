@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ConsoleMachine } from '../../console-state.ts';
-import type { Binding } from '../../state.ts';
 import { onUnauthorized, request } from './api.ts';
 import { Metrics } from './components/Metrics.tsx';
 import { PageHeading } from './components/PageHeading.tsx';
@@ -9,16 +8,13 @@ import { Toast } from './components/Toast.tsx';
 import type { ToastMessage } from './components/Toast.tsx';
 import { Topbar } from './components/Topbar.tsx';
 import { AppDialog } from './dialogs/AppDialog.tsx';
-import { BindingDialog } from './dialogs/BindingDialog.tsx';
 import { ClientTokenDialog } from './dialogs/ClientTokenDialog.tsx';
 import { MachineDialog } from './dialogs/MachineDialog.tsx';
 import type { SavedMachine } from './dialogs/MachineDialog.tsx';
-import { PendingChatsDialog } from './dialogs/PendingChatsDialog.tsx';
-import { PermissionModeDialog } from './dialogs/PermissionModeDialog.tsx';
 import { RegistrationDialog } from './dialogs/RegistrationDialog.tsx';
 import { SkillDialog } from './dialogs/SkillDialog.tsx';
-import { assign, clearQuery, query, reload } from './location.ts';
-import type { ConsoleApp, PendingChat, SkillWithFiles } from './model.ts';
+import { assign, reload } from './location.ts';
+import type { ConsoleApp, SkillWithFiles } from './model.ts';
 import { BindingsPage } from './pages/BindingsPage.tsx';
 import { LoginPage } from './pages/LoginPage.tsx';
 import { LogsPage } from './pages/LogsPage.tsx';
@@ -29,10 +25,10 @@ import { PlatformsPage } from './pages/PlatformsPage.tsx';
 import { SkillsPage } from './pages/SkillsPage.tsx';
 import { useBridge } from './useBridge.ts';
 
-// The dialogs, and the props they open with (see openDialog): the machine, app, chat, binding or skill a dialog is about, or for registration
-// the id of the registration before it.
-type DialogKind = 'machine' | 'client-token' | 'app' | 'pending' | 'binding' | 'permission-mode' | 'skill' | 'registration';
-type DialogProps = { machine?: ConsoleMachine | SavedMachine, app?: ConsoleApp, chat?: PendingChat, binding?: Binding, skill?: SkillWithFiles, previousId?: string };
+// The dialogs, and the props they open with (see openDialog): the machine, app or skill a dialog is about, or for registration the id of the
+// registration before it.
+type DialogKind = 'machine' | 'client-token' | 'app' | 'skill' | 'registration';
+type DialogProps = { machine?: ConsoleMachine | SavedMachine, app?: ConsoleApp, skill?: SkillWithFiles, previousId?: string };
 
 // Login vs. console, the current page, the one open dialog and the toast.
 // dialog: null or { kind, key, ...props }; dialogs are mounted only while open, so each open starts fresh.
@@ -64,19 +60,6 @@ export function App() {
 
   useEffect(() => onUnauthorized(() => setDialog(null)), []);
 
-  // A binding link from Feishu (/?bind=<token>) is handled once the state is loaded, after the login page if there is one,
-  // so the query stays in the address until then.
-  useEffect(() => {
-    const token = authed && new URLSearchParams(query()).get('bind');
-    if (!token) return;
-    clearQuery();
-    const chat = state.pendingChats.find((c) => c.token === token);
-    if (chat) {
-      setPage('bindings');
-      openDialog('binding', { chat });
-    } else showToast('绑定链接已失效，请在飞书里重新发消息');
-  }, [authed, state, openDialog, showToast]);
-
   function navigate(next: Page) {
     setPage(next);
     setMenuOpen(false);
@@ -105,7 +88,7 @@ export function App() {
   if (!authed) return <LoginPage onLogin={refresh} />;
 
   const info = pageInfo[page];
-  const pageActions: { [P in Page]?: () => void } = { platforms: openRegistration, machines: () => openDialog('machine'), bindings: () => openDialog('pending'), skills: () => openDialog('skill') };
+  const pageActions: { [P in Page]?: () => void } = { platforms: openRegistration, machines: () => openDialog('machine'), skills: () => openDialog('skill') };
   const pageProps: PageProps = { state, refresh, toast: showToast };
   return (
     <>
@@ -125,24 +108,17 @@ export function App() {
                   openToken={(machine) => openDialog('client-token', { machine })}
                 />
               )}
-              {page === 'bindings' && <BindingsPage {...pageProps} openPermissionMode={(binding) => openDialog('permission-mode', { binding })} />}
+              {page === 'bindings' && <BindingsPage {...pageProps} />}
               {page === 'skills' && <SkillsPage {...pageProps} openSkill={(skill) => openDialog('skill', { skill })} />}
               {page === 'logs' && <LogsPage state={state} />}
             </div>
           </div>
         </main>
       </div>
-      {/* !: client-token always opens with a machine, binding with a chat and permission-mode with a binding. */}
+      {/* !: client-token always opens with a machine. */}
       {dialog?.kind === 'machine' && <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={machineSaved} />}
       {dialog?.kind === 'client-token' && <ClientTokenDialog key={dialog.key} machine={dialog.machine!} onClose={closeDialog} onIssued={refresh} />}
       {dialog?.kind === 'app' && <AppDialog key={dialog.key} app={dialog.app} onClose={closeDialog} onSaved={saved} />}
-      {dialog?.kind === 'pending' && (
-        <PendingChatsDialog key={dialog.key} state={state} onPick={(chat) => openDialog('binding', { chat })} onClose={closeDialog} />
-      )}
-      {dialog?.kind === 'binding' && <BindingDialog key={dialog.key} state={state} chat={dialog.chat!} onClose={closeDialog} onSaved={saved} />}
-      {dialog?.kind === 'permission-mode' && (
-        <PermissionModeDialog key={dialog.key} binding={dialog.binding!} onClose={closeDialog} onSaved={saved} />
-      )}
       {dialog?.kind === 'skill' && <SkillDialog key={dialog.key} skill={dialog.skill} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'registration' && (
         <RegistrationDialog

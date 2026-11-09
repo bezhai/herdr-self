@@ -44,7 +44,6 @@ export const base64 = (text: string) => btoa(String.fromCharCode(...new TextEnco
 // as: partial where the console reads nothing. The apps have no hasSecret (nor the appSecret: undefined that JSON drops), the agents no
 // workspace_id, tab_id or state_change_seq, and the topics no replySeq.
 export function sampleState() {
-  const now = Date.now();
   return {
     host: 'bridge-host',
     version: '0.1.0',
@@ -81,13 +80,17 @@ export function sampleState() {
         state: 'error', checkedAt: 1, error: 'herdr: session default not found', panes: [], agents: [],
       },
     ],
+    projects: [
+      { id: 'p-1', name: 'genvi', description: '增长相关的服务', repos: ['git@code.example:growth/genvi.git'], skills: [], workMode: 'isolated', adopted: false },
+      { id: 'p-2', name: 'test', description: '', repos: [], skills: [], workMode: 'shared', adopted: true },
+    ] as ConsoleState['projects'],
+    agentConfigs: [
+      { id: 'c-1', name: 'cpu2 · Claude', machineId: 'm-1', kind: 'claude', permissionMode: 'default' },
+      { id: 'c-2', name: 'cpu2 · Codex', machineId: 'm-1', kind: 'codex' },
+    ] as ConsoleState['agentConfigs'],
     bindings: [
-      { id: 'b-1', name: '个人助手', appId: 'app-1', machineId: 'm-1', chatId: 'oc_1', cwd: '~/work', kind: 'claude', requireMention: true, enabled: true },
-    ],
-    pendingChats: [
-      { token: 'tok-group', appId: 'app-1', chatId: 'oc_group', chatType: 'group', createdAt: now - 5 * 60000, expiresAt: now + 25 * 60000 },
-      { token: 'tok-p2p', appId: 'app-1', chatId: 'oc_p2p', chatType: 'p2p', createdAt: now - 20 * 60000, expiresAt: now + 10 * 60000 },
-    ],
+      { id: 'b-1', name: '个人助手', appId: 'app-1', chatId: 'oc_1', chatType: 'group', requireMention: true, enabled: true, defaultProjectId: 'p-1', defaultAgentConfigId: 'c-1' },
+    ] as ConsoleState['bindings'],
     topics: [
       {
         id: 't-1', bindingId: 'b-1', appId: 'app-1', chatId: 'oc_1', rootId: 'om_1', machineId: 'm-1', workspaceId: 'w1', tabId: 'w1:t2',

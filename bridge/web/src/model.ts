@@ -1,14 +1,12 @@
 import type { ClientStatus } from '../../clients.ts';
-import type { ConsoleState } from '../../console-state.ts';
+import type { ConsoleBinding, ConsoleState } from '../../console-state.ts';
 import type { Skills } from '../../skills.ts';
-import type { Binding } from '../../state.ts';
 import type { BridgeState } from './useBridge.ts';
 
 // Pure display derivations from the /api/state payload. No DOM, no requests.
 
 // The parts of the payload that components take one by one, and a skill with its files as /api/skills/read answers.
 export type ConsoleApp = ConsoleState['apps'][number];
-export type PendingChat = ConsoleState['pendingChats'][number];
 export type SkillWithFiles = ReturnType<Skills['read']>;
 
 // Tone of a badge: ok | warn | error | neutral. Tables of badges give the tone and the label of each state they know.
@@ -59,25 +57,17 @@ export function metrics(state: BridgeState) {
   };
 }
 
-// A binding is usable while its platform app is connected and its machine online.
-export function bindingStatus(binding: Binding, state: BridgeState): { tone: Tone, label: string } {
+// A binding is usable while its platform app is connected and the machine of its default agent configuration is online.
+export function bindingStatus(binding: ConsoleBinding, state: BridgeState): { tone: Tone, label: string } {
   const app = state.apps.find((a) => a.id === binding.appId);
   if (app?.connection !== 'connected') return { tone: 'neutral', label: '等待平台连接' };
-  if (!onlineMachines(state).some((m) => m.id === binding.machineId)) return { tone: 'neutral', label: '机器未连接' };
+  const config = state.agentConfigs.find((c) => c.id === binding.defaultAgentConfigId);
+  if (!onlineMachines(state).some((m) => m.id === config?.machineId)) return { tone: 'neutral', label: '机器未连接' };
   return { tone: 'ok', label: '可用' };
 }
 
-// Claude permission modes a binding starts its topic agents with, and what each does.
-export const permissionModes = [
-  { id: 'default', note: '需要确认的操作发卡片到飞书' },
-  { id: 'auto', note: '由 Claude 自动决定，很少需要确认' },
-];
-
 // The SKILL.md of a skill as /api/skills/read returns it, with its files in base64, as text.
 export const skillText = (skill: Pick<SkillWithFiles, 'files'>) => new TextDecoder().decode(Uint8Array.from(atob(skill.files['SKILL.md'] || ''), (c) => c.charCodeAt(0)));
-
-// Permission mode of a Claude binding: one saved before bindings had a mode has none and uses default.
-export const permissionModeOf = (binding: Binding) => binding.permissionMode || 'default';
 
 // choosing: a topic opened by /adopt that waits for an agent to be picked in Feishu.
 const topicStates: Badges = { starting: ['warn', '启动中'], choosing: ['warn', '待选择'], ready: ['ok', '运行中'], failed: ['error', '失败'], closed: ['neutral', '已结束'] };
@@ -90,9 +80,6 @@ export function topicStatus(state: string) {
 
 // Label of a Feishu chat type: p2p is a direct chat, anything else a group.
 export const chatTypeLabel = (type: string) => (type === 'p2p' ? '私聊' : '群聊');
-
-// Whole minutes until a pending chat's binding link expires, rounded up.
-export const minutesLeft = (expiresAt: number, now = Date.now()) => Math.max(0, Math.ceil((expiresAt - now) / 60000));
 
 // Address of an app's bot avatar, or null without one. The update time busts the browser cache after a new download.
 export const avatarUrl = (app: Pick<ConsoleApp, 'id' | 'avatar'> | undefined) => (app?.avatar ? `/api/apps/avatar?id=${encodeURIComponent(app.id)}&v=${app.avatar.updatedAt}` : null);

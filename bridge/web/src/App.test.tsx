@@ -125,7 +125,7 @@ test('navigation switches the title, breadcrumb and page action, and closes the 
 
   await user.click(nav('会话绑定'));
   expect(pageTitle()).toBe('会话绑定');
-  expect(screen.getByRole('button', { name: '+ 新建绑定' })).toBeTruthy();
+  expect(document.querySelector('.heading button')).toBeNull();
 
   await user.click(nav('Skills'));
   expect(pageTitle()).toBe('Skills');
@@ -160,7 +160,7 @@ test('page and section headings hold only their titles and the page action', asy
   await user.click(nav('机器连接'));
   expect(headings()).toEqual(['机器连接+ 添加机器', 'Herdr 实例']);
   await user.click(nav('会话绑定'));
-  expect(headings()).toEqual(['会话绑定+ 新建绑定', '消息路由']);
+  expect(headings()).toEqual(['会话绑定', '消息路由']);
   await user.click(nav('Skills'));
   expect(headings()).toEqual(['Skills+ 新建 skill', 'Agent 的 skill']);
   await user.click(nav('连接日志'));
@@ -347,57 +347,30 @@ test('machine cards show the connection of their client, online with its host, r
   expect(dialog()).toBeNull();
 });
 
-test('binding rows show the chat, the machine with the agent kind and working directory, and the status; the page holds only the routes table', async () => {
-  stubFetch({ '/api/state': sampleState() });
+test('binding rows show the chat, its default project and agent configuration, and the status; a direct chat has its project chosen per task; the page holds only the bindings table', async () => {
+  const state = sampleState();
+  const [group] = state.bindings;
+  state.bindings.push({ id: 'b-2', name: '私聊', appId: 'app-1', chatId: 'oc_2', chatType: 'p2p', requireMention: false, enabled: true, defaultAgentConfigId: 'c-2' });
+  stubFetch({ '/api/state': () => state });
   const user = userEvent.setup();
   render(<App />);
   await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
 
-  const row = screen.getByText('个人助手').closest('tr')!;
-  expect(within(row).getByText('oc_1')).toBeTruthy();
+  const row = screen.getByText(group.name).closest('tr')!;
+  expect(within(row).getByText('群聊 · oc_1')).toBeTruthy();
   expect(within(row).getByText('工作助手')).toBeTruthy();
   expect(row.querySelector('img')!.getAttribute('src')).toBe(avatar);
-  expect(within(row).getByText('cpu2')).toBeTruthy();
-  expect(within(row).getByText('claude · ~/work')).toBeTruthy();
+  expect(within(row).getByText('genvi')).toBeTruthy();
+  expect(within(row).getByText('cpu2 · Claude')).toBeTruthy();
   expect(within(row).getByText('@机器人')).toBeTruthy();
   expect(within(row).getByText('可用')).toBeTruthy();
-  expect([...document.querySelectorAll('th')].map((th) => th.textContent)).toEqual(['来源', '目标', '触发方式', '状态', '操作']);
+  const direct = screen.getByText('私聊').closest('tr')!;
+  expect(within(direct).getByText('私聊 · oc_2')).toBeTruthy();
+  expect(within(direct).getByText('按任务自动选择')).toBeTruthy();
+  expect(within(direct).getByText('cpu2 · Codex')).toBeTruthy();
+  expect(within(direct).getByText('全部消息')).toBeTruthy();
+  expect([...document.querySelectorAll('th')].map((th) => th.textContent)).toEqual(['来源', '默认项目', '默认 Agent 配置', '触发方式', '状态', '操作']);
   expect(screen.queryByText('最近投递')).toBeNull();
-});
-
-test('Claude binding rows show their permission mode, default without one, and change it in a dialog; Codex and Antigravity rows have neither', async () => {
-  const state = sampleState();
-  const [claude] = state.bindings;
-  state.bindings.push(
-    { ...claude, id: 'b-2', name: '自动助手', chatId: 'oc_2', permissionMode: 'auto' },
-    { ...claude, id: 'b-3', name: 'Codex 助手', chatId: 'oc_3', kind: 'codex' },
-    { ...claude, id: 'b-4', name: 'Antigravity 助手', chatId: 'oc_4', kind: 'agy', cwd: '~/code/agy' },
-  );
-  const fetch = stubFetch({ '/api/state': () => state, '/api/bindings/permission-mode': { ok: true } });
-  const user = userEvent.setup();
-  render(<App />);
-  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
-
-  const row = (name: string) => screen.getByText(name).closest('tr')!;
-  expect(within(row('个人助手')).getByText('权限模式：default')).toBeTruthy();
-  expect(within(row('自动助手')).getByText('权限模式：auto')).toBeTruthy();
-  expect(within(row('Codex 助手')).queryByText(/权限模式/)).toBeNull();
-  expect(within(row('Codex 助手')).queryByRole('button', { name: '修改权限模式' })).toBeNull();
-  expect(within(row('Antigravity 助手')).getByText('agy · ~/code/agy')).toBeTruthy();
-  expect(within(row('Antigravity 助手')).queryByText(/权限模式/)).toBeNull();
-  expect(within(row('Antigravity 助手')).queryByRole('button', { name: '修改权限模式' })).toBeNull();
-
-  await user.click(within(row('个人助手')).getByRole('button', { name: '修改权限模式' }));
-  expect(within(dialog()).getByRole('heading', { name: '修改权限模式' })).toBeTruthy();
-  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('default');
-  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
-  const before = callsTo(fetch, '/api/state');
-  state.bindings[0] = { ...claude, permissionMode: 'auto' };
-  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
-  await waitFor(() => expect(dialog()).toBeNull());
-  expect(bodyOf(fetch, '/api/bindings/permission-mode')).toEqual({ id: 'b-1', permissionMode: 'auto' });
-  await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
-  expect(within(row('个人助手')).getByText('权限模式：auto')).toBeTruthy();
 });
 
 test('each binding lists its topics newest first with state, pane and creation time, and shows why a topic failed', async () => {
@@ -608,85 +581,3 @@ test('app cards show the bot avatar synced from Feishu, fall back to the Feishu 
   expect(card('工作助手').querySelector('.card-detail > span')!.textContent).toBe('凭证已验证');
 });
 
-test('a ?bind= link opens the binding form for its chat on the bindings page and drops the query', async () => {
-  window.history.replaceState(null, '', '/?bind=tok-group');
-  stubFetch({ '/api/state': sampleState() });
-  render(<App />);
-  expect(await screen.findByRole('heading', { name: '连接聊天与会话' })).toBeTruthy();
-  expect(within(dialog()).getByText('oc_group')).toBeTruthy();
-  expect(within(dialog()).getByText('群聊')).toBeTruthy();
-  expect(screen.getByLabelText<HTMLInputElement>('绑定名称').value).toBe('飞书群聊');
-  expect(pageTitle()).toBe('会话绑定');
-  expect(window.location.search).toBe('');
-  expect(window.location.pathname).toBe('/');
-});
-
-test('an expired ?bind= link shows a toast, opens nothing and drops the query', async () => {
-  window.history.replaceState(null, '', '/?bind=gone');
-  stubFetch({ '/api/state': sampleState() });
-  render(<App />);
-  await waitFor(() => expect(screen.getByRole('status').textContent).toBe('绑定链接已失效，请在飞书里重新发消息'));
-  expect(dialog()).toBeNull();
-  expect(window.location.search).toBe('');
-});
-
-test('a ?bind= link opened before login keeps its query through the login page and opens the form after login', async () => {
-  window.history.replaceState(null, '', '/?bind=tok-p2p');
-  let authed = false;
-  stubFetch({
-    '/api/state': () => (authed ? sampleState() : reply({ error: '请先登录' }, 401)),
-    '/api/login': () => {
-      authed = true;
-      return { ok: true };
-    },
-  });
-  const user = userEvent.setup();
-  render(<App />);
-  expect(await screen.findByRole('heading', { name: '登录管理台' })).toBeTruthy();
-  expect(window.location.search).toBe('?bind=tok-p2p');
-
-  await user.type(screen.getByLabelText('访问密钥'), 'key');
-  await user.click(screen.getByRole('button', { name: '进入管理台' }));
-  expect(await screen.findByRole('heading', { name: '连接聊天与会话' })).toBeTruthy();
-  expect(screen.getByLabelText<HTMLInputElement>('绑定名称').value).toBe('飞书私聊');
-  expect(window.location.search).toBe('');
-});
-
-test('新建绑定 lists the chats waiting for a binding and opens the form for the one picked', async () => {
-  stubFetch({ '/api/state': sampleState() });
-  const user = userEvent.setup();
-  render(<App />);
-  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
-  await user.click(screen.getByRole('button', { name: '+ 新建绑定' }));
-
-  const [group, p2p] = dialog().querySelectorAll<HTMLElement>('.pending-chat');
-  expect(within(group).getByText('工作助手')).toBeTruthy();
-  expect(group.querySelector('img')!.getAttribute('src')).toBe(avatar);
-  expect(within(group).getByText('群聊')).toBeTruthy();
-  expect(within(group).getByText('oc_group')).toBeTruthy();
-  expect(within(group).getByText('剩余 25 分钟')).toBeTruthy();
-  expect(within(p2p).getByText('私聊')).toBeTruthy();
-  expect(within(p2p).getByText('oc_p2p')).toBeTruthy();
-  expect(within(p2p).getByText('剩余 10 分钟')).toBeTruthy();
-
-  await user.click(p2p);
-  expect(screen.getByRole('heading', { name: '连接聊天与会话' })).toBeTruthy();
-  expect(document.querySelectorAll('dialog')).toHaveLength(1);
-  expect(within(dialog()).getByText('oc_p2p')).toBeTruthy();
-  expect(screen.getByLabelText<HTMLInputElement>('绑定名称').value).toBe('飞书私聊');
-});
-
-test('新建绑定 without waiting chats says there are none', async () => {
-  const state = sampleState();
-  state.pendingChats = [];
-  stubFetch({ '/api/state': state });
-  const user = userEvent.setup();
-  render(<App />);
-  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
-  await user.click(screen.getByRole('button', { name: '+ 新建绑定' }));
-  expect(dialog().querySelector('.dialog-head')!.textContent).toBe('选择要绑定的飞书聊天');
-  expect([...dialog().querySelectorAll('p')].map((p) => p.textContent)).toEqual(['暂无待绑定的聊天']);
-  expect(dialog().querySelector('.pending-chat')).toBeNull();
-  await user.click(within(dialog()).getByRole('button', { name: '关闭' }));
-  expect(dialog()).toBeNull();
-});

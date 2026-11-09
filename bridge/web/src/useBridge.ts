@@ -5,7 +5,7 @@ import { onUnauthorized, request } from './api.ts';
 // The state the console shows: what /api/state answers, or before the first answer the empty state, which has no version (nothing reads it).
 export type BridgeState = Omit<ConsoleState, 'version'>;
 
-const emptyState: BridgeState = { host: '', registration: null, machines: [], apps: [], bindings: [], pendingChats: [], topics: [], skills: [], logs: [] };
+const emptyState: BridgeState = { host: '', registration: null, machines: [], apps: [], projects: [], agentConfigs: [], bindings: [], topics: [], skills: [], logs: [] };
 
 // Polls /api/state every 4s, and every 1.2s while fastPoll is set. A refresh that starts while
 // another is in flight is skipped. online: null until the first result, then whether the last refresh succeeded.

@@ -24,10 +24,15 @@ export type Project={id:string,name:string,description:string,repos:string[],ski
 // An agent configuration (see agent-configs.ts): the kind of agent, its model and, for Claude, its permission mode and the commands it may
 // run, on one machine. The machine is what selects the model environment. A Claude configuration always has a permission mode.
 export type AgentConfig={id:string,name:string,machineId:string,kind:Kind,model?:string,permissionMode?:PermissionMode,allowedCommands?:string[]};
-// A binding of one chat of an app (see normalizeBinding in platform.ts). workspaceId is the Herdr workspace of its topics, once there is
-// one (see Topics.openTab).
-export type Binding={id:string,name:string,appId:string,machineId:string,chatId:string,cwd:string,kind:Kind,permissionMode?:PermissionMode,requireMention:boolean,enabled:boolean,
- workspaceId?:string};
+// A binding of one chat of an app (see normalizeBinding in platform.ts): what the topics of the chat default to. name is the chat's name in
+// Feishu, which Bridge keeps current. A group has a default project and every topic of its chat works on it; a direct chat has none and
+// each of its topics gets the project that fits its task. defaultAgentConfigId is the configuration that runs the topics. workspaces holds,
+// per machine id, the Herdr workspace that the topics of the chat opened tabs in on that machine, once there is one (see Topics.openTab):
+// a fact of that machine's Herdr, checked against the workspace's label before it is used, so that losing it only costs a new workspace.
+// It belongs to the binding, not to a project or a configuration, because the workspace groups the topics of one chat, which can run on
+// several machines.
+export type Binding={id:string,name:string,appId:string,chatId:string,chatType:'p2p'|'group',requireMention:boolean,enabled:boolean,defaultProjectId?:string,defaultAgentConfigId:string,
+ workspaces?:Record<string,string>};
 // A topic of a binding (see topics.ts). An adopted topic waits for an agent to adopt while choosing; a /wt topic has a worktree, whose
 // branch, path and root (the main checkout) are known once createWorktree has them, and whose card offers removing it once the topic has no
 // agent. A topic that a schedule opened is scheduled by run n of schedule id; a topic of an agent that submitted a schedule holds its

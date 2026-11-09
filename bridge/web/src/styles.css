@@ -336,25 +336,10 @@ dialog > form { padding: 18px 24px 0; }
 .dialog-body { padding: 18px 24px 22px; }
 .dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-right: -10px; }
 dialog h2 { margin: 0; font-size: 19px; font-weight: 600; line-height: 1.35; }
-.dialog-empty { margin: 16px 0 0; font-size: 13.5px; color: var(--muted); }
 .dialog-note { margin: 14px 0 0; font-size: 13px; line-height: 1.6; color: var(--muted); }
 /* a skill: SKILL.md needs the width of its lines; its other files are only listed */
 .skill-dialog { width: min(760px, calc(100vw - 24px)); }
 .skill-files { margin: 10px 0 0; padding: 0; list-style: none; font: 12.5px/1.7 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
-
-/* a Feishu chat: bot avatar, app name, chat id */
-.chat-source, .pending-chat { display: flex; align-items: center; gap: 12px; }
-.chat-source { margin-top: 12px; }
-.chat-avatar { display: grid; place-items: center; flex: none; width: 34px; height: 34px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); color: var(--ink-2); overflow: hidden; }
-.chat-avatar .avatar { width: 100%; height: 100%; }
-.chat-main { display: flex; flex: 1; flex-direction: column; min-width: 0; }
-.chat-main strong { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
-.chat-meta small { font-size: 12.5px; color: var(--muted); }
-.chat-main code { font: 12px/1.6 var(--mono); color: var(--faint); overflow-wrap: anywhere; }
-.chat-meta { display: flex; flex: none; flex-direction: column; align-items: flex-end; gap: 1px; white-space: nowrap; }
-.pending-chats { display: grid; gap: 8px; margin: 16px 0 0; padding: 0; list-style: none; }
-.pending-chat { width: 100%; padding: 10px 12px; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--panel-2); text-align: left; transition: background-color .12s, border-color .12s; }
-.pending-chat:hover { background: var(--panel-3); border-color: var(--line-3); }
 
 /* The form footer is the last thing in the dialog's scroll area: it sticks to the bottom edge while fields remain below,
    and at the end of the scroll it sits after the last field instead of over it. */

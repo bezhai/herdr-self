@@ -3,7 +3,3 @@
 export const assign = (url: string) => window.location.assign(url);
 export const replace = (url: string) => window.location.replace(url);
 export const reload = () => window.location.reload();
-
-// The query string of the current address, and dropping it from the address bar without navigating.
-export const query = () => window.location.search;
-export const clearQuery = () => window.history.replaceState(window.history.state, '', window.location.pathname + window.location.hash);

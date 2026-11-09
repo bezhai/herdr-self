@@ -3,7 +3,7 @@ import {parseCron,upcoming,when,phrase} from './cron.ts';
 import {isMode,short} from './schedules.ts';
 import {pendingCard,settledCard} from './schedule-cards.ts';
 import {fits} from './message-cards.ts';
-import {kinds} from './adoption.ts';
+import {bindingTarget} from './platform.ts';
 import type {Store} from './core.ts';
 import type {App,Machine,Topic,Proposal,Submission,Schedule,Run} from './state.ts';
 import type {Topics} from './topics.ts';
@@ -165,11 +165,11 @@ export class AgentSchedules{
  // What the cards of proposal p of topic t show (see schedule-cards.ts) as card, with the runs after from, when given, as next: their
  // instants, and as wall times in the card.
  view(t:Topic,p:Proposal,from?:number):{next:number[]|undefined,card:View}{
-  const f=p.fields,b=this.binding(t),m=this.store.data.machines.find(x=>x.id===b?.machineId),changed=p.before&&(p.before.cron!==f.cron||p.before.timeZone!==f.timeZone);
+  const f=p.fields,b=this.binding(t),changed=p.before&&(p.before.cron!==f.cron||p.before.timeZone!==f.timeZone);
   const next=from==null?undefined:upcoming(parseCron(f.cron),f.timeZone,from,shown);
   return {next,card:{kind:p.kind,...p.scheduleId&&{scheduleId:short({id:p.scheduleId})},phrase:phrase(parseCron(f.cron)),cron:f.cron,timeZone:f.timeZone,
    ...next&&{next:next.map(x=>when(x,f.timeZone,{weekday:true}))},task:f.task,taskChanged:!!p.before&&p.before.task!==f.task,mode:f.mode,here:f.topicId===t.id,topicTitle:this.topic(f.topicId)?.title,
-   binding:`${b?.name??'已删除的绑定'}（${m?.name??'?'} · ${b?.cwd??'?'} · ${(b&&kinds[b.kind])??b?.kind??'?'}）`,
+   binding:`${b?.name??'已删除的绑定'}（${b?bindingTarget(b,this.store.data):'?'}）`,
    // Only a change has a time before.
    ...changed&&{before:{phrase:phrase(parseCron(p.before!.cron)),cron:p.before!.cron,timeZone:p.before!.timeZone}}}};
  }

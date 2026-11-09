@@ -18,8 +18,6 @@ export function enqueue<T>(queues:Map<string,Promise<unknown>>,key:string,task:(
  const run=(queues.get(key)||Promise.resolve()).then(task),tail=run.catch(()=>{});
  queues.set(key,tail);tail.then(()=>{if(queues.get(key)===tail)queues.delete(key);});return run;
 }
-// A path on the Herdr host: absolute or under ~/, without shell metacharacters.
-export function hostPath(v:unknown,label:string){const p=text(v,300);if(!/^(~\/|\/)[a-zA-Z0-9_./-]+$/.test(p))throw Error(label+'必须为绝对路径或 ~/ 开头');return p;}
 // A machine of Bridge: where its Herdr session runs, which Bridge reaches through the client of the machine (see clients.ts), and whether
 // Bridge uses it: enabled, which the console turns off to stop polling the machine and opening or prompting topics there while its client
 // stays connected. The client's token is kept apart (see Clients.issue).

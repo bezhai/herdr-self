@@ -8,8 +8,6 @@ const summaryLength=100;
 const untitled=(text:string,elements:object[],config?:object)=>({schema:'2.0',config:{...config,summary:{content:clip(text.replace(/\s+/g,' ').trim(),summaryLength)}},body:{elements}});
 // Notices are a line or a few: they keep the default width.
 export const notice=(text:string)=>untitled(text,[plain(text)]);
-// A notice followed by a link that shows its URL. A ' would end the attribute; %27 means the same in a URL.
-export const linkNotice=(text:string,url:string)=>untitled(text,[plain(text),{tag:'markdown',content:`<a href='${url.replaceAll("'",'%27')}'></a>`}]);
 // Feishu refuses a card message whose request body exceeds 30 KB. The body carries the card serialized as the string value of its content
 // field, beside some 60 bytes of other fields; a card within 28000 bytes there stays under 30 KB whether a KB is 1000 or 1024 bytes.
 const maxBytes=28000;

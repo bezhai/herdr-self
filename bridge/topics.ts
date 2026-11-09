@@ -2,7 +2,8 @@ import {uuid,publicText,enqueue} from './core.ts';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.ts';
 import {picker,adoptedPicker,intro,nameOf,stillChosen,chosen} from './adoption.ts';
 import {notice,replyCards} from './message-cards.ts';
-import {permissionMode,supported} from './platform.ts';
+import {supported} from './platform.ts';
+import {permissionMode} from './agent-configs.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits,label,reason} from './attachments.ts';
 import {slash} from './commands.ts';
 import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,steps} from './cot.ts';
@@ -10,7 +11,7 @@ import {wtRequest,usage,notRetried,createWorktree,worktreeIntro,failedText,remov
 import {attachmentFolder} from './machine.ts';
 import type {NormalizedMessage,ResourceDescriptor} from '@larksuite/channel';
 import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';
-import type {App,Binding,Machine,Topic,Reaction,RequestCard,Kind} from './state.ts';
+import type {App,Binding,Machine,Topic,Reaction,RequestCard,Kind,Project,AgentConfig} from './state.ts';
 import type {Platforms} from './platform.ts';
 import type {Click,HerdrRequest,Answer} from './request-cards.ts';
 import type {Choice,Offered,Group} from './adoption.ts';
@@ -22,14 +23,14 @@ import type {WtRequest,Removal,Worktree} from './worktrees.ts';
 // (/adopt). Everything goes through the Herdr CLI, besides what worktrees, attachments and Bridge's skills need on the machine; all of it
 // through the client of the machine (see operations in core.ts).
 const workspaceLabel=(b:Binding)=>'飞书 · '+b.name;
-// Arguments that Herdr passes on to the agent it starts, after --, per binding kind. Claude gets the binding's permission mode. Codex runs
+// Arguments that Herdr passes on to the agent it starts, after --, per kind of agent configuration. Claude gets the configuration's permission mode. Codex runs
 // in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
 // that server, and with the network of its workspace-write sandbox on: without it the sandbox refuses connect() on every socket, that of
 // the Bridge client too (see client.ts), which bridge-schedule needs; the network is all or nothing, and the limits on writing files stay.
 // Codex also skips the trust of its hooks: whenever hooks.json changes, for example after Herdr updates its integration, Codex waits on
 // a screen to review the new hooks, which a Feishu topic cannot answer; the hooks are the owner's own. Antigravity (agy) gets nothing,
 // not even the --.
-const agentArgs:Record<Kind,(b:Binding)=>string[]>={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:()=>[]};
+const agentArgs:Record<Kind,(c:AgentConfig)=>string[]>={claude:c=>['--','--permission-mode',permissionMode(c)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:()=>[]};
 const brief=(e:Error)=>publicText(e.message).split('\n')[0].slice(0,200);
 // What a topic says when the client of its machine is offline (see Clients.call): the error names the machine, and after says what that
 // meant for the message.
@@ -127,7 +128,8 @@ export class Topics{
  // schedule run that opened it. A /wt topic has request (see wtRequest) and is marked by worktree, which gets the branch and the path of its
  // worktree once they are known (see createWorktree). Returns {topic, delivered}: the record, and what deliver resolves to.
  begin(a:App,b:Binding,rootId:string,{title,msg,reaction,request,fields}:{title:string,msg:Message,reaction?:string,request?:WtRequest|null,fields?:Pick<Topic,'scheduled'>}){
-  const id=uuid(),t:Topic={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:b.machineId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
+  const id=uuid(),config=this.store.data.agentConfigs.find(c=>c.id===b.defaultAgentConfigId);
+  const t:Topic={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:config?.machineId??'',...b.defaultProjectId&&{projectId:b.defaultProjectId},agentConfigId:b.defaultAgentConfigId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
    title,state:'starting',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],...request&&{worktree:{}},...fields,createdAt:this.now()};
   this.store.data.topics.push(t);this.store.save();
   return {topic:t,delivered:this.deliver(a,b,t,msg,{reaction,request})};
@@ -213,7 +215,7 @@ export class Topics{
  // Sends message msg to the topic's agent, opening the topic first when it is new or failed, a new /wt topic with its request (see
  // wtRequest); a topic still waiting for an agent to adopt prompts nothing, and neither does a /wt topic that failed to start: its first
  // message had the task, and what it created stays in place. The images and files of the message are written under the agent's working
- // directory first (see attach): the binding's for a topic that Bridge opened in a tab, the worktree for a /wt topic, and for an adopted one
+ // directory first (see attach): the topic's own for a topic that Bridge opened in a tab, the worktree for a /wt topic, and for an adopted one
  // what Herdr reports for the agent, where the agent runs before where its shell is. Resolves to the prompted agent, or to nothing when the
  // message was not prompted.
  async forward(a:App,b:Binding,t:Topic,msg:Message,request?:WtRequest|null){
@@ -224,7 +226,7 @@ export class Topics{
   if(t.state==='ready'){agent=await this.alive(a,t);if(!agent)return;}
   else if(!await this.open(a,b,t,request))return;
   // An adopted topic that gets here is ready, with its agent.
-  const text=await this.attach(a,t,msg,t.adopted?agent!.foreground_cwd||agent!.cwd:t.worktree?.path||b.cwd);
+  const text=await this.attach(a,t,msg,t.adopted?agent!.foreground_cwd||agent!.cwd:t.worktree?.path||t.cwd);
   let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,text]);}
   catch(e){if(e.code!=='agent_blocked')throw e;await this.notify(a,t,'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息');return this.noticed(t);}
   this.store.log('消息投递',`${a.name} → ${b.name}：已发送到 ${t.agentName}`);return r.agent;
@@ -297,14 +299,14 @@ export class Topics{
  async open(a:App,b:Binding,t:Topic,request?:WtRequest|null){
   this.update(t,{state:'starting',error:''});let m:Machine,made:Awaited<ReturnType<typeof createWorktree>>|undefined,started=false;
   try{
-   m=this.target(t);
+   m=this.target(t);const config=this.agentConfig(t),dir=this.startDirectory(t);this.update(t,{cwd:dir});
    if(t.worktree){
     // A /wt topic opens once, with the request of its first message.
-    made=await createWorktree(m,b.cwd,request!,{git:this.git,exists:this.exists,askCheapModel:this.askCheapModel,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
+    made=await createWorktree(m,dir,request!,{git:this.git,exists:this.exists,askCheapModel:this.askCheapModel,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
     this.update(t,{workspaceId:made.workspaceId,tabId:made.tabId,paneId:made.paneId});await this.notify(a,t,worktreeIntro(m,made));
-   }else{Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();}
-   await this.place(m,b,t.worktree?.path||b.cwd);
-   try{await this.herdr(m,['agent','start',t.agentName,'--kind',b.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs[b.kind](b)],{timeoutMs:70000});}
+   }else{Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t,dir)));this.store.save();}
+   await this.place(m,b,config.kind,t.worktree?.path||dir);
+   try{await this.herdr(m,['agent','start',t.agentName,'--kind',config.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs[config.kind](config)],{timeoutMs:70000});}
    // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
    catch(e){if(e.code!=='agent_not_ready')throw e;}
    started=true;
@@ -323,27 +325,38 @@ export class Topics{
   }
   this.update(t,{state:'ready'});this.store.log('话题会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}`);return true;
  }
- // Places the skills loaded by default for the agent of binding b in its working directory cwd on machine m, which exists by then, right
+ // The agent configuration that topic t starts with.
+ agentConfig(t:Topic){
+  const config=this.store.data.agentConfigs.find(c=>c.id===t.agentConfigId);if(!config)throw Error('Agent 配置不存在');return config;
+ }
+ // The directory in which the agent of topic t starts: the one it started in before, else for now the directory that its project adopted on
+ // its machine. Every other project waits for the workspace that the client prepares for it (see prepareWorkspace in link.ts).
+ startDirectory(t:Topic){
+  if(t.cwd)return t.cwd;
+  const project=this.store.data.projects.find(p=>p.id===t.projectId);if(!project)throw Error('项目不存在');
+  if(project.adopted?.machineId!==t.machineId)throw Error('这个项目的话题目录还没有实现');return project.adopted.dir;
+ }
+ // Places the skills loaded by default for the agent of kind kind in its working directory cwd on machine m, which exists by then, right
  // before the agent starts and loads them (see Skills.place). Same-name skills of others are left alone and logged. Never rejects: a failure is only logged, and
  // the agent starts without the skills.
- async place(m:Machine,b:Binding,cwd:string){
-  try{for(const p of await this.placeSkills(m,cwd,b.kind))this.store.log('skill',`${b.name}：${p} 已有同名 skill，不是 Bridge 放的，没有改动`);}
+ async place(m:Machine,b:Binding,kind:Kind,cwd:string){
+  try{for(const p of await this.placeSkills(m,cwd,kind))this.store.log('skill',`${b.name}：${p} 已有同名 skill，不是 Bridge 放的，没有改动`);}
   catch(e){this.store.log('skill',`${b.name}：未能在 ${cwd} 放置 skill，${brief(e)}`,'error');}
  }
- // The binding's workspace is created on first use and again after it was closed in Herdr; its root tab serves the topic that created it.
- // Herdr reuses workspace ids after a server restart, so the stored id counts only while the workspace still carries the binding's label.
- // Runs in the binding's queue so that topics opened together create the workspace once.
- async openTab(m:Machine,b:Binding,t:Topic){
+ // The binding's workspace on machine m is created on first use and again after it was closed in Herdr; its root tab serves the topic that
+ // created it. Herdr reuses workspace ids after a server restart, so the stored id counts only while the workspace still carries the
+ // binding's label. The tab starts in directory dir. Runs in the binding's queue so that topics opened together create the workspace once.
+ async openTab(m:Machine,b:Binding,t:Topic,dir:string){
   // Herdr falls back to the home directory for a --cwd that does not exist. Created for every tab: it may have been removed since the workspace was.
-  await this.makeDirectory(m,b.cwd);
-  const {workspaces}=await this.herdr(m,['workspace','list']);
-  if(workspaces.some(w=>w.workspace_id===b.workspaceId&&w.label===workspaceLabel(b))){
-   const r=await this.herdr(m,['tab','create','--workspace',b.workspaceId!,'--cwd',{path:b.cwd},'--label',t.title,'--no-focus']);
-   return {workspaceId:b.workspaceId,tabId:r.tab.tab_id,paneId:r.root_pane.pane_id};
+  await this.makeDirectory(m,dir);
+  const {workspaces}=await this.herdr(m,['workspace','list']),known=b.workspaces?.[m.id];
+  if(known&&workspaces.some(w=>w.workspace_id===known&&w.label===workspaceLabel(b))){
+   const r=await this.herdr(m,['tab','create','--workspace',known,'--cwd',{path:dir},'--label',t.title,'--no-focus']);
+   return {workspaceId:known,tabId:r.tab.tab_id,paneId:r.root_pane.pane_id};
   }
-  const r=await this.herdr(m,['workspace','create','--cwd',{path:b.cwd},'--label',workspaceLabel(b),'--no-focus']);
+  const r=await this.herdr(m,['workspace','create','--cwd',{path:dir},'--label',workspaceLabel(b),'--no-focus']);
   await this.herdr(m,['tab','rename',r.tab.tab_id,t.title]);
-  b.workspaceId=r.workspace.workspace_id;return {workspaceId:b.workspaceId,tabId:r.tab.tab_id,paneId:r.root_pane.pane_id};
+  b.workspaces={...b.workspaces,[m.id]:r.workspace.workspace_id};return {workspaceId:r.workspace.workspace_id,tabId:r.tab.tab_id,paneId:r.root_pane.pane_id};
  }
  // Takes an agent list of machine m after each refresh. The linked agent of a ready topic reports reply_seq, the seq of its latest reply
  // (missing in Herdr versions without replies), state_change_seq, which grows with every status change, and request_ids. In the topic's

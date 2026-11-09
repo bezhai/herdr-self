@@ -1,4 +1,4 @@
-import type { Binding } from '../../../state.ts';
+import type { ConsoleBinding } from '../../../console-state.ts';
 import { request } from '../api.ts';
 import { ActionButton } from '../components/ActionButton.tsx';
 import { AppAvatar } from '../components/AppAvatar.tsx';
@@ -11,7 +11,7 @@ type Props = PageProps & { openApp: (app: ConsoleApp) => void };
 
 const domainNames: { [domain: string]: string } = { bytedance: '字节内部', lark: 'Lark 国际版' };
 
-function AppCard({ app, bindings, refresh, toast, openApp }: Omit<Props, 'state'> & { app: ConsoleApp, bindings: Binding[] }) {
+function AppCard({ app, bindings, refresh, toast, openApp }: Omit<Props, 'state'> & { app: ConsoleApp, bindings: ConsoleBinding[] }) {
   async function act(path: string, body: unknown, message?: string) {
     await request(path, body);
     if (message) toast(message);

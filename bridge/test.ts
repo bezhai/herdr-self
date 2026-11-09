@@ -3,9 +3,9 @@ import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 
 import {Readable} from 'node:stream';
 import {normalizeMachine,migrateMachines,operations,Store} from './core.ts';
 import {Skills,frontmatter,skillLimit} from './skills.ts';
-import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
+import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
-import {normalizeAgentConfig,configName} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName} from './projects.ts';
+import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName} from './projects.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
@@ -45,7 +45,10 @@ type Handlers=Record<string,(...args:any[])=>any>;
 // A fixture without onCardAction has no card clicks.
 function platformFixture(options?:Partial<DepsOf<typeof Platforms>>){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-platform-')),store=new Store(dir),
  messages:Parameters<DepsOf<typeof Platforms>['onMessage']>[]=[],unbound:Parameters<DepsOf<typeof Platforms>['onUnbound']>[]=[];return {dir,store,messages,unbound,platforms:new Platforms(store,{onMessage:(...args)=>messages.push(args),onUnbound:(...args)=>unbound.push(args),...options} as DepsOf<typeof Platforms>),close(){fs.rmSync(dir,{recursive:true});}};}
-const route:Binding={id:'b',name:'个人助手',enabled:true,appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false};
+// The project and the agent configuration of the binding below: a project that adopted ~/work on machine m, and Claude there.
+const routeProject:Project={id:'p',name:'work',description:'',repos:[],skills:[],workMode:'shared',adopted:{machineId:'m',dir:'~/work'}};
+const routeConfig:AgentConfig={id:'c',name:'cpu2 · Claude',machineId:'m',kind:'claude',permissionMode:'default'};
+const route:Binding={id:'b',name:'个人助手',enabled:true,appId:'a',chatId:'oc_1',chatType:'group',requireMention:false,defaultProjectId:'p',defaultAgentConfigId:'c'};
 // A person's message as the SDK makes it, with the fields that Bridge reads.
 const inbound={senderType:'user',senderId:'ou_user',chatId:'oc_1',messageId:'om_1',rawContentType:'text',content:'private prompt'} as NormalizedMessage;
 // An app as far as the tests need one.
@@ -103,12 +106,12 @@ test('machines of a state file from before the clients lose their type, address,
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-migrate-'));try{
   const old=new Store(dir);
   old.data.machines=[{id:'m1',name:'cpu1',type:'local',host:'',port:22,session:'default',binary:'~/.local/bin/herdr',enabled:true,tokenHash:'aa'},{id:'m2',name:'cpu2',type:'ssh',host:'cpu2',port:2222,session:'work',binary:'/opt/herdr/bin/herdr',enabled:false},{id:'m3',name:'gpu1',session:'default',enabled:true}] as Machine[];
-  old.data.bindings=[{id:'b',machineId:'m2'}] as Binding[];old.data.topics=[{id:'t',machineId:'m1'}] as Topic[];old.save();
+  old.data.bindings=[{id:'b'}] as Binding[];old.data.topics=[{id:'t',machineId:'m1'}] as Topic[];old.save();
   const store=new Store(dir),save=store.save.bind(store);let saves=0;store.save=()=>{saves++;save();};
   migrateMachines(store);assert.equal(saves,1);
   const saved:State=JSON.parse(fs.readFileSync(path.join(dir,'state.json'),'utf8'));
   assert.deepEqual(saved.machines,[{id:'m1',name:'cpu1',session:'default',enabled:true,tokenHash:'aa'},{id:'m2',name:'cpu2',session:'work',enabled:false},{id:'m3',name:'gpu1',session:'default',enabled:true}]);
-  assert.deepEqual([saved.bindings,saved.topics],[[{id:'b',machineId:'m2'}],[{id:'t',machineId:'m1'}]]);
+  assert.deepEqual([saved.bindings,saved.topics],[[{id:'b'}],[{id:'t',machineId:'m1'}]]);
   assert.deepEqual(saved.logs.map(l=>[l.kind,l.level,l.message]),[['机器连接','info','机器改为经客户端连接，去掉了 cpu1、cpu2 的连接方式、地址、端口和 Herdr 路径；cpu2 的 Herdr 在 /opt/herdr/bin/herdr，请写进对应机器客户端配置的 herdr']]);
   // Machines without the old fields are left alone, without a save.
   migrateMachines(store);migrateMachines(new Store(dir));assert.equal(saves,1);assert.equal(new Store(dir).data.logs.length,1);
@@ -181,29 +184,48 @@ test('repositories are the same when their URLs name the same host and path what
  for(const url of same)assert.equal(repoName(url),'herdr-self',url);assert.equal(repoName('git@code.byted.org:growth/genvi.git'),'genvi');
  assert.equal(uniqueName('genvi',[]),'genvi');assert.equal(uniqueName('genvi',['genvi']),'genvi 2');assert.equal(uniqueName('genvi',['genvi','genvi 2','other']),'genvi 3');
 });
-test('a binding routes the pending chat of an app to a working directory and agent kind on a machine; app and chat never come from the client',()=>{
- const chat={token:'t',appId:'a',chatId:'oc_1',chatType:'group' as const},input={name:'助手',appId:'forged',chatId:'oc_forged',machineId:'m',cwd:'~/code/x',kind:'codex',requireMention:false};
- const {id,...b}=normalizeBinding({...input,rootId:'om_1',paneId:'w1:p1'},chat,[]);assert.match(id,/^[0-9a-f-]{36}$/);assert.deepEqual(b,{name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'codex',requireMention:false,enabled:true});
- assert.equal(normalizeBinding({...input,requireMention:undefined},chat,[]).requireMention,true);assert.equal(normalizeBinding({...input,cwd:'/srv/app',kind:'claude'},chat,[]).cwd,'/srv/app');
- for(const requireMention of [true,undefined])assert.equal(normalizeBinding({...input,requireMention},{...chat,chatType:'p2p'},[]).requireMention,false);
- for(const cwd of ['relative','/a b','~/$(id)','/x;y','',undefined])assert.throws(()=>normalizeBinding({...input,cwd},chat,[]));assert.throws(()=>normalizeBinding({...input,cwd:'work'},chat,[]),/工作目录/);
- for(const kind of ['claude','codex','agy'] satisfies Kind[])assert.equal(normalizeBinding({...input,kind},chat,[]).kind,kind);
- for(const kind of ['bash','antigravity','Agy','',undefined])assert.throws(()=>normalizeBinding({...input,kind},chat,[]),/^Error: Agent 类型无效$/,String(kind));
- assert.throws(()=>normalizeBinding(input,chat,[{appId:'a',chatId:'oc_1'}]),/该聊天已有绑定/);assert.equal(normalizeBinding(input,chat,[{appId:'other',chatId:'oc_1'},{appId:'a',chatId:'oc_2'}]).chatId,'oc_1');
+const bindingData=(bindings:Binding[]=[])=>({bindings,projects:[routeProject],agentConfigs:[routeConfig,{...routeConfig,id:'c2',name:'cpu2 · Codex',kind:'codex'} as AgentConfig]});
+test('a binding gives a chat a default agent configuration and, for a group, a default project; app, chat and its type come from Feishu, never from the client',()=>{
+ const chat={appId:'a',chatId:'oc_1',chatType:'group' as const},input={name:'产品群',appId:'forged',chatId:'oc_forged',chatType:'p2p',defaultProjectId:'p',defaultAgentConfigId:'c2',requireMention:false};
+ const {id,...b}=normalizeBinding({...input,rootId:'om_1',paneId:'w1:p1'},chat,bindingData());assert.match(id,/^[0-9a-f-]{36}$/);
+ assert.deepEqual(b,{name:'产品群',appId:'a',chatId:'oc_1',chatType:'group',requireMention:false,enabled:true,defaultProjectId:'p',defaultAgentConfigId:'c2'});
+ assert.equal(normalizeBinding({...input,requireMention:undefined},chat,bindingData()).requireMention,true);
+ // A direct chat needs no mention and has no project; the configuration still decides what runs its topics.
+ const dm={...chat,chatType:'p2p' as const},{id:dmId,...direct}=normalizeBinding({name:'私聊',defaultAgentConfigId:'c',requireMention:true},dm,bindingData());
+ assert.deepEqual(direct,{name:'私聊',appId:'a',chatId:'oc_1',chatType:'p2p',requireMention:false,enabled:true,defaultAgentConfigId:'c'});
+ for(const empty of [undefined,null,''])assert.equal('defaultProjectId' in normalizeBinding({name:'私聊',defaultProjectId:empty,defaultAgentConfigId:'c'},dm,bindingData()),false);
+ assert.throws(()=>normalizeBinding({name:'私聊',defaultProjectId:'p',defaultAgentConfigId:'c'},dm,bindingData()),/^Error: 私聊不固定项目$/);
+ for(const defaultProjectId of ['gone','',undefined,null,['p']])assert.throws(()=>normalizeBinding({...input,defaultProjectId},chat,bindingData()),/^Error: 项目不存在$/,String(defaultProjectId));
+ for(const defaultAgentConfigId of ['gone','',undefined,['c']])for(const c of [chat,dm])assert.throws(()=>normalizeBinding({...input,defaultProjectId:c===chat?'p':undefined,defaultAgentConfigId},c,bindingData()),/^Error: Agent 配置不存在$/,String(defaultAgentConfigId));
+ for(const name of ['',' ',undefined,'a'.repeat(61)])assert.throws(()=>normalizeBinding({...input,name},chat,bindingData()),/字段为空或过长/);
+ assert.throws(()=>normalizeBinding(input,chat,bindingData([{appId:'a',chatId:'oc_1'} as Binding])),/该聊天已有绑定/);
+ assert.equal(normalizeBinding(input,chat,bindingData([{appId:'other',chatId:'oc_1'},{appId:'a',chatId:'oc_2'}] as Binding[])).chatId,'oc_1');
 });
-test('a Claude binding has the permission mode default or auto, default when none is given; Codex and Antigravity bindings have none',()=>{
- const chat={token:'t',appId:'a',chatId:'oc_1',chatType:'group' as const},input={name:'助手',machineId:'m',cwd:'~/code/x',kind:'claude'};
- const {id,...b}=normalizeBinding(input,chat,[]);assert.deepEqual(b,{name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'claude',permissionMode:'default',requireMention:true,enabled:true});
- for(const permissionMode of ['default','auto'])assert.equal(normalizeBinding({...input,permissionMode},chat,[]).permissionMode,permissionMode);
- for(const permissionMode of ['acceptEdits','plan','bypassPermissions','dontAsk','AUTO',1])assert.throws(()=>normalizeBinding({...input,permissionMode},chat,[]),/^Error: 权限模式无效$/,String(permissionMode));
- for(const kind of ['codex','agy'])for(const permissionMode of [undefined,'auto','bypassPermissions'])assert.equal('permissionMode' in normalizeBinding({...input,kind,permissionMode},chat,[]),false,kind+' '+permissionMode);
- const {id:agyId,...agy}=normalizeBinding({...input,kind:'agy',permissionMode:'auto'},chat,[]);assert.deepEqual(agy,{name:'助手',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/code/x',kind:'agy',requireMention:true,enabled:true});
+test('adding a binding stores it, logs where it sends its topics and remembers its agent configuration for the next binding',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-binding-'));try{
+  const store=new Store(dir);Object.assign(store.data,bindingData());
+  const group=addBinding(store,{name:'产品群',defaultProjectId:'p',defaultAgentConfigId:'c2'},{appId:'a',chatId:'oc_1',chatType:'group'});
+  assert.deepEqual(store.data.bindings,[group]);assert.equal(store.data.lastAgentConfigId,'c2');assert.deepEqual(new Store(dir).data.bindings,[group]);assert.equal(new Store(dir).data.lastAgentConfigId,'c2');
+  const direct=addBinding(store,{name:'私聊',defaultAgentConfigId:'c'},{appId:'a',chatId:'oc_2',chatType:'p2p'});assert.equal(store.data.lastAgentConfigId,'c');
+  assert.deepEqual(store.data.logs.map(l=>[l.kind,l.message]),[['会话绑定','产品群 → work · cpu2 · Codex'],['会话绑定','私聊 → 按任务自动选择 · cpu2 · Claude']]);
+  // A binding that is refused changes nothing.
+  assert.throws(()=>addBinding(store,{name:'重复',defaultProjectId:'p',defaultAgentConfigId:'c'},{appId:'a',chatId:'oc_1',chatType:'group'}),/该聊天已有绑定/);
+  assert.deepEqual([store.data.bindings.length,store.data.lastAgentConfigId,direct.chatType],[2,'c','p2p']);
+ }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('changing the permission mode of a Claude binding changes that field only; Codex and Antigravity bindings and other modes are refused',()=>{
- const claude:Binding={...route},codex:Binding={...route,kind:'codex'},agy:Binding={...route,kind:'agy'};
- setPermissionMode(claude,'auto');assert.deepEqual(claude,{...route,permissionMode:'auto'});setPermissionMode(claude,'default');assert.deepEqual(claude,{...route,permissionMode:'default'});
- for(const mode of ['bypassPermissions','plan','',undefined])assert.throws(()=>setPermissionMode(claude,mode),/^Error: 权限模式无效$/);assert.equal(claude.permissionMode,'default');
- for(const other of [codex,agy]){const before={...other};assert.throws(()=>setPermissionMode(other,'auto'),/^Error: 只有 Claude 绑定可以设置权限模式$/,other.kind);assert.deepEqual(other,before);}
+test('changing a binding changes the fields that are given and nothing else: the project of a group, the configuration, the mention and whether it is on; the name follows Feishu',()=>{
+ const data=bindingData(),group:Binding={...route,requireMention:true},other=normalizeProject({name:'另一个'},{projects:[],skills:[]});data.projects.push(other);
+ changeBinding(group,{name:'改名',chatId:'oc_other',chatType:'p2p',defaultAgentConfigId:'c2'},data);assert.deepEqual(group,{...route,requireMention:true,defaultAgentConfigId:'c2'});
+ changeBinding(group,{defaultProjectId:other.id,requireMention:false,enabled:false},data);assert.deepEqual(group,{...route,defaultProjectId:other.id,defaultAgentConfigId:'c2',requireMention:false,enabled:false});
+ const before={...group};
+ for(const [fields,error] of [[{defaultProjectId:'gone'},/项目不存在/],[{defaultProjectId:null},/项目不存在/],[{defaultAgentConfigId:'gone'},/Agent 配置不存在/],[{defaultAgentConfigId:['c']},/Agent 配置不存在/],
+  [{requireMention:'yes'},/字段无效：requireMention/],[{enabled:1},/字段无效：enabled/],[{defaultAgentConfigId:'c',enabled:null},/字段无效：enabled/]] as [BindingFields,RegExp][]){
+  assert.throws(()=>changeBinding(group,fields,data),error,JSON.stringify(fields));assert.deepEqual(group,before);
+ }
+ // A direct chat has no project and never needs the mention.
+ const {defaultProjectId:_,...direct}=route,dm:Binding={...direct,chatType:'p2p',requireMention:false};
+ changeBinding(dm,{defaultAgentConfigId:'c2',requireMention:true,defaultProjectId:''},data);assert.deepEqual(dm,{...direct,chatType:'p2p',requireMention:false,defaultAgentConfigId:'c2'});assert.throws(()=>changeBinding(dm,{defaultProjectId:'p'},data),/^Error: 私聊不固定项目$/);
+ assert.equal(bindingTarget(group,data),'另一个 · cpu2 · Codex');assert.equal(bindingTarget(dm,data),'按任务自动选择 · cpu2 · Codex');assert.equal(bindingTarget({...group,defaultProjectId:'gone',defaultAgentConfigId:'gone'},data),'? · ?');
 });
 test('Bridge takes every message of a person; it can forward text, rich text, images and files with content of at most 16000 characters, and no other kind; mentions are left to topic handling',async()=>{
  const raw:Parameters<typeof normalize>[0]={sender:{sender_type:'user',sender_id:{open_id:'ou_user'}},message:{message_id:'om_message',chat_id:'oc_1',chat_type:'group',root_id:'om_root',message_type:'text',content:'{"text":"@_user_1 hi"}',mentions:[{key:'@_user_1',id:{open_id:'ou_bot'},name:'bot'}]}};
@@ -357,6 +379,27 @@ test('a resource of a received message is downloaded through the connected chann
   await assert.rejects(f.platforms.download(allowed,'om_5',{type:'image',fileKey:'img_x'},10),(e:Thrown)=>e.code===234003&&e.message==='飞书接口错误 234003：File not in msg.');
   answers.push(()=>{throw Error('timeout of 10000ms exceeded');});await assert.rejects(f.platforms.download(allowed,'om_6',{type:'image',fileKey:'img_6'},10),/^Error: timeout of 10000ms exceeded$/);
  }finally{f.close();}
+});
+test('a topic starts on the machine of the binding\'s agent configuration, in the directory its project adopted there, and records the project, the configuration and the directory it started with; the workspace is the binding\'s on that machine',async()=>{
+ const f=topicFixture({machines:[{id:'n',name:'cpu1',session:'default',enabled:true}],config:{machineId:'n',kind:'codex'},project:{adopted:{machineId:'n',dir:'~/other'}}});try{
+  await f.send({messageId:'om_1',content:'one'});
+  const [t]=f.store.data.topics;assert.deepEqual([t.state,t.machineId,t.projectId,t.agentConfigId,t.cwd,t.workspaceId],['ready','n','p','c','~/other','w1']);
+  assert.deepEqual([...new Set(f.h.machines)],['n']);assert.deepEqual(f.h.calls[1],['workspace','create','--cwd',{path:'~/other'},'--label','飞书 · 个人助手','--no-focus']);
+  assert.deepEqual(f.b.workspaces,{n:'w1'});assert.deepEqual(f.placed.map(p=>p.slice(0,3)),[['n','~/other','codex']]);
+  // A reply starts nothing again and a topic that failed and is retried starts in the directory it chose first.
+  f.project.adopted!.dir='~/moved';t.state='failed';await f.send({messageId:'om_2',rootId:'om_1',content:'again'});
+  assert.deepEqual([t.state,t.cwd],['ready','~/other']);
+ }finally{f.close();}
+});
+test('a topic whose project adopted its directory on another machine, that has no project (a direct chat) or whose agent configuration is gone fails to start with the reason, and its thread gets the notice',async()=>{
+ const direct:Partial<Binding>={chatType:'p2p',defaultProjectId:undefined};
+ for(const [options,reason] of [[{project:{adopted:{machineId:'n',dir:'~/other'}}},'这个项目的话题目录还没有实现'],[{project:{adopted:undefined}},'这个项目的话题目录还没有实现'],[{binding:direct},'项目不存在'],[{binding:{defaultAgentConfigId:'gone'}},'机器连接不存在']] satisfies [TopicOptions,string][]){
+  const f=topicFixture(options);try{
+   await f.send({messageId:'om_1',content:'one'});
+   assert.deepEqual([f.store.data.topics[0].state,f.store.data.topics[0].error],['failed',reason]);assert.deepEqual(f.h.calls,[]);
+   assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')],reason);
+  }finally{f.close();}
+ }
 });
 test('a start failure with a local path and an English Herdr error keeps them out of the Feishu notice',async()=>{
  const f=topicFixture(),raw='no herdr server is running at /home/someone/.config/herdr/herdr.sock; run `herdr server`';try{
@@ -695,17 +738,18 @@ const cotPath='/open-apis/im/v1/message_cot';
 // as {cwd, prompt, timeoutMs}. f.placed records every placement
 // of Bridge's skills as [machine id, directory, agent kind, number of Herdr calls made before it]; it resolves to f.h.placing, by default
 // no skills of others, or rejects with it when it is an Error.
-type TopicOptions={binding?:Partial<Binding>,machine?:Partial<Machine>,machines?:Machine[],cot?:boolean,now?:()=>number};
+type TopicOptions={binding?:Partial<Binding>,config?:Partial<AgentConfig>,project?:Partial<Project>,machine?:Partial<Machine>,machines?:Machine[],cot?:boolean,now?:()=>number};
 // A card as a test reads it: the JSON that Bridge built.
 type Card={schema?:string,config?:Record<string,any>,header?:{title:{tag?:string,content:string},template:string},body:{elements:Record<string,any>[]},[field:string]:unknown};
 // An OpenAPI request of Bridge as a test reads it.
 type ApiRequest={method:string,url:string,data:Record<string,any>,params?:Record<string,any>};
-function topicFixture({binding,machine,machines=[],cot=true,now}:TopicOptions={}){
+function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:TopicOptions={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies:[string,string,string,{card:Card}][]=[],reacted:string[][]=[],unreacted:string[][]=[],
   updated:[string,string,Card][]=[],api:ApiRequest[]=[],m={id:'m',name:'cpu2',enabled:true,...machine} as Machine;
  const downloads:unknown[][]=[],resources:Record<string,{body:Buffer<ArrayBuffer>,type:string}|Error>={},stored:unknown[][]=[],removed:unknown[][]=[],execs:unknown[][]=[],
   naming:{cwd:string,prompt:string,timeoutMs?:number}[]=[],placed:unknown[][]=[];
- store.data.machines=[m,...machines];store.data.bindings=[{...route,...binding}];store.save();const b=store.data.bindings[0];let sent=0,cots=0;
+ store.data.machines=[m,...machines];store.data.projects=[{...routeProject,...project}];store.data.agentConfigs=[{...routeConfig,...config}];store.data.bindings=[{...route,...binding}];store.save();
+ const b=store.data.bindings[0];let sent=0,cots=0;
  // Every reply resolves to the next message id om_bot_<n>.
  // The fake answers each command with what Herdr prints for it, which its type cannot tie to the command.
  const deps:DepsOf<typeof Topics>={herdr:h.herdr as Herdr,makeDirectory:h.makeDirectory,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
@@ -726,7 +770,7 @@ function topicFixture({binding,machine,machines=[],cot=true,now}:TopicOptions={}
  const topics=new Topics(store,deps);
  const send=(msg:Partial<NormalizedMessage>)=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg} as NormalizedMessage);
  const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
- return {dir,store,h,m,topics,replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,execs,naming,placed,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,config:store.data.agentConfigs[0],project:store.data.projects[0],replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,execs,naming,placed,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
 }
 // The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
 // id, reason].
@@ -743,9 +787,9 @@ test('a new topic creates the binding workspace, names its root tab after the to
   assert.equal(agentName,'feishu-'+id.slice(0,8));assert.match(agentName,/^feishu-[0-9a-f]{8}$/);assert.ok(createdAt>0);
   assert.deepEqual(f.h.calls,[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w1:t1',title],['agent','start',agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],['pane','remote-answers','w1:p1','on'],['agent','prompt','w1:p1',text]]);
   assert.deepEqual(f.h.timeouts,[undefined,undefined,undefined,70000,undefined,undefined]);assert.deepEqual([...new Set(f.h.machines)],['m']);assert.equal(f.h.agents[0].remote_answers,true);
-  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[],cards:[],
+  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',projectId:'p',agentConfigId:'c',cwd:'~/work',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[],cards:[],
    cot:{cotId:'c1',messageId:'om_cot_1',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false}});
-  assert.equal(new Store(f.dir).data.bindings[0].workspaceId,'w1');assert.equal(new Store(f.dir).data.topics[0].state,'ready');
+  assert.deepEqual(new Store(f.dir).data.bindings[0].workspaces,{m:'w1'});assert.equal(new Store(f.dir).data.topics[0].state,'ready');
   assert.deepEqual(f.replies,[]);assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['话题会话','info',`个人助手：已在 cpu2 启动 ${agentName}`],['消息投递','info',`bot → 个人助手：已发送到 ${agentName}`]]);
  }finally{f.close();}
 });
@@ -762,18 +806,18 @@ test('another topic opens a tab in the same workspace and turns on remote answer
   assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>[t.cot!.origin,t.reactions.map(r=>r.messageId)]),[['om_1',['om_3']],['om_2',[]]]);
  }finally{f.close();}
 });
-test('a Claude binding starts each topic agent with -- --permission-mode and its mode, default when the binding has none; a Codex binding starts its agent with -- --no-daemon, the network of its sandbox on, so that bridge-schedule reaches the client of its machine, and past the review of new or changed hooks; an Antigravity binding passes nothing on',async()=>{
- for(const [binding,args] of [[{},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],
-  [{kind:'codex'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust']],[{kind:'agy'},[]]] satisfies [Partial<Binding>,string[]][]){
-  const f=topicFixture({binding});try{
+test('a Claude configuration starts each topic agent with -- --permission-mode and its mode, default when it has none; a Codex configuration starts its agent with -- --no-daemon, the network of its sandbox on, so that bridge-schedule reaches the client of its machine, and past the review of new or changed hooks; an Antigravity configuration passes nothing on',async()=>{
+ for(const [config,args] of [[{permissionMode:undefined},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],
+  [{kind:'codex'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust']],[{kind:'agy'},[]]] satisfies [Partial<AgentConfig>,string[]][]){
+  const f=topicFixture({config});try{
    await f.send({messageId:'om_1',content:'one'});
-   assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',f.b.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(binding));
+   assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',f.config.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(config));
   }finally{f.close();}
  }
 });
 test('a changed permission mode applies to the topics opened afterwards; a running topic keeps its agent',async()=>{
  const f=topicFixture();try{
-  await f.send({messageId:'om_1',content:'one'});setPermissionMode(f.b,'auto');
+  await f.send({messageId:'om_1',content:'one'});f.config.permissionMode='auto';
   await f.send({messageId:'om_2',rootId:'om_1',content:'more'});await f.send({messageId:'om_3',content:'two'});
   assert.deepEqual(f.h.calls.filter(c=>c[1]==='start').map(c=>c.slice(-3)),[['--','--permission-mode','default'],['--','--permission-mode','auto']]);
   assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[2]),['w1:p1','w1:p1','w1:p2']);
@@ -808,7 +852,7 @@ test('a closed workspace is created again for the next new topic',async()=>{
   await f.send({messageId:'om_1',content:'one'});f.h.workspaces.length=0;f.h.calls.length=0;
   await f.send({messageId:'om_2',content:'two'});
   assert.deepEqual(f.h.calls.slice(0,4).map(c=>c.slice(0,2)),[['workspace','list'],['workspace','create'],['tab','rename'],['agent','start']]);
-  assert.equal(f.b.workspaceId,'w2');assert.equal(f.store.data.topics[1].paneId,'w2:p2');
+  assert.equal(f.b.workspaces!.m,'w2');assert.equal(f.store.data.topics[1].paneId,'w2:p2');
  }finally{f.close();}
 });
 test('a workspace id that Herdr reassigned to another workspace is not reused; a new workspace is created',async()=>{
@@ -816,7 +860,7 @@ test('a workspace id that Herdr reassigned to another workspace is not reused; a
   await f.send({messageId:'om_1',content:'one'});f.h.workspaces[0].label='用户自己的工作区';f.h.calls.length=0;
   await f.send({messageId:'om_2',content:'two'});
   assert.deepEqual(f.h.calls.slice(0,3),[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w2:t2','two']]);
-  assert.equal(f.h.calls.some(c=>c[0]==='tab'&&c[1]==='create'),false);assert.deepEqual([f.b.workspaceId,f.store.data.topics[1].paneId],['w2','w2:p2']);
+  assert.equal(f.h.calls.some(c=>c[0]==='tab'&&c[1]==='create'),false);assert.deepEqual([f.b.workspaces!.m,f.store.data.topics[1].paneId],['w2','w2:p2']);
  }finally{f.close();}
 });
 test('each new topic creates its working directory on the machine before any workspace call, whether it creates the workspace or a tab in it',async()=>{
@@ -841,7 +885,7 @@ test('a working directory that cannot be created fails the start like any start 
 const skillLogs=(f:{store:Store})=>f.store.data.logs.filter(l=>l.kind==='skill').map(l=>[l.level,l.message]);
 test('right before a new topic starts its agent, Bridge\'s skills are placed for the binding\'s agent kind in its working directory on its machine: in a new workspace, in a tab of the existing one and in a topic that begin opens; a message in a ready topic places nothing',async()=>{
  for(const kind of ['claude','codex','agy'] satisfies Kind[]){
-  const f=topicFixture({binding:{kind}});try{
+  const f=topicFixture({config:{kind}});try{
    await f.send({messageId:'om_1',content:'one'});await f.send({messageId:'om_2',content:'two'});
    await f.topics.begin(allowed,f.b,'om_root',{title:'报告',msg:{messageId:'om_root',content:'写报告'}}).delivered;
    await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
@@ -2011,7 +2055,7 @@ function gitRepo(){
   close(){fs.rmSync(root,{recursive:true,force:true});}};
 }
 // A topic fixture whose binding works in a repository of its own (see gitRepo), by default in its main checkout.
-function wtFixture({binding,...options}:TopicOptions={}){const repo=gitRepo(),f=topicFixture({...options,binding:{cwd:repo.main,...binding}});return {...f,repo,close(){f.close();repo.close();}};}
+function wtFixture({project,...options}:TopicOptions={}){const repo=gitRepo(),f=topicFixture({...options,project:{adopted:{machineId:'m',dir:repo.main},...project}});return {...f,repo,close(){f.close();repo.close();}};}
 const gitArgs=(cwd:string,...args:string[])=>['git',cwd,...args];
 // A notice of several lines, whose summary has its whitespace collapsed and holds at most 100 code points.
 const noticeOf=(text:string)=>{const s=[...text.replace(/\s+/g,' ').trim()];return notice(text,s.length>100?s.slice(0,99).join('')+'…':s.join(''));};
@@ -2052,13 +2096,13 @@ test('/wt with a description names the branch with Claude haiku on the binding m
   assert.equal(git(target,'rev-parse','--abbrev-ref','HEAD'),'feat/add-login');assert.equal(git(target,'rev-parse','HEAD'),git(f.repo.main,'rev-parse','HEAD'));
   const worktree={branch:'feat/add-login',path:target,root:f.repo.main};
   assert.deepEqual([t.state,t.workspaceId,t.tabId,t.paneId,t.title,t.worktree],['ready','w1','w1:t1','w1:p1','给登录页加验证码 第二行',worktree]);assert.match(t.agentName,/^feishu-[0-9a-f]{8}$/);
-  assert.deepEqual(new Store(f.dir).data.topics[0].worktree,worktree);assert.equal(f.b.workspaceId,undefined);
+  assert.deepEqual(new Store(f.dir).data.topics[0].worktree,worktree);assert.equal(f.b.workspaces,undefined);
   assert.deepEqual(f.replies,[['a','oc_1','om_1',intro('feat/add-login',target)]]);
   assert.deepEqual(f.reacted.map(r=>r[1]),['om_1']);assert.deepEqual(cotLog(f)[0],['create','om_1']);
  }finally{f.close();}
 });
 test('a /wt topic places Bridge\'s skills in its new worktree, once Herdr created it and right before its agent starts',async()=>{
- const f=wtFixture({binding:{kind:'codex'}});try{
+ const f=wtFixture({config:{kind:'codex'}});try{
   await f.send({messageId:'om_1',content:'/wt 给登录页加验证码'});
   assert.deepEqual(f.h.calls.map(c=>c.slice(0,2)).slice(0,2),[['worktree','create'],['agent','start']]);assert.deepEqual(f.placed,[['m',f.repo.target('feat/add-login'),'codex',1]]);
  }finally{f.close();}
@@ -2102,7 +2146,7 @@ test('a naming that fails falls back to a random worktree/ branch and the first 
 });
 test('/wt in a binding whose directory is outside Git fails the topic with the reason in its thread before anything is created; later messages in its thread get a notice and start nothing',async()=>{
  const f=wtFixture();try{
-  const plain=path.join(f.repo.root,'plain');fs.mkdirSync(plain);f.b.cwd=plain;
+  const plain=path.join(f.repo.root,'plain');fs.mkdirSync(plain);f.project.adopted!.dir=plain;
   await f.send({messageId:'om_1',content:'/wt x'});
   const t=f.store.data.topics[0];
   assert.deepEqual([t.state,t.error,t.worktree],['failed',`${plain} 不在 Git 仓库中`,{}]);assert.deepEqual([f.h.calls,f.naming,f.execs.length],[[],[],1]);
@@ -2115,7 +2159,7 @@ test('/wt in a binding whose directory is in a linked worktree creates the new w
  const f=wtFixture();try{
   const linked=path.join(f.repo.root,'linked');git(f.repo.main,'worktree','add','-q','-b','side',linked);
   fs.writeFileSync(path.join(linked,'a.txt'),'x');git(linked,'add','a.txt');git(linked,'commit','-q','-m','side');fs.mkdirSync(path.join(linked,'sub'));
-  f.b.cwd=path.join(linked,'sub');const head=git(linked,'rev-parse','HEAD'),target=f.repo.target('feat/add-login');
+  f.project.adopted!.dir=path.join(linked,'sub');const head=git(linked,'rev-parse','HEAD'),target=f.repo.target('feat/add-login');
   await f.send({messageId:'om_1',content:'/wt from the side'});
   assert.deepEqual(f.h.calls[0],['worktree','create','--cwd',f.repo.main,'--branch','feat/add-login','--path',target,'--base',head,'--no-focus']);
   assert.equal(git(target,'rev-parse','HEAD'),head);assert.deepEqual(f.store.data.topics[0].worktree,{branch:'feat/add-login',path:target,root:f.repo.main});
@@ -2551,7 +2595,7 @@ const confirmButtons=(id:string)=>({tag:'column_set',horizontal_spacing:'8px',co
 const nextWeekdays=['2026-11-09 周一 09:30','2026-11-10 周二 09:30','2026-11-11 周三 09:30','2026-11-12 周四 09:30','2026-11-13 周五 09:30'];
 const aboutWeekdays=(task='总结昨天的提交')=>[plainText('时间：每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）'),plainText('接下来 5 次运行：\n'+nextWeekdays.join('\n')),plainText('任务：\n'+task)];
 const newTopicMode=plainText('模式：每次开新话题。每次运行时机器人在群里发一条消息，在它下面开一个新话题，交给一个新的 Agent'),intoThisMode=plainText('模式：发进这个话题。每次运行把任务发给这个话题里的 Agent，它记得之前的对话');
-const boundTo=plainText('绑定：个人助手（cpu2 · ~/work · Claude）');
+const boundTo=plainText('绑定：个人助手（work · cpu2 · Claude）');
 test('an agent is known by the machine whose client passed its request on and by its pane: a ready topic there whose agent is still linked; any other pane, machine, Herdr session or topic is refused, and a topic whose agent is gone ends',async()=>{
  const other:Machine={id:'m2',name:'cpu1',session:'default',enabled:true};
  const f=agentFixture({machines:[other]});try{
@@ -2878,79 +2922,35 @@ test('bridge-skill --help is complete on its own, since the entry skill that tel
  assert.doesNotMatch(out,/项目|everywhere/);
 });
 const minutes=(n:number)=>n*60000;
-function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}:{bridgeUrl?:string,onBound?:DepsOf<typeof PendingChats>['onBound']}={}){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-pending-')),store=new Store(dir),replies:unknown[][]=[],bound:Parameters<DepsOf<typeof PendingChats>['onBound']>[]=[],clock={now:1000};
- store.data.apps=[{...allowed}];store.data.machines=[{id:'m',name:'cpu2'} as Machine];store.save();
- const lookup=<K extends 'apps'|'machines'>(collection:K,error:string)=>(id:unknown)=>{const x=(store.data[collection] as {id:string}[]).find(y=>y.id===id);if(!x)throw Error(error);return x as State[K][number];};
- const pending=new PendingChats(store,{reply:loose<DepsOf<typeof PendingChats>['reply']>(async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);}),onBound:onBound||((...args)=>{bound.push(args);}),
-  app:lookup('apps','应用不存在'),machine:lookup('machines','机器连接不存在'),bridgeUrl,now:()=>clock.now});
- return {dir,store,replies,bound,clock,pending,close(){fs.rmSync(dir,{recursive:true});}};
+function pendingFixture(){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-pending-')),store=new Store(dir),replies:unknown[][]=[],clock={now:1000};
+ const pending=new PendingChats(store,{reply:loose<DepsOf<typeof PendingChats>['reply']>(async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);}),now:()=>clock.now});
+ return {dir,store,replies,clock,pending,close(){fs.rmSync(dir,{recursive:true});}};
 }
 const firstDm:NormalizedMessage={...inbound,chatType:'p2p',messageId:'om_first',content:'first private prompt'};
-const form={name:'飞书私聊',machineId:'m',cwd:'~/work',kind:'claude',requireMention:true};
-test('an unbound chat gets a pending record kept in memory only and one reply in the thread of its message with the binding link',async()=>{
+test('an unbound chat gets one reply in the thread of its message that says it has no binding, and its message is not kept',async()=>{
  const f=pendingFixture();try{
   await f.pending.open(allowed,firstDm);
-  const [chat]=f.pending.list();assert.match(chat.token,/^[A-Za-z0-9_-]{22}$/);
-  assert.deepEqual(chat,{token:chat.token,appId:'a',chatId:'oc_1',chatType:'p2p',createdAt:1000,expiresAt:1000+minutes(30)});
-  // The link shows its URL and opens it.
-  assert.deepEqual(f.replies,[['a','oc_1','om_first',{card:untitledOf('这个聊天还没有连接到 Herdr，打开链接完成绑定：',[plainText('这个聊天还没有连接到 Herdr，打开链接完成绑定：'),{tag:'markdown',content:`<a href='http://bridge.example:8080/?bind=${chat.token}'></a>`}])}]]);
-  assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('first private prompt'));assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes(chat.token));
-  await f.pending.open(allowed,{...firstDm,chatId:'oc_group',chatType:'group',messageId:'om_group'});assert.deepEqual(f.pending.list().map(c=>[c.chatId,c.chatType]),[['oc_1','p2p'],['oc_group','group']]);
+  assert.deepEqual(f.replies,[['a','oc_1','om_first',{card:untitledOf('这个聊天还没有绑定 Bridge。',[plainText('这个聊天还没有绑定 Bridge。')])}]]);
+  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.message]),[['会话绑定','bot：私聊 oc_1 尚未绑定']]);assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('first private prompt'));
+  await f.pending.open(allowed,{...firstDm,chatId:'oc_group',chatType:'group',messageId:'om_group'});assert.deepEqual(f.replies.map(r=>[r[1],r[2]]),[['oc_1','om_first'],['oc_group','om_group']]);
  }finally{f.close();}
 });
-test('a chat with a live record gets no second reply and keeps its first message; once expired it gets a new token',async()=>{
+test('a chat that was told gets no second reply within half an hour and is told again after it',async()=>{
  const f=pendingFixture();try{
-  await f.pending.open(allowed,firstDm);const [{token}]=f.pending.list();
-  f.clock.now+=minutes(29);await f.pending.open(allowed,{...firstDm,messageId:'om_second',content:'second'});
-  assert.equal(f.replies.length,1);assert.deepEqual(f.pending.list().map(c=>c.token),[token]);
-  f.clock.now+=minutes(1);assert.deepEqual(f.pending.list(),[]);
-  await f.pending.open(allowed,{...firstDm,messageId:'om_third',content:'third'});
-  const [chat]=f.pending.list();assert.notEqual(chat.token,token);assert.equal(chat.createdAt,1000+minutes(30));assert.equal(f.replies.length,2);assert.equal(f.replies[1][2],'om_third');
-  f.pending.bind({...form,token:chat.token});assert.equal(f.bound[0][2].messageId,'om_third');
+  await f.pending.open(allowed,firstDm);f.clock.now+=minutes(29);await f.pending.open(allowed,{...firstDm,messageId:'om_second'});assert.equal(f.replies.length,1);
+  f.clock.now+=minutes(1);await f.pending.open(allowed,{...firstDm,messageId:'om_third'});assert.deepEqual(f.replies.map(r=>r[2]),['om_first','om_third']);
  }finally{f.close();}
 });
-test('without BRIDGE_URL the reply points to the console instead of a link; a failed reply is logged',async()=>{
- const f=pendingFixture({bridgeUrl:''});try{
-  await f.pending.open(allowed,firstDm);assert.deepEqual(f.replies.map(r=>r[3]),[notice('这个聊天还没有连接到 Herdr，请在 Bridge 管理台「会话绑定」中完成绑定。')]);
-  f.pending.reply=async()=>{throw Error('飞书未连接');};await f.pending.open(allowed,{...firstDm,chatId:'oc_2'});
-  assert.equal(f.pending.list().length,2);assert.equal(f.store.data.logs.at(-1)!.level,'error');assert.match(f.store.data.logs.at(-1)!.message,/飞书未连接/);
+test('a reply that fails is logged and the chat is not told again for it',async()=>{
+ const f=pendingFixture();try{
+  f.pending.reply=async()=>{throw Error('飞书未连接');};await f.pending.open(allowed,firstDm);
+  assert.equal(f.store.data.logs.at(-1)!.level,'error');assert.match(f.store.data.logs.at(-1)!.message,/飞书未连接/);
  }finally{f.close();}
 });
 test('BRIDGE_URL must be an http(s) origin; a trailing slash is dropped',()=>{
  for(const [v,origin] of [['http://bridge.example:8080/','http://bridge.example:8080'],['https://bridge.example','https://bridge.example'],['',''],[undefined,'']])assert.equal(consoleUrl(v),origin);
  for(const v of ['http://bridge.example/admin','http://bridge.example/?x=1','http://bridge.example/#a','ftp://bridge.example','bridge.example:8080','http://user:pw@bridge.example','not a url'])assert.throws(()=>consoleUrl(v),/BRIDGE_URL/,v);
-});
-test('binding a pending chat takes app and chat from the record, spends the token and hands the first message over without waiting',async()=>{
- const f=pendingFixture({onBound:(...args)=>{f.bound.push(args);return new Promise(()=>{});}});try{
-  await f.pending.open(allowed,firstDm);await f.pending.open(allowed,{...firstDm,chatId:'oc_2',messageId:'om_other'});const [{token},other]=f.pending.list();
-  const binding=f.pending.bind({...form,token,appId:'forged',chatId:'oc_forged'});
-  const {id,...rest}=binding;assert.deepEqual(rest,{name:'飞书私聊',appId:'a',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',permissionMode:'default',requireMention:false,enabled:true});
-  assert.deepEqual(new Store(f.dir).data.bindings,[binding]);assert.deepEqual(f.bound,[[f.store.data.apps[0],binding,firstDm]]);
-  assert.deepEqual(f.pending.list().map(c=>c.token),[other.token]);
-  assert.throws(()=>f.pending.bind({...form,token}),/^Error: 绑定链接已失效，请在飞书里重新发消息$/);
-  for(const bad of [{token:'unknown'},{token:undefined},{}])assert.throws(()=>f.pending.bind({...form,...bad}),/绑定链接已失效/);
-  // An invalid form or an unknown machine keeps the token for another try.
-  assert.throws(()=>f.pending.bind({...form,token:other.token,cwd:'relative'}),/工作目录/);assert.throws(()=>f.pending.bind({...form,token:other.token,machineId:'gone'}),/机器连接不存在/);
-  assert.deepEqual(f.pending.list().map(c=>c.token),[other.token]);assert.equal(f.store.data.bindings.length,1);
- }finally{f.close();}
-});
-test('a group binding keeps the mention choice and the permission mode chosen; a chat whose app was removed cannot be bound',async()=>{
- const f=pendingFixture();try{
-  await f.pending.open(allowed,{...firstDm,chatType:'group',chatId:'oc_group'});
-  const binding=f.pending.bind({...form,permissionMode:'auto',token:f.pending.list()[0].token});assert.deepEqual([binding.requireMention,binding.permissionMode],[true,'auto']);
-  await f.pending.open(allowed,{...firstDm,chatType:'group',chatId:'oc_group2',messageId:'om_g2'});f.store.data.apps=[];
-  assert.throws(()=>f.pending.bind({...form,token:f.pending.list()[0].token}),/应用不存在/);
- }finally{f.close();}
-});
-test('binding a pending chat opens the first topic with its first message only when that message can be forwarded: an image does, only the mention or a sticker does not',async()=>{
- for(const [message,opens] of [[{...firstDm,messageId:'om_image',...imageOf('img_1')},true],[{...firstDm,messageId:'om_mention',chatType:'group',chatId:'oc_group',content:'',mentionedBot:true},false],[{...firstDm,messageId:'om_sticker',...sticker},false]] satisfies [NormalizedMessage,boolean][]){
-  const f=pendingFixture();try{
-   await f.pending.open(allowed,message);assert.deepEqual(f.replies.map(r=>r[2]),[message.messageId]);
-   const binding=f.pending.bind({...form,token:f.pending.list()[0].token});
-   assert.deepEqual(f.store.data.bindings,[binding],message.messageId);assert.deepEqual(f.bound,opens?[[f.store.data.apps[0],binding,message]]:[],message.messageId);assert.deepEqual(f.pending.list(),[]);
-  }finally{f.close();}
- }
 });
 
 const png=Buffer.from('89504e470d0a1a0a0000','hex');
@@ -3081,15 +3081,18 @@ test('channel startup and shutdown do not revive a cancelled connection',async()
  const store=new Store(dir),messages:unknown[]=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}} as DepsOf<typeof Platforms>),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true} as App;
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety!.batch!.text!.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server lists pending chats, saves bindings only through a link token, changes only the permission mode of a Claude binding, serves app avatars and reports topics without message ids, reactions, request cards, COT, the card of a worktree or a schedule waiting for confirmation',async()=>{
+test('the server changes the defaults of a binding that exists and creates none, lists projects and agent configurations, serves app avatars and reports topics without message ids, reactions, request cards, COT, the card of a worktree or a schedule waiting for confirmation',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
  fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
  const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},proposal:{id:'p1',kind:'add',fields:{mode:'new',cron:'0 9 * * *',timeZone:'UTC',task:'x'},messageId:'om_p',expiresAt:1},createdAt:1};
  const worktree={branch:'feat/x',path:'/src/r-worktrees/feat-x',root:'/src/r'};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
- const claude={id:'b-claude',name:'助手',appId:'x',machineId:'m',chatId:'oc_8',cwd:'~/work',kind:'claude',requireMention:false,enabled:true},codex={...claude,id:'b-codex',chatId:'oc_7',kind:'codex'},agy={...claude,id:'b-agy',chatId:'oc_6',kind:'agy'};
+ const project={description:'',repos:[],skills:[],workMode:'shared'},projects=[{...project,id:'p-1',name:'work',adopted:{machineId:'m',dir:'~/work'}},{...project,id:'p-2',name:'other'}];
+ const agentConfigs=[{id:'c-1',name:'cpu2 · Claude',machineId:'m',kind:'claude',permissionMode:'default'},{id:'c-2',name:'cpu2 · Codex',machineId:'m',kind:'codex'}];
+ const group={id:'b-group',name:'群',appId:'x',chatId:'oc_8',chatType:'group',requireMention:false,enabled:true,defaultProjectId:'p-1',defaultAgentConfigId:'c-1',workspaces:{m:'w9'}};
+ const direct={id:'b-direct',name:'私聊',appId:'x',chatId:'oc_7',chatType:'p2p',requireMention:false,enabled:true,defaultAgentConfigId:'c-1'};
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({apps:[{...app,id:'app-avatar',avatar:{type:'image/png',updatedAt:5}},{...app,id:'app-plain',appId:'cli_plain'},{...app,id:'app-gone',appId:'cli_gone',avatar:{type:'image/png',updatedAt:5}}],
-  bindings:[{id:'b-old',appId:'x',machineId:'m',chatId:'oc_9'},claude,codex,agy],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready',worktree:{...worktree,card:{messageId:'om_wt',heading:'话题已结束',text:'x'}}}]}));
+  projects,agentConfigs,bindings:[{id:'b-old',name:'旧',appId:'x',chatId:'oc_9',chatType:'group',requireMention:true,enabled:true,defaultProjectId:'p-1',defaultAgentConfigId:'c-1'},group,direct],topics:[{...topic,id:'t1',state:'starting'},{...topic,id:'t2',bindingId:'b-keep',state:'ready',worktree:{...worktree,card:{messageId:'om_wt',heading:'话题已结束',text:'x'}}}]}));
  fs.writeFileSync(herdr,`#!/bin/sh\nif [ "$3" = agent ]; then echo '${JSON.stringify({result:{agents}})}'; else echo '{"result":{"panes":[{"pane_id":"w1:p1"}]}}'; fi\n`,{mode:0o700});
  const port=await new Promise<number>(r=>{const s=net.createServer().listen(0,'127.0.0.1',()=>{const {port}=s.address() as AddressInfo;s.close(()=>r(port));});});
  const server=spawn(process.execPath,['server.ts'],{cwd:path.dirname(fileURLToPath(import.meta.url)),env:{...process.env,BRIDGE_STATE:state,PORT:String(port),BIND:'127.0.0.1',BRIDGE_URL:'http://127.0.0.1:'+port+'/'},stdio:['ignore','pipe','inherit']});let client:ClientProcess|undefined;
@@ -3102,17 +3105,20 @@ test('the server lists pending chats, saves bindings only through a link token, 
   const machineId=(await api('machines/save',{name:'fake',session:'default',type:'local',binary:herdr,enabled:true})).body.id;
   const offline={state:'offline',agents:[],panes:[]};assert.deepEqual(await api('machines/connect',{id:machineId}),{status:200,body:offline});
   let [m]=(await api('state')).body.machines;assert.deepEqual(m,{id:machineId,name:'fake',session:'default',enabled:true,hasToken:false,client:{state:'offline'},...offline});
-  const input={token:'forged',name:'route',appId:'app-plain',machineId,chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:true};
-  assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
-  const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','skills','topics','version']);
-  assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map((b:Binding)=>b.id),['b-old','b-claude','b-codex','b-agy']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
+  const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['agentConfigs','apps','bindings','host','logs','machines','projects','registration','skills','topics','version']);
+  assert.deepEqual(s.projects,[{...project,id:'p-1',name:'work',adopted:true},{...project,id:'p-2',name:'other',adopted:false}]);assert.deepEqual(s.agentConfigs,agentConfigs);
+  // The console sees a binding without the Herdr workspaces of its topics.
+  const {workspaces,...shown}=group;assert.deepEqual(s.bindings.map((b:Binding)=>b.id),['b-old','b-group','b-direct']);assert.deepEqual(s.bindings.slice(1),[shown,direct]);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
   const {messageIds,reactions,cards,cot,proposal,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards','cot','proposal'])assert.equal(key in s.topics[1],false,key);
   assert.deepEqual(s.topics[1].worktree,worktree);
-  // Other fields sent along are ignored; a refused change keeps the saved bindings as they are.
-  assert.deepEqual(await api('bindings/permission-mode',{id:'b-claude',permissionMode:'auto',name:'改名',cwd:'/etc',kind:'codex'}),{status:200,body:{ok:true}});
-  for(const [body,error] of [[{id:'b-claude',permissionMode:'bypassPermissions'},'权限模式无效'],[{id:'b-codex',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'b-agy',permissionMode:'auto'},'只有 Claude 绑定可以设置权限模式'],[{id:'unknown',permissionMode:'auto'},'会话绑定不存在']] satisfies [{id:string,permissionMode:string},string][])assert.deepEqual(await api('bindings/permission-mode',body),{status:400,body:{error}},body.id);
-  const changed=(await api('state')).body;assert.deepEqual(changed.bindings.slice(1),[{...claude,permissionMode:'auto'},codex,agy]);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).bindings.slice(1),[{...claude,permissionMode:'auto'},codex,agy]);
-  assert.deepEqual(changed.logs.filter((l:Log)=>l.kind==='会话绑定').map((l:Log)=>l.message),['助手：权限模式改为 auto，之后新开的话题生效']);
+  // The console only changes the defaults of a binding: other fields sent along are ignored, and a refused change keeps the saved bindings as they are.
+  assert.deepEqual(await api('bindings/save',{id:'b-group',defaultProjectId:'p-2',defaultAgentConfigId:'c-2',requireMention:true,name:'改名',chatId:'oc_x',chatType:'p2p',workspaces:{}}),{status:200,body:{ok:true}});
+  for(const [body,error] of [[{id:'b-group',defaultProjectId:'gone'},'项目不存在'],[{id:'b-group',defaultAgentConfigId:'gone'},'Agent 配置不存在'],[{id:'b-direct',defaultProjectId:'p-1'},'私聊不固定项目'],
+   [{id:'b-group',enabled:'no'},'字段无效：enabled'],[{id:'unknown',defaultAgentConfigId:'c-1'},'会话绑定不存在'],[{chatId:'oc_new',name:'新',defaultAgentConfigId:'c-1',defaultProjectId:'p-1'},'会话绑定不存在']] satisfies [object,string][])
+   assert.deepEqual(await api('bindings/save',body),{status:400,body:{error}},JSON.stringify(body));
+  const changed={...group,defaultProjectId:'p-2',defaultAgentConfigId:'c-2',requireMention:true},{workspaces:_,...changedShown}=changed;
+  assert.deepEqual((await api('state')).body.bindings.slice(1),[changedShown,direct]);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).bindings.slice(1),[changed,direct]);
+  assert.deepEqual((await api('state')).body.logs.filter((l:Log)=>l.kind==='会话绑定').map((l:Log)=>l.message),['群：other · cpu2 · Codex，之后新开的话题生效']);
   assert.equal((await api('bindings/remove',{id:'b-old'})).status,200);assert.deepEqual((await api('state')).body.topics.map((t:ConsoleTopic)=>t.id),['t2']);
   const avatar=async(id:string,headers:Record<string,string>={authorization:'Bearer '+key})=>fetch(`http://127.0.0.1:${port}/api/apps/avatar?id=${encodeURIComponent(id)}`,{headers});
   const image=await avatar('app-avatar');assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');assert.equal(image.headers.get('cache-control'),'private, max-age=300');assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);
@@ -3138,7 +3144,8 @@ test('the server migrates machines of an older state file at start and polls Her
  const agent={agent:'claude',name:'feishu-1',pane_id:'w1:p1',agent_status:'idle',state_change_seq:2,reply_seq:1,request_ids:[1],remote_answers:true};
  fs.mkdirSync(state);
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'fake',type:'local',session:'default',binary:herdr,enabled:true},{id:'m2',name:'other',type:'local',session:'default',binary:herdr,enabled:true}],
-  apps:[{id:'app',name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false}],bindings:[{id:'b',name:'助手',appId:'app',machineId:'m',chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:false,enabled:true}],
+  apps:[{id:'app',name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false}],projects:[{id:'p',name:'work',description:'',repos:[],skills:[],workMode:'shared',adopted:{machineId:'m',dir:'~/work'}}],agentConfigs:[{id:'c',name:'fake · Claude',machineId:'m',kind:'claude',permissionMode:'default'}],
+  bindings:[{id:'b',name:'助手',appId:'app',chatId:'oc_1',chatType:'group',requireMention:false,enabled:true,defaultProjectId:'p',defaultAgentConfigId:'c'}],
   topics:[{id:'t',bindingId:'b',appId:'app',chatId:'oc_1',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',state:'ready',error:'',messageIds:['om_1'],
    reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],attachmentDir:attachments,createdAt:1}]}));
  fs.mkdirSync(attachments,{recursive:true});fs.writeFileSync(path.join(attachments,'om_1-1.png'),'png');
