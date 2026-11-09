@@ -12,6 +12,8 @@ export type App={id:string,name:string,appId:string,appSecret:string,domain:'fei
 // The agent kinds that a binding starts in its topics, and the permission modes of a Claude binding (see platform.ts).
 export type Kind='claude'|'codex'|'agy';
 export type PermissionMode='default'|'auto';
+// How the topics of a project share its directory: each in a directory of its own, or all in one.
+export type WorkMode='isolated'|'shared';
 // A binding of one chat of an app (see normalizeBinding in platform.ts). workspaceId is the Herdr workspace of its topics, once there is
 // one (see Topics.openTab).
 export type Binding={id:string,name:string,appId:string,machineId:string,chatId:string,cwd:string,kind:Kind,permissionMode?:PermissionMode,requireMention:boolean,enabled:boolean,

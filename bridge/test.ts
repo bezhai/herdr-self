@@ -3576,6 +3576,14 @@ test('the client creates directories, stores attachments only under a .herdr-bri
   await removeDirectory(m,'~/gone/.herdr-bridge/t1');await removeDirectory(m,'~/work/.herdr-bridge/t9');
  }finally{await f.close();fs.rmSync(dir,{recursive:true});}
 });
+test('the operations that prepare a topic\'s workspace, remove it, prepare an agent\'s launch and describe repositories are in the contract and refuse, as not implemented yet, until a client implements them',async()=>{
+ const f=await machineFixture(),project={id:'p',repos:['git@example.com:team/app.git'],workMode:'isolated' as const},{ops,m}=f;
+ try{
+  const refused=(e:Thrown)=>e.code==='not_implemented'&&/^Error: 这个操作还没有实现：/.test(String(e));
+  await assert.rejects(ops.prepareWorkspace(m,{project,topicId:'t',branch:'topic/x'}),refused);await assert.rejects(ops.removeWorkspace(m,{project,topicId:'t',branch:'topic/x'}),refused);
+  await assert.rejects(ops.prepareLaunch(m,{kind:'claude',model:'sonnet',permissionMode:'auto',allowedCommands:['butler'],dir:'~/work'}),refused);await assert.rejects(ops.describeRepos(m,{repos:project.repos}),refused);
+ }finally{await f.close();}
+});
 test('the client says whether a directory is the root of a Git repository and what its origin is: nothing for a directory that is not a root, one that is missing or a repository without origin',async()=>{
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-inspect-'))),home=path.join(dir,'home'),code=path.join(home,'code');fs.mkdirSync(code,{recursive:true});
  const f=await machineFixture({env:{HOME:home}}),inspect=(p:string)=>f.ops.inspectDirectory(f.m,p);

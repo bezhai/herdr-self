@@ -74,7 +74,8 @@ export type HerdrResult<A>=
 // removeDirectory(m,dir), which removes only such a directory, with what it holds; one that is gone already is fine.
 // git(m,cwd,args,{timeoutMs}) runs git in cwd, and askCheapModel(m,cwd,prompt,{timeoutMs}) asks the cheap model there: each resolves to
 // {code, stdout, stderr} whatever the exit status. exists(m,path) resolves to whether path exists. inspectDirectory(m,path) resolves to {origin}, the
-// URL of the origin remote when path is the root of a Git repository (or of a linked worktree) that has one, else null.
+// URL of the origin remote when path is the root of a Git repository (or of a linked worktree) that has one, else null. prepareWorkspace,
+// removeWorkspace, prepareLaunch and describeRepos take the params of their ClientApi entry (see link.ts, where their semantics are).
 type Options={timeoutMs?:number};
 export type Call=<K extends keyof ClientApi>(m:Machine,method:K,params:ClientApi[K]['params'],options?:Options)=>Promise<ClientApi[K]['result']>;
 export type Herdr=<const A extends readonly HerdrArg[]>(m:Machine,args:A,options?:Options)=>Promise<HerdrResult<A>>;
@@ -92,6 +93,10 @@ export function operations(call:Call){
   exists:(m:Machine,p:string)=>call(m,'exists',{path:p}),
   askCheapModel:(m:Machine,cwd:string,prompt:string,options?:Options)=>call(m,'askCheapModel',{cwd,prompt},options),
   inspectDirectory:(m:Machine,p:string,options?:Options)=>call(m,'inspectDirectory',{path:p},options),
+  prepareWorkspace:(m:Machine,params:ClientApi['prepareWorkspace']['params'],options?:Options)=>call(m,'prepareWorkspace',params,options),
+  removeWorkspace:(m:Machine,params:ClientApi['removeWorkspace']['params'],options?:Options)=>call(m,'removeWorkspace',params,options),
+  prepareLaunch:(m:Machine,params:ClientApi['prepareLaunch']['params'],options?:Options)=>call(m,'prepareLaunch',params,options),
+  describeRepos:(m:Machine,params:ClientApi['describeRepos']['params'],options?:Options)=>call(m,'describeRepos',params,options),
  };
 }
 export function publicText(s:unknown){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}

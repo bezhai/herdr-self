@@ -21,6 +21,8 @@ function local(v:unknown,what:string){
 }
 // A relative path below a directory, which never leaves it.
 function inside(v:unknown,what:string){const p=string(v,what);if(path.isAbsolute(p)||p.split('/').some(s=>!s||s==='.'||s==='..'))throw invalid(`${what}：${p}`);return p;}
+// The methods that the control plane already calls but that no client does yet (see ClientApi in link.ts).
+const unfinished=(method:string)=>()=>{throw Object.assign(Error('这个操作还没有实现：'+method),{code:'not_implemented'});};
 const name=(v:unknown,what:string)=>{const s=inside(v,what);if(s.includes('/'))throw invalid(`${what}：${s}`);return s;};
 // Runs program with args and resolves to {code, stdout, stderr} whatever its exit status; stderr keeps its last 2000 characters. Rejects when
 // it cannot start, prints too much, or does not finish within timeoutMs: it then gets SIGKILL with every process it started, which share its
@@ -189,5 +191,6 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   // Puts skill {name, digest, files}, which an agent of this machine reads through bridge-skill, into the store (see stock) and resolves to
   // its directory there, where its other files are for the agent to open.
   stockSkill:({store,skill})=>stock(local(store,'store'),skillsOf([skill])[0]),
+  prepareWorkspace:unfinished('prepareWorkspace'),removeWorkspace:unfinished('removeWorkspace'),prepareLaunch:unfinished('prepareLaunch'),describeRepos:unfinished('describeRepos'),
  };
 }

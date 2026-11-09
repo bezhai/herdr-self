@@ -2,8 +2,9 @@
 // several at a time, each a JSON text frame. A request is {id, method, params}; its answer has the same id and {result} or
 // {error:{message, code}}. Each side numbers its own requests, so a frame with a method is a request of the other side and one without
 // is the answer to a request of this side. It uses only addEventListener, send and readyState, which Node's WebSocket on the client and
-// the ws package on the control plane both have, and imports nothing: the client runs without node_modules.
+// the ws package on the control plane both have, and imports only types: the client runs without node_modules.
 
+import type {Kind,PermissionMode,WorkMode} from './state.ts';
 // The version of what the two sides send each other. The control plane refuses a client of another version (see Clients.hello). 2: the
 // client passes the requests of bridge-schedule on (schedules), which a client of 1 has no socket for. 3: the control plane does everything
 // it does on a machine through its client (see machine.ts), whose methods a client of 2 lacks. 4: placeSkills takes the skills of the
@@ -24,6 +25,9 @@ export type Ran={code:number|null,stdout:string,stderr:string};
 export type HerdrArg=string|{path:string};
 // A skill as it goes to a machine: its name, the digest of its files and the files, {relative path: base64}.
 export type SkillFiles={name:string,digest:string,files:Record<string,string>};
+// A project as the client needs it to prepare or remove the workspace of a topic: its id, the URLs of its repositories (none for a project
+// without any), how its topics share their directory, and the directory that the project adopted on this machine, if it did.
+export type WorkspaceProject={id:string,repos:string[],workMode:WorkMode,adoptedDir?:string};
 // What the control plane asks of the client of a machine (see machine.ts). A request carries timeoutMs, the most that a command it runs
 // may take (see Clients.call), except the heartbeat's ping.
 type Timed<P>=P&{timeoutMs?:number};
@@ -37,6 +41,28 @@ export type ClientApi={
  exists:{params:Timed<{path:string}>,result:boolean},
  askCheapModel:{params:Timed<{cwd:string,prompt:string}>,result:Ran},
  inspectDirectory:{params:Timed<{path:string}>,result:{origin:string|null}},
+ // inspectDirectory: the origin URL of the repository whose root path is, null when path is no root or the repository has no origin.
+ // The following four are the machine side of projects, where the paths on the machine are the client's business and the control plane never
+ // builds one. They take long (a clone, a fetch, a model), so callers give them a timeoutMs of minutes.
+ // prepareWorkspace: the directory in which the agent of topic topicId starts, once it exists. A project with an adoptedDir works in that
+ // directory as it is, whatever its repos and work mode. Otherwise, shared: the project's fixed directory, with each repo checked out in it,
+ // cloned when missing; isolated: a directory of this topic, with a worktree of each repo in it on branch (the branch is given for a project with
+ // repos), made from origin: it fetches, checks out the existing branch or else creates it from the default branch of origin. A project without
+ // repos gets an empty directory, fixed when shared and of this topic when isolated. It can be called again for a topic that has its
+ // workspace, as the way to restore one whose worktrees were removed: what exists stays, what is missing is recreated from the branch.
+ // removeWorkspace: removes what prepareWorkspace made for the topic (its directory and the worktrees in it), never the fixed directory of a
+ // shared project or an adoptedDir. It deletes branch in each repo when the branch has no commit of its own (nothing beyond the default
+ // branch) and keeps it otherwise; branchKept tells whether it kept the branch in any repo. Called again for a workspace that is gone, it
+ // succeeds.
+ // prepareLaunch: the setup that an agent of kind needs on this machine before it starts in dir: its trust of the directory (for Claude, the
+ // trust of the main checkout of the repository that holds dir is registered, and a worktree follows its main checkout), and for Claude with
+ // allowedCommands, the hook that lets only those commands through. It resolves to the extra arguments of the agent command (those after
+ // the -- of `herdr agent start`) for model, permissionMode and the trust of Codex and Antigravity. Calling it again is fine.
+ // describeRepos: one sentence about what the repositories hold, which the cheap model writes from their READMEs.
+ prepareWorkspace:{params:Timed<{project:WorkspaceProject,topicId:string,branch?:string}>,result:{dir:string}},
+ removeWorkspace:{params:Timed<{project:WorkspaceProject,topicId:string,branch?:string}>,result:{branchKept:boolean}},
+ prepareLaunch:{params:Timed<{kind:Kind,model?:string,permissionMode?:PermissionMode,allowedCommands?:string[],dir:string}>,result:{args:string[]}},
+ describeRepos:{params:Timed<{repos:string[]}>,result:{description:string}},
  placeSkills:{params:Timed<{store:string,skills:SkillFiles[],dir:string,as:'link'|'copy',cwd:string}>,result:string[]},
  stockSkill:{params:Timed<{store:string,skill:SkillFiles}>,result:string},
 };
