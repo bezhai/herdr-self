@@ -73,8 +73,8 @@ function registrationFixture(register:(o:Parameters<RegisterApp>[0])=>Promise<un
 }
 const ready=(o:Parameters<RegisterApp>[0])=>o.onQRCodeReady({url:'https://open.feishu.cn/page/launcher?user_code=test',expireIn:600});
 test('registration stores credentials server-side, uses minimal bot scopes and allows only the creator',async()=>{
- const f=registrationFixture(async o=>{assert.equal(o.createOnly,false);assert.equal(o.addons!.preset,false);assert.equal(o.addons!.scopes!.user,undefined);assert.deepEqual(o.addons!.events!.items!.tenant,['im.message.receive_v1']);
-  assert.deepEqual(o.addons!.scopes!.tenant,['im:message:send_as_bot','im:message.p2p_msg:readonly','im:message.group_at_msg:readonly','application:bot.basic_info:read','im:message.reactions:write_only','application:app_slash_command:read','application:app_slash_command:write','im:message:readonly']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
+ const f=registrationFixture(async o=>{assert.equal(o.createOnly,false);assert.equal(o.addons!.preset,false);assert.equal(o.addons!.scopes!.user,undefined);assert.deepEqual(o.addons!.events!.items!.tenant,['im.message.receive_v1','im.chat.updated_v1']);
+  assert.deepEqual(o.addons!.scopes!.tenant,['im:message:send_as_bot','im:message.p2p_msg:readonly','im:message.group_at_msg:readonly','application:bot.basic_info:read','im:message.reactions:write_only','application:app_slash_command:read','application:app_slash_command:write','im:message:readonly','im:chat:readonly']);ready(o);return {client_id:'cli_test',client_secret:'private-test-secret',user_info:{open_id:'ou_owner',tenant_brand:'feishu'}};});
  try{f.registrations.start({name:'test'})!;await f.registrations.current!.done;assert.equal(f.registrations.status()!.status,'completed');const a=new Store(f.store.dir).data.apps[0];assert.equal(a.appSecret,'private-test-secret');assert.deepEqual(a.allowedUsers,['ou_owner']);assert.equal(a.enabled,false);assert.equal(a.domain,'feishu');assert.ok(!JSON.stringify(f.registrations.status()).includes('private-test-secret'));assert.equal(f.registrations.status()!.url,undefined);assert.equal(fs.statSync(path.join(f.store.dir,'state.json')).mode&0o777,0o600);}finally{f.close();}
 });
 test('duplicate starts reuse pending flow; cancellation fences a late SDK result and stale cancel',async()=>{
@@ -499,10 +499,10 @@ test('a state file with legacy message queues loads only the collections of the 
   store.save();assert.ok(!fs.readFileSync(path.join(dir,'state.json'),'utf8').includes('old prompt'));
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('platform channels listen for messages, card clicks and connection events only, take clicks in their own queue and never retry a send',()=>{
- let options!:LarkChannelOptions;const handlers:Handlers={},f=platformFixture({channelFactory:o=>{options=o;return fakeChannel({on:(name:string,fn:Handlers[string])=>{handlers[name]=fn;}});}});
+test('platform channels listen for messages, card clicks, group renames and connection events only, take clicks in their own queue and never retry a send',()=>{
+ let options!:LarkChannelOptions;const handlers:Handlers={},raw:string[]=[],f=platformFixture({channelFactory:o=>{options=o;return fakeChannel({on:(name:string,fn:Handlers[string])=>{handlers[name]=fn;},onRawEvent:(type:string)=>{raw.push(type);}});}});
  try{f.platforms.channel({id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu'} as App);
- assert.deepEqual(Object.keys(handlers).sort(),['cardAction','error','message','reconnected','reconnecting']);assert.deepEqual(options.outbound,{retry:{maxAttempts:1}});
+ assert.deepEqual(Object.keys(handlers).sort(),['cardAction','error','message','reconnected','reconnecting']);assert.deepEqual(raw,['im.chat.updated_v1']);assert.deepEqual(options.outbound,{retry:{maxAttempts:1}});
  // A click must not wait behind the chat's messages.
  assert.deepEqual(options.safety!.chatQueue,{enabled:true,mergeWhileBusy:false,cardActions:'separate'});}finally{f.close();}
 });
@@ -523,7 +523,7 @@ test('a message of the bot outside any thread goes into the chat as a card witho
  }finally{f.close();}
 });
 test('a card click reaches the card handler with its app, whose answer goes back to Feishu; people outside the allowlist and clicks on a disabled app get a toast',()=>{
- const handlers:Handlers={},clicks:unknown[][]=[],f=platformFixture({channelFactory:()=>fakeChannel({on:(name:string,fn:Handlers[string])=>{handlers[name]=fn;}}),onCardAction:(...args)=>{clicks.push(args);return {toast:{type:'info',content:'正在提交'}};}});
+ const handlers:Handlers={},clicks:unknown[][]=[],f=platformFixture({channelFactory:()=>fakeChannel({on:(name:string,fn:Handlers[string])=>{handlers[name]=fn;},onRawEvent(){}}),onCardAction:(...args)=>{clicks.push(args);return {toast:{type:'info',content:'正在提交'}};}});
  try{
   const a:App={...allowed,appId:'cli_test',appSecret:'private',domain:'feishu'};f.platforms.channel(a);
   const click=(openId:string)=>({messageId:'om_card',chatId:'oc_1',operator:{openId},action:{tag:'button',value:{request:1}}});
@@ -3212,7 +3212,7 @@ const oldWt={command_id:'c-wt',command:'wt',description:described('在新的 Git
 type BotOptions={info?:()=>unknown,avatar?:(url:string)=>Response|Promise<Response>,commands?:(o:ApiRequest)=>unknown};
 function botFixture({info,avatar,commands=()=>({code:0,msg:'success',data:{items:registered}})}:BotOptions={}){
  const requests:ApiRequest[]=[],downloads:string[]=[];
- const channel={on(){},connect:async()=>{},disconnect:async()=>{},getConnectionStatus:()=>({state:'connected'}),rawClient:{request:async(o:ApiRequest)=>{requests.push(o);return o.url==='/open-apis/bot/v3/info'?info!():commands(o);}}};
+ const channel={on(){},onRawEvent(){},connect:async()=>{},disconnect:async()=>{},getConnectionStatus:()=>({state:'connected'}),rawClient:{request:async(o:ApiRequest)=>{requests.push(o);return o.url==='/open-apis/bot/v3/info'?info!():commands(o);}}};
  const f=platformFixture({channelFactory:()=>fakeChannel(channel),fetch:async(url,options)=>{downloads.push(String(url));assert.ok(options!.signal);return avatar!(String(url));}});
  const a={id:'app-1',name:'注册时的名称',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:['ou_user'],enabled:true} as App;f.store.data.apps=[a];f.store.save();
  return {...f,a,requests,downloads,file:path.join(f.dir,'avatars','app-1')};
@@ -3325,7 +3325,7 @@ test('connection failure retains the added app for retry without showing false s
 
 test('channel startup and shutdown do not revive a cancelled connection',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-lifecycle-'));let resolve!:(value?:unknown)=>void,options!:LarkChannelOptions;const handlers:Handlers={};let closes=0;
- const channel=fakeChannel({on:(name:string,fn:Handlers[string])=>handlers[name]=fn,connect:()=>new Promise(r=>resolve=r),disconnect:async()=>{},rawWsClient:{close:()=>closes++},getConnectionStatus:()=>({state:'connected'})});
+ const channel=fakeChannel({onRawEvent(){},on:(name:string,fn:Handlers[string])=>handlers[name]=fn,connect:()=>new Promise(r=>resolve=r),disconnect:async()=>{},rawWsClient:{close:()=>closes++},getConnectionStatus:()=>({state:'connected'})});
  const store=new Store(dir),messages:unknown[]=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}} as DepsOf<typeof Platforms>),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true} as App;
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety!.batch!.text!.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
@@ -4097,4 +4097,50 @@ test('the panel offers adopt, release and stop and no wt; a wt with the descript
  assert.deepEqual(done,{registered:['adopt','release','stop'],removed:['wt']});assert.deepEqual(Object.keys(commands),['adopt','release','stop']);
  assert.deepEqual(seen.filter(o=>o.method==='POST').map(o=>(o.data as Sent).command),['adopt','release','stop']);assert.deepEqual(seen.at(-1),{method:'DELETE',url:slashPath+'/c-wt'});
  await assert.rejects(registerCommands(async o=>{if(o.method==='DELETE')throw Error('denied');return {items:[...registered,oldWt]};}),/denied/);
+});
+
+// The names of bindings: a group's name in Feishu, which Bridge keeps current, and 私聊 for a direct chat.
+function namesFixture(chats:Record<string,string|Error>){
+ const raw:Handlers={},asked:string[]=[];
+ const channel={on(){},onRawEvent:(type:string,fn:Handlers[string])=>{raw[type]=fn;},connect:async()=>{},disconnect:async()=>{},getConnectionStatus:()=>({state:'connected'}),
+  getChatInfo:async(id:string)=>{asked.push(id);const c=chats[id];if(c instanceof Error)throw c;return {chatId:id,name:c,chatType:'group'};},
+  rawClient:{request:async(o:ApiRequest)=>o.url==='/open-apis/bot/v3/info'?{code:0,bot:{app_name:'机器人',open_id:'ou_bot'}}:{items:registered}}};
+ const f=platformFixture({channelFactory:()=>fakeChannel(channel)});
+ const a={id:'app-1',name:'机器人',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:['ou_user'],enabled:true} as App;
+ const chat=(id:string,chatId:string,chatType:Binding['chatType'],name='飞书群聊'):Binding=>({...route,id,appId:'app-1',chatId,chatType,name,...chatType==='p2p'&&{defaultProjectId:undefined}});
+ f.store.data.apps=[a];
+ return {...f,a,raw,asked,chat};
+}
+const chatEvent=(chatId:string,after:object)=>({event_type:'im.chat.updated_v1',chat_id:chatId,after_change:after,before_change:{}});
+test('connecting takes the name of each group binding of the app from Feishu and calls every direct chat 私聊; a group whose name cannot be read keeps its name and one line says so',async()=>{
+ const f=namesFixture({oc_g1:'Genvi 项目群',oc_g2:Error('Request failed with status code 400'),oc_g3:'  '+'长'.repeat(70)+'  '});try{
+  f.store.data.bindings=[f.chat('b1','oc_g1','group'),f.chat('b2','oc_g2','group','旧的群名'),f.chat('b3','oc_dm','p2p'),f.chat('b4','oc_g3','group'),{...f.chat('b5','oc_g1','group'),appId:'other'}];
+  await f.platforms.start(f.a);
+  assert.deepEqual(f.store.data.bindings.map(b=>b.name),['Genvi 项目群','旧的群名','私聊','长'.repeat(60),'飞书群聊']);
+  assert.deepEqual(f.asked,['oc_g1','oc_g2','oc_g3']);assert.deepEqual(new Store(f.dir).data.bindings.map(b=>b.name),f.store.data.bindings.map(b=>b.name));
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='会话绑定'&&l.level==='info').map(l=>[l.level,l.message]),[['info','飞书群聊 → Genvi 项目群'],['info','飞书群聊 → 私聊'],['info','飞书群聊 → '+'长'.repeat(60)]]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.level==='error').map(l=>l.message),['机器人：1 个会话绑定的名称未能读取，Request failed with status code 400']);
+  // Names that are the same already are neither saved nor logged again.
+  f.store.data.logs=[];await f.platforms.stop('app-1');await f.platforms.start(f.a);assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='会话绑定'&&l.level==='info'),[]);
+ }finally{f.close();}
+});
+test('a group that is renamed in Feishu is renamed in its binding, from the chat updated event of the app; a change of anything but the name, another chat, a direct chat or an empty name changes nothing',async()=>{
+ const f=namesFixture({});try{
+  f.store.data.bindings=[f.chat('b1','oc_g1','group','旧群名'),f.chat('b2','oc_g2','group','另一个群'),f.chat('b3','oc_dm','p2p','私聊')];f.store.save();
+  await f.platforms.start(f.a);assert.deepEqual(Object.keys(f.raw),['im.chat.updated_v1']);
+  f.store.data.logs=[];
+  await f.raw['im.chat.updated_v1'](chatEvent('oc_g1',{name:'新群名'}));
+  assert.deepEqual(f.store.data.bindings.map(b=>b.name),['新群名','另一个群','私聊']);assert.deepEqual(new Store(f.dir).data.bindings.map(b=>b.name),['新群名','另一个群','私聊']);
+  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.message]),[['会话绑定','旧群名 → 新群名']]);
+  for(const evt of [chatEvent('oc_g1',{description:'x'}),chatEvent('oc_g1',{name:' '}),chatEvent('oc_g1',{name:7}),chatEvent('oc_other',{name:'别的群'}),chatEvent('oc_dm',{name:'私聊改名'}),{chat_id:'oc_g1'},{}])await f.raw['im.chat.updated_v1'](evt);
+  assert.deepEqual(f.store.data.bindings.map(b=>b.name),['新群名','另一个群','私聊']);assert.equal(f.store.data.logs.length,1);
+  await f.platforms.stop('app-1');await f.raw['im.chat.updated_v1'](chatEvent('oc_g1',{name:'停用后'}));assert.equal(f.store.data.bindings[0].name,'新群名');
+ }finally{f.close();}
+});
+test('the name of a chat comes from Feishu through the connected channel; without a connection it fails',async()=>{
+ const f=namesFixture({oc_g1:'Genvi 项目群',oc_empty:undefined as unknown as string});try{
+  await assert.rejects(f.platforms.chatName(f.a,'oc_g1'),/飞书未连接/);
+  await f.platforms.start(f.a);f.asked.length=0;
+  assert.equal(await f.platforms.chatName(f.a,'oc_g1'),'Genvi 项目群');assert.equal(await f.platforms.chatName(f.a,'oc_empty'),undefined);assert.deepEqual(f.asked,['oc_g1','oc_empty']);
+ }finally{f.close();}
 });

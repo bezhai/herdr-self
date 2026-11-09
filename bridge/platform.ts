@@ -60,6 +60,13 @@ export function addBinding(store:Store,b:BindingFields,chat:Parameters<typeof no
  store.data.bindings.push(binding);store.data.lastAgentConfigId=binding.defaultAgentConfigId;store.save();
  store.log('会话绑定',`${binding.name} → ${bindingTarget(binding,store.data)}`);return binding;
 }
+// The name of a binding for a chat of chatType whose name in Feishu is name: a direct chat has none and is called 私聊; a group keeps its
+// name, cut to the length of a name, and is called 群聊 while Bridge does not know it.
+export function chatLabel(chatType:Binding['chatType'],name?:unknown){
+ if(chatType==='p2p')return '私聊';
+ let label='';for(const c of typeof name==='string'?name.trim():''){if((label+c).length>60)break;label+=c;}
+ return label||'群聊';
+}
 // What a binding sends its topics to, as people read it: its project, or for a direct chat that the project is chosen per task, and its
 // agent configuration.
 export const bindingTarget=(b:Binding,data:Pick<State,'projects'|'agentConfigs'>)=>
@@ -119,6 +126,8 @@ export class Platforms{
   const current=()=>this.runtime.get(a.id)===rt&&!rt.stopped;
   channel.on('message',msg=>{if(current())this.receive(a,msg);});
   channel.on('cardAction',evt=>current()?this.cardAction(a,evt):undefined);
+  // The event of a change to a chat: its payload carries the chat's id and, for what changed, the new values (after_change).
+  channel.onRawEvent('im.chat.updated_v1',raw=>{if(current())this.renamed(a,raw);});
   channel.on('error',()=>{if(current()){rt.error='飞书连接异常';this.store.log('平台连接',a.name+' 连接异常','error');}});
   channel.on('reconnecting',()=>{if(current()){rt.state='reconnecting';this.store.log('平台连接',a.name+' 正在重连');}});
   channel.on('reconnected',()=>{if(current()){rt.state='connected';rt.error='';this.store.log('平台连接',a.name+' 已连接');}});
@@ -170,8 +179,33 @@ export class Platforms{
   }finally{rt.connecting=null;}
   // The connection stands even when the bot profile cannot be read.
   await this.syncBot(a,channel).catch(e=>this.store.log('应用信息',`${a.name}：未能读取机器人信息，${e.message}`,'error'));
+  await this.syncNames(a,channel);
   await this.syncCommands(a,channel);
   })();return rt.connecting;
+ }
+ // The name of chat chatId in Feishu, or undefined when it has none. Rejects without a connection or when Feishu refuses.
+ async chatName(a:App,chatId:string){return (await this.connected(a).getChatInfo(chatId)).name?.trim()||undefined;}
+ // Names the bindings of app a after their chats (see chatLabel) on every connection, which also names the bindings that a migration left
+ // with a name of their own. A group whose name cannot be read, or that has none, keeps its name; one line counts the first. Never rejects.
+ async syncNames(a:App,channel:LarkChannel){
+  let failed=0,first='';
+  for(const b of this.store.data.bindings.filter(x=>x.appId===a.id)){
+   try{
+    if(b.chatType==='p2p')this.rename(b,chatLabel('p2p'));
+    else{const name=(await channel.getChatInfo(b.chatId)).name;if(name?.trim())this.rename(b,chatLabel('group',name));}
+   }catch(e){if(!failed++)first=missingScope.includes(e.response?.data?.code)?'应用缺少权限 im:chat:readonly':e.message;}
+  }
+  if(failed)this.store.log('会话绑定',`${a.name}：${failed} 个会话绑定的名称未能读取，${first}`,'error');
+ }
+ // The change event of a chat: a group that got a new name renames its binding. Anything else about the chat is not Bridge's.
+ renamed(a:App,raw:unknown){
+  const {chat_id,after_change}=(raw??{}) as {chat_id?:unknown,after_change?:{name?:unknown}},name=after_change?.name;
+  if(typeof chat_id!=='string'||typeof name!=='string'||!name.trim())return;
+  for(const b of this.store.data.bindings)if(b.appId===a.id&&b.chatId===chat_id&&b.chatType==='group')this.rename(b,chatLabel('group',name));
+ }
+ rename(b:Binding,name:string){
+  if(b.name===name)return;
+  this.store.log('会话绑定',`${b.name} → ${name}`);b.name=name;this.store.save();
  }
  // Offers the bridge's commands in the slash command panel of the app on every connection and deletes those it no longer has. Never rejects:
  // without the scopes, or when Feishu refuses, one line is logged and the commands still work when typed.

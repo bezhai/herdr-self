@@ -15,7 +15,9 @@ export const registrationAddons={preset:false,scopes:{tenant:[
  'application:app_slash_command:read','application:app_slash_command:write',
  // Topics download the images and files of the messages they receive (see attachments.ts).
  'im:message:readonly',
-]},events:{items:{tenant:['im.message.receive_v1']}},callbacks:{items:['card.action.trigger']}};
+ // Bindings are named after the chat in Feishu and follow the rename of a group (see Platforms.syncNames).
+ 'im:chat:readonly',
+]},events:{items:{tenant:['im.message.receive_v1','im.chat.updated_v1']}},callbacks:{items:['card.action.trigger']}};
 // A run of the registration flow (see start), with the link and its QR code while Feishu waits for the owner.
 type Registration={id:string,name:string,status:'starting'|'pending'|'connecting'|'completed'|'cancelled'|'expired'|'denied'|'error'|'needs_owner'|'connection_error',
  controller:AbortController,message:string,timer?:NodeJS.Timeout,done?:Promise<void>,url?:string,qr?:string,expiresAt?:number,appId?:string};
