@@ -8,6 +8,8 @@ import { bindingStatus, chatTypeLabel, formatDateTime, topicStatus } from '../mo
 import type { BridgeState } from '../useBridge.ts';
 import type { PageProps } from './pageInfo.ts';
 
+type Props = PageProps & { openBinding: (binding: ConsoleBinding) => void };
+
 // The topics of one binding, newest first: each is an agent session in its own Herdr tab, or one it adopted from any pane (/adopt).
 function TopicsRow({ topics, state }: { topics: ConsoleTopic[], state: BridgeState }) {
   return (
@@ -35,7 +37,7 @@ function TopicsRow({ topics, state }: { topics: ConsoleTopic[], state: BridgeSta
 
 // The chat a binding is for, with the project and the agent configuration its topics start with. A direct chat has no project: each of its
 // topics gets the one that fits its task.
-function BindingRow({ binding: b, state, refresh, toast }: PageProps & { binding: ConsoleBinding }) {
+function BindingRow({ binding: b, state, refresh, toast, openBinding }: Props & { binding: ConsoleBinding }) {
   const project = state.projects.find((p) => p.id === b.defaultProjectId);
   const config = state.agentConfigs.find((c) => c.id === b.defaultAgentConfigId);
   const app = state.apps.find((a) => a.id === b.appId);
@@ -54,17 +56,18 @@ function BindingRow({ binding: b, state, refresh, toast }: PageProps & { binding
         </div>
       </td>
       <td data-label="默认项目"><div>{b.chatType === 'p2p' ? '按任务自动选择' : project?.name}</div></td>
-      <td data-label="默认 Agent 配置"><div>{config?.name}</div></td>
-      <td data-label="触发方式"><div>{b.requireMention ? '@机器人' : '全部消息'}</div></td>
+      <td className="nowrap" data-label="默认 Agent 配置"><div>{config?.name}</div></td>
+      <td className="nowrap" data-label="触发方式"><div>{b.requireMention ? '@机器人' : '全部消息'}</div></td>
       <td data-label="状态"><div><Badge tone={status.tone}>{status.label}</Badge></div></td>
       <td className="row-action">
+        <button type="button" className="secondary" onClick={() => openBinding(b)}>编辑</button>
         <ActionButton className="text-button danger" run={remove} onError={toast}>解除</ActionButton>
       </td>
     </tr>
   );
 }
 
-export function BindingsPage({ state, refresh, toast }: PageProps) {
+export function BindingsPage({ state, refresh, toast, openBinding }: Props) {
   return (
     <section className="page">
       <div className="section-heading"><h2>消息路由</h2></div>
@@ -79,7 +82,7 @@ export function BindingsPage({ state, refresh, toast }: PageProps) {
                 const topics = state.topics.filter((t) => t.bindingId === b.id).sort((x, y) => y.createdAt - x.createdAt);
                 return (
                   <Fragment key={b.id}>
-                    <BindingRow binding={b} state={state} refresh={refresh} toast={toast} />
+                    <BindingRow binding={b} state={state} refresh={refresh} toast={toast} openBinding={openBinding} />
                     {topics.length > 0 && <TopicsRow topics={topics} state={state} />}
                   </Fragment>
                 );

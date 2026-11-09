@@ -1,6 +1,7 @@
 import type { ClientStatus } from '../../clients.ts';
 import type { ConsoleBinding, ConsoleState } from '../../console-state.ts';
 import type { Skills } from '../../skills.ts';
+import type { Kind, PermissionMode, WorkMode } from '../../state.ts';
 import type { BridgeState } from './useBridge.ts';
 
 // Pure display derivations from the /api/state payload. No DOM, no requests.
@@ -66,6 +67,26 @@ export function bindingStatus(binding: ConsoleBinding, state: BridgeState): { to
   if (!onlineMachines(state).some((m) => m.id === config?.machineId)) return { tone: 'neutral', label: '机器未连接' };
   return { tone: 'ok', label: '可用' };
 }
+
+// The agent kinds of a configuration, named as the control plane names them in Feishu (see kinds in adoption.ts, which a browser cannot load).
+export const agentKinds: { id: Kind, name: string }[] = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' }, { id: 'agy', name: 'Antigravity' }];
+
+// What an agent configuration is called unless it is named: machine, kind and model, like configName in agent-configs.ts.
+export const configName = (machine: { name: string } | undefined, kind: Kind, model: string) => (
+  [machine?.name, agentKinds.find((k) => k.id === kind)?.name, model].filter(Boolean).join(' · ')
+);
+
+// Claude permission modes a configuration starts its agent with, and what each does.
+export const permissionModes: { id: PermissionMode, note: string }[] = [
+  { id: 'default', note: '需要确认的操作发卡片到飞书' },
+  { id: 'auto', note: '由 Claude 自动决定，很少需要确认' },
+];
+
+// How the topics of a project share its directory.
+export const workModes: { id: WorkMode, name: string }[] = [{ id: 'isolated', name: '每个话题独立' }, { id: 'shared', name: '所有话题共用' }];
+
+// The name of a repository: the last part of its address, such as genvi for an ssh address ending in growth/genvi.git.
+export const repoName = (url: string) => url.trim().replace(/\/+$/, '').replace(/\.git$/, '').split(/[/:]/).at(-1)!;
 
 // The SKILL.md of a skill as /api/skills/read returns it, with its files in base64, as text.
 export const skillText = (skill: Pick<SkillWithFiles, 'files'>) => new TextDecoder().decode(Uint8Array.from(atob(skill.files['SKILL.md'] || ''), (c) => c.charCodeAt(0)));

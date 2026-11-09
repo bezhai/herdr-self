@@ -4,9 +4,12 @@ import type { UserEvent } from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import { expect, test, vi } from 'vitest';
 import type { ConsoleState } from '../../../console-state.ts';
+import { AgentConfigDialog } from './AgentConfigDialog.tsx';
 import { AppDialog } from './AppDialog.tsx';
+import { BindingDialog } from './BindingDialog.tsx';
 import { ClientTokenDialog } from './ClientTokenDialog.tsx';
 import { MachineDialog } from './MachineDialog.tsx';
+import { ProjectDialog } from './ProjectDialog.tsx';
 import { RegistrationDialog } from './RegistrationDialog.tsx';
 import { SkillDialog } from './SkillDialog.tsx';
 import { base64, bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.ts';
@@ -22,6 +25,11 @@ test('form dialogs head with their title next to the close button and hold no ex
   const forms: [ReactElement, string][] = [
     [<AppDialog onClose={vi.fn()} onSaved={vi.fn()} />, '应用配置'],
     [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加机器'],
+    [<ProjectDialog skills={state.skills} onClose={vi.fn()} onSaved={vi.fn()} />, '新建项目'],
+    [<ProjectDialog project={state.projects[0]} skills={state.skills} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑项目'],
+    [<AgentConfigDialog machines={state.machines} onClose={vi.fn()} onSaved={vi.fn()} />, '新建 Agent 配置'],
+    [<AgentConfigDialog config={state.agentConfigs[0]} machines={state.machines} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑 Agent 配置'],
+    [<BindingDialog binding={state.bindings[0]} projects={state.projects} agentConfigs={state.agentConfigs} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑会话绑定'],
     [<SkillDialog onClose={vi.fn()} onSaved={vi.fn()} />, '新建 skill'],
     [<SkillDialog skill={{ ...state.skills[1], files: { 'SKILL.md': base64('---\n'), 'run.sh': base64('') } }} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑 deploy-notes'],
   ];
@@ -133,6 +141,151 @@ async function replaceText(user: UserEvent, field: HTMLElement, text: string) {
   await user.click(field);
   await user.paste(text);
 }
+
+// The captions of the fields in the open dialog: labels, and the legends of groups of fields. A select inside a label has the text of its
+// options in it, so the caption is the text before the field, except for a checkbox, whose caption follows it.
+const captions = () => [...document.querySelectorAll('dialog label, dialog legend')].map((label) => (label.classList.contains('checkbox') ? label.textContent : label.firstChild!.textContent));
+
+test('project form asks for the name, description, repositories one per line, the topic directory and the on-demand skills, and saves a new project as isolated', async () => {
+  const fetch = stubFetch({ '/api/projects/save': { id: 'p-9' } });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  render(<ProjectDialog skills={sampleState().skills} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(captions()).toEqual(['项目名称', '描述', '仓库', '话题目录', 'Skills', 'deploy-notes']);
+  expect(optionLabels('话题目录')).toEqual(['每个话题独立', '所有话题共用']);
+  expect(screen.getByLabelText<HTMLSelectElement>('话题目录').value).toBe('isolated');
+  expect(screen.getByLabelText<HTMLTextAreaElement>('仓库').placeholder).toBe('每行一个地址');
+
+  await user.type(screen.getByLabelText('项目名称'), 'promoter');
+  await replaceText(user, screen.getByLabelText('仓库'), 'git@code.example:growth/promoter.git\n\n https://github.example/a/b.git \n');
+  await user.click(screen.getByLabelText('deploy-notes'));
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  expect(bodyOf(fetch, '/api/projects/save')).toEqual({
+    name: 'promoter', description: '', repos: ['git@code.example:growth/promoter.git', 'https://github.example/a/b.git'], workMode: 'isolated', skills: ['deploy-notes'],
+  });
+});
+
+test('project form edits a project by its id from what it holds; a skill loaded by default is not offered, a refusal stays in the dialog', async () => {
+  const project = { ...sampleState().projects[0], skills: ['deploy-notes'], workMode: 'shared' as const };
+  const fetch = stubFetch({ '/api/projects/save': reply({ error: '已有同名的项目' }, 400) });
+  const user = userEvent.setup();
+  render(<ProjectDialog project={project} skills={sampleState().skills} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByLabelText<HTMLInputElement>('项目名称').value).toBe('genvi');
+  expect(screen.getByLabelText<HTMLTextAreaElement>('描述').value).toBe('增长相关的服务');
+  expect(screen.getByLabelText<HTMLTextAreaElement>('仓库').value).toBe('git@code.example:growth/genvi.git');
+  expect(screen.getByLabelText<HTMLSelectElement>('话题目录').value).toBe('shared');
+  expect(screen.getByLabelText<HTMLInputElement>('deploy-notes').checked).toBe(true);
+  expect(screen.queryByLabelText('bridge-schedule')).toBeNull();
+
+  await user.selectOptions(screen.getByLabelText('话题目录'), 'isolated');
+  await user.click(screen.getByLabelText('deploy-notes'));
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  expect(await screen.findByText('已有同名的项目')).toBeTruthy();
+  expect(bodyOf(fetch, '/api/projects/save')).toEqual({
+    id: 'p-1', name: 'genvi', description: '增长相关的服务', repos: ['git@code.example:growth/genvi.git'], workMode: 'isolated', skills: [],
+  });
+});
+
+test('project form has no skills section while the platform has no skill to pick', () => {
+  render(<ProjectDialog skills={[sampleState().skills[0]]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(captions()).toEqual(['项目名称', '描述', '仓库', '话题目录']);
+});
+
+test('agent configuration form names a new configuration after machine, type and model until the name is edited, and saves it', async () => {
+  const fetch = stubFetch({ '/api/agent-configs/save': { id: 'c-9' } });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  render(<AgentConfigDialog machines={sampleState().machines} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(captions()).toEqual(['配置名称', '机器', 'Agent 类型', '模型', '权限模式', '只允许执行的命令']);
+  expect(optionLabels('机器')).toEqual(['cpu2', 'gpu1', 'laptop', 'cpu3', 'gpu2']);
+  expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
+  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
+  const name = () => screen.getByLabelText<HTMLInputElement>('配置名称').value;
+  expect(name()).toBe('cpu2 · Claude');
+
+  await user.type(screen.getByLabelText('模型'), 'Seed');
+  expect(name()).toBe('cpu2 · Claude · Seed');
+  await user.selectOptions(screen.getByLabelText('机器'), 'gpu1');
+  expect(name()).toBe('gpu1 · Claude · Seed');
+  await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
+  await user.type(screen.getByLabelText('只允许执行的命令'), 'butler{Enter}git');
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({
+    name: 'gpu1 · Claude · Seed', machineId: 'm-2', kind: 'claude', model: 'Seed', permissionMode: 'auto', allowedCommands: ['butler', 'git'],
+  });
+});
+
+test('agent configuration form keeps a name that was edited, and leaves out what only Claude has for another type', async () => {
+  const fetch = stubFetch({ '/api/agent-configs/save': { id: 'c-9' } });
+  const user = userEvent.setup();
+  render(<AgentConfigDialog machines={sampleState().machines} onClose={vi.fn()} onSaved={vi.fn()} />);
+  await replaceText(user, screen.getByLabelText('配置名称'), '我的配置');
+  await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
+  await user.type(screen.getByLabelText('模型'), 'gpt-5.1-codex');
+  expect(screen.getByLabelText<HTMLInputElement>('配置名称').value).toBe('我的配置');
+  expect(captions()).toEqual(['配置名称', '机器', 'Agent 类型', '模型']);
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(bodyOf(fetch, '/api/agent-configs/save')).toBeTruthy());
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({ name: '我的配置', machineId: 'm-1', kind: 'codex', model: 'gpt-5.1-codex' });
+});
+
+test('agent configuration form edits a configuration by its id from what it holds; a refusal stays in the dialog', async () => {
+  const config = { ...sampleState().agentConfigs[0], model: 'Seed', allowedCommands: ['butler'] };
+  const fetch = stubFetch({ '/api/agent-configs/save': reply({ error: '已有同名的 Agent 配置' }, 400) });
+  const user = userEvent.setup();
+  render(<AgentConfigDialog config={config} machines={sampleState().machines} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByLabelText<HTMLInputElement>('配置名称').value).toBe('cpu2 · Claude');
+  expect(screen.getByLabelText<HTMLSelectElement>('机器').value).toBe('m-1');
+  expect(screen.getByLabelText<HTMLSelectElement>('Agent 类型').value).toBe('claude');
+  expect(screen.getByLabelText<HTMLInputElement>('模型').value).toBe('Seed');
+  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('default');
+  expect(screen.getByLabelText<HTMLTextAreaElement>('只允许执行的命令').value).toBe('butler');
+  await user.clear(screen.getByLabelText('只允许执行的命令'));
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  expect(await screen.findByText('已有同名的 Agent 配置')).toBeTruthy();
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({
+    id: 'c-1', name: 'cpu2 · Claude', machineId: 'm-1', kind: 'claude', model: 'Seed', permissionMode: 'default', allowedCommands: [],
+  });
+});
+
+test('binding form shows the name from Feishu as it is, and changes the default project, configuration and mention of a group', async () => {
+  const fetch = stubFetch({ '/api/bindings/save': { ok: true } });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  const state = sampleState();
+  render(<BindingDialog binding={state.bindings[0]} projects={state.projects} agentConfigs={state.agentConfigs} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(captions()).toEqual(['名称', '默认项目', '默认 Agent 配置', '需要 @ 机器人']);
+  const name = screen.getByLabelText<HTMLInputElement>('名称');
+  expect([name.value, name.readOnly]).toEqual(['个人助手', true]);
+  expect(optionLabels('默认项目')).toEqual(['genvi', 'test']);
+  expect(optionLabels('默认 Agent 配置')).toEqual(['cpu2 · Claude', 'cpu2 · Codex']);
+  expect(screen.getByLabelText<HTMLSelectElement>('默认项目').value).toBe('p-1');
+  expect(screen.getByLabelText<HTMLInputElement>('需要 @ 机器人').checked).toBe(true);
+
+  await user.selectOptions(screen.getByLabelText('默认项目'), 'test');
+  await user.selectOptions(screen.getByLabelText('默认 Agent 配置'), 'cpu2 · Codex');
+  await user.click(screen.getByLabelText('需要 @ 机器人'));
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ id: 'b-1', defaultProjectId: 'p-2', defaultAgentConfigId: 'c-2', requireMention: false });
+});
+
+test('binding form of a direct chat leaves the project to each task and has no mention to require', async () => {
+  const fetch = stubFetch({ '/api/bindings/save': { ok: true } });
+  const user = userEvent.setup();
+  const state = sampleState();
+  const direct = { id: 'b-2', name: '私聊', appId: 'app-1', chatId: 'oc_2', chatType: 'p2p' as const, requireMention: false, enabled: true, defaultAgentConfigId: 'c-1' };
+  render(<BindingDialog binding={direct} projects={state.projects} agentConfigs={state.agentConfigs} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(captions()).toEqual(['名称', '默认项目', '默认 Agent 配置']);
+  const project = screen.getByLabelText<HTMLInputElement>('默认项目');
+  expect([project.value, project.readOnly]).toEqual(['按任务自动选择', true]);
+  await user.selectOptions(screen.getByLabelText('默认 Agent 配置'), 'cpu2 · Codex');
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(bodyOf(fetch, '/api/bindings/save')).toBeTruthy());
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ id: 'b-2', defaultAgentConfigId: 'c-2' });
+});
 
 test('skill form for a new skill asks for its name and its SKILL.md, which starts from the frontmatter that a skill needs, and saves it as a new skill; a refusal stays in the dialog', async () => {
   const save = deferred();

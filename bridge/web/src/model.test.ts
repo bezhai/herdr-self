@@ -3,7 +3,7 @@ import type { ClientStatus } from '../../clients.ts';
 import type { ConsoleState } from '../../console-state.ts';
 import type { Agent } from '../../core.ts';
 import {
-  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, onlineMachines, registrationView, statusLabel,
+  agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, configName, metrics, onlineMachines, registrationView, repoName, statusLabel,
   skillText, statusTone, topicStatus,
 } from './model.ts';
 import type { ConsoleApp } from './model.ts';
@@ -86,6 +86,16 @@ test('a binding is usable while its platform app is connected and the machine of
   state.agentConfigs[0] = { ...state.agentConfigs[0], machineId: 'm-1' };
   state.apps[0].connection = 'reconnecting';
   expect(bindingStatus(binding, state)).toEqual({ tone: 'neutral', label: '等待平台连接' });
+});
+
+test('an agent configuration is named after its machine, kind and model, whichever of them it has', () => {
+  expect(configName({ name: 'cpu1' }, 'claude', 'Seed')).toBe('cpu1 · Claude · Seed');
+  expect(configName({ name: 'cpu2' }, 'agy', '')).toBe('cpu2 · Antigravity');
+  expect(configName(undefined, 'codex', '')).toBe('Codex');
+});
+
+test('a repository is named by the last part of its address, whether ssh or https', () => {
+  expect(['git@code.example:growth/genvi.git', 'https://github.example/a/promoter/', 'ssh://git@host:2222/team/app.git'].map(repoName)).toEqual(['genvi', 'promoter', 'app']);
 });
 
 test('a chat type is labelled direct or group', () => {

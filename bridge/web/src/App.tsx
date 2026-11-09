@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ConsoleMachine } from '../../console-state.ts';
+import type { ConsoleBinding, ConsoleMachine, ConsoleProject } from '../../console-state.ts';
+import type { AgentConfig } from '../../state.ts';
 import { onUnauthorized, request } from './api.ts';
 import { Metrics } from './components/Metrics.tsx';
 import { PageHeading } from './components/PageHeading.tsx';
@@ -8,13 +9,17 @@ import { Toast } from './components/Toast.tsx';
 import type { ToastMessage } from './components/Toast.tsx';
 import { Topbar } from './components/Topbar.tsx';
 import { AppDialog } from './dialogs/AppDialog.tsx';
+import { AgentConfigDialog } from './dialogs/AgentConfigDialog.tsx';
+import { BindingDialog } from './dialogs/BindingDialog.tsx';
 import { ClientTokenDialog } from './dialogs/ClientTokenDialog.tsx';
 import { MachineDialog } from './dialogs/MachineDialog.tsx';
 import type { SavedMachine } from './dialogs/MachineDialog.tsx';
+import { ProjectDialog } from './dialogs/ProjectDialog.tsx';
 import { RegistrationDialog } from './dialogs/RegistrationDialog.tsx';
 import { SkillDialog } from './dialogs/SkillDialog.tsx';
 import { assign, reload } from './location.ts';
 import type { ConsoleApp, SkillWithFiles } from './model.ts';
+import { AgentConfigsPage } from './pages/AgentConfigsPage.tsx';
 import { BindingsPage } from './pages/BindingsPage.tsx';
 import { LoginPage } from './pages/LoginPage.tsx';
 import { LogsPage } from './pages/LogsPage.tsx';
@@ -22,13 +27,16 @@ import { MachinesPage } from './pages/MachinesPage.tsx';
 import { pageInfo } from './pages/pageInfo.ts';
 import type { Page, PageProps } from './pages/pageInfo.ts';
 import { PlatformsPage } from './pages/PlatformsPage.tsx';
+import { ProjectsPage } from './pages/ProjectsPage.tsx';
 import { SkillsPage } from './pages/SkillsPage.tsx';
 import { useBridge } from './useBridge.ts';
 
-// The dialogs, and the props they open with (see openDialog): the machine, app or skill a dialog is about, or for registration the id of the
-// registration before it.
-type DialogKind = 'machine' | 'client-token' | 'app' | 'skill' | 'registration';
-type DialogProps = { machine?: ConsoleMachine | SavedMachine, app?: ConsoleApp, skill?: SkillWithFiles, previousId?: string };
+// The dialogs, and the props they open with (see openDialog): the machine, app, skill, project, agent configuration or binding a dialog is
+// about, or for registration the id of the registration before it. A project and an agent configuration are also created in their dialogs.
+type DialogKind = 'machine' | 'client-token' | 'app' | 'skill' | 'project' | 'agent-config' | 'binding' | 'registration';
+type DialogProps = {
+  machine?: ConsoleMachine | SavedMachine, app?: ConsoleApp, skill?: SkillWithFiles, project?: ConsoleProject, agentConfig?: AgentConfig, binding?: ConsoleBinding, previousId?: string,
+};
 
 // Login vs. console, the current page, the one open dialog and the toast.
 // dialog: null or { kind, key, ...props }; dialogs are mounted only while open, so each open starts fresh.
@@ -88,7 +96,13 @@ export function App() {
   if (!authed) return <LoginPage onLogin={refresh} />;
 
   const info = pageInfo[page];
-  const pageActions: { [P in Page]?: () => void } = { platforms: openRegistration, machines: () => openDialog('machine'), skills: () => openDialog('skill') };
+  const pageActions: { [P in Page]?: () => void } = {
+    platforms: openRegistration,
+    machines: () => openDialog('machine'),
+    projects: () => openDialog('project'),
+    agentConfigs: () => openDialog('agent-config'),
+    skills: () => openDialog('skill'),
+  };
   const pageProps: PageProps = { state, refresh, toast: showToast };
   return (
     <>
@@ -108,7 +122,9 @@ export function App() {
                   openToken={(machine) => openDialog('client-token', { machine })}
                 />
               )}
-              {page === 'bindings' && <BindingsPage {...pageProps} />}
+              {page === 'bindings' && <BindingsPage {...pageProps} openBinding={(binding) => openDialog('binding', { binding })} />}
+              {page === 'projects' && <ProjectsPage {...pageProps} openProject={(project) => openDialog('project', { project })} />}
+              {page === 'agentConfigs' && <AgentConfigsPage {...pageProps} openConfig={(agentConfig) => openDialog('agent-config', { agentConfig })} />}
               {page === 'skills' && <SkillsPage {...pageProps} openSkill={(skill) => openDialog('skill', { skill })} />}
               {page === 'logs' && <LogsPage state={state} />}
             </div>
@@ -120,6 +136,12 @@ export function App() {
       {dialog?.kind === 'client-token' && <ClientTokenDialog key={dialog.key} machine={dialog.machine!} onClose={closeDialog} onIssued={refresh} />}
       {dialog?.kind === 'app' && <AppDialog key={dialog.key} app={dialog.app} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'skill' && <SkillDialog key={dialog.key} skill={dialog.skill} onClose={closeDialog} onSaved={saved} />}
+      {dialog?.kind === 'project' && <ProjectDialog key={dialog.key} project={dialog.project} skills={state.skills} onClose={closeDialog} onSaved={saved} />}
+      {dialog?.kind === 'agent-config' && <AgentConfigDialog key={dialog.key} config={dialog.agentConfig} machines={state.machines} onClose={closeDialog} onSaved={saved} />}
+      {/* !: binding always opens with a binding. */}
+      {dialog?.kind === 'binding' && (
+        <BindingDialog key={dialog.key} binding={dialog.binding!} projects={state.projects} agentConfigs={state.agentConfigs} onClose={closeDialog} onSaved={saved} />
+      )}
       {dialog?.kind === 'registration' && (
         <RegistrationDialog
           key={dialog.key}

@@ -127,6 +127,16 @@ test('navigation switches the title, breadcrumb and page action, and closes the 
   expect(pageTitle()).toBe('会话绑定');
   expect(document.querySelector('.heading button')).toBeNull();
 
+  await user.click(nav('项目'));
+  expect(pageTitle()).toBe('项目');
+  expect(nav('项目').querySelector('b')!.textContent).toBe('2');
+  expect(screen.getByRole('button', { name: '+ 新建项目' })).toBeTruthy();
+
+  await user.click(nav('Agent 配置'));
+  expect(pageTitle()).toBe('Agent 配置');
+  expect(nav('Agent 配置').querySelector('b')!.textContent).toBe('2');
+  expect(screen.getByRole('button', { name: '+ 新建 Agent 配置' })).toBeTruthy();
+
   await user.click(nav('Skills'));
   expect(pageTitle()).toBe('Skills');
   expect(nav('Skills').querySelector('b')!.textContent).toBe('2');
@@ -136,6 +146,18 @@ test('navigation switches the title, breadcrumb and page action, and closes the 
   expect(pageTitle()).toBe('连接日志');
   expect(document.querySelector('.heading button')).toBeNull();
   expect(screen.getByText('cpu2 已连接')).toBeTruthy();
+});
+
+test('the sidebar groups the pages into connections, work configuration and what is running', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  render(<App />);
+  await screen.findByRole('button', { name: '+ 添加飞书' });
+  const groups = [...document.querySelectorAll('.sidebar .nav-label')].map((label) => [label.textContent, [...label.nextElementSibling!.querySelectorAll('button')].map((b) => b.textContent)]);
+  expect(groups).toEqual([
+    ['连接管理', ['平台连接2', '机器连接5', '会话绑定1']],
+    ['工作配置', ['项目2', 'Agent 配置2', 'Skills2']],
+    ['运行情况', ['连接日志']],
+  ]);
 });
 
 test('the topbar ends with the theme button', async () => {
@@ -161,6 +183,10 @@ test('page and section headings hold only their titles and the page action', asy
   expect(headings()).toEqual(['机器连接+ 添加机器', 'Herdr 实例']);
   await user.click(nav('会话绑定'));
   expect(headings()).toEqual(['会话绑定', '消息路由']);
+  await user.click(nav('项目'));
+  expect(headings()).toEqual(['项目+ 新建项目', '项目列表']);
+  await user.click(nav('Agent 配置'));
+  expect(headings()).toEqual(['Agent 配置+ 新建 Agent 配置', 'Agent 配置列表']);
   await user.click(nav('Skills'));
   expect(headings()).toEqual(['Skills+ 新建 skill', 'Agent 的 skill']);
   await user.click(nav('连接日志'));
@@ -168,7 +194,7 @@ test('page and section headings hold only their titles and the page action', asy
 });
 
 test('empty pages show only a short status', async () => {
-  const state = { ...sampleState(), apps: [], machines: [], bindings: [], topics: [], skills: [], logs: [] };
+  const state = { ...sampleState(), apps: [], machines: [], projects: [], agentConfigs: [], bindings: [], topics: [], skills: [], logs: [] };
   stubFetch({ '/api/state': state });
   const user = userEvent.setup();
   render(<App />);
@@ -178,6 +204,10 @@ test('empty pages show only a short status', async () => {
   expect(document.querySelector('.empty-state')!.textContent).toBe('暂无机器');
   await user.click(nav('会话绑定'));
   expect(document.querySelector('.table-empty')!.textContent).toBe('暂无会话绑定');
+  await user.click(nav('项目'));
+  expect(document.querySelector('.empty-state')!.textContent).toBe('暂无项目');
+  await user.click(nav('Agent 配置'));
+  expect(document.querySelector('.empty-state')!.textContent).toBe('暂无 Agent 配置');
   await user.click(nav('Skills'));
   expect(document.querySelector('.empty-state')!.textContent).toBe('暂无 skill');
   await user.click(nav('连接日志'));
@@ -371,6 +401,141 @@ test('binding rows show the chat, its default project and agent configuration, a
   expect(within(direct).getByText('全部消息')).toBeTruthy();
   expect([...document.querySelectorAll('th')].map((th) => th.textContent)).toEqual(['来源', '默认项目', '默认 Agent 配置', '触发方式', '状态', '操作']);
   expect(screen.queryByText('最近投递')).toBeNull();
+});
+
+test('editing a binding changes its defaults by its id, closes the form and fetches the bindings again', async () => {
+  const state = sampleState();
+  const fetch = stubFetch({
+    '/api/state': () => state,
+    '/api/bindings/save': ({ id, defaultProjectId, defaultAgentConfigId }: { id: string, defaultProjectId: string, defaultAgentConfigId: string }) => {
+      state.bindings = state.bindings.map((b) => (b.id === id ? { ...b, defaultProjectId, defaultAgentConfigId } : b));
+      return { ok: true };
+    },
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^会话绑定/ }));
+  await user.click(within(screen.getByText('个人助手').closest('tr')!).getByRole('button', { name: '编辑' }));
+  expect(within(dialog()).getByRole('heading', { name: '编辑会话绑定' })).toBeTruthy();
+  await user.selectOptions(screen.getByLabelText('默认项目'), 'test');
+  const before = callsTo(fetch, '/api/state');
+  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(dialog()).toBeNull());
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ id: 'b-1', defaultProjectId: 'p-2', defaultAgentConfigId: 'c-1', requireMention: true });
+  await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
+  expect(within(screen.getByText('个人助手').closest('tr')!).getByText('test')).toBeTruthy();
+});
+
+test('project cards show the name, how the topics share the directory, the description and what the project holds; they are created, edited and deleted from the page', async () => {
+  const state = sampleState();
+  state.projects[0].skills = ['deploy-notes'];
+  const fetch = stubFetch({
+    '/api/state': () => state,
+    '/api/projects/save': (body: ConsoleState['projects'][number]) => {
+      if (body.id) state.projects = state.projects.map((p) => (p.id === body.id ? { ...p, ...body } : p));
+      else state.projects.push({ ...body, id: 'p-9', adopted: false });
+      return { id: body.id || 'p-9' };
+    },
+    '/api/projects/remove': ({ id }: { id: string }) => {
+      if (id === 'p-1') return reply({ error: '请先修改使用该项目的会话绑定' }, 400);
+      state.projects = state.projects.filter((p) => p.id !== id);
+      return { ok: true };
+    },
+  });
+  const projectCard = (name: string) => screen.getByText(name, { selector: 'strong' }).closest('article')!;
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^项目/ }));
+
+  const genvi = projectCard('genvi');
+  expect(genvi.querySelector('.card-icon use')!.getAttribute('href')).toBe('#i-folder');
+  expect(within(genvi).getByText('每个话题独立')).toBeTruthy();
+  expect(within(genvi).getByText('增长相关的服务')).toBeTruthy();
+  expect(within(genvi).getByText('个仓库').querySelector('b')!.textContent).toBe('1');
+  expect(within(genvi).getByText('个 skill').querySelector('b')!.textContent).toBe('1');
+  expect(within(projectCard('test')).getByText('所有话题共用')).toBeTruthy();
+  expect(within(projectCard('test')).getByText('个仓库').querySelector('b')!.textContent).toBe('0');
+
+  await user.click(screen.getByRole('button', { name: '+ 新建项目' }));
+  await user.type(screen.getByLabelText('项目名称'), 'promoter');
+  const before = callsTo(fetch, '/api/state');
+  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(dialog()).toBeNull());
+  expect(bodyOf(fetch, '/api/projects/save')).toMatchObject({ name: 'promoter', workMode: 'isolated' });
+  await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
+  expect(within(projectCard('promoter')).getByText('每个话题独立')).toBeTruthy();
+
+  await user.click(within(projectCard('test')).getByRole('button', { name: '编辑' }));
+  expect(within(dialog()).getByRole('heading', { name: '编辑项目' })).toBeTruthy();
+  await user.type(screen.getByLabelText('描述'), '测试用');
+  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(dialog()).toBeNull());
+  expect(bodyOf(fetch, '/api/projects/save')).toMatchObject({ id: 'p-2', description: '测试用' });
+  expect(await screen.findByText('测试用')).toBeTruthy();
+
+  await user.click(within(projectCard('genvi')).getByRole('button', { name: '删除' }));
+  expect(bodyOf(fetch, '/api/projects/remove')).toEqual({ id: 'p-1' });
+  expect((await screen.findByRole('status')).textContent).toBe('请先修改使用该项目的会话绑定');
+  expect(projectCard('genvi')).toBeTruthy();
+  await user.click(within(projectCard('promoter')).getByRole('button', { name: '删除' }));
+  expect(bodyOf(fetch, '/api/projects/remove')).toEqual({ id: 'p-9' });
+  await waitFor(() => expect(screen.queryByText('promoter')).toBeNull());
+});
+
+test('agent configuration cards show the machine, type, model and permission mode, and the commands a configuration is limited to; they are created, edited and deleted from the page', async () => {
+  const state = sampleState();
+  state.agentConfigs[0].model = 'Seed';
+  state.agentConfigs[0].allowedCommands = ['butler'];
+  const fetch = stubFetch({
+    '/api/state': () => state,
+    '/api/agent-configs/save': (body: ConsoleState['agentConfigs'][number]) => {
+      if (body.id) state.agentConfigs = state.agentConfigs.map((c) => (c.id === body.id ? { ...c, ...body } : c));
+      else state.agentConfigs.push({ ...body, id: 'c-9' });
+      return { id: body.id || 'c-9' };
+    },
+    '/api/agent-configs/remove': ({ id }: { id: string }) => {
+      if (id === 'c-1') return reply({ error: '请先修改使用该 Agent 配置的会话绑定' }, 400);
+      state.agentConfigs = state.agentConfigs.filter((c) => c.id !== id);
+      return { ok: true };
+    },
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^Agent 配置/ }));
+
+  const claude = card('cpu2 · Claude');
+  expect(claude.querySelector('.card-icon use')!.getAttribute('href')).toBe('#i-terminal');
+  expect([...claude.querySelectorAll('.card-title p span')].map((s) => s.textContent)).toEqual(['cpu2', 'Claude', 'Seed']);
+  expect(within(claude).getByText('default')).toBeTruthy();
+  expect(within(claude).getByText('只允许执行的命令')).toBeTruthy();
+  expect(within(claude).getByText('butler')).toBeTruthy();
+  const codex = card('cpu2 · Codex');
+  expect(codex.querySelector('.card-title p')).toBeNull(); // Its name already says machine and kind.
+  expect(codex.querySelector('.badge')).toBeNull();
+  expect(within(codex).queryByText('只允许执行的命令')).toBeNull();
+
+  await user.click(screen.getByRole('button', { name: '+ 新建 Agent 配置' }));
+  await user.selectOptions(screen.getByLabelText('机器'), 'gpu1');
+  const before = callsTo(fetch, '/api/state');
+  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(dialog()).toBeNull());
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({ name: 'gpu1 · Claude', machineId: 'm-2', kind: 'claude', permissionMode: 'default', allowedCommands: [] });
+  await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
+  expect(card('gpu1 · Claude')).toBeTruthy();
+
+  await user.click(within(card('cpu2 · Codex')).getByRole('button', { name: '编辑' }));
+  expect(within(dialog()).getByRole('heading', { name: '编辑 Agent 配置' })).toBeTruthy();
+  await user.type(screen.getByLabelText('模型'), 'gpt-5');
+  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(dialog()).toBeNull());
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({ id: 'c-2', name: 'cpu2 · Codex · gpt-5', machineId: 'm-1', kind: 'codex', model: 'gpt-5' });
+
+  await user.click(within(card('cpu2 · Claude')).getByRole('button', { name: '删除' }));
+  expect(bodyOf(fetch, '/api/agent-configs/remove')).toEqual({ id: 'c-1' });
+  expect((await screen.findByRole('status')).textContent).toBe('请先修改使用该 Agent 配置的会话绑定');
+  await user.click(within(card('gpu1 · Claude')).getByRole('button', { name: '删除' }));
+  expect(bodyOf(fetch, '/api/agent-configs/remove')).toEqual({ id: 'c-9' });
+  await waitFor(() => expect(screen.queryByText('gpu1 · Claude')).toBeNull());
 });
 
 test('each binding lists its topics newest first with state, pane and creation time, and shows why a topic failed', async () => {
