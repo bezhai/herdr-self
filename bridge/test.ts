@@ -3452,6 +3452,20 @@ test('the server creates, changes and removes projects and agent configurations,
   assert.deepEqual((await shown()).agentConfigs,[]);
  }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
 });
+test('a machine whose client is in but whose first poll of Herdr is still running is connecting, with the empty lists of agents and panes that the console counts',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-'))),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ fs.mkdirSync(state);fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu1',session:'default',enabled:true}]}));
+ fs.writeFileSync(herdr,['#!/bin/sh','sleep 1.5','echo \'{"result":{"agents":[{"agent":"claude","pane_id":"w1:p1","agent_status":"idle"}],"panes":[{"pane_id":"w1:p1"}]}}\'',''].join('\n'),{mode:0o700});
+ const server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
+  const {config}=await api('machines/token',{id:'m'});
+  client=bridgeClient(configFile(dir,'client.json',JSON.stringify({...JSON.parse(config),herdr})),{BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock')});
+  const connecting=await until(async()=>{const [m]=(await api('state')).machines;return m.client.state==='online'&&m;},'the client is online');
+  assert.deepEqual([connecting.state,connecting.agents,connecting.panes],['connecting',[],[]]);
+  const connected=await until(async()=>{const [m]=(await api('state')).machines;return m.state==='connected'&&m;},'the first poll is done');assert.deepEqual([connected.agents.length,connected.panes.length],[1,1]);
+ }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
+});
 test('the server keeps skills for the console and the access key alone: the state lists their index without their files; it reads a skill with its files, creates and edits its SKILL.md, imports a whole directory past the limit of other requests up to that of a skill, sets whether it is loaded by default and removes it',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  const server=await bridgeServer(state,port,{BRIDGE_URL:''});

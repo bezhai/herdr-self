@@ -6,9 +6,9 @@ import type {Registrations} from './registration.ts';
 // What the console reads from /api/state (see state in server.ts, and web/src). Types only: the server builds it and the console reads it,
 // both with these types.
 
-// The Herdr status of a machine (see herdrStatus in server.ts): the agents and panes that the latest poll through its client found, which a
-// first poll that is still connecting does not have yet.
-export type HerdrStatus={state:'disabled'|'offline'|'connecting'|'connected'|'error',checkedAt?:number,error?:string,agents?:Agent[],panes?:object[]};
+// The Herdr status of a machine (see herdrStatus in server.ts): the agents and panes that the latest poll through its client found. Every
+// status has both lists, empty where no poll has found any yet (while connecting) or where there is nothing to poll (disabled, offline).
+export type HerdrStatus={state:'disabled'|'offline'|'connecting'|'connected'|'error',checkedAt?:number,error?:string,agents:Agent[],panes:object[]};
 // A machine without the hash of its token, with whether it has one, and the status of its client and of its Herdr.
 export type ConsoleMachine=Omit<Machine,'tokenHash'>&{hasToken:boolean,client:ClientStatus}&HerdrStatus;
 // A topic without what only Bridge reads: the messages, reactions, cards, COT and proposal, and the card of its worktree.

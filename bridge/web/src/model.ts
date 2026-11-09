@@ -53,7 +53,7 @@ export function metrics(state: BridgeState) {
     platformsConnected: state.apps.filter((a) => a.connection === 'connected').length,
     platforms: state.apps.length,
     bindings: state.bindings.length,
-    agents: online.reduce((n, m) => n + m.agents!.length, 0), // !: the server leaves agents out while the first poll of a machine connects.
+    agents: online.reduce((n, m) => n + m.agents.length, 0),
   };
 }
 

@@ -30,7 +30,7 @@ function herdrStatus(m:Machine):HerdrStatus{
  if(!m.enabled)return {state:'disabled',agents:[],panes:[]};if(!clients.online(m.id))return {state:'offline',agents:[],panes:[]};
  return live.get(m.id)||{state:'connecting',agents:[],panes:[]};
 }
-async function refresh(m:Machine){if(refreshes.has(m.id))return refreshes.get(m.id);const p=(async()=>{const previous=live.get(m.id);live.set(m.id,{...previous,state:previous?.state==='connected'?'connected':'connecting'});try{
+async function refresh(m:Machine){if(refreshes.has(m.id))return refreshes.get(m.id);const p=(async()=>{const previous=live.get(m.id);live.set(m.id,{agents:[],panes:[],...previous,state:previous?.state==='connected'?'connected':'connecting'});try{
  const [agentResult,paneResult]=await Promise.all([ops.herdr(m,['agent','list']),ops.herdr(m,['pane','list'])]);
  const agents=agentResult.agents||[];live.set(m.id,{state:'connected',checkedAt:Date.now(),agents,panes:paneResult.panes||[]});if(previous?.state!=='connected')store.log('机器连接',m.name+' 已连接');
  // Topic agents' new replies and requests go back to Feishu; this does not wait for them and never throws.
