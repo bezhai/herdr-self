@@ -1,6 +1,8 @@
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';
-import {Store,normalizeMachine,migrateMachines,operations,publicText,stateDir,enqueue} from './core.ts';
+import {Store,normalizeMachine,migrateMachines,operations,publicText,stateDir,enqueue,isRecord} from './core.ts';
 import {Platforms,normalizeApp,changeBinding,bindingTarget} from './platform.ts';
+import {saveProject,removeProject,fillDescription} from './projects.ts';
+import {saveAgentConfig,removeAgentConfig} from './agent-configs.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
 import {Registrations} from './registration.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';
@@ -57,9 +59,12 @@ const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);
 function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
-// The JSON body of a request of at most limit characters, read as UTF-8 also when a piece ends inside a character. It is the console's,
-// as it arrives: what reads it checks what it needs.
-async function body(req:http.IncomingMessage,limit=100000):Promise<any>{let s='';req.setEncoding('utf8');for await(const b of req){s+=b;if(s.length>limit)throw Error('请求内容过大');}return JSON.parse(s||'{}');}
+// The JSON object that is the body of a request of at most limit characters, read as UTF-8 also when a piece ends inside a character. It is the
+// console's, as it arrives: what reads it checks what it needs.
+async function body(req:http.IncomingMessage,limit=100000):Promise<any>{
+ let s='';req.setEncoding('utf8');for await(const b of req){s+=b;if(s.length>limit)throw Error('请求内容过大');}
+ const v=JSON.parse(s||'{}');if(!isRecord(v))throw Error('请求内容无效');return v;
+}
 const server=http.createServer(async(req,res)=>{try{
  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
  // A request that a server received has its url.
@@ -87,6 +92,14 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/apps/test'){result=await platforms.verify(platforms.app(b.id));store.log('凭证验证',platforms.app(b.id).name+' 验证通过');}
  else if(p==='/api/apps/toggle'){const a=platforms.app(b.id);if(b.enabled){await platforms.start(a);a.enabled=true;}else{a.enabled=false;await platforms.stop(a.id);}store.save();}
  else if(p==='/api/apps/remove'){if(store.data.bindings.some(x=>x.appId===b.id))throw Error('请先移除该应用的会话绑定');await platforms.remove(b.id);}
+ else if(p==='/api/projects/save'){
+  const x=saveProject(store,b);result={id:x.id};
+  // The description is made in the background, from an online machine, and the save does not wait for it.
+  fillDescription(store,x,()=>store.data.machines.filter(m=>m.enabled&&clients.online(m.id)),(m,repos)=>ops.describeRepos(m,{repos},{timeoutMs:180000}));
+ }
+ else if(p==='/api/projects/remove'){removeProject(store,b.id);}
+ else if(p==='/api/agent-configs/save'){result={id:saveAgentConfig(store,b).id};}
+ else if(p==='/api/agent-configs/remove'){removeAgentConfig(store,b.id);}
  else if(p==='/api/bindings/save'){const x=binding(b.id);changeBinding(x,b,store.data);store.save();store.log('会话绑定',`${x.name}：${bindingTarget(x,store.data)}，之后新开的话题生效`);}
  else if(p==='/api/bindings/remove'){store.data.bindings=store.data.bindings.filter(x=>x.id!==b.id);store.save();topics.unbind(b.id);}
  // Writes to skills come only from the console and the access key, never from an agent: a skill goes into every later topic, and an

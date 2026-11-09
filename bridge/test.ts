@@ -5,7 +5,7 @@ import {normalizeMachine,migrateMachines,operations,Store} from './core.ts';
 import {Skills,frontmatter,skillLimit} from './skills.ts';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
-import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName} from './projects.ts';
+import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
@@ -245,6 +245,71 @@ test('a project that was removed or changed while its directory was being asked 
   const inspect=async(m:Machine,dir:string)=>{const r=await fake.inspect(m,dir);if(dir.endsWith('herdr'))f.store.data.projects=f.store.data.projects.filter(x=>x!==gone);else delete changed.adopted;return r;};
   await convertAdopted(f.store,m2,inspect);
   assert.equal(f.store.data.projects.includes(gone),false);assert.deepEqual([changed.repos,changed.adopted],[[],undefined]);
+ }finally{f.close();}
+});
+// A store in a temporary directory with the machines cpu1 (m1) and cpu2 (m2), the skill butler and what the tests add.
+function managedStore(){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-manage-')),store=new Store(dir);
+ store.data.machines=[{id:'m1',name:'cpu1',session:'default',enabled:true},{id:'m2',name:'cpu2',session:'default',enabled:true}];store.data.skills=[{name:'butler',description:'',preload:false,digest:'d'}];store.save();
+ return {dir,store,close(){fs.rmSync(dir,{recursive:true});}};
+}
+test('saving a project creates it or changes the one named by id, checks it and keeps it on disk; a project that does not exist cannot be changed',()=>{
+ const f=managedStore();try{
+  const made=saveProject(f.store,{name:'genvi',description:'增长',repos:['git@code.byted.org:growth/genvi.git'],skills:['butler'],workMode:'isolated'});
+  assert.deepEqual(f.store.data.projects,[made]);assert.deepEqual(new Store(f.dir).data.projects,[made]);
+  const changed=saveProject(f.store,{id:made.id,name:'genvi',description:'',repos:[],skills:[]});assert.deepEqual([changed.id,changed.repos,changed.skills,changed.workMode],[made.id,[],[],'isolated']);assert.equal(f.store.data.projects.length,1);
+  assert.deepEqual(new Store(f.dir).data.projects,[changed]);
+  for(const id of ['gone','',5,null,['x']])assert.throws(()=>saveProject(f.store,{id,name:'x'}),/^Error: 项目不存在$/,String(id));
+  assert.throws(()=>saveProject(f.store,{name:'genvi'}),/^Error: 已有同名的项目$/);assert.throws(()=>saveProject(f.store,{name:'x',skills:['missing']}),/skill 不存在/);
+  const before=structuredClone(f.store.data.projects);assert.throws(()=>saveProject(f.store,{id:made.id,name:'',repos:[]}),/字段为空或过长/);assert.deepEqual(f.store.data.projects,before);
+ }finally{f.close();}
+});
+test('a project is removed only when no binding has it as its default and no topic of it is starting or running',()=>{
+ const f=managedStore();try{
+  const keep=saveProject(f.store,{name:'keep'}),gone=saveProject(f.store,{name:'gone'});
+  f.store.data.bindings=[{...route,defaultProjectId:keep.id}];f.store.data.topics=[{id:'t1',projectId:keep.id,state:'closed'},{id:'t2',projectId:gone.id,state:'closed'},{id:'t3',projectId:keep.id,state:'ready'}] as Topic[];
+  assert.throws(()=>removeProject(f.store,keep.id),/^Error: 请先修改使用该项目的会话绑定$/);
+  f.store.data.bindings=[];assert.throws(()=>removeProject(f.store,keep.id),/^Error: 该项目还有进行中的话题$/);
+  f.store.data.topics[2].state='starting';assert.throws(()=>removeProject(f.store,keep.id),/^Error: 该项目还有进行中的话题$/);
+  removeProject(f.store,gone.id);assert.deepEqual(f.store.data.projects.map(p=>p.name),['keep']);assert.deepEqual(new Store(f.dir).data.projects.map(p=>p.name),['keep']);
+  f.store.data.topics[2].state='closed';removeProject(f.store,keep.id);assert.deepEqual(f.store.data.projects,[]);assert.throws(()=>removeProject(f.store,keep.id),/^Error: 项目不存在$/);
+ }finally{f.close();}
+});
+test('saving an agent configuration creates it or changes the one named by id; removing one needs no binding with it as its default and no topic of it starting or running, and forgets it as the configuration of the latest binding',()=>{
+ const f=managedStore();try{
+  const made=saveAgentConfig(f.store,{machineId:'m1',kind:'claude',model:'sonnet',allowedCommands:['butler']});
+  assert.deepEqual([made.name,f.store.data.agentConfigs.length,new Store(f.dir).data.agentConfigs[0].id],['cpu1 · Claude · sonnet',1,made.id]);
+  const changed=saveAgentConfig(f.store,{id:made.id,name:'管家',machineId:'m2',kind:'codex'});assert.deepEqual(f.store.data.agentConfigs,[{id:made.id,name:'管家',machineId:'m2',kind:'codex'}]);
+  for(const id of ['gone','',5,null])assert.throws(()=>saveAgentConfig(f.store,{id,machineId:'m1',kind:'claude'}),/^Error: Agent 配置不存在$/,String(id));
+  assert.throws(()=>saveAgentConfig(f.store,{name:'管家',machineId:'m1',kind:'claude'}),/^Error: 已有同名的 Agent 配置$/);
+  f.store.data.bindings=[{...route,defaultAgentConfigId:changed.id}];f.store.data.topics=[{id:'t1',agentConfigId:changed.id,state:'ready'}] as Topic[];f.store.data.lastAgentConfigId=changed.id;
+  assert.throws(()=>removeAgentConfig(f.store,changed.id),/^Error: 请先修改使用该 Agent 配置的会话绑定$/);
+  f.store.data.bindings=[];assert.throws(()=>removeAgentConfig(f.store,changed.id),/^Error: 该 Agent 配置还有进行中的话题$/);
+  f.store.data.topics[0].state='closed';removeAgentConfig(f.store,changed.id);assert.deepEqual([f.store.data.agentConfigs,f.store.data.lastAgentConfigId],[[],undefined]);
+  assert.deepEqual([new Store(f.dir).data.agentConfigs,new Store(f.dir).data.lastAgentConfigId],[[],undefined]);assert.throws(()=>removeAgentConfig(f.store,changed.id),/^Error: Agent 配置不存在$/);
+  // The configuration of the latest binding stays when another one is removed.
+  const a=saveAgentConfig(f.store,{machineId:'m1',kind:'claude'}),b=saveAgentConfig(f.store,{machineId:'m1',kind:'codex'});f.store.data.lastAgentConfigId=a.id;removeAgentConfig(f.store,b.id);assert.equal(f.store.data.lastAgentConfigId,a.id);
+ }finally{f.close();}
+});
+test('a project saved with repositories and no description gets one from the cheap model on an online machine in the background, unless the description or the repositories changed meanwhile; a machine that cannot answer is only logged',async()=>{
+ const f=managedStore();try{
+  const [m1,m2]=f.store.data.machines,asked:[string,string[]][]=[];let answer:Promise<{description:string}>|Error=Promise.resolve({description:' 增长业务的投放与创作服务。 '});
+  const describe=async(m:Machine,repos:string[])=>{asked.push([m.id,repos]);await null;if(answer instanceof Error)throw answer;return answer;};
+  const project=saveProject(f.store,{name:'genvi',repos:['git@code.byted.org:growth/genvi.git']});
+  // The first online machine is asked; the description is stored and saved.
+  await fillDescription(f.store,project,()=>[m2,m1],describe);assert.deepEqual(asked,[['m2',['git@code.byted.org:growth/genvi.git']]]);
+  assert.equal(project.description,'增长业务的投放与创作服务。');assert.equal(new Store(f.dir).data.projects[0].description,'增长业务的投放与创作服务。');
+  // A description is not asked for, nor a project without repositories or a machine to ask.
+  await fillDescription(f.store,project,()=>[m1],describe);const bare=saveProject(f.store,{name:'bare'});await fillDescription(f.store,bare,()=>[m1],describe);
+  const empty=saveProject(f.store,{name:'empty',repos:['https://host.example/a/b']});await fillDescription(f.store,empty,()=>[],describe);assert.equal(asked.length,1);assert.equal(empty.description,'');
+  // What changed while the machine answered is not overwritten, and an empty answer stores nothing.
+  let release!:(r:{description:string})=>void;answer=new Promise(r=>{release=r;});const pending=fillDescription(f.store,empty,()=>[m1],describe);
+  await later(10);empty.description='我写的';release({description:'生成的'});await pending;assert.equal(empty.description,'我写的');
+  empty.description='';answer=Promise.resolve({description:'  '});await fillDescription(f.store,empty,()=>[m1],describe);assert.equal(empty.description,'');
+  answer=new Promise(r=>{release=r;});const moved=fillDescription(f.store,empty,()=>[m1],describe);await later(10);empty.repos=['https://host.example/other'];release({description:'旧仓库的'});await moved;assert.equal(empty.description,'');
+  // A machine that cannot answer is logged and nothing else happens, also for the error of a client that has not got the operation yet.
+  answer=Object.assign(Error('这个操作还没有实现：describeRepos'),{code:'not_implemented'});await fillDescription(f.store,empty,()=>[m1],describe);assert.equal(empty.description,'');
+  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['项目','error','empty：未能从仓库生成描述，这个操作还没有实现：describeRepos']]);
  }finally{f.close();}
 });
 const configData=(configs:AgentConfig[]=[])=>({machines:[{id:'m',name:'cpu1'},{id:'n',name:'cpu2'}] as Machine[],agentConfigs:configs});
@@ -3338,6 +3403,49 @@ test('the server migrates the bindings of an older state file at start, and once
   assert.deepEqual(s.projects.map((p:Project)=>[p.name,p.repos,p.workMode,p.adopted]),[['app',['git@example.com:team/app.git'],'isolated',false],['plain',[],'shared',true]]);
   const saved=JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8'));await until(()=>JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).projects[1].adopted.inspected,'the other directory is marked as asked');
   assert.equal('adopted' in saved.projects[0],false);
+ }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
+});
+test('the server creates, changes and removes projects and agent configurations, refuses what is invalid or still in use, and only reads requests that are JSON objects; a project saved with repositories asks a machine to describe them, which fails harmlessly while no client can',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ fs.mkdirSync(home);fs.mkdirSync(state);
+ fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu1',session:'default',enabled:true}]}));
+ const server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim();
+  const api=async(p:string,body?:object|string):Promise<Answer>=>{const r=await fetch(`${origin}/api/${p}`,{method:body===undefined?'GET':'POST',headers:{authorization:'Bearer '+key},body:typeof body==='string'?body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
+  const shown=async()=>(await api('state')).body;
+  for(const bad of ['[]','null','"x"','5','{'])assert.equal((await api('projects/save',bad)).status,400,bad);
+  assert.deepEqual(await api('projects/save','[]'),{status:400,body:{error:'请求内容无效'}});
+  // Projects: created, changed in place and refused when invalid.
+  const created=await api('projects/save',{name:'genvi',description:'增长',repos:['git@code.byted.org:growth/genvi.git'],skills:[],workMode:'isolated'});assert.equal(created.status,200);
+  const id=created.body.id as string;assert.match(id,/^[0-9a-f-]{36}$/);
+  assert.deepEqual((await shown()).projects,[{id,name:'genvi',description:'增长',repos:['git@code.byted.org:growth/genvi.git'],skills:[],workMode:'isolated',adopted:false}]);
+  assert.deepEqual(await api('projects/save',{id,name:'genvi',description:'增长服务',repos:['git@code.byted.org:growth/genvi.git','https://github.com/a/b'],skills:['gone']}),{status:400,body:{error:'skill 不存在：gone'}});
+  assert.equal((await api('projects/save',{id,name:'genvi',description:'',repos:'a b'})).status,400);
+  assert.deepEqual(await api('projects/save',{id,name:'genvi',description:'增长服务',repos:[],workMode:'shared'}),{status:200,body:{id}});
+  assert.deepEqual((await shown()).projects.map((p:Project)=>[p.name,p.description,p.repos,p.workMode]),[['genvi','增长服务',[],'shared']]);
+  assert.deepEqual(await api('projects/save',{id:'gone',name:'x'}),{status:400,body:{error:'项目不存在'}});
+  // Agent configurations: machine, kind, model, mode and commands; the name defaults, and a name is not taken twice.
+  const made=await api('agent-configs/save',{machineId:'m',kind:'claude',model:'sonnet',permissionMode:'auto',allowedCommands:['butler']});assert.equal(made.status,200);
+  const config=made.body.id as string;
+  assert.deepEqual((await shown()).agentConfigs,[{id:config,name:'cpu1 · Claude · sonnet',machineId:'m',kind:'claude',model:'sonnet',permissionMode:'auto',allowedCommands:['butler']}]);
+  for(const [body,error] of [[{machineId:'gone',kind:'claude'},'机器连接不存在'],[{machineId:'m',kind:'bash'},'Agent 类型无效'],[{machineId:'m',kind:'codex',allowedCommands:['butler']},'只有 Claude 可以限制可执行的命令'],
+   [{name:'cpu1 · Claude · sonnet',machineId:'m',kind:'codex'},'已有同名的 Agent 配置'],[{id:'gone',machineId:'m',kind:'codex'},'Agent 配置不存在']] satisfies [object,string][])
+   assert.deepEqual(await api('agent-configs/save',body),{status:400,body:{error}},JSON.stringify(body));
+  assert.deepEqual(await api('agent-configs/save',{id:config,name:'管家',machineId:'m',kind:'claude',allowedCommands:['butler']}),{status:200,body:{id:config}});
+  // A machine that has a configuration stays.
+  assert.deepEqual(await api('machines/remove',{id:'m'}),{status:400,body:{error:'请先移除该机器上的 Agent 配置'}});
+  // Without a client the machine is offline: the project that asks for a description finds none to ask, and nothing is logged.
+  assert.deepEqual((await shown()).logs.filter((l:Log)=>l.kind==='项目'),[]);
+  const {config:text}=(await api('machines/token',{id:'m'})).body;
+  client=bridgeClient(configFile(dir,'client.json',JSON.stringify({...JSON.parse(text),herdr:fakeHerdrBinary(dir)})),{HOME:home,BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock')});
+  await until(async()=>(await shown()).machines[0].client.state==='online','the client is online');
+  const other=await api('projects/save',{name:'promoter',repos:['git@code.byted.org:growth/promoter.git']});assert.equal(other.status,200);
+  const log=await until(async()=>(await shown()).logs.find((l:Log)=>l.kind==='项目'),'the failed description is logged');
+  assert.deepEqual([log.level,log.message],['error','promoter：未能从仓库生成描述，这个操作还没有实现：describeRepos']);assert.equal((await shown()).projects.find((p:Project)=>p.name==='promoter').description,'');
+  assert.deepEqual(await api('projects/remove',{id:other.body.id}),{status:200,body:{ok:true}});assert.deepEqual(await api('projects/remove',{id:other.body.id}),{status:400,body:{error:'项目不存在'}});
+  assert.deepEqual(await api('agent-configs/remove',{id:config}),{status:200,body:{ok:true}});assert.deepEqual(await api('agent-configs/remove',{id:config}),{status:400,body:{error:'Agent 配置不存在'}});
+  assert.deepEqual((await shown()).agentConfigs,[]);
  }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
 });
 test('the server keeps skills for the console and the access key alone: the state lists their index without their files; it reads a skill with its files, creates and edits its SKILL.md, imports a whole directory past the limit of other requests up to that of a skill, sets whether it is loaded by default and removes it',async()=>{

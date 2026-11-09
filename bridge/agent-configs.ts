@@ -1,5 +1,6 @@
 import {text,uuid,oneOf,isRecord} from './core.ts';
 import {kinds} from './adoption.ts';
+import type {Store} from './core.ts';
 import type {Machine,AgentConfig,Kind,PermissionMode,State} from './state.ts';
 // Agent configurations (see AgentConfig in state.ts): what a topic's agent runs as, on which machine. The machine selects the model
 // environment, so the configuration, not the project, names it.
@@ -38,4 +39,18 @@ export function normalizeAgentConfig(b:{name?:unknown,machineId?:unknown,kind?:u
  const name=b.name==null||b.name===''?configName(machine,b.kind,named):text(b.name,60);
  if(data.agentConfigs.some(c=>c.id!==old?.id&&c.name===name))throw Error('已有同名的 Agent 配置');
  return {id:old?.id||uuid(),name,machineId:machine.id,kind:b.kind,...named&&{model:named},...b.kind==='claude'&&{permissionMode:claudeMode(b.permissionMode??'default')},...allowed.length&&{allowedCommands:allowed}};
+}
+// Creates the configuration that b describes, or changes the one that b.id names (see normalizeAgentConfig), and saves it. Resolves to it.
+export function saveAgentConfig(store:Store,b:Parameters<typeof normalizeAgentConfig>[0]){
+ const old=b.id===undefined?undefined:store.data.agentConfigs.find(c=>c.id===b.id);if(b.id!==undefined&&!old)throw Error('Agent 配置不存在');
+ const config=normalizeAgentConfig(b,store.data,old);
+ if(old){for(const k of ['model','permissionMode','allowedCommands'] as const)delete old[k];Object.assign(old,config);}else store.data.agentConfigs.push(config);
+ store.save();return old??config;
+}
+// Removes a configuration, unless a binding has it as its default or a topic of it is starting or running: those still need it.
+export function removeAgentConfig(store:Store,id:unknown){
+ const config=store.data.agentConfigs.find(c=>c.id===id);if(!config)throw Error('Agent 配置不存在');
+ if(store.data.bindings.some(b=>b.defaultAgentConfigId===config.id))throw Error('请先修改使用该 Agent 配置的会话绑定');
+ if(store.data.topics.some(t=>t.agentConfigId===config.id&&['starting','ready'].includes(t.state)))throw Error('该 Agent 配置还有进行中的话题');
+ store.data.agentConfigs=store.data.agentConfigs.filter(c=>c!==config);if(store.data.lastAgentConfigId===config.id)delete store.data.lastAgentConfigId;store.save();
 }
