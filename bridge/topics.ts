@@ -38,7 +38,7 @@ const offline=(e:Error,after:string)=>`${brief(e)}。${after}`;
 // exits, is released or changes to another agent, so a ready topic is linked to the agent of its pane for as long as the agent reports it.
 const linked=(t:Topic,agents:Agent[])=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
 const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'on':'off'];
-const endedNotice='该话题的会话已结束，请发起新话题',continuable='该话题的会话已结束，在话题里回复即可接着做',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
+const endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
 // Where the images and files of a topic go, under the working directory of its agent (see attach).
 const attachmentRoot=(cwd:string)=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;

@@ -139,7 +139,7 @@ export class AgentSchedules{
  // binding is gone, the schedule it changes is gone, a mode into schedule's topic has ended, or its time no longer runs.
  apply(t:Topic,p:Proposal,openId:string){
   if(p.kind==='add'){
-   if(p.fields.mode==='into'&&t.state!=='ready')throw Error('这个话题的会话已结束，定时任务不能发进来');
+   if(p.fields.mode==='into'&&t.state!=='ready')throw Error('该话题所在的 Agent 会话已退出，不能添加发进这个话题的定时任务');
    return this.schedules.add({bindingId:t.bindingId,...p.fields,createdBy:{topicId:t.id,openId}});
   }
   const s=this.store.data.schedules.find(x=>x.id===p.scheduleId);if(s?.bindingId!==t.bindingId)throw Error('定时任务不存在');

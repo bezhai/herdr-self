@@ -171,7 +171,7 @@ export class Schedules{
  // would not remember the earlier runs. A topic that is still there gets a notice in its thread.
  async ended(s:Schedule,t:Topic|undefined,run:{due:number,at:number}){
   s.paused=true;this.record(s,{...run,outcome:'skipped',reason:endedReason});this.log(s,`定时任务 ${short(s)} 的话题已结束，已暂停`);
-  if(t)await this.topics.notify(this.app(t.appId),t,`定时任务 ${short(s)} 已暂停：这个话题的会话已结束，定时任务不会在这里另起一个 Agent`);
+  if(t)await this.topics.notify(this.app(t.appId),t,`定时任务 ${short(s)} 已暂停：该话题所在的 Agent 会话已退出`);
  }
  // Ends the topics that schedule s opened before its latest 3 runs and closes the panes of their agents (see Topics.retire), except one in
  // which a person wrote within a day: they may still be talking to its agent. Each daily run would otherwise keep an agent of a few hundred
