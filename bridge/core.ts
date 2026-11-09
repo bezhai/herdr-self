@@ -23,7 +23,7 @@ export function hostPath(v:unknown,label:string){const p=text(v,300);if(!/^(~\/|
 // A machine of Bridge: where its Herdr session runs, which Bridge reaches through the client of the machine (see clients.ts), and whether
 // Bridge uses it: enabled, which the console turns off to stop polling the machine and opening or prompting topics there while its client
 // stays connected. The client's token is kept apart (see Clients.issue).
-export function normalizeMachine(b:{id?:string,name?:unknown,session?:unknown,enabled?:unknown}):Machine{
+export function normalizeMachine(b:{id?:string,name?:unknown,session?:unknown,enabled?:unknown,[field:string]:unknown}):Machine{
  const session=text(b.session||'default',80);if(!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(session))throw Error('Herdr session 名称无效');
  return {id:b.id||uuid(),name:text(b.name,60),session,enabled:Boolean(b.enabled)};
 }

@@ -76,7 +76,7 @@ export class Schedules{
  }
  // Changes the cron expression, the time zone or the task of schedule id, checked like add; the mode, the binding and the topic stay. Its
  // times count from now. Returns a copy.
- update(id:string,{cron,timeZone,task}:{cron?:unknown,timeZone?:unknown,task?:unknown}={}){
+ update(id:string,{cron,timeZone,task}:{cron?:unknown,timeZone?:unknown,task?:unknown,[field:string]:unknown}={}){
   const s=this.get(id);Object.assign(s,this.check({cron:cron??s.cron,timeZone:timeZone??s.timeZone,task:task??s.task}),{handledUntil:this.now()});
   this.store.save();this.log(s,`定时任务 ${short(s)} 已修改（${s.cron}，${s.timeZone}）`);return structuredClone(s);
  }

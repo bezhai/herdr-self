@@ -25,7 +25,7 @@ const extensions:{[type:string]:string}={'image/png':'png','image/jpeg':'jpg','i
 const defaults={image:'jpg',file:'bin'};
 // The file name of attachment x of message messageId, whose download had content type type: <message id>-<index>.<extension>, only
 // letters, digits, _ and - besides the dot. A file keeps the extension of its own name when that has one of letters and digits.
-export function fileName(messageId:string,x:Attachment,type:string){
+export function fileName(messageId:string,x:Pick<Attachment,'type'|'fileName'|'index'>,type:string){
  const own=x.type==='file'&&/\.([A-Za-z0-9]{1,16})$/.exec(x.fileName||'')?.[1].toLowerCase();
  return `${String(messageId).replace(/[^A-Za-z0-9_-]/g,'_')}-${x.index}.${own||extensions[type]||defaults[x.type]}`;
 }

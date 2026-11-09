@@ -6,6 +6,7 @@ import type {Store} from './core.ts';
 import {registerCommands} from './commands.ts';
 import type {App,Binding,Kind,PermissionMode} from './state.ts';
 import type {Click} from './request-cards.ts';
+import type {Attachment} from './attachments.ts';
 const domains:Record<App['domain'],string>={feishu:'https://open.feishu.cn',lark:'https://open.larksuite.com',bytedance:'https://fsopen.bytedance.net'},avatarLimit=1024*1024;
 // Feishu codes of a call that the app has no scope for.
 const missingScope=[99991672,99991640];
@@ -27,7 +28,7 @@ export function channelCache():NonNullable<LarkChannelOptions['cache']>{const en
  async get(key,options={}){const k=JSON.stringify([options.namespace||'',String(key)]),entry=entries.get(k);if(!entry)return;if(entry.expires<=Date.now()){entries.delete(k);return;}return entry.value;},
  async set(key,value,expire=Infinity,options={}){const k=JSON.stringify([options.namespace||'',String(key)]);entries.delete(k);entries.set(k,{value,expires:expire});while(entries.size>10000)entries.delete(entries.keys().next().value!);return true;},
 };}
-export function normalizeApp(b:{name?:unknown,appId?:unknown,appSecret?:unknown,domain?:unknown,allowedUsers?:unknown},old:Partial<App>={}):App{
+export function normalizeApp(b:{name?:unknown,appId?:unknown,appSecret?:unknown,domain?:unknown,allowedUsers?:unknown,[field:string]:unknown},old:Partial<App>={}):App{
  const appId=text(b.appId,100);if(!/^cli_[a-zA-Z0-9]+$/.test(appId))throw Error('App ID 应以 cli_ 开头');
  const allowedUsers=Array.isArray(b.allowedUsers)?[...new Set(b.allowedUsers)]:[];
  if(allowedUsers.some(x=>typeof x!=='string'||!/^ou_[a-zA-Z0-9]+$/.test(x)))throw Error('允许操作的用户请填写 open_id（ou_…）');
@@ -45,7 +46,8 @@ export const permissionMode=<T>(b:{permissionMode?:T})=>b.permissionMode||'defau
 const agentKinds:Kind[]=['claude','codex','agy'];
 // A binding routes one chat of an app; every topic in that chat gets its own agent session in Herdr (see topics.ts).
 // chat is the pending chat that asked for it (see pending-chats.ts): app and chat never come from the client, and a direct chat needs no mention.
-export function normalizeBinding(b:{name?:unknown,machineId:string,cwd?:unknown,kind?:unknown,permissionMode?:unknown,requireMention?:unknown},chat:{appId:string,chatId:string,chatType:'p2p'|'group'},bindings:Binding[]):Binding{
+export function normalizeBinding(b:{name?:unknown,machineId:string,cwd?:unknown,kind?:unknown,permissionMode?:unknown,requireMention?:unknown,[field:string]:unknown},
+ chat:{appId:string,chatId:string,chatType:'p2p'|'group'},bindings:Pick<Binding,'appId'|'chatId'>[]):Binding{
  if(!oneOf(agentKinds,b.kind))throw Error('Agent 类型无效');
  if(bindings.some(x=>x.appId===chat.appId&&x.chatId===chat.chatId))throw Error('该聊天已有绑定，请先移除旧绑定');
  return {id:uuid(),name:text(b.name,60),appId:chat.appId,machineId:b.machineId,chatId:chat.chatId,cwd:hostPath(b.cwd,'工作目录'),kind:b.kind,...b.kind==='claude'&&{permissionMode:claudeMode(permissionMode(b))},requireMention:chat.chatType==='group'&&b.requireMention!==false,enabled:true};
@@ -182,7 +184,7 @@ export class Platforms{
  // Resource r ({type, fileKey}, type image or file) of message messageId, received by app a, as {body, type}, type its content type without
  // parameters. A body over limit bytes is refused with code too_large: by the length the response announces before any of the body is read,
  // and by what arrives when it announces none or too little. Feishu's own failures keep their code (see resourceError).
- async download(a:App,messageId:string,r:{type:'image'|'file',fileKey:string},limit:number){
+ async download(a:App,messageId:string,r:Pick<Attachment,'type'|'fileKey'|'fileName'>,limit:number){
   let response;try{response=await this.connected(a).rawClient.im.v1.messageResource.get({path:{message_id:messageId,file_key:r.fileKey},params:{type:r.type}});}catch(e){throw await resourceError(e);}
   const header=(name:string)=>response.headers?.[name]??response.headers?.[name.replace(/(^|-)./g,c=>c.toUpperCase())];
   const stream=response.getReadableStream();if(Number(header('content-length'))>limit){stream.destroy();throw tooLarge();}

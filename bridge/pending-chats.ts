@@ -40,7 +40,7 @@ export class PendingChats{
  // Saves the binding asked for through b.token. App and chat come from the record, never from the client; an invalid form keeps the token.
  // The first message then opens the chat's first topic in the background, when an agent can be prompted with it: a message that only
  // mentions the bot, or of a kind that Bridge cannot forward, asked for the binding and opens nothing.
- bind(b:{token?:unknown,machineId?:unknown}){
+ bind(b:{token?:unknown,machineId?:unknown,[field:string]:unknown}){
   const chat=this.list().find(x=>x.token===b.token);if(!chat)throw Error('绑定链接已失效，请在飞书里重新发消息');
   // The record was just listed, and take finds it.
   const a=this.app(chat.appId),m=this.machine(b.machineId),binding=normalizeBinding({...b,machineId:m.id},chat,this.store.data.bindings),{message}=this.take(chat.token)!;

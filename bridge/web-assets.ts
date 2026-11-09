@@ -1,4 +1,4 @@
-import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';import type {ServerResponse} from 'node:http';
+import fs from 'node:fs';import path from 'node:path';import {fileURLToPath} from 'node:url';
 // Built admin UI (web/dist). No side effects on import: server.ts and the tests share this module.
 const dist=path.join(path.dirname(fileURLToPath(import.meta.url)),'web','dist'),html='text/html; charset=utf-8';
 const types:{[extension:string]:string}={js:'text/javascript; charset=utf-8',css:'text/css; charset=utf-8',svg:'image/svg+xml',png:'image/png',woff2:'font/woff2'};
@@ -10,7 +10,9 @@ export function staticFile(pathname:string,root=dist):Static|null{
  if(Object.hasOwn(fixed,pathname)){const [file,type]=fixed[pathname];return {file:path.join(root,file),type,immutable:false};}
  const m=/^\/assets\/(\w[\w.-]*\.(js|css|svg|png|woff2))$/.exec(pathname);return m?{file:path.join(root,'assets',m[1]),type:types[m[2]],immutable:true}:null;
 }
-export async function sendStatic(res:ServerResponse,{file,type,immutable}:Static){
+// What sendStatic writes a file to: the response of server.ts, of which it uses only the head and the body.
+type Response={writeHead(code:number,headers:Record<string,string>):unknown,end(body:string|Buffer):unknown};
+export async function sendStatic(res:Response,{file,type,immutable}:Static){
  let body;try{body=await fs.promises.readFile(file);}catch{
   const code=!immutable&&!fs.existsSync(path.dirname(file))?503:404;res.writeHead(code,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store'});return res.end(code===503?'前端尚未构建，运行 npm run build':'文件不存在');
  }

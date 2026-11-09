@@ -138,7 +138,7 @@ export class Topics{
  // prompted agent, or to nothing. Never rejects.
  deliver(a:App,b:Binding,t:Topic,msg:Message,{reaction,request}:{reaction?:string,request?:WtRequest|null}={}){
   const reacted=reaction&&this.addReaction(a,t,reaction);
-  return enqueue(this.topicQueues,t.id,()=>this.prompt(a,b,t,msg,{reacted,request})).catch(async e=>{
+  return enqueue(this.topicQueues,t.id,()=>this.prompt(a,b,t,msg,{reacted,request})).catch(async(e):Promise<undefined>=>{
    this.store.log('消息投递',`${a.name} → ${b.name}：${brief(e)}`,'error');
    if(e.code==='client_offline')await this.notify(a,t,offline(e,'这条消息没有发给 Agent，请稍后重发'));
   });

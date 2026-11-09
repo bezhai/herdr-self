@@ -20,8 +20,5 @@
     "allowJs": true,
     "skipLibCheck": true
   },
-  // The modules typed so far; the others follow.
-  "include": ["array-includes.d.ts", "state.ts", "core.ts", "link.ts", "machine.ts", "platform.ts", "commands.ts", "cot.ts", "request-cards.ts", "message-cards.ts",
-    "attachments.ts", "cron.ts", "web-assets.ts", "skills.ts", "clients.ts", "registration.ts", "pending-chats.ts",
-    "adoption.ts", "schedule-cards.ts", "worktree-branch.mjs", "worktrees.ts", "topics.ts", "schedules.ts", "agent-schedules.ts", "client.ts", "schedule-command.ts", "skill-command.ts", "console-state.ts", "server.ts", "bin/bridge-client.ts", "bin/bridge-schedule.ts", "bin/bridge-skill.ts"]
+  "include": ["*.ts", "bin/*.ts", "worktree-branch.mjs"]
 }
