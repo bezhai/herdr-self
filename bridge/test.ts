@@ -5,7 +5,7 @@ import {normalizeMachine,migrateMachines,operations,Store} from './core.ts';
 import {Skills,frontmatter,skillLimit} from './skills.ts';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
-import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName} from './projects.ts';
+import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName} from './projects.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
@@ -126,6 +126,126 @@ test('the store keeps projects and agent configurations beside the other collect
   old.data.lastAgentConfigId='c';old.save();
   const saved=new Store(dir);assert.deepEqual([saved.data.projects.map(p=>p.id),saved.data.agentConfigs.map(c=>c.id),saved.data.lastAgentConfigId],[['p'],['c'],'c']);
  }finally{fs.rmSync(dir,{recursive:true});}
+});
+// The bindings of a state file from before projects and agent configurations: the machine, directory, kind and permission mode were their own.
+const oldBinding=(id:string,fields:Record<string,unknown>)=>({id,name:'飞书群聊',appId:'a',chatId:'oc_'+id,requireMention:true,enabled:true,...fields});
+const oldBindings=()=>[
+ oldBinding('b1',{name:'飞书私聊',machineId:'m1',cwd:'~/code/test',kind:'claude',requireMention:false,workspaceId:'wD'}),
+ oldBinding('b2',{machineId:'m1',cwd:'~/code/test',kind:'claude',permissionMode:'auto',workspaceId:'wA'}),
+ oldBinding('b3',{machineId:'m1',cwd:'~/code/codex-test',kind:'codex'}),
+ oldBinding('b4',{machineId:'m2',cwd:'~/code/learning/herdr',kind:'codex'}),
+ oldBinding('b5',{machineId:'m2',cwd:'/data/work/genvi',kind:'claude',permissionMode:'auto'}),
+ oldBinding('b6',{machineId:'m2',cwd:'~/code/genvi',kind:'claude',permissionMode:'auto'}),
+ oldBinding('b7',{machineId:'m2',cwd:'~/code/genvi/',kind:'codex'}),
+ oldBinding('b8',{machineId:'m1',cwd:'~/butler-desk',kind:'claude',permissionMode:'default',requireMention:false}),
+];
+// A store in a temporary directory whose state file is an old one: the machines cpu1 (m1) and cpu2 (m2), oldBindings and some topics.
+function oldStore(){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-migrate-')),topic={appId:'a',chatId:'oc',rootId:'om',machineId:'m1',workspaceId:'',tabId:'',paneId:'',agentName:'x',title:'t',error:'',messageIds:[],replySeq:0,reactions:[],cards:[],createdAt:1};
+ fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify({machines:[{id:'m1',name:'cpu1',session:'default',enabled:true},{id:'m2',name:'cpu2',session:'default',enabled:true}],apps:[],bindings:oldBindings(),
+  topics:[{...topic,id:'t1',bindingId:'b1',state:'closed'},{...topic,id:'t2',bindingId:'b2',state:'ready',worktree:{branch:'x',path:'/w/x',root:'/w'}},{...topic,id:'t3',bindingId:'b2',state:'choosing',machineId:'',adopted:{picker:'om_card'}},
+   {...topic,id:'t4',bindingId:'b3',state:'ready',adopted:{kind:'claude'}},{...topic,id:'t5',bindingId:'gone',state:'closed'},{...topic,id:'t6',bindingId:'b7',state:'failed',machineId:'m2'}],
+  schedules:[{id:'s1',bindingId:'b2',mode:'new',cron:'0 9 * * *',timeZone:'UTC',task:'x',paused:false,createdBy:{},createdAt:1,handledUntil:1,count:0,runs:[]}]}));
+ return {dir,store:new Store(dir),close(){fs.rmSync(dir,{recursive:true});}};
+}
+test('every old binding becomes a binding of the same id with a default agent configuration and, for a group, a default project that adopts its old directory as a shared project; bindings of one machine and directory share a project, bindings of one machine, kind and permission mode a configuration',()=>{
+ const f=oldStore();try{
+  migrateBindings(f.store);
+  const {projects,agentConfigs,bindings}=f.store.data,by=(name:string)=>projects.find(p=>p.name===name)!,config=(name:string)=>agentConfigs.find(c=>c.name===name)!;
+  const adopt=(machineId:string,dir:string)=>({workMode:'shared',description:'',repos:[],skills:[],adopted:{machineId,dir}});
+  assert.deepEqual(projects.map(({id,...p})=>p),[{name:'test',...adopt('m1','~/code/test')},{name:'codex-test',...adopt('m1','~/code/codex-test')},{name:'herdr',...adopt('m2','~/code/learning/herdr')},
+   {name:'genvi',...adopt('m2','/data/work/genvi')},{name:'genvi 2',...adopt('m2','~/code/genvi')},{name:'butler-desk',...adopt('m1','~/butler-desk')}]);
+  assert.deepEqual(agentConfigs.map(({id,...c})=>c),[{name:'cpu1 · Claude · default',machineId:'m1',kind:'claude',permissionMode:'default'},{name:'cpu1 · Claude · auto',machineId:'m1',kind:'claude',permissionMode:'auto'},
+   {name:'cpu1 · Codex',machineId:'m1',kind:'codex'},{name:'cpu2 · Codex',machineId:'m2',kind:'codex'},{name:'cpu2 · Claude',machineId:'m2',kind:'claude',permissionMode:'auto'}]);
+  const group=(id:string,project:string,cfg:string,fields:object={})=>({id,name:'飞书群聊',appId:'a',chatId:'oc_'+id,chatType:'group',requireMention:true,enabled:true,defaultProjectId:by(project).id,defaultAgentConfigId:config(cfg).id,...fields});
+  assert.deepEqual(bindings,[
+   {id:'b1',name:'飞书私聊',appId:'a',chatId:'oc_b1',chatType:'p2p',requireMention:false,enabled:true,defaultAgentConfigId:config('cpu1 · Claude · default').id,workspaces:{m1:'wD'}},
+   group('b2','test','cpu1 · Claude · auto',{workspaces:{m1:'wA'}}),group('b3','codex-test','cpu1 · Codex'),group('b4','herdr','cpu2 · Codex'),group('b5','genvi','cpu2 · Claude'),group('b6','genvi 2','cpu2 · Claude'),
+   group('b7','genvi 2','cpu2 · Codex'),group('b8','butler-desk','cpu1 · Claude · default',{requireMention:false})]);
+  // Topics keep the directory they started in, and what they started with; those that adopted an agent, and the ones of no binding, are left alone.
+  const topic=(id:string)=>f.store.data.topics.find(t=>t.id===id)!;
+  assert.deepEqual([topic('t1').projectId,topic('t1').agentConfigId,topic('t1').cwd],[by('test').id,config('cpu1 · Claude · default').id,'~/code/test']);
+  assert.deepEqual([topic('t2').projectId,topic('t2').agentConfigId,topic('t2').cwd],[by('test').id,config('cpu1 · Claude · auto').id,'~/code/test']);
+  assert.deepEqual([topic('t6').projectId,topic('t6').agentConfigId,topic('t6').cwd],[by('genvi 2').id,config('cpu2 · Codex').id,'~/code/genvi/']);
+  for(const id of ['t3','t4','t5'])for(const k of ['projectId','agentConfigId','cwd'])assert.equal(k in topic(id),false,id+' '+k);
+  assert.deepEqual(f.store.data.schedules.map(s=>[s.id,s.bindingId]),[['s1','b2']]);
+  // It is saved, and logged once for the whole state with a line per project that tells where its directory is.
+  assert.deepEqual(new Store(f.dir).data.bindings,bindings);
+  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level]),Array(7).fill(['数据迁移','info']));
+  assert.equal(f.store.data.logs[0].message,'8 个会话绑定已迁移为 6 个项目和 5 个 Agent 配置');assert.equal(f.store.data.logs[1].message,'项目「test」沿用 cpu1 上的 ~/code/test，被 2 个会话绑定使用');
+ }finally{f.close();}
+});
+test('a state that is migrated already is left alone, without a save or a log line',()=>{
+ const f=oldStore();try{
+  migrateBindings(f.store);const saved=fs.readFileSync(path.join(f.dir,'state.json'),'utf8'),save=f.store.save.bind(f.store);let saves=0;f.store.save=()=>{saves++;save();};
+  migrateBindings(f.store);migrateBindings(new Store(f.dir));assert.equal(saves,0);assert.equal(fs.readFileSync(path.join(f.dir,'state.json'),'utf8'),saved);
+  const empty=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-migrate-'));try{const store=new Store(empty);migrateBindings(store);assert.equal(fs.existsSync(path.join(empty,'state.json')),false);}finally{fs.rmSync(empty,{recursive:true});}
+ }finally{f.close();}
+});
+test('a project of a migrated binding is named after its directory, never after the chat: a number tells equal names apart, and a binding that no longer names a machine still migrates',()=>{
+ const f=oldStore();try{
+  f.store.data.bindings=[oldBinding('x1',{machineId:'m1',cwd:'/srv/app/',kind:'claude'}),oldBinding('x2',{machineId:'m2',cwd:'~/work/app',kind:'claude'}),oldBinding('x3',{machineId:'m2',cwd:'/other/app',kind:'claude'}),
+   oldBinding('x4',{machineId:'m1',cwd:'/',kind:'claude'}),oldBinding('x5',{machineId:'gone',cwd:'~/a-b_c.d',kind:'agy'})] as unknown as Binding[];
+  f.store.data.projects=[{id:'taken',name:'app 3',description:'',repos:[],skills:[],workMode:'isolated'}];
+  migrateBindings(f.store);
+  assert.deepEqual(f.store.data.projects.map(p=>p.name),['app 3','app','app 2','app 4','cpu1','a-b_c.d']);
+  assert.deepEqual(f.store.data.agentConfigs.map(c=>c.name),['cpu1 · Claude','cpu2 · Claude','已删除的机器 · Antigravity']);
+  assert.deepEqual(f.store.data.bindings.map(b=>b.defaultProjectId&&f.store.data.projects.find(p=>p.id===b.defaultProjectId)!.name),['app','app 2','app 4','cpu1','a-b_c.d']);
+ }finally{f.close();}
+});
+// The inspectDirectory of a machine that has the origins in origins by '<machine id> <directory>', null for any other directory, or the
+// error there; calls records the directories asked as the same keys.
+function fakeInspect(origins:Record<string,string|Error|null>){
+ const calls:string[]=[];
+ return {calls,inspect:async(m:Machine,dir:string)=>{const key=m.id+' '+dir;calls.push(key);await null;const o=origins[key]??null;if(o instanceof Error)throw o;return {origin:o};}};
+}
+test('once the client of a machine is connected, a migrated project whose directory is the root of a repository with an origin becomes an isolated project of that repository, which loses the directory and is named after it; projects of one origin merge and take over bindings and topics; the others are asked only once',async()=>{
+ const f=oldStore();try{
+  migrateBindings(f.store);
+  const p=(name:string)=>f.store.data.projects.find(x=>x.name===name)!,ids=Object.fromEntries(f.store.data.projects.map(x=>[x.name,x.id])),[m1,m2]=f.store.data.machines;
+  const fake=fakeInspect({'m2 ~/code/learning/herdr':'git@github.com:bezhai/herdr-self.git','m2 /data/work/genvi':'git@code.byted.org:growth/genvi.git','m2 ~/code/genvi':'https://code.byted.org/growth/genvi.git'});
+  await convertAdopted(f.store,m2,fake.inspect);
+  assert.deepEqual(fake.calls,['m2 ~/code/learning/herdr','m2 /data/work/genvi','m2 ~/code/genvi']);
+  const repo=(name:string,url:string)=>({name,description:'',repos:[url],skills:[],workMode:'isolated'});
+  assert.deepEqual(f.store.data.projects.map(({id,...x})=>x).slice(2),[repo('herdr-self','git@github.com:bezhai/herdr-self.git'),repo('genvi','git@code.byted.org:growth/genvi.git'),
+   {name:'butler-desk',description:'',repos:[],skills:[],workMode:'shared',adopted:{machineId:'m1',dir:'~/butler-desk'}}]);
+  // The project that merged is gone: its bindings and topics are the other one's now, and the topic keeps the directory it started in.
+  assert.deepEqual(f.store.data.bindings.filter(b=>['b4','b5','b6','b7'].includes(b.id)).map(b=>b.defaultProjectId),[ids.herdr,ids.genvi,ids.genvi,ids.genvi]);
+  assert.deepEqual(f.store.data.topics.filter(t=>t.id==='t6').map(t=>[t.projectId,t.cwd]),[[ids.genvi,'~/code/genvi/']]);
+  assert.equal(f.store.data.projects.some(x=>x.id===ids['genvi 2']),false);
+  assert.deepEqual(new Store(f.dir).data.projects,f.store.data.projects);
+  assert.deepEqual(f.store.data.logs.slice(7).map(l=>l.message),['项目「herdr」改为仓库 git@github.com:bezhai/herdr-self.git 的项目，改名为「herdr-self」','项目「genvi」改为仓库 git@code.byted.org:growth/genvi.git 的项目',
+   '项目「genvi 2」的仓库与项目「genvi」相同，已合并到它']);
+  // The projects of the other machine are not asked, and the machine of a project that is not a repository is asked once.
+  const other=fakeInspect({});await convertAdopted(f.store,m1,other.inspect);assert.deepEqual(other.calls,['m1 ~/code/test','m1 ~/code/codex-test','m1 ~/butler-desk']);
+  assert.deepEqual(p('test').adopted,{machineId:'m1',dir:'~/code/test',inspected:true});
+  await convertAdopted(f.store,m1,other.inspect);await convertAdopted(f.store,m2,fake.inspect);assert.equal(other.calls.length,3);assert.equal(fake.calls.length,3);
+ }finally{f.close();}
+});
+test('a project whose name was changed since the migration keeps it when it becomes a repository project, and one that joins a repository project that exists goes into it; a directory that cannot be asked about is asked again next time',async()=>{
+ const f=oldStore();try{
+  migrateBindings(f.store);const [,m2]=f.store.data.machines,herdr=f.store.data.projects.find(x=>x.name==='herdr')!,existing=f.store.data.projects.find(x=>x.name==='genvi')!;
+  herdr.name='我的 herdr';
+  const known:Project={id:'known',name:'增长',description:'投放',repos:['git@code.byted.org:growth/genvi'],skills:['butler'],workMode:'isolated'};f.store.data.projects.push(known);
+  const fake=fakeInspect({'m2 ~/code/learning/herdr':'git@github.com:bezhai/herdr-self.git','m2 /data/work/genvi':'ssh://git@code.byted.org/growth/genvi.git','m2 ~/code/genvi':Error('机器 cpu2 离线：它的 Bridge 客户端没有连上')});
+  await convertAdopted(f.store,m2,fake.inspect);
+  assert.deepEqual([herdr.name,herdr.repos,herdr.adopted],['我的 herdr',['git@github.com:bezhai/herdr-self.git'],undefined]);
+  // The existing project of that repository takes over, with its own name, description and skills.
+  assert.equal(f.store.data.projects.includes(existing),false);assert.deepEqual([known.name,known.description,known.skills],['增长','投放',['butler']]);
+  assert.deepEqual(f.store.data.bindings.find(b=>b.id==='b5')!.defaultProjectId,'known');
+  const failed=f.store.data.projects.find(x=>x.name==='genvi 2')!;assert.deepEqual(failed.adopted,{machineId:'m2',dir:'~/code/genvi'});
+  assert.deepEqual(f.store.data.logs.filter(l=>l.level==='error').map(l=>l.message),['项目「genvi 2」的目录没能检查：机器 cpu2 离线：它的 Bridge 客户端没有连上']);
+  const retry=fakeInspect({});await convertAdopted(f.store,m2,retry.inspect);assert.deepEqual(retry.calls,['m2 ~/code/genvi']);assert.equal(failed.adopted!.inspected,true);
+ }finally{f.close();}
+});
+test('a project that was removed or changed while its directory was being asked about is left as it is',async()=>{
+ const f=oldStore();try{
+  migrateBindings(f.store);const [,m2]=f.store.data.machines,[gone,changed]=f.store.data.projects.filter(x=>x.adopted?.machineId==='m2');
+  const fake=fakeInspect({'m2 ~/code/learning/herdr':'git@github.com:bezhai/herdr-self.git','m2 /data/work/genvi':'git@code.byted.org:growth/genvi.git'});
+  const inspect=async(m:Machine,dir:string)=>{const r=await fake.inspect(m,dir);if(dir.endsWith('herdr'))f.store.data.projects=f.store.data.projects.filter(x=>x!==gone);else delete changed.adopted;return r;};
+  await convertAdopted(f.store,m2,inspect);
+  assert.equal(f.store.data.projects.includes(gone),false);assert.deepEqual([changed.repos,changed.adopted],[[],undefined]);
+ }finally{f.close();}
 });
 const configData=(configs:AgentConfig[]=[])=>({machines:[{id:'m',name:'cpu1'},{id:'n',name:'cpu2'}] as Machine[],agentConfigs:configs});
 test('an agent configuration is a kind of agent with a model on a machine, and for Claude a permission mode and the commands it may run; its name is machine, kind and model unless given',()=>{
@@ -3196,6 +3316,29 @@ test('the server refuses to start with a BRIDGE_URL that is not an http(s) origi
   let err='';server.stderr.on('data',d=>{err+=d;});const timer=setTimeout(()=>server.kill(),5000);const code=await new Promise(r=>server.once('exit',r));clearTimeout(timer);
   assert.notEqual(code,0);assert.match(err,/BRIDGE_URL/);assert.equal(fs.existsSync(path.join(dir,'access-key')),false);
  }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('the server migrates the bindings of an older state file at start, and once the client of their machine is in it turns a project whose directory is the root of a repository with an origin into a repository project',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),app=path.join(home,'code','app'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ fs.mkdirSync(app,{recursive:true});fs.mkdirSync(path.join(home,'code','plain'));git(app,'init','-q');git(app,'remote','add','origin','git@example.com:team/app.git');
+ fs.mkdirSync(state);
+ fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu1',session:'default',enabled:true}],
+  bindings:[oldBinding('b1',{machineId:'m',cwd:'~/code/app',kind:'claude'}),oldBinding('b2',{machineId:'m',cwd:'~/code/plain',kind:'codex'})]}));
+ const server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),admin={authorization:'Bearer '+key};
+  const api=async(p:string,body?:object):Promise<Answer>=>{const r=await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:admin,body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
+  const shown=async()=>(await api('state')).body;
+  let s=await shown();
+  assert.deepEqual(s.projects.map((p:Project)=>[p.name,p.workMode,p.adopted]),[['app','shared',true],['plain','shared',true]]);assert.deepEqual(s.agentConfigs.map((c:AgentConfig)=>c.name),['cpu1 · Claude','cpu1 · Codex']);
+  assert.deepEqual(s.bindings.map((b:Binding)=>[b.id,b.chatType,b.defaultProjectId===s.projects[b.id==='b1'?0:1].id]),[['b1','group',true],['b2','group',true]]);
+  const disk=JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8'));assert.deepEqual(disk.projects[0].adopted,{machineId:'m',dir:'~/code/app'});assert.equal('cwd' in disk.bindings[0],false);
+  const {config}=(await api('machines/token',{id:'m'})).body;
+  client=bridgeClient(configFile(dir,'client.json',JSON.stringify({...JSON.parse(config),herdr:fakeHerdrBinary(dir)})),{HOME:home,BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock')});
+  s=await until(async()=>{const x=await shown();return x.projects[0].repos.length&&x;},'the project of the repository is converted');
+  assert.deepEqual(s.projects.map((p:Project)=>[p.name,p.repos,p.workMode,p.adopted]),[['app',['git@example.com:team/app.git'],'isolated',false],['plain',[],'shared',true]]);
+  const saved=JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8'));await until(()=>JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).projects[1].adopted.inspected,'the other directory is marked as asked');
+  assert.equal('adopted' in saved.projects[0],false);
+ }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
 });
 test('the server keeps skills for the console and the access key alone: the state lists their index without their files; it reads a skill with its files, creates and edits its SKILL.md, imports a whole directory past the limit of other requests up to that of a skill, sets whether it is loaded by default and removes it',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),port=await freePort(),origin=`http://127.0.0.1:${port}`;

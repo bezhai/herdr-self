@@ -1,8 +1,9 @@
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';
-import {Store,normalizeMachine,migrateMachines,operations,publicText,stateDir} from './core.ts';
+import {Store,normalizeMachine,migrateMachines,operations,publicText,stateDir,enqueue} from './core.ts';
 import {Platforms,normalizeApp,changeBinding,bindingTarget} from './platform.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
 import {Registrations} from './registration.ts';
+import {migrateBindings,convertAdopted} from './migration.ts';
 import {Topics} from './topics.ts';
 import {Skills,requestLimit} from './skills.ts';
 import {Schedules} from './schedules.ts';
@@ -16,7 +17,7 @@ import type {HerdrStatus,ConsoleState} from './console-state.ts';
 const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Store(dir),live=new Map<string,HerdrStatus>(),refreshes=new Map<string,Promise<void>>();
 // auth and attempts are looked up also for a request without a session cookie, or without a remote address once its socket closed.
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map<string|undefined,number>(),attempts=new Map<string|undefined,{at:number,n:number}>();
-migrateMachines(store);
+migrateMachines(store);migrateBindings(store);
 // What Bridge does on a machine goes through the client of the machine (see operations and Clients.call).
 const call:Call=(...args)=>clients.call(...args),ops=operations(call),skills=new Skills(store,call);
 function machine(id:unknown){const m=store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;}
@@ -50,7 +51,9 @@ function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registr
 // publicText, like the console's errors.
 const allowedHost=(req:http.IncomingMessage)=>['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(req.headers.host?.split(':')[0]);
 const refusal=(e:Error)=>{throw Error(publicText(e.message).slice(0,1200));};
-const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal)}});
+// Once the client of a machine is in, the projects that adopted a directory there are asked about it (see convertAdopted), one machine after the other.
+const conversions=new Map<string,Promise<unknown>>();
+const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal)}});
 function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
