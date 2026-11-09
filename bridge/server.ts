@@ -113,7 +113,9 @@ const server=http.createServer(async(req,res)=>{try{
  }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});
 // Machines are polled once their clients are in (see joined), then every 5 s while they stay in.
 const poll=setInterval(()=>{for(const m of store.data.machines)if(m.enabled&&clients.online(m.id))refresh(m);},5000);
+// The workspaces of topics that ended long ago are removed once a day (see Topics.sweep); the first sweep waits for the clients to connect.
+const sweeping=setInterval(()=>topics.sweep(),24*3600000),firstSweep=setTimeout(()=>topics.sweep(),5*60000);
 for(const a of store.data.apps)if(a.enabled)platforms.start(a).catch(e=>store.log('平台连接',a.name+'：'+e.message,'error'));schedules.start();agentSchedules.start();
 server.on('upgrade',(req,socket,head)=>clients.upgrade(req,socket,head));
 server.listen(Number(process.env.PORT||8080),process.env.BIND||'0.0.0.0',()=>console.log('herdr-bridge listening on '+(process.env.PORT||8080)));
-process.on('SIGTERM',()=>{clearInterval(poll);schedules.stop();agentSchedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);clients.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});
+process.on('SIGTERM',()=>{clearInterval(poll);clearInterval(sweeping);clearTimeout(firstSweep);schedules.stop();agentSchedules.stop();registrations.stop();for(const a of store.data.apps)platforms.stop(a.id);clients.close();server.close(()=>process.exit(0));setTimeout(()=>process.exit(0),2000).unref();});

@@ -13,4 +13,4 @@ export const hasBranch=(p:Project|undefined)=>Boolean(p?.repos.length&&p.workMod
 export const keepFor=7*24*3600000;
 // Whether the workspace of topic t is to be removed at time now: it was prepared for the topic (not one of before the projects, nor an
 // adopted one), the topic ended or failed more than keepFor ago and the workspace is not removed yet.
-export const sweepable=(t:Topic,now:number)=>Boolean(t.routed&&!t.swept&&t.endedAt!=null&&['closed','failed'].includes(t.state)&&now-t.endedAt>keepFor);
+export const sweepable=(t:Topic,now:number)=>Boolean(t.routed&&!t.adopted&&!t.swept&&t.endedAt!=null&&['closed','failed'].includes(t.state)&&now-t.endedAt>keepFor);

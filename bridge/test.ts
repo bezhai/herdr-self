@@ -1257,6 +1257,56 @@ test('an agent that cannot be closed leaves the topic as it was with a notice; a
   assert.ok(f.store.data.logs.some(l=>l.level==='error'&&l.message.includes('未能删除工作目录')&&l.message.includes('git worktree remove 失败')));
  }finally{f.close();}
 });
+const day=24*3600000;
+// A topic of the group of genvi whose agent has gone and that ended at the time of the fixture's clock, which the test moves on.
+async function endedTopic(){
+ const clock={at:Date.parse('2026-03-01T08:00:00Z')},f=topicFixture({now:()=>clock.at});withProjects(f,genvi);f.b.defaultProjectId='g';
+ await f.send({messageId:'om_1',content:'修复登录页'});const t=f.store.data.topics[0];
+ f.h.agents=[];await f.topics.sync(f.m,[]);for(const l of [f.h.calls,f.prepared,f.naming,f.launched,f.replies])l.length=0;
+ return {...f,t,clock};
+}
+test('a reply in a topic that ended starts it again in its project, on its branch and with its agent configuration, with the first card drawn again instead of posted; nothing asks the cheap model',async()=>{
+ const f=await endedTopic(),{t}=f;try{
+  assert.deepEqual([t.state,t.endedAt],['closed',f.clock.at]);const cwd=t.cwd;
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual(f.prepared,[['m',{project:{id:'g',repos:genvi.repos,workMode:'isolated'},topicId:t.id,branch:'feat/add-login'},600000]]);assert.deepEqual([f.naming,f.starts.length],[[],1]);
+  assert.deepEqual([t.state,t.cwd,t.endedAt,t.swept,t.paneId],['ready',cwd,undefined,undefined,'w1:p2']);assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c.slice(2)),[['w1:p2','接着做']]);
+  assert.deepEqual(f.updated.map(u=>[u[1],cardText(u[2])]),[['om_start_1','genvi · 分支 feat/add-login · cpu2 · Claude']]);
+ }finally{f.close();}
+});
+test('a topic is not started again by a message that is no reply to a person: /stop and /release in a topic that ended are dropped, and so is any message in an adopted topic or one of before the projects that ended',async()=>{
+ const f=await endedTopic(),{t}=f;try{
+  await f.send({messageId:'om_2',rootId:'om_1',content:'/stop'});await f.send({messageId:'om_3',rootId:'om_1',content:'/release'});
+  assert.deepEqual([t.state,f.h.calls,f.prepared],['closed',[],[]]);
+  delete t.routed;await f.send({messageId:'om_4',rootId:'om_1',content:'hi'});assert.deepEqual([t.state,f.h.calls,f.prepared],['closed',[],[]]);
+  t.routed=true;t.adopted={};await f.send({messageId:'om_5',rootId:'om_1',content:'hi'});assert.deepEqual([t.state,f.h.calls,f.prepared],['closed',[],[]]);
+ }finally{f.close();}
+});
+test('a daily sweep removes the workspace of a topic that ended or failed more than 7 days ago, once, and a reply after that restores it from the branch',async()=>{
+ const f=await endedTopic(),{t}=f;try{
+  f.clock.at+=7*day;await f.topics.sweep();assert.deepEqual([f.dropped,t.swept],[[],undefined]);
+  f.clock.at+=1;await f.topics.sweep();
+  assert.deepEqual(f.dropped,[['m',{project:{id:'g',repos:genvi.repos,workMode:'isolated'},topicId:t.id,branch:'feat/add-login'},600000]]);assert.deepEqual([t.swept,t.state],[true,'closed']);
+  {const {at,...log}=f.store.data.logs.at(-1)!;assert.deepEqual(log,{kind:'话题清理',message:`${t.agentName}：已删除工作目录`,level:'info'});}assert.equal(new Store(f.dir).data.topics[0].swept,true);
+  f.clock.at+=day;await f.topics.sweep();assert.equal(f.dropped.length,1);
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual([f.prepared.length,t.state,t.swept,t.endedAt,(f.prepared[0][1] as Sent).branch],[1,'ready',undefined,undefined,'feat/add-login']);
+  // Ended again, it keeps its workspace for another 7 days from then.
+  f.h.agents=[];await f.topics.sync(f.m,[]);f.clock.at+=7*day;await f.topics.sweep();assert.equal(f.dropped.length,1);f.clock.at+=1;await f.topics.sweep();assert.equal(f.dropped.length,2);
+ }finally{f.close();}
+});
+test('the sweep leaves alone the topics that run, ended 7 days ago or less, are adopted or are of before the projects, and removes that of a failed one; a machine that is offline is tried again by the next sweep, and a project that is gone only logs',async()=>{
+ const f=await endedTopic(),{t}=f;try{
+  const make=(fields:Partial<Topic>)=>{const x:Topic={...t,id:'t'+f.store.data.topics.length,agentName:'agent'+f.store.data.topics.length,...fields};f.store.data.topics.push(x);return x;};
+  const running=make({state:'ready',endedAt:undefined}),adopted=make({adopted:{}}),legacy=make({routed:undefined}),failed=make({state:'failed'}),gone=make({projectId:'ghost'});
+  f.clock.at+=8*day;const offline='机器 cpu2 离线：它的 Bridge 客户端没有连上';f.fake.fail.remove=coded('client_offline',offline);await f.topics.sweep();
+  const tried=()=>f.dropped.map(d=>(d[1] as Sent).topicId).sort();
+  assert.deepEqual(tried(),[failed.id,t.id].sort());assert.deepEqual([t.swept,failed.swept,gone.swept],[undefined,undefined,true]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.level==='error').map(l=>l.message).sort(),[`${t.agentName}：未能删除工作目录，${offline}`,`${failed.agentName}：未能删除工作目录，${offline}`,`${gone.agentName}：未能删除工作目录，项目已删除`].sort());
+  delete f.fake.fail.remove;f.dropped.length=0;await f.topics.sweep();
+  assert.deepEqual(tried(),[failed.id,t.id].sort());assert.deepEqual([t.swept,failed.swept,running.swept,adopted.swept,legacy.swept],[true,true,undefined,undefined,undefined]);
+ }finally{f.close();}
+});
 test('/wt is a message like any other: a root message that starts with it is the task, and nothing of Bridge still reads it',async()=>{
  const f=topicFixture();try{
   await f.send({messageId:'om_1',content:'/wt 给登录页加验证码'});await f.send({messageId:'om_2',content:'/wt'});
@@ -1287,13 +1337,14 @@ test('a placement of skills that fails is only logged, and the topic starts and 
   assert.deepEqual(skillLogs(f),[['error',`个人助手：未能在 ~/work 放置 skill，${raw}`],['info','个人助手：/home/u/work/.claude/skills/bridge-schedule 已有同名 skill，不是 Bridge 放的，没有改动']]);
  }finally{f.close();}
 });
-test('a topic whose named agent is gone is closed with one notice and gets no further prompts',async()=>{
+test('a topic whose named agent is gone is closed with one notice, and the messages that follow start it again in a new agent, which they are prompted to',async()=>{
  const f=topicFixture();try{
-  await f.send({messageId:'om_1',content:'one'});
+  await f.send({messageId:'om_1',content:'one'});const [t]=f.store.data.topics;
   f.h.agents.splice(0,1,{name:'someone-else',pane_id:'w1:p1',agent_status:'idle'} as Agent);f.h.calls.length=0;f.replies.length=0;
   await f.send({messageId:'om_2',rootId:'om_1',content:'two'});await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
-  assert.deepEqual(f.h.calls,[['agent','list']]);assert.equal(f.store.data.topics[0].state,'closed');
-  assert.deepEqual(f.replies,[['a','oc_1','om_1',notice('该话题的会话已结束，请发起新话题')]]);
+  assert.deepEqual(f.h.calls.slice(0,2),[['agent','list'],['workspace','list']]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c.slice(2)),[['w1:p2','two'],['w1:p2','three']]);
+  assert.deepEqual([t.state,t.endedAt,f.h.calls.filter(c=>c[1]==='start').length],['ready',undefined,1]);
+  assert.deepEqual(f.replies,[['a','oc_1','om_1',notice('该话题的会话已结束，在话题里回复即可接着做')]]);
  }finally{f.close();}
 });
 test('a failed start marks the topic failed with a notice that carries no error details; the next message retries in a new tab',async()=>{
@@ -1401,7 +1452,7 @@ test('retiring a ready topic closes the pane of its agent, which takes its tab a
   // The pane id of an agent that is gone may name another pane by now.
   f.h.agents=f.h.agents.filter(a=>a.pane_id!=='w1:p2');f.h.calls.length=0;f.replies.length=0;
   await f.topics.retire(two,'已关闭');
-  assert.deepEqual(f.h.calls,[['agent','list']]);assert.equal(two.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，请发起新话题')]);
+  assert.deepEqual(f.h.calls,[['agent','list']]);assert.equal(two.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，在话题里回复即可接着做')]);
   f.h.on['pane close']=()=>{throw Error('连接超时，请检查 SSH 与 Herdr 状态');};f.replies.length=0;
   await f.topics.retire(three,'已关闭');
   assert.equal(three.state,'ready');assert.deepEqual(f.replies,[]);assert.deepEqual(f.store.data.logs.at(-1)!.message,`${three.agentName}：未能关闭 pane，连接超时，请检查 SSH 与 Herdr 状态`);
@@ -1594,7 +1645,7 @@ test('sync forwards replies only for ready topics of its machine, bridge-opened 
   assert.deepEqual(f.replies,[['a','oc_1','om_ready',replyOf('hi')],['a','oc_1','om_adopted',replyOf('adopted hi')]]);
  }finally{f.close();}
 });
-const endedNotice=notice('该话题的会话已结束，请发起新话题'),adoptedGone=notice('被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管');
+const endedNotice=notice('该话题的会话已结束，在话题里回复即可接着做'),adoptedGone=notice('被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管');
 test('a ready topic ends in sync with one notice once a fresh agent list confirms that its pane closed or its agent no longer has remote answers on; a stale list ends nothing',async()=>{
  const f=await readyTopic();try{
   const t=f.t,agent=f.h.agents[0];assert.equal(agent.remote_answers,true);
@@ -1608,14 +1659,11 @@ test('a ready topic ends in sync with one notice once a fresh agent list confirm
   assert.deepEqual(f.h.calls,[['agent','list']]);assert.deepEqual(f.unreacted,[['a','om_1','r_om_1']]);
  }finally{f.close();}
 });
-test('sync runs in the topic queue after a message being prompted, and skips a topic that such a message closed',async()=>{
+test('sync runs in the topic queue after a message being prompted',async()=>{
  const f=await readyTopic();try{
   f.h.retained['w1:p1']=[{seq:1,text:'done'}];f.h.on['agent prompt']=async(args,run)=>{await later(20);return run(args);};
   await Promise.all([f.send({messageId:'om_2',rootId:'om_1',content:'two'}),f.topics.sync(f.m,f.snapshot(1))]);
   assert.deepEqual(f.h.calls.map(c=>c.slice(0,2)),[['agent','list'],['agent','prompt'],['agent','replies']]);assert.deepEqual(f.replies.map(r=>r[3]),[replyOf('done')]);
-  const snapshot=f.snapshot(2);f.h.agents.length=0;f.h.calls.length=0;
-  await Promise.all([f.send({messageId:'om_3',rootId:'om_1',content:'three'}),f.topics.sync(f.m,snapshot)]);
-  assert.deepEqual(f.h.calls,[['agent','list']]);assert.equal(f.t.state,'closed');assert.equal(f.t.replySeq,1);
  }finally{f.close();}
 });
 test('a queued reply fetch whose binding was removed meanwhile sends nothing',async()=>{
@@ -1674,16 +1722,16 @@ test('a message that is not prompted loses its reaction: failed start, blocked a
   f.h.on['agent prompt']=()=>{throw coded('agent_prompt_failed','pty closed');};await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
   assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因'),notice('Agent 正在等待确认，请到 Herdr 中处理后重发这条消息')]);
   assert.deepEqual(f.unreacted,[['a','om_1','r_om_1'],['a','om_2','r_om_2'],['a','om_3','r_om_3']]);assert.deepEqual(onDisk(f),[]);
-  const t=f.store.data.topics[0];t.state='closed';f.h.calls.length=0;await f.send({messageId:'om_4',rootId:'om_1',content:'four'});
+  const t=f.store.data.topics[0];t.state='closed';delete t.routed;f.h.calls.length=0;await f.send({messageId:'om_4',rootId:'om_1',content:'four'});
   assert.deepEqual(f.h.calls,[]);assert.deepEqual(f.unreacted.at(-1),['a','om_4','r_om_4']);assert.deepEqual(onDisk(f),[]);
  }finally{f.close();}
 });
 test('a topic closed because its agent is gone loses every reaction',async()=>{
  const f=await readyTopic({cot:false});try{
   await f.send({messageId:'om_2',rootId:'om_1',content:'two'});f.t.reactions.push({messageId:'om_waiting',reactionId:'r_waiting',stateSeq:null});
-  f.h.agents.length=0;await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
-  assert.equal(f.t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，请发起新话题')]);
-  assert.deepEqual(f.unreacted.map(r=>r[1]).sort(),['om_1','om_2','om_3','om_waiting']);assert.equal(f.unreacted.length,4);assert.deepEqual(onDisk(f),[]);
+  f.h.agents.length=0;await f.topics.sync(f.m,[]);
+  assert.equal(f.t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，在话题里回复即可接着做')]);
+  assert.deepEqual(f.unreacted.map(r=>r[1]).sort(),['om_1','om_2','om_waiting']);assert.equal(f.unreacted.length,3);assert.deepEqual(onDisk(f),[]);
  }finally{f.close();}
 });
 test('a reaction Feishu refuses is logged and the message is still prompted without a record',async()=>{
@@ -1806,7 +1854,7 @@ test('the card of a request that ended outside Feishu shows 已失效 with its t
 });
 test('a topic closed because its agent is gone marks its cards 已失效',async()=>{
  const f=await requestTopic(bash);try{
-  await f.topics.sync(f.m,f.pending());f.h.agents.length=0;await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
+  await f.topics.sync(f.m,f.pending());f.h.agents.length=0;await f.topics.sync(f.m,[]);
   assert.equal(f.t.state,'closed');assert.deepEqual(f.updated,[['a','om_bot_1',expiredCard('权限确认 · Bash')]]);assert.deepEqual(f.records(),[]);
  }finally{f.close();}
 });
@@ -2638,7 +2686,7 @@ test('a schedule in mode into whose topic has ended skips the time and pauses, w
   f.h.agents=f.h.agents.filter(x=>x.pane_id!=='w1:p1');closed.state='closed';f.replies.length=0;f.h.calls.length=0;
   f.at('2026-11-06T10:05:00+08:00');await f.schedules.tick();
   const paused=(s:{id:string})=>notice(`定时任务 ${s.id.slice(0,8)} 已暂停：这个话题的会话已结束，定时任务不会在这里另起一个 Agent`),thread=(root:string)=>f.replies.filter(r=>r[2]===root).map(r=>r[3]);
-  assert.deepEqual([thread('om_1'),thread('om_2'),f.replies.length],[[notice('该话题的会话已结束，请发起新话题'),paused(a)],[paused(b)],3]);
+  assert.deepEqual([thread('om_1'),thread('om_2'),f.replies.length],[[notice('该话题的会话已结束，在话题里回复即可接着做'),paused(a)],[paused(b)],3]);
   assert.deepEqual([gone.state,closed.state],['closed','closed']);assert.deepEqual(f.h.calls,[['agent','list']]);
   assert.deepEqual([a,b].map(s=>f.schedules.runs(s.id).map(r=>[r.outcome,r.reason])),[[['skipped','话题已结束，定时任务已暂停']],[['skipped','话题已结束，定时任务已暂停']]]);
   assert.deepEqual(new Store(f.dir).data.schedules.map(s=>s.paused),[true,true]);
@@ -2790,7 +2838,7 @@ test('an agent is known by the machine whose client passed its request on and by
   f.m.enabled=false;await assert.rejects(f.call('list'),/Bridge 已断开机器 cpu2 的桥接/);f.m.enabled=true;
   // The agent no longer reports remote answers: the topic ends, and the agent is refused.
   delete f.h.agents[0].remote_answers;f.replies.length=0;
-  await assert.rejects(f.call('list'),notTopic);assert.equal(t!.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，请发起新话题')]);
+  await assert.rejects(f.call('list'),notTopic);assert.equal(t!.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('该话题的会话已结束，在话题里回复即可接着做')]);
   await assert.rejects(f.call('list'),notTopic);
  }finally{f.close();}
 });

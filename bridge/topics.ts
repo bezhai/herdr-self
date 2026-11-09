@@ -10,7 +10,7 @@ import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,s
 import {attachmentFolder} from './machine.ts';
 import {nameTask} from './routing.ts';
 import {startCard} from './topic-cards.ts';
-import {workspaceOf,hasBranch} from './workspaces.ts';
+import {workspaceOf,hasBranch,sweepable} from './workspaces.ts';
 import {randomBranch} from './worktree-branch.mjs';
 import type {NormalizedMessage,ResourceDescriptor} from '@larksuite/channel';
 import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';
@@ -46,7 +46,7 @@ const offline=(e:Error,after:string)=>`${brief(e)}。${after}`;
 // exits, is released or changes to another agent, so a ready topic is linked to the agent of its pane for as long as the agent reports it.
 const linked=(t:Topic,agents:Agent[])=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
 const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'on':'off'];
-const endedNotice='该话题的会话已结束，请发起新话题',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
+const endedNotice='该话题的会话已结束，请发起新话题',continuable='该话题的会话已结束，在话题里回复即可接着做',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
 // Where the images and files of a topic go, under the working directory of its agent (see attach).
 const attachmentRoot=(cwd:string)=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;
@@ -119,6 +119,8 @@ export class Topics{
   t.messageIds=[...t.messageIds,msg.messageId].slice(-50);if(t.scheduled)t.scheduled.messageAt=this.now();this.store.save();
   if(t.adopted&&t.state==='ready'&&text===slash.release)return enqueue(this.topicQueues,t.id,()=>this.release(a,b,t)).catch(e=>this.store.log('话题接管',`${b.name}：${brief(e)}`,'error'));
   if(t.state==='ready'&&text===slash.stop)return enqueue(this.topicQueues,t.id,()=>this.stop(a,t));
+  // The commands mean nothing to a topic whose agent is gone, which any other message starts again (see continuable).
+  if(t.state==='closed'&&[slash.stop,slash.release].includes(text))return;
   return this.deliver(a,b,t,msg,{reaction:msg.messageId});
  }
  // Opens a topic of binding b whose root is message rootId and gives its agent message msg (see deliver): the one way into a new topic, for
@@ -212,16 +214,17 @@ export class Topics{
  async unsupported(a:App,b:Binding,msg:Inbound){
   try{await this.reply(a,b.chatId,msg.rootId||msg.messageId,{card:notice(unsupportedNotice)});}catch(e){this.store.log('话题通知',`${b.name}：${brief(e)}`,'error');}
  }
- // Sends message msg to the topic's agent, opening the topic first when it is new or failed; a topic still waiting for an agent to adopt
- // prompts nothing. The images and files of the message are written under the agent's working directory first (see attach): the topic's
+ // Sends message msg to the topic's agent, opening the topic first when it is new or failed, or when it ended and Bridge started it: a
+ // reply continues the topic in its project, on its branch and with its agent configuration, and its workspace is prepared again, which
+ // restores one that the sweep removed (see sweep). A topic still waiting for an agent to adopt, and an adopted one that ended, prompt nothing. The images and files of the message are written under the agent's working directory first (see attach): the topic's
  // own for a topic that Bridge opened in a tab, and for an adopted one what Herdr reports for the agent, where the agent runs before where
  // its shell is. Resolves to the prompted agent, or to nothing when the message was not prompted.
  async forward(a:App,b:Binding,t:Topic,msg:Message){
-  if(t.state==='closed')return;
+  if(t.state==='closed'&&!this.continuable(t))return;
   if(t.state==='choosing'){await this.notify(a,t,'请先在上面的卡片中选择要接管的 Agent');return;}
   let agent;
-  if(t.state==='ready'){agent=await this.alive(a,t);if(!agent)return;}
-  else if(!await this.open(a,b,t))return;
+  if(t.state==='ready'){agent=await this.alive(a,t);if(!agent&&!this.continuable(t))return;}
+  if(!agent&&!await this.open(a,b,t))return;
   // An adopted topic that gets here is ready, with its agent.
   const text=await this.attach(a,t,msg,t.adopted?agent!.foreground_cwd||agent!.cwd:t.cwd);
   let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,text]);}
@@ -265,7 +268,7 @@ export class Topics{
  async alive(a:App,t:Topic){
   if(t.state!=='ready')return;
   const {agents}=await this.herdr(this.target(t),['agent','list']),agent=linked(t,agents);
-  if(!agent&&t.state==='ready')await this.end(a,t,t.adopted?adoptedGone:endedNotice);
+  if(!agent&&t.state==='ready')await this.end(a,t,t.adopted?adoptedGone:t.routed?continuable:endedNotice);
   return agent;
  }
  // Ends a ready topic with a notice; its open COT shows the run failed, its reactions are removed, its cards show 已失效 and the directory of
@@ -294,6 +297,23 @@ export class Topics{
    catch(e){this.store.log('话题会话',`${t.agentName}：未能关闭 pane，${brief(e)}`,'error');return;}
    this.store.log('话题会话',`${t.agentName}：已关闭 pane ${t.paneId}`);await this.end(a,t,text);
   });
+ }
+ // Whether topic t, which ended, starts again with the next message: Bridge started it, with a workspace of its project.
+ continuable(t:Topic){return t.state==='closed'&&Boolean(t.routed)&&!t.adopted;}
+ // Removes the workspace of the topics that ended or failed more than 7 days ago (see sweepable), once each, in their queues; the next
+ // message of such a topic prepares it again. A removal that fails, such as one on a machine whose client is offline, is logged and tried
+ // again by the next sweep; a topic whose project is gone has nothing to remove it by and counts as swept. Never rejects; resolves when
+ // all are done.
+ sweep(){
+  return Promise.all(this.store.data.topics.filter(t=>sweepable(t,this.now())).map(t=>enqueue(this.topicQueues,t.id,async()=>{
+   // Checked again in the queue: a message may have started the topic again meanwhile.
+   if(!sweepable(t,this.now()))return;
+   try{await this.removeWorkspaceOf(t);this.update(t,{swept:true});this.store.log('话题清理',`${t.agentName}：已删除工作目录`);}
+   catch(e){
+    if(e.code==='project_gone')this.update(t,{swept:true});
+    this.store.log('话题清理',`${t.agentName}：未能删除工作目录，${brief(e)}`,'error');
+   }
+  })));
  }
  // Starts the agent of topic t: decides its project and branch (see route), prepares the workspace on the machine, places Bridge's skills in
  // it, prepares the launch, opens a tab there and starts the agent, and shows the card with the settings it started with (see showCard).
