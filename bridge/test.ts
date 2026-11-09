@@ -4215,13 +4215,28 @@ test('the agent configuration offered is the one of the latest binding, else the
   await f.chats.open(bindApp,{...groupMessage,chatId:'oc_group2'});assert.deepEqual(f.replies.at(-1)![2],notice('请先在 Bridge 管理台创建「项目」和「Agent 配置」，再绑定这个聊天。'));
  }finally{f.close();}
 });
-test('a chat gets one card within half an hour, also while the first is being drawn, and one again after it; a card that cannot be sent is logged and the chat waits as if it had been',async()=>{
+test('a chat gets one card within half an hour, also while the first is being drawn, and one again after it; a card that cannot be sent is logged and the next message gets one again',async()=>{
  const f=bindFixture();try{
   const first=f.chats.open(bindApp,groupMessage),second=f.chats.open(bindApp,{...groupMessage,messageId:'om_2'});await Promise.all([first,second]);assert.equal(f.replies.length,1);
   f.clock.now+=minutes(29);await f.chats.open(bindApp,{...groupMessage,messageId:'om_3'});assert.equal(f.replies.length,1);
   f.clock.now+=minutes(1);await f.chats.open(bindApp,{...groupMessage,messageId:'om_4'});assert.deepEqual(f.replies.map(r=>r[1]),['om_task','om_4']);
   f.fail.reply=true;await f.chats.open(bindApp,directMessage);assert.equal(f.store.data.logs.at(-1)!.level,'error');assert.match(f.store.data.logs.at(-1)!.message,/飞书未连接/);
-  f.fail.reply=false;await f.chats.open(bindApp,{...directMessage,messageId:'om_dm2'});assert.equal(f.replies.length,2);
+  f.fail.reply=false;await f.chats.open(bindApp,{...directMessage,messageId:'om_dm2'});assert.deepEqual(f.replies.map(r=>r[1]),['om_task','om_4','om_dm2']);
+ }finally{f.close();}
+});
+test('a chat that was told what must exist first is told once while that is still missing, and gets its card with the next message after the project and the agent configuration were created; a notice that cannot be sent is tried again by the next message',async()=>{
+ const f=bindFixture();try{
+  const {projects,agentConfigs}=f.store.data;f.store.data.projects=[];f.store.data.agentConfigs=[];
+  const first=f.chats.open(bindApp,groupMessage),second=f.chats.open(bindApp,{...groupMessage,messageId:'om_2'});await Promise.all([first,second]);
+  await f.chats.open(bindApp,{...groupMessage,messageId:'om_3'});assert.deepEqual(f.replies,[['oc_group','om_task',notice('请先在 Bridge 管理台创建「项目」和「Agent 配置」，再绑定这个聊天。')]]);
+  // What is missing changes (the agent configuration still is): the chat has been told, and stays quiet.
+  f.store.data.projects=projects;await f.chats.open(bindApp,{...groupMessage,messageId:'om_4'});assert.equal(f.replies.length,1);
+  f.store.data.agentConfigs=agentConfigs;await f.chats.open(bindApp,{...groupMessage,messageId:'om_5'});assert.equal(f.replies.length,2);
+  assert.deepEqual(f.replies.at(-1),['oc_group','om_5',{card:bindCardOf(1,projectDropdown('p2'),configDropdown('c2'))}]);
+  f.chats.click(bindApp,f.click('om_card2',{project:'p1',config:'c1'}));await settle();assert.equal(f.store.data.bindings.length,1);
+  // The same when the notice never reached the chat.
+  f.store.data.agentConfigs=[];f.fail.reply=true;await f.chats.open(bindApp,directMessage);f.fail.reply=false;await f.chats.open(bindApp,{...directMessage,messageId:'om_dm2'});
+  assert.deepEqual(f.replies.at(-1),['oc_dm','om_dm2',notice('请先在 Bridge 管理台创建「Agent 配置」，再绑定这个聊天。')]);
  }finally{f.close();}
 });
 test('clicking 绑定 creates the binding of the chat with the chosen project and configuration, named after the group, and the card turns into 已绑定 before the message that asked for the binding starts as the first task through the entry of a bound chat',async()=>{

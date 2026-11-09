@@ -36,8 +36,8 @@ const bindCard=(data:Pick<State,'projects'|'agentConfigs'>,group:boolean,render:
  ...group?[select('project','项目',data.projects.map(p=>option(p.name,p.id)),chosen.project?.id)]:[],
  select('config','Agent 配置',data.agentConfigs.map(c=>option(c.name,c.id)),chosen.config?.id)],'绑定',{bind:true,render})]);
 // A chat with a card: the app and the message that asked, the name its binding gets, the id of the card once it is sent, and the words of the
-// reply once the card made the binding.
-type Waiting={app:string,msg:NormalizedMessage,name:string,expires:number,card?:string,bound?:string};
+// reply once the card made the binding; lacking says it got the notice of what must exist first instead of a card.
+type Waiting={app:string,msg:NormalizedMessage,name:string,expires:number,card?:string,bound?:string,lacking?:boolean};
 type Deps=Pick<Platforms,'reply'|'updateCard'|'chatName'>&Pick<Operations,'askCheapModel'>&{handle:(a:App,b:Binding,msg:NormalizedMessage)=>unknown,now?:()=>number};
 export class ChatBindings{
  declare store:Store;declare reply:Deps['reply'];declare updateCard:Deps['updateCard'];declare chatName:Deps['chatName'];declare askCheapModel:Deps['askCheapModel'];
@@ -48,22 +48,28 @@ export class ChatBindings{
  constructor(store:Store,{reply,updateCard,chatName,askCheapModel,handle,now=Date.now}:Deps){
   this.store=store;this.reply=reply;this.updateCard=updateCard;this.chatName=chatName;this.askCheapModel=askCheapModel;this.handle=handle;this.now=now;this.waiting=new Map();this.renders=0;
  }
+ // The projects and agent configurations that must exist before a chat (of a group or not) can be bound, by their names in the notice.
+ missing(group:boolean){
+  const {projects,agentConfigs}=this.store.data;
+  return [...group&&!projects.length?['项目']:[],...agentConfigs.length?[]:['Agent 配置']];
+ }
  // A message from a chat without a binding: it gets the card, or says what must exist first. Only the first message within the lifetime of
- // a card is answered, also while the card is being made. Never rejects.
+ // a card is answered, also while the card is being made; a chat told what is missing gets its card with the first message after that
+ // exists, and a notice or card that could not be sent is tried again by the next message. Never rejects.
  async open(a:App,msg:NormalizedMessage){
   const now=this.now();for(const [key,w] of this.waiting)if(w.expires<=now)this.waiting.delete(key);
-  const key=JSON.stringify([a.id,msg.chatId]);
+  const key=JSON.stringify([a.id,msg.chatId]),group=msg.chatType==='group';
   // A chat that was bound and lost its binding again is unbound like any other.
-  const waiting=this.waiting.get(key);if(waiting&&!waiting.bound)return;
-  const group=msg.chatType==='group',w:Waiting={app:a.id,msg,name:chatLabel(msg.chatType),expires:now+lifetime},{projects,agentConfigs}=this.store.data;
+  const waiting=this.waiting.get(key);if(waiting&&!waiting.bound&&!(waiting.lacking&&!this.missing(group).length))return;
+  const w:Waiting={app:a.id,msg,name:chatLabel(msg.chatType),expires:now+lifetime},{agentConfigs}=this.store.data;
   this.waiting.set(key,w);this.store.log('会话绑定',`${a.name}：${group?'群聊':'私聊'} ${msg.chatId} 尚未绑定`);
   try{
-   const missing=[...group&&!projects.length?['项目']:[],...agentConfigs.length?[]:['Agent 配置']];
-   if(missing.length){await this.reply(a,msg.chatId,msg.messageId,{card:notice(`请先在 Bridge 管理台创建${missing.map(x=>`「${x}」`).join('和')}，再绑定这个聊天。`)});return;}
+   const missing=this.missing(group);
+   if(missing.length){await this.reply(a,msg.chatId,msg.messageId,{card:notice(`请先在 Bridge 管理台创建${missing.map(x=>`「${x}」`).join('和')}，再绑定这个聊天。`)});w.lacking=true;return;}
    const config=agentConfigs.find(c=>c.id===this.store.data.lastAgentConfigId)??agentConfigs[0];
    const project=group?await this.guess(a,w,config):undefined;
    w.card=await this.reply(a,msg.chatId,msg.messageId,{card:bindCard(this.store.data,group,++this.renders,{project,config})});
-  }catch(e){this.store.log('会话绑定',`${a.name}：绑定卡片未发出，${e.message}`,'error');}
+  }catch(e){this.waiting.delete(key);this.store.log('会话绑定',`${a.name}：绑定卡片未发出，${e.message}`,'error');}
  }
  // The project of the group of w by the cheap model, on the machine of config, from the group's name in Feishu; none when there is nothing
  // to go by, nothing fits or the model cannot answer, which only costs the person a click. The only project there is needs no guess.
