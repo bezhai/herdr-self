@@ -1,7 +1,7 @@
 import path from 'node:path';
-import {uuid} from './core.ts';
+import {uuid,publicText} from './core.ts';
 import {configName,permissionMode} from './agent-configs.ts';
-import {repoKey,repoName,uniqueName} from './projects.ts';
+import {repoKey,repoName,repoUrl,uniqueName} from './projects.ts';
 import type {Store} from './core.ts';
 import type {AgentConfig,Binding,Kind,Machine,PermissionMode,Project} from './state.ts';
 // The migration of a state file from before projects and agent configurations (see Binding, Project and AgentConfig in state.ts). It runs
@@ -70,7 +70,8 @@ const given=(p:Project)=>new RegExp(`^${path.posix.basename(p.adopted!.dir).repl
 // other, with inspect(m,dir), which resolves to {origin} (see inspectDirectory in link.ts). A directory that is the root of a repository
 // with an origin turns its project into an isolated project of that repository: it loses the directory, is named after the repository if
 // it still has the name it was given, and goes into a repository project that has that repository alone already, which then has its
-// bindings and topics; a topic keeps the directory it started in. Any other directory is marked as asked, once. A project that was removed
+// bindings and topics; a topic keeps the directory it started in. Any other directory, also that of an origin which is no remote address (a
+// path), is marked as asked, once. A project that was removed
 // or changed while the client answered stays as it is, and a directory the client cannot be asked about is asked again next time. Never
 // rejects.
 export async function convertAdopted(store:Store,m:Machine,inspect:(m:Machine,dir:string)=>Promise<{origin:string|null}>){
@@ -81,6 +82,9 @@ export async function convertAdopted(store:Store,m:Machine,inspect:(m:Machine,di
   catch(e){store.log('数据迁移',`项目「${p.name}」的目录没能检查：${e.message}`,'error');continue;}
   if(!data.projects.includes(p)||p.adopted?.dir!==dir||p.adopted.inspected)continue;
   if(!origin){p.adopted.inspected=true;store.save();continue;}
+  // An origin that is a path on the machine, or no address that a clone of Bridge could take, is no repository for a project: the directory stays.
+  try{origin=repoUrl(origin);}
+  catch{p.adopted.inspected=true;store.log('数据迁移',`项目「${p.name}」的目录是仓库，但它的 origin（${publicText(origin)}）不是可以 clone 的远程地址，仍是共用目录的项目`,'error');store.save();continue;}
   const same=data.projects.find(q=>q!==p&&!q.adopted&&q.workMode==='isolated'&&q.repos.length===1&&repoKey(q.repos[0])===repoKey(origin));
   if(same){
    for(const b of data.bindings)if(b.defaultProjectId===p.id)b.defaultProjectId=same.id;

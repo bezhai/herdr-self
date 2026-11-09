@@ -8,11 +8,11 @@ const descriptionLimit=500,repoLimit=20;
 // A remote repository: an http, https, ssh or git URL, or the scp form user@host:path. Nothing that git takes as an option, a helper
 // (ext::) or a local path.
 const remote=/^(?:(?:https?|ssh|git):\/\/[^\s/@]+(?:@[^\s/]+)?(?:\/[^\s]*)?|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+)$/;
-function repoUrl(v:unknown){if(typeof v!=='string'||v.length>300||!remote.test(v.trim())||/^\w+:\/\/[^/]*$/.test(v.trim()))throw Error('仓库地址无效');return v.trim();}
+export function repoUrl(v:unknown){if(typeof v!=='string'||v.length>300||!remote.test(v.trim())||/^\w+:\/\/[^/]*$/.test(v.trim()))throw Error('仓库地址无效');return v.trim();}
 // The host and the path of a repository URL, lower-cased host first, without user, port, trailing slashes and .git: what two URLs of one
 // repository share, whether ssh or https.
 export function repoKey(url:string){
- const m=/^(?:\w+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+(?=\/))?[:/](.*)$/.exec(url.trim())!;
+ const m=/^(?:\w+:\/\/)?(?:[^@/]+@)?([^/:]+)(?::\d+(?=\/))?[:/](.*)$/.exec(url.trim());if(!m)throw Error('仓库地址无效');
  return m[1].toLowerCase()+'/'+m[2].replace(/\/+$/,'').replace(/\.git$/,'');
 }
 // The name of a repository: the last part of its path.

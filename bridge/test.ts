@@ -239,6 +239,18 @@ test('a project whose name was changed since the migration keeps it when it beco
   const retry=fakeInspect({});await convertAdopted(f.store,m2,retry.inspect);assert.deepEqual(retry.calls,['m2 ~/code/genvi']);assert.equal(failed.adopted!.inspected,true);
  }finally{f.close();}
 });
+test('a directory whose origin is a local path or no address Bridge can clone stays a shared directory project, asked once and logged, and does not keep the projects after it from being converted',async()=>{
+ const f=oldStore();try{
+  migrateBindings(f.store);const [,m2]=f.store.data.machines,local=f.store.data.projects.find(x=>x.name==='herdr')!;
+  const fake=fakeInspect({'m2 ~/code/learning/herdr':'/srv/git/herdr.git','m2 /data/work/genvi':'file:///srv/git/genvi.git','m2 ~/code/genvi':'git@code.byted.org:growth/genvi.git'});
+  await convertAdopted(f.store,m2,fake.inspect);
+  assert.deepEqual(fake.calls,['m2 ~/code/learning/herdr','m2 /data/work/genvi','m2 ~/code/genvi']);
+  assert.deepEqual([local.repos,local.workMode,local.adopted],[[],'shared',{machineId:'m2',dir:'~/code/learning/herdr',inspected:true}]);
+  assert.deepEqual(f.store.data.projects.find(x=>x.name==='genvi 2')?.repos??f.store.data.projects.find(x=>x.name==='genvi')?.repos,['git@code.byted.org:growth/genvi.git']);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.level==='error').map(l=>l.message),['项目「herdr」的目录是仓库，但它的 origin（/srv/git/herdr.git）不是可以 clone 的远程地址，仍是共用目录的项目','项目「genvi」的目录是仓库，但它的 origin（file:///srv/git/genvi.git）不是可以 clone 的远程地址，仍是共用目录的项目']);
+  await convertAdopted(f.store,m2,fake.inspect);assert.equal(fake.calls.length,3);
+ }finally{f.close();}
+});
 test('a project that was removed or changed while its directory was being asked about is left as it is',async()=>{
  const f=oldStore();try{
   migrateBindings(f.store);const [,m2]=f.store.data.machines,[gone,changed]=f.store.data.projects.filter(x=>x.adopted?.machineId==='m2');
