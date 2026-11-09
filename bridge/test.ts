@@ -3276,9 +3276,10 @@ test('the client does not start without a config file it can use or with Node\'s
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 test('the client, bridge-schedule and bridge-skill run on Node alone: bin/bridge-client.ts, bin/bridge-schedule.ts, bin/bridge-skill.ts and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
+ // Node erases the type-only imports of a .ts file, which load nothing.
  const imports=bin=>{
   const seen=new Set(),visit=file=>{if(seen.has(file))return;seen.add(file);
-   for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
+   for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b(?!\s+type\b)[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
   visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
  };
  assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','link.ts','machine.ts']);
