@@ -11,8 +11,8 @@ import type {Registrations} from './registration.ts';
 export type HerdrStatus={state:'disabled'|'offline'|'connecting'|'connected'|'error',checkedAt?:number,error?:string,agents:Agent[],panes:object[]};
 // A machine without the hash of its token, with whether it has one, and the status of its client and of its Herdr.
 export type ConsoleMachine=Omit<Machine,'tokenHash'>&{hasToken:boolean,client:ClientStatus}&HerdrStatus;
-// A topic without what only Bridge reads: the messages, reactions, cards, COT and proposal, and the card of its worktree.
-export type ConsoleTopic=Omit<Topic,'messageIds'|'reactions'|'cards'|'cot'|'proposal'|'worktree'>&{worktree?:Omit<NonNullable<Topic['worktree']>,'card'>};
+// A topic without what only Bridge reads: the messages, reactions, cards, COT and proposal.
+export type ConsoleTopic=Omit<Topic,'messageIds'|'reactions'|'cards'|'cot'|'proposal'>;
 // A binding without the Herdr workspaces of its topics, which only Bridge reads.
 export type ConsoleBinding=Omit<Binding,'workspaces'>;
 // A project tells whether it adopted a directory (a migrated project), never which: the machines decide where a project's files are.
