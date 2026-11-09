@@ -1,5 +1,4 @@
-import http from 'node:http';
-import {clientSocket,forwardMs} from './client.mjs';
+import {clientSocket,send} from './client.mjs';
 import {when} from './cron.mjs';
 import {clip} from './request-cards.mjs';
 // bridge-schedule, the command line through which the agent of a Feishu topic manages the schedules of the topic's binding (see
@@ -76,22 +75,6 @@ export function parse(args){
  if(positional.length>2)throw usageError('多余的参数：'+positional.slice(2).join(' '));
  const [op,id]=positional;return {...op!=null&&{op},...id!=null&&{id},...out};
 }
-// Sends request op with body to the client on socket, on a connection of its own, and resolves to Bridge's answer; rejects with what Bridge
-// or the client refused, when no client listens there, or when the agent's sandbox forbids the connection (that of a Codex started without
-// its network, see Topics). The client answers within forwardMs; this waits 5 seconds longer, for a client that does not answer at all.
-export function send(socket,op,body){
- return new Promise((resolve,reject)=>{
-  const data=JSON.stringify(body);
-  const req=http.request({socketPath:socket,agent:false,path:'/schedules/'+op,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)},timeout:forwardMs+5000},res=>{
-   let s='';res.setEncoding('utf8');res.on('data',d=>{s+=d;});
-   res.on('end',()=>{let r;try{r=JSON.parse(s);}catch{return reject(Error('本机的 Bridge 客户端的回答不是 JSON'));}if(res.statusCode!==200)return reject(Error(r.error||'本机的 Bridge 客户端回答 '+res.statusCode));resolve(r);});
-  });
-  req.on('timeout',()=>req.destroy(Error('本机的 Bridge 客户端没有回答')));
-  req.on('error',e=>reject(['ENOENT','ECONNREFUSED'].includes(e.code)?Error(`连不上本机的 Bridge 客户端（${socket}）：客户端没有运行，或者没有打开这个 socket`)
-   :['EACCES','EPERM'].includes(e.code)?Error(`没有权限连接本机的 Bridge 客户端（${socket}）：如果命令运行在 Agent 的沙箱里，需要在沙箱外运行这条命令`):e));
-  req.end(data);
- });
-}
 const at=(ms,timeZone)=>when(ms,timeZone,{weekday:true});
 const short=id=>id.slice(0,8);
 const where=s=>s.mode==='new'?'每次开新话题':s.here?'发进这个话题':`发进话题「${s.topicTitle??'已删除的话题'}」`;
@@ -129,7 +112,7 @@ export async function main(argv,{env=process.env,stdout=process.stdout,stderr=pr
   if(!ops.includes(o.op))throw usageError(o.op?'未知的操作：'+o.op:'缺少操作');
   const {op,json,help,...fields}=o,pane=fields.pane??env.HERDR_PANE_ID,session=fields.session??env.HERDR_SESSION;
   const body={...fields,...pane&&{pane},...session&&{session},...op==='add'&&{timeZone:fields.timeZone??timeZone}};
-  const r=await send(clientSocket(env),op,body);
+  const r=await send(clientSocket(env),'/schedules/'+op,body);
   stdout.write((json?JSON.stringify(r,null,2):format(op,r))+'\n');return 0;
  }catch(e){stderr.write(`bridge-schedule: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
 }

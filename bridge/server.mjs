@@ -40,10 +40,12 @@ const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...a
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),skills:skills.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
-// requests of bridge-schedule on its machine (see client.mjs), which are answered for the machine of its connection; what the agent reads
-// of a refusal goes through publicText, like the console's errors.
+// requests of bridge-schedule and bridge-skill on its machine (see client.mjs), which are answered for the machine of its connection: the
+// schedules of its agents, and reads of the skills of the platform alone (see Skills.answer). What the agent reads of a refusal goes through
+// publicText, like the console's errors.
 const allowedHost=req=>['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(req.headers.host?.split(':')[0]);
-const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(e=>{throw Error(publicText(e.message).slice(0,1200));})}});
+const refusal=e=>{throw Error(publicText(e.message).slice(0,1200));};
+const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal)}});
 function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
@@ -59,7 +61,7 @@ const server=http.createServer(async(req,res)=>{try{
  if(!authorized(req))return json(res,401,{error:'请先登录'});
  if(p==='/api/state'&&req.method==='GET')return json(res,200,state());
  if(p==='/api/apps/avatar'&&req.method==='GET'){const avatar=await platforms.avatar(url.searchParams.get('id'));if(!avatar)return json(res,404,{error:'没有头像'});res.writeHead(200,{'Content-Type':avatar.type,'Cache-Control':'private, max-age=300'});return res.end(avatar.body);}
- // A skill with its files, which the console edits; the state has only the index of the skills.
+ // A skill with its files, which the console edits and bridge-skill exports; the state has only the index of the skills.
  if(p==='/api/skills/read'&&req.method==='GET')return json(res,200,skills.read(url.searchParams.get('name')));
  if(req.method!=='POST')return json(res,404,{error:'接口不存在'});const b=await body(req,p.startsWith('/api/skills/')?requestLimit:undefined);let result={ok:true};
  if(p==='/api/logout'){auth.delete(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1]);res.setHeader('Set-Cookie','bridge_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');}

@@ -6,7 +6,7 @@ import {Skills,frontmatter,skillLimit} from './skills.mjs';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
-import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.mjs';import {Schedules} from './schedules.mjs';import {AgentSchedules} from './agent-schedules.mjs';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.mjs';
+import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.mjs';import {Schedules} from './schedules.mjs';import {AgentSchedules} from './agent-schedules.mjs';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.mjs';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.mjs';
 import {check,card,plain} from './request-cards.mjs';import {fits} from './message-cards.mjs';import {nameOf} from './adoption.mjs';
 import {Registrations} from './registration.mjs';import {staticFile,sendStatic} from './web-assets.mjs';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
@@ -464,6 +464,27 @@ test('skill placements run one after another on a machine and at once on differe
   f.skills.flag('beta',false);f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','changed')}));await place(two,'/w','claude');
   assert.deepEqual(on('m2')[1].skills,sent('alpha'));assert.notEqual(on('m2')[1].skills[0].digest,first.skills[0].digest);
   f.skills.flag('alpha',false);await place(two,'/w','claude');assert.deepEqual(on('m2')[2].skills,[]);
+ }finally{f.close();}
+});
+
+test('an agent reads skills through the client of its machine: the index, a search, and a skill with the text of its SKILL.md, whose other files the client of the machine puts into its store first, after the placements queued there; nothing else, and nothing on a machine that Bridge does not use',async()=>{
+ const calls=[],fake=async(m,method,params)=>{calls.push([m.id,method,params]);await later(10);return '/home/u/.local/share/herdr-bridge/skills/'+(params.skill?.name??'');};
+ const f=skillsFixture(fake),m={id:'m',name:'cpu2',enabled:true};
+ try{
+  skillSource(f.skills);f.skills.put('gamma',encoded({'SKILL.md':skillText('gamma','g','读我\n')}));
+  assert.deepEqual(await f.skills.answer(m,'list',{}),{skills:f.skills.list()});assert.deepEqual(await f.skills.answer(m,'search',{query:'GAMMA'}),{skills:[f.skills.entry('gamma')]});
+  assert.deepEqual(await f.skills.answer(m,'read',{name:'gamma'}),{name:'gamma',description:'g',everywhere:false,text:skillText('gamma','g','读我\n'),files:[]});assert.deepEqual(calls,[]);
+  // A skill with other files waits for the placement queued before on the machine, which shares the store.
+  const placed=f.skills.place(m,'~/w','claude'),read=await f.skills.answer(m,'read',{name:'alpha'});await placed;
+  assert.deepEqual(read,{name:'alpha',description:'a',everywhere:true,text:skillText('alpha','a',"secret-marker ' \" $(id) `id`\n"),files:['ref/notes.md'],path:'/home/u/.local/share/herdr-bridge/skills/alpha'});
+  const {digest,files}=f.skills.read('alpha');assert.deepEqual(calls.map(c=>c[1]),['placeSkills','stockSkill']);
+  assert.deepEqual(calls[1][2],{store:'~/.local/share/herdr-bridge/skills',skill:{name:'alpha',digest,files}});
+  // Writes and anything else are refused, as are a body that is no object, a skill that does not exist and a machine that Bridge does not use.
+  for(const op of ['import','save','put','everywhere','flag','remove','write','export','constructor'])await assert.rejects(f.skills.answer(m,op,{name:'alpha',files:{}}),new RegExp('^Error: 未知的操作：'+op+'$'),op);
+  for(const body of [null,[],'x'])await assert.rejects(f.skills.answer(m,'list',body),/^Error: 请求内容无效$/,JSON.stringify(body));
+  await assert.rejects(f.skills.answer(m,'read',{name:'none'}),/^Error: skill 不存在：none$/);await assert.rejects(f.skills.answer(m,'search',{}),/^Error: 缺少要搜索的词$/);
+  await assert.rejects(f.skills.answer({...m,enabled:false},'list',{}),/^Error: Bridge 已断开机器 cpu2 的桥接$/);
+  assert.equal(calls.length,2);assert.deepEqual(f.store.data.skills.map(x=>x.name),['alpha','beta','gamma']);
  }finally{f.close();}
 });
 
@@ -2582,7 +2603,7 @@ async function fakeClient(answer){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-agent-')),socket=path.join(dir,'client.sock'),requests=[];
  const server=http.createServer(async(req,res)=>{
   let s='';for await(const c of req)s+=c;const body=JSON.parse(s);requests.push([req.method,req.url,req.headers['content-type'],body]);
-  const [code,data]=await answer(req.url.replace('/schedules/',''),body);res.writeHead(code,{'content-type':'application/json'});res.end(JSON.stringify(data));
+  const [code,data]=await answer(req.url.replace(/^\/(schedules|skills)\//,''),body);res.writeHead(code,{'content-type':'application/json'});res.end(JSON.stringify(data));
  });
  await new Promise(r=>server.listen(socket,r));
  return {dir,socket,requests,close:()=>new Promise(r=>server.close(()=>{fs.rmSync(dir,{recursive:true});r();}))};
@@ -2591,6 +2612,12 @@ async function fakeClient(answer){
 async function schedule(client,args,{env={}}={}){
  let out='',err='';
  const code=await runCommand(args,{env:{BRIDGE_CLIENT_SOCKET:client.socket,HERDR_PANE_ID:'w1:p1',...env},stdout:{write:s=>{out+=s;}},stderr:{write:s=>{err+=s;}},timeZone:'Asia/Shanghai'});
+ return {code,out,err};
+}
+// Runs bridge-skill with args in env (the socket that of client) and resolves to {code, out, err}.
+async function skill(client,args,{env={}}={}){
+ let out='',err='';
+ const code=await runSkill(args,{env:{BRIDGE_CLIENT_SOCKET:client.socket,...env},stdout:{write:s=>{out+=s;}},stderr:{write:s=>{err+=s;}}});
  return {code,out,err};
 }
 const sid=n=>`${n}0000000-0000-4000-8000-00000000000${n}`.slice(0,36);
@@ -2668,6 +2695,54 @@ test('bridge-schedule --help is complete on its own, since the skill that tells 
   for(const option of ['--cron','--tz','--mode','--task','--json','--pane','--session','--help','HERDR_PANE_ID','HERDR_SESSION'])assert.ok(out.includes(option),option);
   for(const fact of ['5 个字段','IANA','0 和 7 都是星期日','@daily','退出码','确认卡片','30 分钟','开头几位','连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','不属于任何进行中的飞书话题'])assert.ok(out.includes(fact),fact);
  }finally{await client.close();}
+});
+test('bridge-skill reads its operation and the arguments that each takes, the words of a search, and --json for the reads; anything else is a usage error',()=>{
+ assert.deepEqual(parseSkill(['list','--json']),{op:'list',args:[],json:true});assert.deepEqual(parseSkill(['search','部署','CI']),{op:'search',args:['部署','CI'],json:false});
+ assert.deepEqual(parseSkill(['read','alpha']),{op:'read',args:['alpha'],json:false});assert.deepEqual(parseSkill(['import','./alpha']),{op:'import',args:['./alpha'],json:false});
+ assert.deepEqual(parseSkill(['export','alpha']),{op:'export',args:['alpha'],json:false});assert.deepEqual(parseSkill(['export','alpha','/tmp/x']),{op:'export',args:['alpha','/tmp/x'],json:false});
+ assert.deepEqual(parseSkill(['everywhere','alpha','off']),{op:'everywhere',args:['alpha','off'],json:false});assert.deepEqual(parseSkill(['remove','alpha']),{op:'remove',args:['alpha'],json:false});
+ assert.deepEqual(parseSkill(['-h']),{args:[],json:false,help:true});
+ for(const [args,error] of [[[],/^缺少操作$/],[['make'],/^未知的操作：make$/],[['list','x'],/^多余的参数：x$/],[['search'],/^缺少要搜索的词$/],[['read'],/^缺少 skill 的名称$/],[['read','a','b'],/^多余的参数：b$/],
+  [['import'],/^缺少 skill 的目录$/],[['export','a','b','c'],/^多余的参数：c$/],[['everywhere','a'],/^everywhere 要写 on 或 off$/],[['everywhere','a','yes'],/^everywhere 要写 on 或 off$/],[['remove'],/^缺少 skill 的名称$/],
+  [['remove','a','--json'],/^--json 只用于 list、search 和 read$/],[['list','--all'],/^未知的参数：--all$/]])
+  assert.throws(()=>parseSkill(args),e=>e.usage===true&&error.test(e.message),args.join(' '));
+});
+test('bridge-skill lists, searches and reads skills through the Bridge client of its machine and prints them for the agent to read, or the answer itself with --json; a skill with other files comes with the directory of this machine that holds them',async()=>{
+ const index=[{name:'bridge-schedule',description:'定时任务\n第二行',everywhere:true,digest:'a'.repeat(64)},{name:'deploy-notes',description:'部署前后要检查的事项。',everywhere:false,digest:'b'.repeat(64)}];
+ const text='---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI。\n',kept='/home/u/.local/share/herdr-bridge/skills/deploy-notes';
+ const answers={list:{skills:index},search:{skills:[index[1]]},read:{name:'deploy-notes',description:'部署前后要检查的事项。',everywhere:false,text,files:['references/a.md','scripts/check.sh'],path:kept}};
+ const client=await fakeClient(op=>[200,answers[op]]);try{
+  assert.deepEqual(await skill(client,['list']),{code:0,out:'平台上有 2 个 skill：\nbridge-schedule · 所有项目都带\n  定时任务 第二行\ndeploy-notes\n  部署前后要检查的事项。\n',err:''});
+  assert.deepEqual(await skill(client,['search','部署','CI']),{code:0,out:'匹配「部署 CI」的 skill 有 1 个：\ndeploy-notes\n  部署前后要检查的事项。\n',err:''});
+  assert.deepEqual(await skill(client,['read','deploy-notes']),{code:0,out:`deploy-notes 带有其他文件，在这台机器的 ${kept} 里：\n  references/a.md\n  scripts/check.sh\nSKILL.md 里提到的相对路径都相对这个目录。\n\n${text}`,err:''});
+  for(const [op,...args] of [['list'],['search','x'],['read','x']])assert.deepEqual(await skill(client,[op,...args,'--json']),{code:0,out:JSON.stringify(answers[op],null,2)+'\n',err:''},op);
+  assert.deepEqual(client.requests.slice(0,3),[['POST','/skills/list','application/json',{}],['POST','/skills/search','application/json',{query:'部署 CI'}],['POST','/skills/read','application/json',{name:'deploy-notes'}]]);
+ }finally{await client.close();}
+ // No skill at all, none that matches, and a skill of SKILL.md alone, which is all there is to read.
+ const empty=await fakeClient(op=>[200,op==='read'?{name:'a',description:'d',everywhere:false,text:'---\nname: a\n---',files:[]}:{skills:[]}]);try{
+  assert.deepEqual(await skill(empty,['list']),{code:0,out:'平台上还没有 skill。\n',err:''});assert.deepEqual(await skill(empty,['search','x']),{code:0,out:'没有匹配「x」的 skill。\n',err:''});
+  assert.deepEqual(await skill(empty,['read','a']),{code:0,out:'---\nname: a\n---\n',err:''});
+ }finally{await empty.close();}
+});
+test('bridge-skill prints what was refused and exits 1, a usage error with the usage and exits 2, names the Bridge client of its machine when it cannot reach it, and does not manage skills without the address and the access key of the console',async()=>{
+ const client=await fakeClient(()=>[400,{error:'skill 不存在：x'}]);try{
+  assert.deepEqual(await skill(client,['read','x']),{code:1,out:'',err:'bridge-skill: skill 不存在：x\n'});
+  for(const args of [[],['make'],['read']]){const r=await skill(client,args);assert.equal(r.code,2,args.join(' '));assert.match(r.err,/用法：\n  bridge-skill list/);}
+  const help=await skill(client,['--help']);assert.equal(help.code,0);assert.equal(help.out,skillUsage);
+  const gone={socket:path.join(client.dir,'none.sock')};
+  assert.deepEqual(await skill(gone,['list']),{code:1,out:'',err:`bridge-skill: 连不上本机的 Bridge 客户端（${gone.socket}）：客户端没有运行，或者没有打开这个 socket\n`});
+  const needed='bridge-skill: 管理 skill 要设置 BRIDGE_URL（管理台的地址，例如 http://<控制面>:8080）和 BRIDGE_ACCESS_KEY（管理台的访问密钥）\n';
+  for(const [args,env] of [[['import','.'],{}],[['export','x'],{BRIDGE_URL:'http://127.0.0.1:9'}],[['everywhere','x','on'],{BRIDGE_ACCESS_KEY:'k'}],[['remove','x'],{}]])assert.deepEqual(await skill(client,args,{env}),{code:1,out:'',err:needed},args.join(' '));
+  const closed=`http://127.0.0.1:${await freePort()}`;
+  assert.deepEqual(await skill(client,['remove','x'],{env:{BRIDGE_URL:closed,BRIDGE_ACCESS_KEY:'k'}}),{code:1,out:'',err:`bridge-skill: 连不上控制面 ${closed}：ECONNREFUSED\n`});
+  assert.deepEqual(client.requests.map(r=>r[1]),['/skills/read']);
+ }finally{await client.close();}
+});
+test('bridge-skill --help is complete on its own, since the entry skill that tells agents about the platform leaves the details to it: every operation with what it does and what it takes, where the files of a skill go, what the management commands need, the exit codes and what to do on each error that the agent has to handle',async()=>{
+ const {code,out,err}=await skill({socket:'/nonexistent'},['--help']);assert.deepEqual([code,err],[0,'']);assert.equal(out,skillUsage);
+ for(const op of ['list','search','read','import','export','everywhere','remove']){assert.ok(out.includes('  bridge-skill '+op),op);assert.match(out,new RegExp(`^  ${op} +\\S`,'m'),op);}
+ for(const fact of ['--json','-h, --help','BRIDGE_URL','BRIDGE_ACCESS_KEY','access-key','所有项目都带','~/.local/share/herdr-bridge/skills/<名称>','相对路径','frontmatter','软链接','退出码',
+  '连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','skill 不存在'])assert.ok(out.includes(fact),fact);
 });
 const minutes=n=>n*60000;
 function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}={}){
@@ -3015,6 +3090,45 @@ test('the server keeps skills for the console and the access key alone: the stat
   assert.deepEqual(await api('skills/read?name=alpha'),{status:400,body:{error:'skill 不存在：alpha'}});
  }finally{await server.stop();fs.rmSync(dir,{recursive:true});}
 });
+test('bridge-skill with a real Bridge and the real client of a machine: the access key imports a skill directory, marks it for every topic, exports it as it was imported and removes it; agents on the machine list, search and read it through the client, which puts its other files into the store of the machine; the socket of the client takes no write whatever it sends, and the management commands need the right key',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-cli-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ fs.mkdirSync(home);const server=await bridgeServer(state,port,{BRIDGE_URL:''});let client;
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),admin={BRIDGE_URL:origin+'/',BRIDGE_ACCESS_KEY:key};
+  const api=async(p,body)=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
+  const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});
+  client=bridgeClient(configFile(dir,'client.json',config),{HOME:home,BRIDGE_CLIENT_SOCKET:socket});
+  await until(async()=>fs.existsSync(socket)&&(await api('state')).machines[0].client.state==='online','the client is online');
+  const cli=(env,...args)=>spawned(process.execPath,[path.join(bridgeDir,'bin','bridge-skill.mjs'),...args],clientEnv({BRIDGE_CLIENT_SOCKET:socket,...env}));
+  // A skill directory with a file in a subdirectory.
+  const src=path.join(dir,'src','deploy-notes'),text=skillText('deploy-notes','部署前后要检查的事项。','先运行 scripts/check.sh。\n');
+  fs.mkdirSync(path.join(src,'scripts'),{recursive:true});fs.writeFileSync(path.join(src,'SKILL.md'),text);fs.writeFileSync(path.join(src,'scripts','check.sh'),'echo ok\n');
+  assert.deepEqual(await cli(admin,'import',src),{status:0,stdout:'已导入 skill deploy-notes，共 2 个文件。\n',stderr:''});
+  assert.deepEqual(await cli(admin,'everywhere','deploy-notes','on'),{status:0,stdout:'deploy-notes 已设为所有项目都带：之后新开的话题，Bridge 都会把它放进 Agent 的工作目录。\n',stderr:''});
+  // An agent of the machine reads it through the client, without the key.
+  const listed='deploy-notes · 所有项目都带\n  部署前后要检查的事项。\n';
+  assert.deepEqual(await cli({},'list'),{status:0,stdout:'平台上有 1 个 skill：\n'+listed,stderr:''});assert.deepEqual(await cli({},'search','CHECK.SH'),{status:0,stdout:'匹配「CHECK.SH」的 skill 有 1 个：\n'+listed,stderr:''});
+  const kept=path.join(home,'.local/share/herdr-bridge/skills/deploy-notes');
+  assert.deepEqual(await cli({},'read','deploy-notes'),{status:0,stdout:`deploy-notes 带有其他文件，在这台机器的 ${kept} 里：\n  scripts/check.sh\nSKILL.md 里提到的相对路径都相对这个目录。\n\n${text}`,stderr:''});
+  assert.equal(fs.readFileSync(path.join(kept,'scripts','check.sh'),'utf8'),'echo ok\n');
+  // The socket of the client takes reads only: the control plane answers no write that comes that way, whatever it carries.
+  const raw=(p,body)=>new Promise((resolve,reject)=>{const req=http.request({socketPath:socket,method:'POST',path:p,agent:false},res=>{let b='';res.on('data',d=>{b+=d;});res.on('end',()=>resolve([res.statusCode,JSON.parse(b)]));});req.on('error',reject);req.end(JSON.stringify(body));});
+  for(const op of ['import','save','everywhere','remove'])assert.deepEqual(await raw('/skills/'+op,{name:'deploy-notes',files:{},text:'x',everywhere:false,key}),[400,{error:'未知的操作：'+op}],op);
+  assert.deepEqual((await api('state')).skills.map(s=>[s.name,s.everywhere]),[['deploy-notes',true]]);
+  // Export writes the skill as it was imported, into a directory of its name, and refuses a place that exists.
+  const out=path.join(dir,'out');fs.mkdirSync(out);
+  assert.deepEqual(await cli(admin,'export','deploy-notes',out),{status:0,stdout:`已导出到 ${path.join(out,'deploy-notes')}。\n`,stderr:''});assert.deepEqual(tree(path.join(out,'deploy-notes')),tree(src));
+  assert.deepEqual(await cli(admin,'export','deploy-notes',out),{status:1,stdout:'',stderr:`bridge-skill: ${path.join(out,'deploy-notes')} 已经存在\n`});
+  // A wrong key, a directory with a link, a path that is no directory, and a skill that the platform refuses.
+  assert.deepEqual(await cli({...admin,BRIDGE_ACCESS_KEY:'wrong'},'remove','deploy-notes'),{status:1,stdout:'',stderr:'bridge-skill: 请先登录\n'});
+  fs.symlinkSync(path.join(src,'SKILL.md'),path.join(src,'scripts','link'));assert.deepEqual(await cli(admin,'import',src),{status:1,stdout:'',stderr:'bridge-skill: 只能导入普通文件和目录：scripts/link\n'});fs.rmSync(path.join(src,'scripts','link'));
+  assert.deepEqual(await cli(admin,'import',path.join(dir,'none')),{status:1,stdout:'',stderr:`bridge-skill: 不是目录：${path.join(dir,'none')}\n`});
+  const bad=path.join(dir,'src','Bad');fs.mkdirSync(bad);fs.writeFileSync(path.join(bad,'SKILL.md'),skillText('Bad','x'));assert.match((await cli(admin,'import',bad)).stderr,/^bridge-skill: skill 名称无效：Bad，/);
+  assert.deepEqual(await cli(admin,'everywhere','deploy-notes','off'),{status:0,stdout:'deploy-notes 已取消所有项目都带：之后新开话题时，Bridge 会把它从 Agent 的工作目录里移走。\n',stderr:''});
+  assert.deepEqual(await cli(admin,'remove','deploy-notes'),{status:0,stdout:'已删除 skill deploy-notes。\n',stderr:''});
+  assert.deepEqual(await cli({},'read','deploy-notes'),{status:1,stdout:'',stderr:'bridge-skill: skill 不存在：deploy-notes\n'});
+ }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
+});
 
 // The client of a machine and its connection to the control plane (link.mjs, clients.mjs, client.mjs).
 const bridgeDir=path.dirname(fileURLToPath(import.meta.url));
@@ -3157,7 +3271,7 @@ test('the client does not start without a config file it can use or with Node\'s
   ]){const [status,stderr]=run(env);assert.equal(status,1,stderr);assert.ok(stderr.startsWith('bridge-client: ')&&stderr.includes(error),stderr);}
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the client and bridge-schedule run on Node alone: bin/bridge-client.mjs, bin/bridge-schedule.mjs and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
+test('the client, bridge-schedule and bridge-skill run on Node alone: bin/bridge-client.mjs, bin/bridge-schedule.mjs, bin/bridge-skill.mjs and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
  const imports=bin=>{
   const seen=new Set(),visit=file=>{if(seen.has(file))return;seen.add(file);
    for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
@@ -3165,6 +3279,7 @@ test('the client and bridge-schedule run on Node alone: bin/bridge-client.mjs, b
  };
  assert.deepEqual(imports('bridge-client.mjs'),['bin/bridge-client.mjs','client.mjs','link.mjs','machine.mjs']);
  assert.deepEqual(imports('bridge-schedule.mjs'),['bin/bridge-schedule.mjs','client.mjs','cron.mjs','link.mjs','machine.mjs','request-cards.mjs','schedule-command.mjs']);
+ assert.deepEqual(imports('bridge-skill.mjs'),['bin/bridge-skill.mjs','client.mjs','link.mjs','machine.mjs','skill-command.mjs']);
 });
 // Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
 async function stopClients(f,started){
@@ -3173,7 +3288,7 @@ async function stopClients(f,started){
 }
 // What bridge-schedule prints while the client of its machine is not connected to the control plane.
 const notConnected='bridge-schedule: 本机的 Bridge 客户端没有连上控制面：请稍后重试，一直这样时请主人查看这台机器上客户端的日志\n';
-test('the client answers bridge-schedule on its socket, 0600 in a directory 0700 that it creates and in place of a socket left by an earlier client: POST /schedules/<op> with a JSON body goes to the control plane as the request schedules {op, body} with 60 seconds to answer; it answers 200 with the result, 400 with what the control plane refused or when it did not answer in time, 503 while the client is not connected, and 404 for anything else',async()=>{
+test('the client answers bridge-schedule and bridge-skill on its socket, 0600 in a directory 0700 that it creates and in place of a socket left by an earlier client: POST /schedules/<op> and /skills/<op> with a JSON body go to the control plane as the requests schedules and skills {op, body} with 60 seconds to answer; it answers 200 with the result, 400 with what the control plane refused or when it did not answer in time, 503 while the client is not connected, and 404 for anything else',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-')),socket=path.join(dir,'state','herdr-bridge','client.sock'),stale=path.join(dir,'stale.sock'),calls=[];let peer=null,answer;
  const server=await serve(socket,()=>peer);
  const raw=(method,p,body)=>new Promise((resolve,reject)=>{const req=http.request({socketPath:socket,method,path:p,agent:false},res=>{let s='';res.on('data',d=>{s+=d;});res.on('end',()=>resolve([res.statusCode,JSON.parse(s)]));});req.on('error',reject);req.end(body);});
@@ -3186,11 +3301,13 @@ test('the client answers bridge-schedule on its socket, 0600 in a directory 0700
   peer={call:async(...args)=>{calls.push(args);return answer();}};answer=()=>({binding:{id:'b',name:'助手'},topicId:'t',schedules:[]});
   assert.deepEqual(await schedule({socket},['list','--json'],{env:{HERDR_SESSION:'work'}}),{code:0,out:JSON.stringify(answer(),null,2)+'\n',err:''});
   assert.deepEqual(calls,[['schedules',{op:'list',body:{pane:'w1:p1',session:'work'}},{timeoutMs:60000}]]);
+  assert.deepEqual(await raw('POST','/skills/read','{"name":"alpha"}'),[200,answer()]);assert.deepEqual(calls.at(-1),['skills',{op:'read',body:{name:'alpha'}},{timeoutMs:60000}]);
   answer=()=>{throw Object.assign(Error('定时任务不存在'),{code:'x'});};assert.deepEqual(await schedule({socket},['pause','x']),{code:1,out:'',err:'bridge-schedule: 定时任务不存在\n'});
   answer=()=>{throw Object.assign(Error('请求超时：schedules'),{timedOut:true});};assert.deepEqual(await schedule({socket},['list']),{code:1,out:'',err:'bridge-schedule: 控制面 60 秒内没有回答\n'});
-  for(const [method,p] of [['GET','/schedules/list'],['POST','/schedules/'],['POST','/schedules/LIST'],['POST','/run'],['POST','/schedules/list/x']])assert.deepEqual(await raw(method,p,'{}'),[404,{error:'接口不存在'}],method+' '+p);
+  for(const [method,p] of [['GET','/schedules/list'],['POST','/schedules/'],['POST','/schedules/LIST'],['POST','/run'],['POST','/schedules/list/x'],['GET','/skills/list'],['POST','/skills/'],['POST','/skill/list'],['POST','/skills/list/x']])
+   assert.deepEqual(await raw(method,p,'{}'),[404,{error:'接口不存在'}],method+' '+p);
   assert.deepEqual(await raw('POST','/schedules/list','not json'),[400,{error:'请求内容不是 JSON'}]);assert.deepEqual(await raw('POST','/schedules/list','x'.repeat(100001)),[400,{error:'请求内容过大'}]);
-  assert.equal(calls.length,3);
+  assert.equal(calls.length,4);
   // A body that arrives in pieces, one of them ending inside a character, is read as the text it is.
   answer=()=>({});const text=Buffer.from(JSON.stringify({task:'定时任务'}));
   await new Promise((resolve,reject)=>{const req=http.request({socketPath:socket,method:'POST',path:'/schedules/add',agent:false},res=>{res.resume();res.on('end',resolve);});req.on('error',reject);req.write(text.subarray(0,10));setTimeout(()=>req.end(text.subarray(10)),50);});
@@ -3224,7 +3341,7 @@ test('without BRIDGE_CLIENT_SOCKET the client and bridge-schedule find the socke
   first.kill();await first.exited;await until(()=>f.clients.status('m').state==='offline','the first client is gone');
   const long=path.join(dir,'s'.repeat(120),'client.sock'),second=bridgeClient(config,{BRIDGE_CLIENT_SOCKET:long});started.push(second);
   await until(()=>f.clients.status('m').state==='online','the second client is online');
-  assert.ok(second.log.includes(`bridge-client: 没能打开 bridge-schedule 用的 socket ${long}：`),second.log);
+  assert.ok(second.log.includes(`bridge-client: 没能打开 bridge-schedule 和 bridge-skill 用的 socket ${long}：`),second.log);
  }finally{await stopClients(f,started);fs.rmSync(dir,{recursive:true});}
 });
 test('a machine\'s client gets in with the token that the console generates and the state keeps only as a hash; the console shows it online with its host, refused with the reason of a version mismatch, or offline; a newer client of the machine replaces the older, which exits; a new token drops the client of the old one, which is refused from then on; the client reconnects after the control plane restarts, and removing the machine drops it',async()=>{
@@ -3353,7 +3470,7 @@ test('the client does only what its fixed set of methods names, none of which ru
    ['storeFile',{root:'~/w/.herdr-bridge',dir:'..',name:'a',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a/b',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a',body:1}],
    ['placeSkills',{...skills,as:'move'}],['placeSkills',{...skills,dir:'/abs'}],['placeSkills',{...skills,skills:{a:skill}}],['placeSkills',{...skills,skills:[{...skill,name:'../a'}]}],['placeSkills',{...skills,skills:[{...skill,name:'a/b'}]}],
    ['placeSkills',{...skills,skills:[{...skill,digest:''}]}],['placeSkills',{...skills,skills:[{...skill,files:null}]}],['placeSkills',{...skills,skills:[{...skill,files:{'../x':''}}]}],['placeSkills',{...skills,skills:[{...skill,files:{'/x':''}}]}],
-   ['placeSkills',{...skills,skills:[{...skill,files:{x:1}}]}]])
+   ['placeSkills',{...skills,skills:[{...skill,files:{x:1}}]}],['stockSkill',{store:'~/s'}],['stockSkill',{store:'relative',skill}],['stockSkill',{store:'~/s',skill:{...skill,name:'a/b'}}],['stockSkill',{store:'~/s',skill:{...skill,files:{'../x':''}}}]])
    await assert.rejects(f.call(f.m,method,params),e=>e.code==='invalid_params',method+' '+JSON.stringify(params));
  }finally{await f.close();}
 });
@@ -3383,6 +3500,17 @@ test('placing skills through the client links Claude\'s and Codex\'s skills to t
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skills-'))),home=path.join(dir,'home');fs.mkdirSync(home);
  const f=await machineFixture({env:{HOME:home}});
  try{await placeSkillsBehaves(f.call,f.m,dir);}finally{await f.close();fs.rmSync(dir,{recursive:true});}
+});
+test('the client puts a skill that an agent reads into the store of its machine, with Bridge\'s marker holding its digest, and leaves it as it is while the digest stays',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-stock-'))),home=path.join(dir,'home');fs.mkdirSync(home);
+ const f=await machineFixture({env:{HOME:home}}),kept=path.join(home,'.local/share/herdr-bridge/skills'),store='~/.local/share/herdr-bridge/skills';
+ try{
+  const skill={name:'alpha',digest:'d1',files:encoded({'SKILL.md':'x\n','ref/a.md':'a\n'})};
+  assert.equal(await f.call(f.m,'stockSkill',{store,skill}),path.join(kept,'alpha'));assert.deepEqual(tree(path.join(kept,'alpha')),{'.herdr-bridge-skill':'d1\n','SKILL.md':'x\n','ref/a.md':'a\n'});
+  fs.writeFileSync(path.join(kept,'alpha','extra'),'');await f.call(f.m,'stockSkill',{store,skill});assert.ok(fs.existsSync(path.join(kept,'alpha','extra')));
+  await f.call(f.m,'stockSkill',{store,skill:{...skill,digest:'d2',files:encoded({'SKILL.md':'y\n'})}});
+  assert.deepEqual(tree(path.join(kept,'alpha')),{'.herdr-bridge-skill':'d2\n','SKILL.md':'y\n'});assert.deepEqual(fs.readdirSync(kept),['alpha']);
+ }finally{await f.close();fs.rmSync(dir,{recursive:true});}
 });
 test('the client runs commands with the environment that the user\'s shell sets up as a login shell without a terminal, captured once at its start and without the HERDR_* variables: they find programs on the PATH of the shell\'s startup files, which the client\'s own PATH lacks, whatever those files print; git never prompts and speaks English, claude names a branch in the directory given with the prompt on stdin, and Herdr is ~/.local/bin/herdr unless the config says otherwise; a shell that fails leaves the client its own environment',async()=>{
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-env-'))),home=path.join(dir,'home'),bin=path.join(dir,'bin'),shell=path.join(dir,'shell'),repo=path.join(home,'repo');

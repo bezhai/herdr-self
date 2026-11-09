@@ -123,4 +123,19 @@ export class Skills{
   const skills=()=>this.list().filter(s=>s.everywhere).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
   return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:skills(),...places[kind],cwd}));
  }
+ // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
+ // the entries that match body.query; read, skill body.name with the text of its SKILL.md and the paths of its other files, which the
+ // client of m puts into its store first, after the placements queued there, so that the answer also has their directory there, path. The
+ // socket of that client takes the commands of any agent of m, and what the platform holds goes into every later agent: nothing else is
+ // answered, writes least of all, and nothing on a machine that Bridge does not use.
+ async answer(m,op,body){
+  if(!['list','search','read'].includes(op))throw Error('未知的操作：'+op);
+  if(!body||typeof body!=='object'||Array.isArray(body))throw Error('请求内容无效');
+  if(!m.enabled)throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
+  if(op==='list')return {skills:this.list()};
+  if(op==='search')return {skills:this.search(body.query)};
+  const {name,description,everywhere,digest,files}=this.read(body.name),text=Buffer.from(files['SKILL.md'],'base64').toString('utf8'),others=Object.keys(files).filter(p=>p!=='SKILL.md');
+  const read={name,description,everywhere,text,files:others};if(!others.length)return read;
+  return {...read,path:await enqueue(this.queues,m.id,()=>this.call(m,'stockSkill',{store:machineStore,skill:{name,digest,files}}))};
+ }
 }

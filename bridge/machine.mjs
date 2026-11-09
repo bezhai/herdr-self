@@ -173,5 +173,8 @@ export function methods({herdr,env}){
    }
    return theirs;
   },
+  // Puts skill {name, digest, files}, which an agent of this machine reads through bridge-skill, into the store (see stock) and resolves to
+  // its directory there, where its other files are for the agent to open.
+  stockSkill:({store,skill})=>stock(local(store,'store'),skillsOf([skill])[0]),
  };
 }

@@ -6,9 +6,9 @@ import {link,protocol,closeCodes} from './link.mjs';
 import {methods,loginEnvironment,stripped} from './machine.mjs';
 // The Bridge client of a machine (bin/bridge-client.mjs runs it, one per machine, as a user service). It dials the control plane at
 // the url of its config with the machine's token and stays connected over one WebSocket (see link.mjs and clients.mjs), does on this
-// machine what the control plane asks of it with a fixed set of methods (see machine.mjs), and passes the requests of bridge-schedule on
-// this machine on to the control plane (see serve). It uses only Node's built-in modules, Node's own WebSocket among them, so a copy of the
-// Bridge directory without node_modules runs it. It logs to stderr.
+// machine what the control plane asks of it with a fixed set of methods (see machine.mjs), and passes the requests of bridge-schedule and
+// bridge-skill on this machine on to the control plane (see serve). It uses only Node's built-in modules, Node's own WebSocket among them,
+// so a copy of the Bridge directory without node_modules runs it. It logs to stderr.
 
 // The config file: BRIDGE_CLIENT_CONFIG, else herdr-bridge/client.json in the user's config directory.
 export const configPath=(env=process.env)=>env.BRIDGE_CLIENT_CONFIG||path.join(env.XDG_CONFIG_HOME||path.join(os.homedir(),'.config'),'herdr-bridge','client.json');
@@ -26,33 +26,52 @@ export function readConfig(file){
  const herdr=c.herdr??'~/.local/bin/herdr';if(typeof herdr!=='string'||!/^(~\/|\/)/.test(herdr))throw Error(`配置文件 ${file} 的 herdr 必须是 Herdr 程序的绝对路径或 ~/ 开头的路径`);
  return {url:url.href,token:c.token,herdr};
 }
-// The Unix socket on which the client takes the requests of bridge-schedule: BRIDGE_CLIENT_SOCKET, else herdr-bridge/client.sock in
-// ~/.local/state. Both find it from the home directory alone, not from XDG_RUNTIME_DIR or XDG_STATE_HOME: the user service of the client and
-// the panes of Herdr where agents run bridge-schedule may have different values of them, or only one of them may have one.
+// The Unix socket on which the client takes the requests of bridge-schedule and bridge-skill: BRIDGE_CLIENT_SOCKET, else
+// herdr-bridge/client.sock in ~/.local/state. They all find it from the home directory alone, not from XDG_RUNTIME_DIR or XDG_STATE_HOME:
+// the user service of the client and the panes of Herdr where agents run the commands may have different values of them, or only one of
+// them may have one.
 export const clientSocket=(env=process.env)=>env.BRIDGE_CLIENT_SOCKET||path.join(os.homedir(),'.local','state','herdr-bridge','client.sock');
-// How long the client waits for the control plane to answer a request of bridge-schedule; bridge-schedule waits a little longer for the client.
+// How long the client waits for the control plane to answer a request of a command; the command waits a little longer for the client.
 export const forwardMs=60000;
 const notConnected='本机的 Bridge 客户端没有连上控制面：请稍后重试，一直这样时请主人查看这台机器上客户端的日志';
-// Takes the requests of bridge-schedule on socket, which only this user may open, in a directory that it creates 0700: POST /schedules/<op>
-// with a JSON body. While the client is connected (peer() returns the link of its connection, else null), each goes to the control plane
-// as the request schedules {op, body}, which the control plane answers for the machine of that connection (see Clients); the client does not
-// look into it. Answers 200 with the result, 400 with what the control plane refused or when it did not answer within forwardMs, 503 while
-// the client is not connected. A socket already at that path is one that an earlier client left (see run). Resolves to the server once it
-// listens.
+// Takes the requests of bridge-schedule and bridge-skill on socket, which only this user may open, in a directory that it creates 0700:
+// POST /schedules/<op> and /skills/<op> with a JSON body. While the client is connected (peer() returns the link of its connection, else
+// null), each goes to the control plane as the request schedules or skills {op, body}, which the control plane answers for the machine of
+// that connection (see Clients); the client does not look into it, so what it may ask is up to the control plane, which answers only reads
+// of skills that come this way. Answers 200 with the result, 400 with what the control plane refused or when it did not answer within
+// forwardMs, 503 while the client is not connected. A socket already at that path is one that an earlier client left (see run). Resolves to
+// the server once it listens.
 export async function serve(socket,peer){
  const answer=(res,code,data)=>{res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
  const server=http.createServer(async(req,res)=>{
-  const op=req.method==='POST'&&/^\/schedules\/([a-z]+)$/.exec(new URL(req.url,'http://localhost').pathname)?.[1];if(!op)return answer(res,404,{error:'接口不存在'});
+  const [,method,op]=req.method==='POST'&&/^\/(schedules|skills)\/([a-z]+)$/.exec(new URL(req.url,'http://localhost').pathname)||[];if(!op)return answer(res,404,{error:'接口不存在'});
   let s='',body;req.setEncoding('utf8');for await(const b of req)if(s.length<=100000)s+=b;
   if(s.length>100000)return answer(res,400,{error:'请求内容过大'});
   try{body=JSON.parse(s||'{}');}catch{return answer(res,400,{error:'请求内容不是 JSON'});}
   const p=peer();if(!p)return answer(res,503,{error:notConnected});
-  try{answer(res,200,await p.call('schedules',{op,body},{timeoutMs:forwardMs}));}
+  try{answer(res,200,await p.call(method,{op,body},{timeoutMs:forwardMs}));}
   catch(e){answer(res,400,{error:e.timedOut?`控制面 ${forwardMs/1000} 秒内没有回答`:String(e.message)});}
  });
  await fs.promises.mkdir(path.dirname(socket),{recursive:true,mode:0o700});await fs.promises.rm(socket,{force:true});
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(socket,resolve);});
  fs.chmodSync(socket,0o600);return server;
+}
+// Sends the request of a command, path with body, to the client on socket (see serve), on a connection of its own, and resolves to Bridge's
+// answer; rejects with what Bridge or the client refused, when no client listens there, or when the agent's sandbox forbids the connection
+// (that of a Codex started without its network, see Topics). The client answers within forwardMs; this waits 5 seconds longer, for a client
+// that does not answer at all.
+export function send(socket,path,body){
+ return new Promise((resolve,reject)=>{
+  const data=JSON.stringify(body);
+  const req=http.request({socketPath:socket,agent:false,path,method:'POST',headers:{'content-type':'application/json','content-length':Buffer.byteLength(data)},timeout:forwardMs+5000},res=>{
+   let s='';res.setEncoding('utf8');res.on('data',d=>{s+=d;});
+   res.on('end',()=>{let r;try{r=JSON.parse(s);}catch{return reject(Error('本机的 Bridge 客户端的回答不是 JSON'));}if(res.statusCode!==200)return reject(Error(r.error||'本机的 Bridge 客户端回答 '+res.statusCode));resolve(r);});
+  });
+  req.on('timeout',()=>req.destroy(Error('本机的 Bridge 客户端没有回答')));
+  req.on('error',e=>reject(['ENOENT','ECONNREFUSED'].includes(e.code)?Error(`连不上本机的 Bridge 客户端（${socket}）：客户端没有运行，或者没有打开这个 socket`)
+   :['EACCES','EPERM'].includes(e.code)?Error(`没有权限连接本机的 Bridge 客户端（${socket}）：如果命令运行在 Agent 的沙箱里，需要在沙箱外运行这条命令`):e));
+  req.end(data);
+ });
 }
 // Connects and stays connected until the process ends. After a connection ends or fails it dials again 1 s later, doubling the wait up
 // to 30 s, and from 1 s again once a hello succeeds. It dials again after a refusal too (a wrong token or another protocol version), so
@@ -94,7 +113,7 @@ export async function main(env=process.env){
  if(proxy){log(`客户端要直接连接控制面，不能经过代理：去掉 ${proxy} 再启动`);process.exitCode=1;return;}
  let config;try{config=readConfig(configPath(env));}catch(e){log(e.message);process.exitCode=1;return;}
  let shellEnv;try{shellEnv=await loginEnvironment(env);}catch(e){log(`没能取得登录 shell 的环境，命令按客户端自己的环境运行：${e.message}`);shellEnv=stripped(env);}
- // Without its socket the client runs on, and only bridge-schedule fails on this machine.
+ // Without its socket the client runs on, and only bridge-schedule and bridge-skill fail on this machine.
  const socket=clientSocket(env),peer=run(config,log,{ping:()=>({}),...methods({herdr:config.herdr,env:shellEnv})});
- serve(socket,peer).catch(e=>log(`没能打开 bridge-schedule 用的 socket ${socket}：${e.message}`));
+ serve(socket,peer).catch(e=>log(`没能打开 bridge-schedule 和 bridge-skill 用的 socket ${socket}：${e.message}`));
 }
