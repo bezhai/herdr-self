@@ -6,14 +6,14 @@ import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
-import {PendingChats,consoleUrl} from './pending-chats.ts';
+import {ChatBindings} from './chat-bindings.ts';
 import {registerCommands,commands} from './commands.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules,isMode} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
 import {Registrations} from './registration.ts';import {staticFile,sendStatic} from './web-assets.ts';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
 import crypto from 'node:crypto';import {WebSocketServer} from 'ws';import type {WebSocket as WsSocket} from 'ws';import type {AddressInfo} from 'node:net';
-import {link,protocol,closeCodes} from './link.ts';import type {Api,ControlApi,Peer} from './link.ts';import {Clients} from './clients.ts';import {configText,serve} from './client.ts';
+import {link,protocol,closeCodes} from './link.ts';import type {Api,ControlApi,Peer} from './link.ts';import {Clients} from './clients.ts';import {configText,serve,consoleUrl} from './client.ts';
 import type {App,Binding,Machine,Topic,Kind,State,Schedule,Skill,Log,AgentConfig,Project} from './state.ts';import type {ConsoleMachine,ConsoleTopic} from './console-state.ts';import type {ClientStatus} from './clients.ts';import type {Agent,Herdr,Snapshot,Operations,Call} from './core.ts';import type {Message} from './topics.ts';import type {ScheduleOps} from './agent-schedules.ts';
 import type {Ran,HerdrArg,ClientApi} from './link.ts';import type {Reply} from './message-cards.ts';import type {HerdrRequest,Click} from './request-cards.ts';import type {RequestCard} from './state.ts';import type {ToolCall} from './cot.ts';
 import type {NormalizedMessage,ResourceDescriptor,LarkChannel,LarkChannelOptions,CardActionEvent} from '@larksuite/channel';
@@ -3170,32 +3170,6 @@ test('bridge-skill --help is complete on its own, since the entry skill that tel
  assert.doesNotMatch(out,/项目|everywhere/);
 });
 const minutes=(n:number)=>n*60000;
-function pendingFixture(){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-pending-')),store=new Store(dir),replies:unknown[][]=[],clock={now:1000};
- const pending=new PendingChats(store,{reply:loose<DepsOf<typeof PendingChats>['reply']>(async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content]);}),now:()=>clock.now});
- return {dir,store,replies,clock,pending,close(){fs.rmSync(dir,{recursive:true});}};
-}
-const firstDm:NormalizedMessage={...inbound,chatType:'p2p',messageId:'om_first',content:'first private prompt'};
-test('an unbound chat gets one reply in the thread of its message that says it has no binding, and its message is not kept',async()=>{
- const f=pendingFixture();try{
-  await f.pending.open(allowed,firstDm);
-  assert.deepEqual(f.replies,[['a','oc_1','om_first',{card:untitledOf('这个聊天还没有绑定 Bridge。',[plainText('这个聊天还没有绑定 Bridge。')])}]]);
-  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.message]),[['会话绑定','bot：私聊 oc_1 尚未绑定']]);assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('first private prompt'));
-  await f.pending.open(allowed,{...firstDm,chatId:'oc_group',chatType:'group',messageId:'om_group'});assert.deepEqual(f.replies.map(r=>[r[1],r[2]]),[['oc_1','om_first'],['oc_group','om_group']]);
- }finally{f.close();}
-});
-test('a chat that was told gets no second reply within half an hour and is told again after it',async()=>{
- const f=pendingFixture();try{
-  await f.pending.open(allowed,firstDm);f.clock.now+=minutes(29);await f.pending.open(allowed,{...firstDm,messageId:'om_second'});assert.equal(f.replies.length,1);
-  f.clock.now+=minutes(1);await f.pending.open(allowed,{...firstDm,messageId:'om_third'});assert.deepEqual(f.replies.map(r=>r[2]),['om_first','om_third']);
- }finally{f.close();}
-});
-test('a reply that fails is logged and the chat is not told again for it',async()=>{
- const f=pendingFixture();try{
-  f.pending.reply=async()=>{throw Error('飞书未连接');};await f.pending.open(allowed,firstDm);
-  assert.equal(f.store.data.logs.at(-1)!.level,'error');assert.match(f.store.data.logs.at(-1)!.message,/飞书未连接/);
- }finally{f.close();}
-});
 test('BRIDGE_URL must be an http(s) origin; a trailing slash is dropped',()=>{
  for(const [v,origin] of [['http://bridge.example:8080/','http://bridge.example:8080'],['https://bridge.example','https://bridge.example'],['',''],[undefined,'']])assert.equal(consoleUrl(v),origin);
  for(const v of ['http://bridge.example/admin','http://bridge.example/?x=1','http://bridge.example/#a','ftp://bridge.example','bridge.example:8080','http://user:pw@bridge.example','not a url'])assert.throws(()=>consoleUrl(v),/BRIDGE_URL/,v);
@@ -4143,4 +4117,160 @@ test('the name of a chat comes from Feishu through the connected channel; withou
   await f.platforms.start(f.a);f.asked.length=0;
   assert.equal(await f.platforms.chatName(f.a,'oc_g1'),'Genvi 项目群');assert.equal(await f.platforms.chatName(f.a,'oc_empty'),undefined);assert.deepEqual(f.asked,['oc_g1','oc_empty']);
  }finally{f.close();}
+});
+
+// The binding card: a chat without a binding gets it where it wrote, and the click on its 绑定 button creates the binding and starts the message.
+const settle=()=>new Promise(r=>setImmediate(r));
+const bindText='这个聊天还没有绑定 Bridge。';
+const bindProjects:Project[]=[{id:'p1',name:'genvi',description:'GEO 业务的内容生成',repos:[],skills:[],workMode:'isolated'},{id:'p2',name:'promoter',description:'推广投放平台',repos:[],skills:[],workMode:'isolated'}];
+const bindConfigs:AgentConfig[]=[{id:'c1',name:'cpu1 · Claude',machineId:'m1',kind:'claude',permissionMode:'default'},{id:'c2',name:'cpu2 · Claude',machineId:'m2',kind:'claude',permissionMode:'default'}];
+const bindApp={id:'a',name:'bot',enabled:true,allowedUsers:['ou_user']} as App;
+const groupMessage={...inbound,chatId:'oc_group',chatType:'group',messageId:'om_task',mentionedBot:true,content:'帮我看看登录页的验证码'} as NormalizedMessage;
+const directMessage={...inbound,chatId:'oc_dm',chatType:'p2p',messageId:'om_dm',content:'整理一下今天的待办'} as NormalizedMessage;
+// The card as Bridge draws it: no title; one dropdown per default, the chosen option of each marked by its value, and the button.
+const dropdown=(name:string,placeholder:string,options:[string,string][],initial?:string)=>({tag:'select_static',name,width:'fill',placeholder:{tag:'plain_text',content:placeholder},options:options.map(([text,value])=>({text:{tag:'plain_text',content:text},value})),...initial!=null&&{initial_option:initial}});
+const projectDropdown=(initial?:string)=>dropdown('project','项目',[['genvi','p1'],['promoter','p2']],initial),configDropdown=(initial?:string)=>dropdown('config','Agent 配置',[['cpu1 · Claude','c1'],['cpu2 · Claude','c2']],initial);
+const bindCardOf=(render:number,...dropdowns:object[])=>untitledOf(bindText,[plainText(bindText),{tag:'form',name:'bind',elements:[...dropdowns,{tag:'button',text:{tag:'plain_text',content:'绑定'},type:'primary',form_action_type:'submit',name:'submit',behaviors:[{type:'callback',value:{bind:true,render}}]}]}]);
+type BindOptions={names?:Record<string,string|Error|undefined>,answer?:(prompt:string)=>Ran|Promise<Ran>,machines?:Partial<Machine>[]};
+function bindFixture({names={oc_group:'Genvi 项目群'},answer=()=>({code:0,stdout:'promoter\n',stderr:''}),machines=[{id:'m2',name:'cpu2',enabled:true}]}:BindOptions={}){
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-bind-')),store=new Store(dir),clock={now:1000};
+ const replies:[string,string,unknown][]=[],updates:[string,unknown][]=[],handled:[App,Binding,NormalizedMessage][]=[],asked:{machine:string,cwd:string,prompt:string,timeoutMs?:number}[]=[],events:string[]=[];
+ const fail={reply:false,update:false};
+ store.data.machines=machines.map(m=>({session:'default',...m}) as Machine);store.data.projects=structuredClone(bindProjects);store.data.agentConfigs=structuredClone(bindConfigs);store.data.lastAgentConfigId='c2';
+ const chats=new ChatBindings(store,{
+  reply:loose<DepsOf<typeof ChatBindings>['reply']>(async(a,chatId,rootId,content)=>{if(fail.reply)throw Error('飞书未连接');replies.push([chatId,rootId,content]);return 'om_card'+replies.length;}),
+  updateCard:loose<DepsOf<typeof ChatBindings>['updateCard']>(async(a,messageId,card)=>{if(fail.update)throw Error('卡片已过期');events.push('update');updates.push([messageId,card]);}),
+  chatName:loose<DepsOf<typeof ChatBindings>['chatName']>(async(a,chatId)=>{const n=names[chatId];if(n instanceof Error)throw n;return n;}),
+  askCheapModel:loose<DepsOf<typeof ChatBindings>['askCheapModel']>(async(m,cwd,prompt,options)=>{asked.push({machine:m.id,cwd,prompt,timeoutMs:options?.timeoutMs});return answer(prompt);}),
+  handle:(a,b,msg)=>{events.push('handle');handled.push([a,b,msg]);},now:()=>clock.now});
+ const click=(messageId:string,form?:Record<string,unknown>,openId='ou_user'):Clicked=>({messageId,operator:{openId},action:{value:{bind:true,render:1},...form&&{formValue:form}}}) as Clicked;
+ return {dir,store,chats,replies,updates,handled,asked,events,fail,clock,click,close(){fs.rmSync(dir,{recursive:true});}};
+}
+test('a message in a group without a binding gets the binding card in its thread: no title, the project guessed by the cheap model from the group name and the projects, and the agent configuration of the latest binding; the model runs on the machine of that configuration, once',async()=>{
+ const f=bindFixture();try{
+  await f.chats.open(bindApp,groupMessage);
+  assert.deepEqual(f.replies,[['oc_group','om_task',{card:bindCardOf(1,projectDropdown('p2'),configDropdown('c2'))}]]);
+  assert.equal(f.asked.length,1);const [ask]=f.asked;assert.deepEqual([ask.machine,ask.cwd,typeof ask.timeoutMs],['m2','~/','number']);
+  assert.ok(ask.prompt.includes('Genvi 项目群'));assert.ok(ask.prompt.includes('genvi: GEO 业务的内容生成')&&ask.prompt.includes('promoter: 推广投放平台'));assert.ok(!ask.prompt.includes('帮我看看登录页'));
+  assert.deepEqual(f.store.data.bindings,[]);assert.deepEqual(f.handled,[]);assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('登录页'));
+  // The card is for the chat once: later messages while it waits get none, and the model is not asked again.
+  await f.chats.open(bindApp,{...groupMessage,messageId:'om_2'});assert.equal(f.replies.length,1);assert.equal(f.asked.length,1);
+ }finally{f.close();}
+});
+test('a direct chat gets a card without the project dropdown, named 私聊, and no model is asked',async()=>{
+ const f=bindFixture();try{
+  await f.chats.open(bindApp,directMessage);
+  assert.deepEqual(f.replies,[['oc_dm','om_dm',{card:bindCardOf(1,configDropdown('c2'))}]]);assert.deepEqual(f.asked,[]);
+ }finally{f.close();}
+});
+test('the project is a guess that can be wrong or missing: the model names no project, names one that does not exist, fails, is offline, or the group name is unknown, and the card is sent with no project chosen; with one project there is nothing to guess',async()=>{
+ const unchosen=bindCardOf(1,projectDropdown(),configDropdown('c2'));
+ for(const [what,options] of [['none',{answer:()=>({code:0,stdout:'NONE\n',stderr:''})}],['unknown',{answer:()=>({code:0,stdout:'other\n',stderr:''})}],['sentence',{answer:()=>({code:0,stdout:'I think genvi fits.\n',stderr:''})}],
+  ['exit code',{answer:()=>({code:1,stdout:'genvi',stderr:'boom'})}],['offline',{answer:()=>{throw Object.assign(Error('机器 cpu2 离线'),{code:'client_offline'});}}],['disabled machine',{machines:[{id:'m2',name:'cpu2',enabled:false}]}],
+  ['no name',{names:{oc_group:undefined}}],['name unreadable',{names:{oc_group:Error('无权限')}}]] satisfies [string,BindOptions][]){
+  const f=bindFixture(options);try{
+   await f.chats.open(bindApp,groupMessage);assert.deepEqual(f.replies.map(r=>r[2]),[{card:unchosen}],what);
+   if(what==='name unreadable')assert.deepEqual(f.store.data.logs.map(l=>l.level),['info','error']);
+  }finally{f.close();}
+ }
+ const f=bindFixture();try{
+  f.store.data.projects=[bindProjects[1]];await f.chats.open(bindApp,groupMessage);assert.deepEqual(f.asked,[]);
+  assert.deepEqual(f.replies.map(r=>r[2]),[{card:bindCardOf(1,dropdown('project','项目',[['promoter','p2']],'p2'),configDropdown('c2'))}]);
+ }finally{f.close();}
+});
+test('the model answers with the name of a project, also in quotes or backticks and with a final period or whitespace around it; it is asked with the group name and each project as name: description',async()=>{
+ for(const answer of ['genvi','  genvi\n','"genvi"','`genvi`','genvi.','genvi\nBecause it matches.']){
+  const f=bindFixture({answer:()=>({code:0,stdout:answer,stderr:''})});try{
+   await f.chats.open(bindApp,groupMessage);assert.deepEqual(f.replies.map(r=>r[2]),[{card:bindCardOf(1,projectDropdown('p1'),configDropdown('c2'))}],answer);
+  }finally{f.close();}
+ }
+});
+test('the agent configuration offered is the one of the latest binding, else the first; a chat that cannot be bound yet is told what is missing instead of getting a card',async()=>{
+ const f=bindFixture();try{
+  delete f.store.data.lastAgentConfigId;await f.chats.open(bindApp,directMessage);assert.deepEqual(f.replies.map(r=>r[2]),[{card:bindCardOf(1,configDropdown('c1'))}]);
+  f.store.data.lastAgentConfigId='gone';await f.chats.open(bindApp,{...directMessage,chatId:'oc_dm2',messageId:'om_dm2'});assert.deepEqual(f.replies.map(r=>r[2]).at(-1),{card:bindCardOf(2,configDropdown('c1'))});
+  f.store.data.projects=[];await f.chats.open(bindApp,groupMessage);assert.deepEqual(f.replies.at(-1),['oc_group','om_task',notice('请先在 Bridge 管理台创建「项目」，再绑定这个聊天。')]);
+  f.store.data.agentConfigs=[];await f.chats.open(bindApp,{...directMessage,chatId:'oc_dm3',messageId:'om_dm3'});assert.deepEqual(f.replies.at(-1)![2],notice('请先在 Bridge 管理台创建「Agent 配置」，再绑定这个聊天。'));
+  await f.chats.open(bindApp,{...groupMessage,chatId:'oc_group2'});assert.deepEqual(f.replies.at(-1)![2],notice('请先在 Bridge 管理台创建「项目」和「Agent 配置」，再绑定这个聊天。'));
+ }finally{f.close();}
+});
+test('a chat gets one card within half an hour, also while the first is being drawn, and one again after it; a card that cannot be sent is logged and the chat waits as if it had been',async()=>{
+ const f=bindFixture();try{
+  const first=f.chats.open(bindApp,groupMessage),second=f.chats.open(bindApp,{...groupMessage,messageId:'om_2'});await Promise.all([first,second]);assert.equal(f.replies.length,1);
+  f.clock.now+=minutes(29);await f.chats.open(bindApp,{...groupMessage,messageId:'om_3'});assert.equal(f.replies.length,1);
+  f.clock.now+=minutes(1);await f.chats.open(bindApp,{...groupMessage,messageId:'om_4'});assert.deepEqual(f.replies.map(r=>r[1]),['om_task','om_4']);
+  f.fail.reply=true;await f.chats.open(bindApp,directMessage);assert.equal(f.store.data.logs.at(-1)!.level,'error');assert.match(f.store.data.logs.at(-1)!.message,/飞书未连接/);
+  f.fail.reply=false;await f.chats.open(bindApp,{...directMessage,messageId:'om_dm2'});assert.equal(f.replies.length,2);
+ }finally{f.close();}
+});
+test('clicking 绑定 creates the binding of the chat with the chosen project and configuration, named after the group, and the card turns into 已绑定 before the message that asked for the binding starts as the first task through the entry of a bound chat',async()=>{
+ const f=bindFixture();try{
+  await f.chats.open(bindApp,groupMessage);
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_card1',{project:'p1',config:'c1'})),{});await settle();
+  const [b]=f.store.data.bindings;assert.deepEqual({...b,id:undefined},{id:undefined,name:'Genvi 项目群',appId:'a',chatId:'oc_group',chatType:'group',requireMention:true,enabled:true,defaultProjectId:'p1',defaultAgentConfigId:'c1'});
+  assert.equal(f.store.data.lastAgentConfigId,'c1');assert.deepEqual(new Store(f.dir).data.bindings,f.store.data.bindings);
+  assert.deepEqual(f.updates,[['om_card1',notice('已绑定：项目 genvi，Agent 配置 cpu1 · Claude。').card]]);assert.deepEqual(f.events,['update','handle']);
+  assert.deepEqual(f.handled,[[bindApp,b,groupMessage]]);assert.equal(f.replies.length,1);
+  // A second click on the same card changes nothing and says what happened.
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_card1',{project:'p2',config:'c2'})),{toast:{type:'info',content:'已绑定：项目 genvi，Agent 配置 cpu1 · Claude。'}});await settle();
+  assert.equal(f.store.data.bindings.length,1);assert.equal(f.handled.length,1);
+  // The next message of the chat is a bound chat's, so it never comes back here.
+  assert.ok(f.store.data.logs.some(l=>l.kind==='会话绑定'&&l.message==='Genvi 项目群 → genvi · cpu1 · Claude'));
+ }finally{f.close();}
+});
+test('a direct chat is bound without a project, to the chosen configuration, and its binding needs no mention; the card says only the configuration',async()=>{
+ const f=bindFixture();try{
+  await f.chats.open(bindApp,directMessage);
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_card1',{config:'c2',project:'p1'})),{});await settle();
+  const [b]=f.store.data.bindings;assert.deepEqual({...b,id:undefined},{id:undefined,name:'私聊',appId:'a',chatId:'oc_dm',chatType:'p2p',requireMention:false,enabled:true,defaultAgentConfigId:'c2'});
+  assert.deepEqual(f.updates,[['om_card1',notice('已绑定：Agent 配置 cpu2 · Claude。').card]]);assert.deepEqual(f.handled,[[bindApp,b,directMessage]]);
+ }finally{f.close();}
+});
+test('a click that chose no project or no configuration, or one that no longer exists, binds nothing: a toast says what to choose and the card is drawn again with the choices kept, so that the next click is not dropped as a repeat',async()=>{
+ const f=bindFixture();try{
+  await f.chats.open(bindApp,groupMessage);
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_card1',{config:'c1'})),{toast:{type:'warning',content:'请选择项目'}});await settle();
+  assert.deepEqual(f.updates.at(-1),['om_card1',bindCardOf(2,projectDropdown(),configDropdown('c1'))]);
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_card1',{project:'p1'})),{toast:{type:'warning',content:'请选择 Agent 配置'}});await settle();
+  assert.deepEqual(f.updates.at(-1),['om_card1',bindCardOf(3,projectDropdown('p1'),configDropdown())]);
+  f.store.data.projects=f.store.data.projects.filter(p=>p.id!=='p1');
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_card1',{project:'p1',config:'c2'})),{toast:{type:'warning',content:'请选择项目'}});await settle();
+  assert.deepEqual([f.store.data.bindings,f.handled],[[],[]]);
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_card1')),{toast:{type:'warning',content:'请选择项目'}});
+ }finally{f.close();}
+});
+test('a click on a card that Bridge does not hold, that belongs to another app, or that is older than half an hour gets a toast to write again and binds nothing; so does a click on a chat that has a binding meanwhile',async()=>{
+ const f=bindFixture();try{
+  await f.chats.open(bindApp,groupMessage);const stale={toast:{type:'info',content:'这张卡片已失效，请重新发一条消息'}},form={project:'p1',config:'c1'};
+  assert.deepEqual(f.chats.click(bindApp,f.click('om_other',form)),stale);assert.deepEqual(f.chats.click({...bindApp,id:'b'},f.click('om_card1',form)),stale);
+  f.clock.now+=minutes(30);assert.deepEqual(f.chats.click(bindApp,f.click('om_card1',form)),stale);
+  assert.deepEqual([f.store.data.bindings,f.handled],[[],[]]);
+ }finally{f.close();}
+ const g=bindFixture();try{
+  await g.chats.open(bindApp,groupMessage);g.store.data.bindings.push({...route,id:'taken',appId:'a',chatId:'oc_group'});
+  const r=g.chats.click(bindApp,g.click('om_card1',{project:'p1',config:'c1'}));assert.deepEqual(r,{toast:{type:'error',content:'该聊天已有绑定，请先移除旧绑定'}});await settle();
+  assert.equal(g.store.data.bindings.length,1);assert.deepEqual([g.handled,g.updates],[[],[]]);
+ }finally{g.close();}
+});
+test('when the card cannot be turned into 已绑定 the same words go into the thread of the message, and when neither works they are logged; the first task starts anyway',async()=>{
+ const f=bindFixture();try{
+  await f.chats.open(bindApp,groupMessage);f.fail.update=true;f.chats.click(bindApp,f.click('om_card1',{project:'p1',config:'c1'}));await settle();
+  assert.deepEqual(f.replies.at(-1),['oc_group','om_task',notice('已绑定：项目 genvi，Agent 配置 cpu1 · Claude。')]);assert.equal(f.handled.length,1);
+ }finally{f.close();}
+ const g=bindFixture();try{
+  await g.chats.open(bindApp,groupMessage);g.fail.update=true;g.fail.reply=true;g.chats.click(bindApp,g.click('om_card1',{project:'p1',config:'c1'}));await settle();
+  assert.equal(g.handled.length,1);assert.deepEqual(g.store.data.logs.filter(l=>l.level==='error').length,1);assert.match(g.store.data.logs.at(-1)!.message,/卡片已过期|飞书未连接/);
+ }finally{g.close();}
+});
+test('only people on the allowlist get a binding card and can use it: the platform drops a message of anyone else in an unbound chat and answers a click of anyone else with a refusal, and nothing is bound',async()=>{
+ const f=bindFixture(),handlers:Handlers={};
+ const p=platformFixture({channelFactory:()=>fakeChannel({on:(name:string,fn:Handlers[string])=>{handlers[name]=fn;},onRawEvent(){}}),onUnbound:(a,msg)=>f.chats.open(a,msg),onCardAction:(a,evt)=>f.chats.click(a,evt)});
+ try{
+  const a:App={...bindApp,appId:'cli_test',appSecret:'private',domain:'feishu'};p.platforms.channel(a);
+  p.platforms.receive(a,{...groupMessage,senderId:'ou_stranger'});await settle();assert.deepEqual(f.replies,[]);
+  p.platforms.receive(a,groupMessage);await settle();assert.equal(f.replies.length,1);
+  const refused={toast:{type:'error',content:'你不在这个应用的允许名单中，不能处理这个请求'}};
+  assert.deepEqual(handlers.cardAction(f.click('om_card1',{project:'p1',config:'c1'},'ou_stranger')),refused);await settle();assert.deepEqual([f.store.data.bindings,f.handled],[[],[]]);
+  assert.deepEqual(handlers.cardAction(f.click('om_card1',{project:'p1',config:'c1'},'ou_user')),{});await settle();assert.equal(f.store.data.bindings.length,1);assert.equal(f.handled.length,1);
+ }finally{f.close();p.close();}
 });

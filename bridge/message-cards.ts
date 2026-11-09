@@ -1,11 +1,11 @@
 import {plain,clip} from './request-cards.ts';
-// Feishu cards (JSON 2.0) without a header for everything else that Bridge posts into a thread (see Topics and PendingChats): the replies
+// Feishu cards (JSON 2.0) without a header for everything else that Bridge posts into a thread (see Topics and ChatBindings): the replies
 // of an agent as markdown, and notices as plain text, so that text from Herdr, the agent or an error is never read as markdown.
 // Feishu shows the summary of a card in the chat list and in notifications instead of a card placeholder: here the beginning of the text
 // with its whitespace collapsed. The chat list shows one line of it and a notification a few lines, which 100 code points fill; a short
 // summary also takes little of the room of a reply card (see replyCards).
 const summaryLength=100;
-const untitled=(text:string,elements:object[],config?:object)=>({schema:'2.0',config:{...config,summary:{content:clip(text.replace(/\s+/g,' ').trim(),summaryLength)}},body:{elements}});
+export const untitled=(text:string,elements:object[],config?:object)=>({schema:'2.0',config:{...config,summary:{content:clip(text.replace(/\s+/g,' ').trim(),summaryLength)}},body:{elements}});
 // Notices are a line or a few: they keep the default width.
 export const notice=(text:string)=>untitled(text,[plain(text)]);
 // Feishu refuses a card message whose request body exceeds 30 KB. The body carries the card serialized as the string value of its content

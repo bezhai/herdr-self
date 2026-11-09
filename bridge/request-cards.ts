@@ -10,8 +10,8 @@ export type HerdrRequest={id:number,tool_name:string,description?:string,input_p
 // What a submitted form holds, by the names of its elements (see SDK's CardActionEvent).
 export type Form=NonNullable<CardActionEvent['action']['formValue']>;
 // The callback values of the buttons of Bridge's cards: of a request card here, of the picker (see adoption.ts), of the dropdowns of the first
-// card of a topic (see topic-cards.ts) and of a card that confirms a schedule (see schedule-cards.ts).
-export type ButtonValue={request?:number,check?:string,render?:number,decision?:Decision,questions?:number,adopt?:boolean,restart?:'project'|'agentConfig',schedule?:'confirm'|'cancel',proposal?:string};
+// card of a topic (see topic-cards.ts), of a card that confirms a schedule (see schedule-cards.ts) and of the card that binds a chat (see chat-bindings.ts).
+export type ButtonValue={bind?:true,request?:number,check?:string,render?:number,decision?:Decision,questions?:number,adopt?:boolean,restart?:'project'|'agentConfig',schedule?:'confirm'|'cancel',proposal?:string};
 // A click on a card of Bridge from someone on the app's allowlist (see Platforms.cardAction): the message of the card, who clicked, the
 // value of the button or dropdown, which Feishu returns as Bridge drew it, what its form held, and the option a dropdown chose.
 export type Click={messageId:string,operator:{openId:string},action:{value?:ButtonValue,formValue?:Form,option?:string}};

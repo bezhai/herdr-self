@@ -15,6 +15,13 @@ import type {SkillReads} from './skills.ts';
 
 // The config file: BRIDGE_CLIENT_CONFIG, else herdr-bridge/client.json in the user's config directory.
 export const configPath=(env=process.env)=>env.BRIDGE_CLIENT_CONFIG||path.join(env.XDG_CONFIG_HOME||path.join(os.homedir(),'.config'),'herdr-bridge','client.json');
+// BRIDGE_URL: the console's public origin, http(s) without path, query or fragment; a trailing / is dropped. Unset means none. It is the
+// origin that configText gives a client when the browser reached the console by another address.
+export function consoleUrl(value:string|undefined){
+ if(!value)return '';let u;try{u=new URL(value);}catch{}
+ if(!u||!['http:','https:'].includes(u.protocol)||u.username||u.password||u.pathname!=='/'||u.search||u.hash)throw Error('BRIDGE_URL 应为 http(s) 地址，不带路径、查询参数和 #，例如 http://host:8080');
+ return u.origin;
+}
 // The config file for a token, which the console shows once: the client endpoint of the control plane at origin, http(s)://host[:port].
 export const configText=(origin:string,token:string)=>JSON.stringify({url:origin.replace(/^http/,'ws')+'/api/client',token},null,2)+'\n';
 // The url, the token and the Herdr of the config file: herdr, the path of the Herdr program on this machine, absolute or with ~/ for the
