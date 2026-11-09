@@ -104,10 +104,10 @@ export function publicText(s:unknown){return String(s||'').replace(/((?:api[_-]?
 export const stateDir=(env=process.env)=>env.BRIDGE_STATE||path.join(path.dirname(fileURLToPath(import.meta.url)),'state');
 // Persisted collections. Keys of older state files outside this list are dropped on load; a collection they lack loads empty. The file
 // is Bridge's own: what it holds is taken for the collections as Bridge wrote them.
-const collections:(keyof State)[]=['machines','apps','bindings','topics','schedules','skills','logs'];
+const collections=['machines','apps','projects','agentConfigs','bindings','topics','schedules','skills','logs'] as const satisfies (keyof State)[];
 export class Store{
  declare dir:string;declare file:string;declare data:State;
- constructor(dir:string){this.dir=dir;fs.mkdirSync(dir,{recursive:true,mode:0o700});this.file=path.join(dir,'state.json');const saved=fs.existsSync(this.file)?JSON.parse(fs.readFileSync(this.file,'utf8')):{};this.data=Object.fromEntries(collections.map(k=>[k,saved[k]||[]])) as State;}
+ constructor(dir:string){this.dir=dir;fs.mkdirSync(dir,{recursive:true,mode:0o700});this.file=path.join(dir,'state.json');const saved=fs.existsSync(this.file)?JSON.parse(fs.readFileSync(this.file,'utf8')):{};this.data=Object.fromEntries(collections.map(k=>[k,saved[k]||[]])) as unknown as State;if(typeof saved.lastAgentConfigId==='string')this.data.lastAgentConfigId=saved.lastAgentConfigId;}
  save(){fs.writeFileSync(this.file+'.tmp',JSON.stringify(this.data),{mode:0o600});fs.renameSync(this.file+'.tmp',this.file);}
  log(kind:string,message:string,level:Log['level']='info'){this.data.logs.push({at:Date.now(),kind,message:publicText(message),level});this.data.logs=this.data.logs.slice(-200);this.save();}
 }

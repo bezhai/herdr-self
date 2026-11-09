@@ -5,6 +5,7 @@ import {normalizeMachine,migrateMachines,operations,Store} from './core.ts';
 import {Skills,frontmatter,skillLimit} from './skills.ts';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
+import {normalizeAgentConfig,configName} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName} from './projects.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
@@ -12,7 +13,7 @@ import {Registrations} from './registration.ts';import {staticFile,sendStatic} f
 import {normalize} from '@larksuite/channel';
 import crypto from 'node:crypto';import {WebSocketServer} from 'ws';import type {WebSocket as WsSocket} from 'ws';import type {AddressInfo} from 'node:net';
 import {link,protocol,closeCodes} from './link.ts';import type {Api,ControlApi,Peer} from './link.ts';import {Clients} from './clients.ts';import {configText,serve} from './client.ts';
-import type {App,Binding,Machine,Topic,Kind,State,Schedule,Skill,Log} from './state.ts';import type {ConsoleMachine,ConsoleTopic} from './console-state.ts';import type {ClientStatus} from './clients.ts';import type {Agent,Herdr,Snapshot,Operations,Call} from './core.ts';import type {Message} from './topics.ts';import type {ScheduleOps} from './agent-schedules.ts';
+import type {App,Binding,Machine,Topic,Kind,State,Schedule,Skill,Log,AgentConfig,Project} from './state.ts';import type {ConsoleMachine,ConsoleTopic} from './console-state.ts';import type {ClientStatus} from './clients.ts';import type {Agent,Herdr,Snapshot,Operations,Call} from './core.ts';import type {Message} from './topics.ts';import type {ScheduleOps} from './agent-schedules.ts';
 import type {Ran,HerdrArg,ClientApi} from './link.ts';import type {Reply} from './message-cards.ts';import type {HerdrRequest,Click} from './request-cards.ts';import type {RequestCard} from './state.ts';import type {ToolCall} from './cot.ts';
 import type {NormalizedMessage,ResourceDescriptor,LarkChannel,LarkChannelOptions,CardActionEvent} from '@larksuite/channel';
 // The assertions of node:assert/strict without narrowing what they check: a test checks the same value again after it changed.
@@ -112,6 +113,73 @@ test('machines of a state file from before the clients lose their type, address,
   // Machines without the old fields are left alone, without a save.
   migrateMachines(store);migrateMachines(new Store(dir));assert.equal(saves,1);assert.equal(new Store(dir).data.logs.length,1);
  }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('the store keeps projects and agent configurations beside the other collections, and the configuration of the latest binding; a state file from before has none of them',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-'));
+ try{
+  fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify({machines:[{id:'m'}],bindings:[]}));
+  const old=new Store(dir);assert.deepEqual([old.data.projects,old.data.agentConfigs,old.data.lastAgentConfigId],[[],[],undefined]);
+  old.data.projects.push({id:'p',name:'genvi',description:'',repos:[],skills:[],workMode:'isolated'});old.data.agentConfigs.push({id:'c',name:'cpu1 · Claude',machineId:'m',kind:'claude',permissionMode:'default'});
+  old.data.lastAgentConfigId='c';old.save();
+  const saved=new Store(dir);assert.deepEqual([saved.data.projects.map(p=>p.id),saved.data.agentConfigs.map(c=>c.id),saved.data.lastAgentConfigId],[['p'],['c'],'c']);
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+const configData=(configs:AgentConfig[]=[])=>({machines:[{id:'m',name:'cpu1'},{id:'n',name:'cpu2'}] as Machine[],agentConfigs:configs});
+test('an agent configuration is a kind of agent with a model on a machine, and for Claude a permission mode and the commands it may run; its name is machine, kind and model unless given',()=>{
+ const {id,...c}=normalizeAgentConfig({machineId:'m',kind:'claude',model:' Seed ',permissionMode:'auto',allowedCommands:['butler','git-lfs']},configData());
+ assert.match(id,/^[0-9a-f-]{36}$/);assert.deepEqual(c,{name:'cpu1 · Claude · Seed',machineId:'m',kind:'claude',model:'Seed',permissionMode:'auto',allowedCommands:['butler','git-lfs']});
+ // A Claude configuration has a mode, default without one; no model and no commands are no fields.
+ const {id:plainId,...plain}=normalizeAgentConfig({machineId:'n',kind:'claude',model:'',allowedCommands:[]},configData());assert.deepEqual(plain,{name:'cpu2 · Claude',machineId:'n',kind:'claude',permissionMode:'default'});
+ for(const permissionMode of ['acceptEdits','plan','bypassPermissions','AUTO',1])assert.throws(()=>normalizeAgentConfig({machineId:'m',kind:'claude',permissionMode},configData()),/^Error: 权限模式无效$/,String(permissionMode));
+ // Codex and Antigravity have neither: a mode that comes with them is dropped, commands are refused.
+ for(const [kind,label] of [['codex','Codex'],['agy','Antigravity']] as const){
+  const {id:otherId,...other}=normalizeAgentConfig({machineId:'m',kind,model:'gpt-5',permissionMode:'auto'},configData());assert.deepEqual(other,{name:`cpu1 · ${label} · gpt-5`,machineId:'m',kind,model:'gpt-5'});
+  assert.throws(()=>normalizeAgentConfig({machineId:'m',kind,allowedCommands:['butler']},configData()),/^Error: 只有 Claude 可以限制可执行的命令$/);
+ }
+ for(const kind of ['bash','antigravity','Agy','',undefined])assert.throws(()=>normalizeAgentConfig({machineId:'m',kind},configData()),/^Error: Agent 类型无效$/,String(kind));
+ for(const machineId of ['gone','',undefined])assert.throws(()=>normalizeAgentConfig({machineId,kind:'claude'},configData()),/^Error: 机器连接不存在$/);
+ for(const model of ['a b','x;y','$(id)','-m','a'.repeat(101),5])assert.throws(()=>normalizeAgentConfig({machineId:'m',kind:'claude',model},configData()),/^Error: 模型名称无效$/,String(model));
+ for(const allowedCommands of ['butler',['butler bash'],[''],['../x'],['a;b'],[1],Array(21).fill('a')])assert.throws(()=>normalizeAgentConfig({machineId:'m',kind:'claude',allowedCommands},configData()),/^Error: 可执行的命令无效$/,String(allowedCommands));
+ assert.equal(normalizeAgentConfig({machineId:'m',kind:'claude',allowedCommands:['butler','butler']},configData()).allowedCommands?.length,1);
+ assert.equal(configName({name:'cpu1'},'claude','Seed'),'cpu1 · Claude · Seed');assert.equal(configName({name:'cpu1'},'agy'),'cpu1 · Antigravity');
+});
+test('the name of an agent configuration is unique; a configuration keeps its id and may keep its own name when it changes',()=>{
+ const first=normalizeAgentConfig({name:'日常',machineId:'m',kind:'claude'},configData());
+ assert.throws(()=>normalizeAgentConfig({name:'日常',machineId:'n',kind:'codex'},configData([first])),/^Error: 已有同名的 Agent 配置$/);
+ assert.throws(()=>normalizeAgentConfig({machineId:'m',kind:'claude'},configData([{...first,name:'cpu1 · Claude'}])),/^Error: 已有同名的 Agent 配置$/);
+ const changed=normalizeAgentConfig({name:'日常',machineId:'n',kind:'codex'},configData([first]),first);assert.deepEqual([changed.id,changed.name,changed.machineId],[first.id,'日常','n']);
+ assert.equal('permissionMode' in changed,false);
+});
+const projectData=(projects:Project[]=[])=>({projects,skills:[{name:'butler'},{name:'deploy'}] as Skill[]});
+test('a project has a name, a description, repositories, skills of the platform and a work mode, isolated unless given; its repositories are remote URLs of one form of git, without duplicates',()=>{
+ const repos=['git@code.byted.org:growth/genvi.git','https://github.com/bezhai/herdr-self','ssh://git@host.example:2222/team/app.git','git://host.example/team/lib.git'];
+ const {id,...p}=normalizeProject({name:' genvi ',description:' GenVI 的代码 ',repos:[...repos,'https://code.byted.org/growth/genvi'],skills:['butler','butler','deploy'],workMode:'shared'},projectData());
+ assert.match(id,/^[0-9a-f-]{36}$/);assert.deepEqual(p,{name:'genvi',description:'GenVI 的代码',repos,skills:['butler','deploy'],workMode:'shared'});
+ const {id:bareId,...bare}=normalizeProject({name:'管家'},projectData());assert.deepEqual(bare,{name:'管家',description:'',repos:[],skills:[],workMode:'isolated'});
+ for(const name of ['',' ',undefined,'a'.repeat(61)])assert.throws(()=>normalizeProject({name},projectData()),/字段为空或过长/);
+ assert.throws(()=>normalizeProject({name:'a',description:'x'.repeat(501)},projectData()),/^Error: 描述过长$/);assert.throws(()=>normalizeProject({name:'a',description:5},projectData()),/^Error: 描述过长$/);
+ for(const workMode of ['both','ISOLATED','',null,['shared'],5])assert.throws(()=>normalizeProject({name:'a',workMode},projectData()),/^Error: 话题目录无效$/,String(workMode));
+ for(const repo of ['','-oProxyCommand=x','ext::sh -c id','/srv/repo','~/repo','file:///srv/repo','http://','git@host','a b','https://host/a b','https://host/a\nb',5,null])
+  assert.throws(()=>normalizeProject({name:'a',repos:[repo]},projectData()),/^Error: 仓库地址无效$/,String(repo));
+ for(const repos of ['https://host/a',{}])assert.throws(()=>normalizeProject({name:'a',repos},projectData()),/^Error: 仓库地址无效$/);
+ assert.throws(()=>normalizeProject({name:'a',repos:Array.from({length:21},(_,i)=>`https://host/r${i}`)},projectData()),/^Error: 仓库地址无效$/);
+ assert.throws(()=>normalizeProject({name:'a',skills:['butler','missing']},projectData()),/^Error: skill 不存在：missing$/);assert.throws(()=>normalizeProject({name:'a',skills:'butler'},projectData()),/^Error: skill 不存在：/);
+});
+test('the name of a project is unique; a project keeps its id, its work mode and its adopted directory unless the change contradicts it: repositories or isolated topics release the adopted directory',()=>{
+ const adopted={machineId:'m',dir:'~/code/projects'},first:Project={id:'p1',name:'projects',description:'',repos:[],skills:[],workMode:'shared',adopted};
+ assert.throws(()=>normalizeProject({name:'projects'},projectData([first])),/^Error: 已有同名的项目$/);
+ assert.deepEqual(normalizeProject({name:'projects',description:'一组仓库'},projectData([first]),first),{...first,description:'一组仓库'});
+ assert.deepEqual(normalizeProject({name:'projects',workMode:'shared'},projectData([first]),first),first);
+ const repo=normalizeProject({name:'projects',repos:['git@host.example:team/a.git']},projectData([first]),first);assert.deepEqual([repo.id,repo.workMode,repo.repos,'adopted' in repo],['p1','shared',['git@host.example:team/a.git'],false]);
+ assert.equal('adopted' in normalizeProject({name:'projects',workMode:'isolated'},projectData([first]),first),false);
+ assert.equal(normalizeProject({name:'projects',description:'x'},projectData([first]),first).adopted,adopted);
+});
+test('repositories are the same when their URLs name the same host and path whatever the form, and are named after the last part of the path',()=>{
+ const same=['git@github.com:bezhai/herdr-self.git','https://github.com/bezhai/herdr-self','ssh://git@GitHub.com/bezhai/herdr-self.git/','http://user@github.com:8080/bezhai/herdr-self.git'];
+ for(const url of same)assert.equal(repoKey(url),repoKey(same[0]),url);
+ for(const url of ['git@github.com:bezhai/herdr.git','git@github.com:other/herdr-self.git','git@gitlab.com:bezhai/herdr-self.git'])assert.notEqual(repoKey(url),repoKey(same[0]),url);
+ for(const url of same)assert.equal(repoName(url),'herdr-self',url);assert.equal(repoName('git@code.byted.org:growth/genvi.git'),'genvi');
+ assert.equal(uniqueName('genvi',[]),'genvi');assert.equal(uniqueName('genvi',['genvi']),'genvi 2');assert.equal(uniqueName('genvi',['genvi','genvi 2','other']),'genvi 3');
 });
 test('a binding routes the pending chat of an app to a working directory and agent kind on a machine; app and chat never come from the client',()=>{
  const chat={token:'t',appId:'a',chatId:'oc_1',chatType:'group' as const},input={name:'助手',appId:'forged',chatId:'oc_forged',machineId:'m',cwd:'~/code/x',kind:'codex',requireMention:false};
@@ -215,10 +283,10 @@ test('a chat without a binding asks for one on any direct message and on any gro
   assert.deepEqual(f.unbound.map(([,msg])=>msg.messageId),['om_1-empty','om_1-image','om_1-sticker','om_2-empty','om_2-image','om_2-sticker']);assert.deepEqual(f.messages,[]);
  }finally{f.close();}
 });
-test('a state file with legacy message queues loads only machines, apps, bindings, topics, schedules, skills and logs; one from before schedules and skills loads none',()=>{
+test('a state file with legacy message queues loads only the collections of the state; one from before schedules, skills, projects and agent configurations loads none',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-'));try{
   fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify({machines:[{id:'m'}],apps:[{id:'a'}],bindings:[{id:'b'}],inbox:[{text:'old prompt'}],outbox:[{key:'k'}],logs:[{kind:'x'}]}));
-  const store=new Store(dir);assert.deepEqual(store.data,{machines:[{id:'m'}],apps:[{id:'a'}],bindings:[{id:'b'}],topics:[],schedules:[],skills:[],logs:[{kind:'x'}]});
+  const store=new Store(dir);assert.deepEqual(store.data,{machines:[{id:'m'}],apps:[{id:'a'}],projects:[],agentConfigs:[],bindings:[{id:'b'}],topics:[],schedules:[],skills:[],logs:[{kind:'x'}]});
   store.data.schedules.push({id:'s'} as Schedule);store.data.skills.push({name:'k'} as Skill);store.save();assert.deepEqual(new Store(dir).data.schedules,[{id:'s'}]);assert.deepEqual(new Store(dir).data.skills,[{name:'k'}]);
   store.save();assert.ok(!fs.readFileSync(path.join(dir,'state.json'),'utf8').includes('old prompt'));
  }finally{fs.rmSync(dir,{recursive:true});}
