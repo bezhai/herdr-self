@@ -268,12 +268,12 @@ test('skill form for a new skill asks for its name and its SKILL.md, which start
   const user = userEvent.setup();
   render(<SkillDialog onClose={vi.fn()} onSaved={onSaved} />);
   expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(2);
-  expect(screen.getByLabelText('名称').value).toBe('');
+  expect(screen.getByLabelText('skill 名称').value).toBe('');
   expect(screen.getByLabelText('SKILL.md').value).toBe('---\nname: \ndescription: \n---\n');
   expect(document.querySelector('.skill-files')).toBeNull();
 
   const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n\n先看 CI。\n';
-  await user.type(screen.getByLabelText('名称'), 'deploy-notes');
+  await user.type(screen.getByLabelText('skill 名称'), 'deploy-notes');
   await replaceText(user, screen.getByLabelText('SKILL.md'), text);
   const submit = screen.getByRole('button', { name: '保存' });
   await user.click(submit);
@@ -293,7 +293,7 @@ test('skill form for an existing skill edits its SKILL.md alone: the title names
   const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI。\n';
   const skill = { ...sampleState().skills[1], files: { 'SKILL.md': base64(text), 'references/checklist.md': base64('- CI\n'), 'scripts/check.sh': base64('echo\n') } };
   render(<SkillDialog skill={skill} onClose={vi.fn()} onSaved={onSaved} />);
-  expect(screen.queryByLabelText('名称')).toBeNull();
+  expect(screen.queryByLabelText('skill 名称')).toBeNull();
   expect(screen.getByLabelText('SKILL.md').value).toBe(text);
   const files = screen.getByRole('group', { name: '其他文件' });
   expect([...files.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['references/checklist.md', 'scripts/check.sh']);

@@ -18,7 +18,7 @@ export function SkillDialog({ skill, onClose, onSaved }) {
 
   return (
     <FormDialog title={skill ? `编辑 ${skill.name}` : '新建 skill'} submitLabel="保存" className="skill-dialog" onSubmit={save} onClose={onClose}>
-      {!skill && <label>名称<input className="mono" required placeholder="例如：deploy-notes" {...field('name')} /></label>}
+      {!skill && <label>skill 名称<input className="mono" required placeholder="例如：deploy-notes" {...field('name')} /></label>}
       <label>SKILL.md<textarea className="mono" required rows="18" spellCheck="false" {...field('text')} /></label>
       {others.length > 0 && (
         <fieldset>

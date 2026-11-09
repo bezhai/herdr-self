@@ -327,7 +327,7 @@ test('a skill is refused, and nothing changes, without a SKILL.md whose frontmat
  const f=skillsFixture(),ok=skillText('alpha','a');try{
   for(const name of ['Alpha','../x','a b','-a','a-','a--b','a.b','','a'.repeat(65)])assert.throws(()=>f.skills.put(name,encoded({'SKILL.md':skillText(name,'a')})),/^Error: skill 名称无效/,name);
   for(const [files,error] of [[{},/^Error: skill 缺少 SKILL\.md$/],[{'SKILL.md':'# alpha\n'},/^Error: SKILL\.md 开头没有 frontmatter/],[{'SKILL.md':'---\nname: alpha\ndescription: a\n'},/^Error: SKILL\.md 开头没有 frontmatter/],
-   [{'SKILL.md':skillText('beta','a')},/^Error: SKILL\.md 的 frontmatter 里 name 是 beta，必须和目录名 alpha 一致$/],[{'SKILL.md':'---\nname: alpha\n---\n'},/^Error: SKILL\.md 的 frontmatter 缺少 description/],
+   [{'SKILL.md':skillText('beta','a')},/^Error: SKILL\.md 的 frontmatter 里 name 是 beta，必须和 skill 名称 alpha 一致$/],[{'SKILL.md':skillText('','a')},/^Error: SKILL\.md 的 frontmatter 里 name 是空的，必须和 skill 名称 alpha 一致$/],[{'SKILL.md':'---\nname: alpha\n---\n'},/^Error: SKILL\.md 的 frontmatter 缺少 description/],
    [{'SKILL.md':skillText('alpha','x'.repeat(1025))},/^Error: SKILL\.md 的 frontmatter 缺少 description，或者超过 1024 个字符$/],
    ...['../x','/abs','a//b','./a','a/../b','.herdr-bridge-skill'].map(p=>[{'SKILL.md':ok,[p]:''},new RegExp('^Error: 文件路径无效：'+p.replace(/[./]/g,'\\$&')+'$')])])
    assert.throws(()=>f.skills.put('alpha',encoded(files)),error,JSON.stringify(files).slice(0,80));

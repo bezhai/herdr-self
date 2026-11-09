@@ -477,7 +477,7 @@ test('adding a skill saves it as a new one, closes the form and fetches the skil
   await user.click(await screen.findByRole('button', { name: /^Skills/ }));
   await user.click(screen.getByRole('button', { name: '+ 新建 skill' }));
   expect(within(dialog()).getByRole('heading', { name: '新建 skill' })).toBeTruthy();
-  await user.type(screen.getByLabelText('名称'), 'release-check');
+  await user.type(screen.getByLabelText('skill 名称'), 'release-check');
   const before = callsTo(fetch, '/api/state');
   await user.click(within(dialog()).getByRole('button', { name: '保存' }));
   await waitFor(() => expect(dialog()).toBeNull());
