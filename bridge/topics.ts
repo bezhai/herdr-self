@@ -26,14 +26,6 @@ import type {Named} from './routing.ts';
 // workspace, the launch of an agent, attachments and Bridge's skills need on the machine; all of it through the client of the machine
 // (see operations in core.ts).
 const workspaceLabel=(b:Binding)=>'飞书 · '+b.name;
-// Arguments that Herdr passes on to the agent it starts, after --, that every topic gets besides those that the client prepares for the
-// configuration (see launchArguments): its model, permission mode and trust. Codex runs in the topic pane instead of attaching to its
-// shared background server, whose hooks carry the Herdr variables of the pane that started that server, and with the network of its
-// workspace-write sandbox on: without it the sandbox refuses connect() on every socket, that of the Bridge client too (see client.ts),
-// which bridge-schedule needs; the network is all or nothing, and the limits on writing files stay. Codex also skips the trust of its
-// hooks: whenever hooks.json changes, for example after Herdr updates its integration, Codex waits on a screen to review the new hooks,
-// which a Feishu topic cannot answer; the hooks are the owner's own. Claude and Antigravity (agy) get nothing.
-const launchBase:Record<Kind,string[]>={claude:[],codex:['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:[]};
 // How long preparing a workspace (a clone and a fetch) and a launch may take.
 const workspaceTimeoutMs=600000,launchTimeoutMs=60000;
 const brief=(e:Error)=>publicText(e.message).split('\n')[0].slice(0,200);
@@ -370,13 +362,12 @@ export class Topics{
   const {dir}=await this.prepareWorkspace(m,{project:workspaceOf(this.projectOf(t),m.id),topicId:t.id,...t.branch&&{branch:t.branch}},{timeoutMs:workspaceTimeoutMs});
   this.update(t,{cwd:dir});return dir;
  }
- // What follows the -- of `agent start` for configuration config in directory dir: what every topic passes to the kind of agent and what
- // the client prepares on the machine, such as the trust of the directory, and the model and the permission mode (see prepareLaunch in link.ts).
- // Antigravity gets nothing, not even the --.
+ // What follows the -- of `agent start` for configuration config in directory dir: all of it comes from the client of the machine, which also
+ // prepares what it needs there, such as the trust of the directory (see prepareLaunch in link.ts).
  async launchArguments(m:Machine,config:AgentConfig,dir:string){
   const {args}=await this.prepareLaunch(m,{kind:config.kind,...config.model&&{model:config.model},...config.kind==='claude'&&{permissionMode:permissionMode(config)},
    ...config.allowedCommands&&{allowedCommands:config.allowedCommands},dir},{timeoutMs:launchTimeoutMs});
-  const all=[...launchBase[config.kind],...args];return all.length?['--',...all]:[];
+  return ['--',...args];
  }
  // Shows the first card of topic t, which the first start posts into the thread and every start after it draws again (see startCard): the
  // project, the branch, the agent configuration, and the dropdowns that offer the other projects and configurations. Never rejects: a card

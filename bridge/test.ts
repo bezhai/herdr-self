@@ -922,6 +922,8 @@ function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:
   removeWorkspace:async(m,params,options)=>{dropped.push([m.id,params,options?.timeoutMs]);await null;reach(m);if(fake.fail.remove)throw fake.fail.remove;return {branchKept:Boolean(fake.fail.kept)};},
   prepareLaunch:async(m,params)=>{
    launched.push([m.id,params]);await null;reach(m);if(fake.fail.launch)throw fake.fail.launch;
+   if(params.kind==='codex')return {args:[...params.model?['-m',params.model]:[],'-c',`projects={"${params.dir}"={trust_level="trusted"}}`]};
+   if(params.kind==='agy')return {args:['--settings',JSON.stringify({trustedWorkspaces:[params.dir]})]};
    return {args:[...params.permissionMode?['--permission-mode',params.permissionMode]:[],...params.model?['--model',params.model]:[]]};
   },
   askCheapModel:async(m,cwd,prompt,{timeoutMs}={})=>{
@@ -975,9 +977,8 @@ test('another topic opens a tab in the same workspace and turns on remote answer
   assert.deepEqual(f.reacted.map(r=>r[1]),['om_1','om_2','om_3']);assert.deepEqual(f.store.data.topics.map(t=>[t.cot!.origin,t.reactions.map(r=>r.messageId)]),[['om_1',['om_3']],['om_2',[]]]);
  }finally{f.close();}
 });
-test('a Claude configuration starts each topic agent with -- --permission-mode and its mode, default when it has none; a Codex configuration starts its agent with -- --no-daemon, the network of its sandbox on, so that bridge-schedule reaches the client of its machine, and past the review of new or changed hooks; an Antigravity configuration passes nothing on',async()=>{
- for(const [config,args] of [[{permissionMode:undefined},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],
-  [{kind:'codex'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust']],[{kind:'agy'},[]]] satisfies [Partial<AgentConfig>,string[]][]){
+test('a Claude configuration starts each topic agent with -- --permission-mode and its mode, default when it has none',async()=>{
+ for(const [config,args] of [[{permissionMode:undefined},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']]] satisfies [Partial<AgentConfig>,string[]][]){
   const f=topicFixture({config});try{
    await f.send({messageId:'om_1',content:'one'});
    assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',f.config.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(config));
@@ -1142,13 +1143,13 @@ test('the first card of a topic names the project, the branch where there is one
   const g=topicFixture();try{await g.send({messageId:'om_1',content:'one'});assert.deepEqual(menus(g.starts[0][1]),[]);}finally{g.close();}
  }finally{f.close();}
 });
-test('the configuration of an agent decides how it is launched: its model, its permission mode and its commands go to the client with the directory, and what the client returns follows the -- of agent start, after what the topics always pass to Codex',async()=>{
+test('the configuration of an agent decides how it is launched: its model, its permission mode and its commands go to the client with the directory, and what the client returns, for every kind of agent, is all that follows the -- of agent start: the topics add nothing of their own',async()=>{
  for(const [config,params,args] of [
   [{permissionMode:'auto',model:'sonnet',allowedCommands:['butler']},{kind:'claude',permissionMode:'auto',model:'sonnet',allowedCommands:['butler']},['--','--permission-mode','auto','--model','sonnet']],
   [{permissionMode:undefined},{kind:'claude',permissionMode:'default'},['--','--permission-mode','default']],
-  [{kind:'codex',model:'gpt-5'},{kind:'codex',model:'gpt-5'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust','--model','gpt-5']],
-  [{kind:'codex'},{kind:'codex'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust']],
-  [{kind:'agy'},{kind:'agy'},[]]] satisfies [Partial<AgentConfig>,Sent,string[]][]){
+  [{kind:'codex',model:'gpt-5'},{kind:'codex',model:'gpt-5'},['--','-m','gpt-5','-c','projects={"~/work"={trust_level="trusted"}}']],
+  [{kind:'codex'},{kind:'codex'},['--','-c','projects={"~/work"={trust_level="trusted"}}']],
+  [{kind:'agy'},{kind:'agy'},['--','--settings','{"trustedWorkspaces":["~/work"]}']]] satisfies [Partial<AgentConfig>,Sent,string[]][]){
   const f=topicFixture({config});try{
    await f.send({messageId:'om_1',content:'one'});
    assert.deepEqual(f.launched,[['m',{...params,dir:'~/work'}]],JSON.stringify(config));
