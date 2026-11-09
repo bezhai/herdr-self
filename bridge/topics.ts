@@ -10,7 +10,7 @@ import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,s
 import {attachmentFolder} from './machine.ts';
 import {nameTask} from './routing.ts';
 import {startCard} from './topic-cards.ts';
-import {workspaceOf,hasBranch,sweepable} from './workspaces.ts';
+import {workspaceOf,hasBranch,sweepable,freeBranch} from './workspaces.ts';
 import {randomBranch} from './worktree-branch.mjs';
 import type {NormalizedMessage,ResourceDescriptor} from '@larksuite/channel';
 import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';
@@ -342,7 +342,8 @@ export class Topics{
  // Decides, once, the project of topic t and the branch of its worktrees; the topic is routed then, and a start that failed later does not
  // decide again. The project of a group is the binding's, and one call of the cheap model names the branch when its worktrees have one; in a
  // direct chat the same call also picks the project of all projects by the task, and a topic whose call picks none works in an empty
- // directory. A branch that the topic has already is kept (see restart), and a model that fails or names none gives a random branch.
+ // directory. A branch that the topic has already is kept (see restart), and a model that fails or names none gives a random branch; one that another topic has gets a number (see freeBranch), which is decided
+ // in the same step that records it, so that topics named at once do not take the same one.
  // A topic of before the projects has a directory and is never routed.
  async route(m:Machine,b:Binding,t:Topic){
   if(t.routed||t.cwd)return;
@@ -350,7 +351,7 @@ export class Topics{
   if(!direct&&!project)throw Error('项目不存在');
   const asking=direct?projects.length>0:hasBranch(project)&&!t.branch;let named:Named={};
   if(asking){named=await nameTask(this.askCheapModel,m,t.task!.content,direct?projects:null);if(direct)project=named.project;}
-  const branch=hasBranch(project)?t.branch??named.branch??randomBranch():undefined;
+  const branch=hasBranch(project)?t.branch??freeBranch(named.branch??randomBranch(),t,this.store.data.topics):undefined;
   if(asking&&named.reason)this.store.log('话题会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
   if(!branch)delete t.branch;
   this.update(t,{routed:true,...project&&{projectId:project.id},...branch&&{branch}});

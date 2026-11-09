@@ -1107,6 +1107,19 @@ test('when the cheap model fails, says nothing usable or the task has no text, a
   }finally{f.close();}
  }
 });
+test('two topics of one project never share a branch: a name that another topic has, also one whose workspace was swept and whose branch is kept, gets a number, also when the topics start at once',async()=>{
+ const f=topicFixture();withProjects(f,genvi);f.b.defaultProjectId='g';try{
+  // Both are named before either records its branch.
+  await Promise.all([f.send({messageId:'om_1',content:'fix login bug'}),f.send({messageId:'om_2',content:'fix login bug'})]);
+  const [a,b]=f.store.data.topics;assert.deepEqual([a.state,b.state,a.branch,b.branch],['ready','ready','feat/add-login','feat/add-login-2']);
+  assert.deepEqual(f.prepared.map(p=>(p[1] as Sent).branch),['feat/add-login','feat/add-login-2']);
+  assert.ok(cardText(f.starts[1][1]).includes('分支 feat/add-login-2'));
+  await f.send({messageId:'om_3',content:'fix login bug'});assert.equal(f.store.data.topics[2].branch,'feat/add-login-3');
+  // A topic that is started again, or a reply, keeps its own branch, and a swept topic still holds its name.
+  await f.send({messageId:'om_4',rootId:'om_1',content:'继续'});assert.equal(a.branch,'feat/add-login');
+  a.swept=true;await f.send({messageId:'om_5',content:'fix login bug'});assert.equal(f.store.data.topics[3].branch,'feat/add-login-4');
+ }finally{f.close();}
+});
 test('a direct chat has no project: one call of the cheap model picks one of all projects by name and names the branch, and the topic works in it',async()=>{
  const f=topicFixture({binding:direct});withProjects(f,genvi,notes,promoter);f.fake.model=()=>({stdout:'PROJECT=promoter\nBRANCH=fix/login-page\n'});try{
   await f.send({messageId:'om_1',content:'修复推广后台的登录页'});

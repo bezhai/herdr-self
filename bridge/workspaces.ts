@@ -9,6 +9,13 @@ export const workspaceOf=(p:Project|undefined,machineId:string):WorkspaceProject
  !p?emptyProject:{id:p.id,repos:p.repos,workMode:p.workMode,...p.adopted?.machineId===machineId&&{adoptedDir:p.adopted.dir}};
 // Whether the worktrees of project p have a branch of their own: it has repositories and gives each topic a directory.
 export const hasBranch=(p:Project|undefined)=>Boolean(p?.repos.length&&p.workMode==='isolated');
+// branch, or the first of branch-2, branch-3, … that no other topic of topics has. Git lets only one worktree have a branch, so a second
+// topic on the name of a topic that still has its worktree could not start, and one on the name of a topic that was swept would take over
+// the commits that the sweep kept.
+export const freeBranch=(branch:string,t:Topic,topics:Topic[])=>{
+ const taken=new Set(topics.filter(x=>x!==t).map(x=>x.branch));
+ let free=branch;for(let n=2;taken.has(free);n++)free=`${branch}-${n}`;return free;
+};
 // How long a topic that ended or failed keeps its workspace (see Topics.sweep).
 export const keepFor=7*24*3600000;
 // Whether the workspace of topic t is to be removed at time now: it was prepared for the topic (not one of before the projects, nor an
