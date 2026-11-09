@@ -2485,6 +2485,22 @@ test('removing a binding drops its topics, turns off remote answers for those li
   assert.deepEqual(f.store.data.topics,[]);assert.match(f.store.data.logs.at(-1)!.message,/未能关闭.*连接超时/);
  }finally{f.close();}
 });
+test('removing a binding removes the workspaces of its topics that ended or failed, which no record would drive later; the workspace of a topic whose agent still runs stays for it, and a failure is only logged',async()=>{
+ const f=topicFixture();withProjects(f,genvi);f.b.defaultProjectId='g';try{
+  await f.send({messageId:'om_1',content:'one'});await f.send({messageId:'om_2',content:'two'});await f.send({messageId:'om_3',content:'three'});
+  const [ended,running,failed]=f.store.data.topics;
+  ended.state='closed';ended.endedAt=1;failed.state='failed';failed.endedAt=1;
+  await f.topics.unbind('b');
+  const params=(t:Topic)=>['m',{project:{id:'g',repos:genvi.repos,workMode:'isolated'},topicId:t.id,branch:t.branch},600000];
+  assert.deepEqual(f.dropped.map(d=>d.slice(0,2)).sort(),[params(ended),params(failed)].map(d=>d.slice(0,2)).sort());assert.equal(f.dropped.length,2);assert.equal(running.state,'ready');
+  assert.deepEqual(f.store.data.topics,[]);
+  // A client that is offline or a project that is gone only costs the cleaning.
+  const g=topicFixture();withProjects(g,genvi);g.b.defaultProjectId='g';try{
+   await g.send({messageId:'om_1',content:'one'});const [t]=g.store.data.topics;t.state='closed';t.endedAt=1;g.fake.fail.remove=Error('机器 cpu2 离线');
+   await g.topics.unbind('b');assert.deepEqual(g.store.data.logs.filter(l=>l.level==='error').map(l=>l.message),[`${t.agentName}：未能删除工作目录，机器 cpu2 离线`]);
+  }finally{g.close();}
+ }finally{f.close();}
+});
 test('an adopted topic writes attachments under the working directory that Herdr reports for its agent, where the agent runs before where its shell is; without one they fail; /release removes the directory',async()=>{
  const f=await adoptFixture();try{
   const t=await f.adopt('om_cmd',claudeChoice),prompts=()=>f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),root='/home/someone/code/herdr/.herdr-bridge';f.replies.length=0;

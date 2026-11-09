@@ -18,6 +18,8 @@ export const freeBranch=(branch:string,t:Topic,topics:Topic[])=>{
 };
 // How long a topic that ended or failed keeps its workspace (see Topics.sweep).
 export const keepFor=7*24*3600000;
-// Whether the workspace of topic t is to be removed at time now: it was prepared for the topic (not one of before the projects, nor an
-// adopted one), the topic ended or failed more than keepFor ago and the workspace is not removed yet.
-export const sweepable=(t:Topic,now:number)=>Boolean(t.routed&&!t.adopted&&!t.swept&&t.endedAt!=null&&['closed','failed'].includes(t.state)&&now-t.endedAt>keepFor);
+// Whether topic t has a workspace that nothing uses: it was prepared for the topic (not one of before the projects, nor an adopted one),
+// the topic ended or failed, and the workspace is not removed yet.
+export const unused=(t:Topic)=>Boolean(t.routed&&!t.adopted&&!t.swept&&['closed','failed'].includes(t.state));
+// Whether the workspace of topic t is to be removed at time now: it is unused and the topic ended more than keepFor ago.
+export const sweepable=(t:Topic,now:number)=>unused(t)&&t.endedAt!=null&&now-t.endedAt>keepFor;

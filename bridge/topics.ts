@@ -10,7 +10,7 @@ import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,s
 import {attachmentFolder} from './machine.ts';
 import {nameTask} from './routing.ts';
 import {startCard} from './topic-cards.ts';
-import {workspaceOf,hasBranch,sweepable,freeBranch} from './workspaces.ts';
+import {workspaceOf,hasBranch,sweepable,unused,freeBranch} from './workspaces.ts';
 import {randomBranch} from './worktree-branch.mjs';
 import type {NormalizedMessage,ResourceDescriptor} from '@larksuite/channel';
 import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';
@@ -643,12 +643,17 @@ export class Topics{
   await this.end(a,t,'已结束接管。Agent 仍在终端的 pane 里运行，话题里的消息不再发给它');
  }
  // Drops the topics of a removed binding. Their agents keep running; those of ready topics stop waiting for Feishu's answers, and their open
- // COT shows the run failed. The directories of their attachments are removed, also those that an ended topic failed to remove. Never
- // rejects; resolves once Herdr and Feishu were told.
+ // COT shows the run failed. The directories of their attachments are removed, also those that an ended topic failed to remove, and so are
+ // the workspaces of the topics that ended or failed, which no record would remove after this (see removeWorkspaceOf); the workspace of a
+ // ready topic stays, as its agent still works in it. Never rejects; resolves once Herdr and Feishu were told.
  unbind(bindingId:string){
   const dropped=this.store.data.topics.filter(t=>t.bindingId===bindingId);
   this.store.data.topics=this.store.data.topics.filter(t=>t.bindingId!==bindingId);this.store.save();
   return Promise.all(dropped.map(async t=>{
+   if(unused(t))await enqueue(this.topicQueues,t.id,async()=>{
+    try{await this.removeWorkspaceOf(t);this.store.log('话题清理',`${t.agentName}：已删除工作目录`);}
+    catch(e){this.store.log('话题清理',`${t.agentName}：未能删除工作目录，${brief(e)}`,'error');}
+   });
    if(t.state==='ready'){
     try{await this.herdr(this.target(t),remoteAnswers(t.paneId,false));}
     catch(e){this.store.log('话题会话',`${t.agentName}：未能关闭外部回答，${brief(e)}`,'error');}
