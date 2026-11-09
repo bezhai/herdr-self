@@ -1,38 +1,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {fileURLToPath} from 'node:url';
 import {enqueue} from './core.mjs';
 import {skillMark} from './machine.mjs';
-// Bridge's own skills, which it places in the working directory of a topic's agent before the agent starts (see Topics.place): only the
-// agents of Bridge's topics use them, so they belong in those directories, not in the global skill directories that every agent reads.
-// One directory per skill, named after it, with its SKILL.md.
-export const bundledSkills=path.join(path.dirname(fileURLToPath(import.meta.url)),'agent-instructions','skills');
-// Where each machine keeps the skills as the deployed Bridge has them. No agent reads it as a global skill directory, unlike ~/.agents/skills,
-// which Codex reads.
-const store='~/.local/share/herdr-bridge/skills';
-// Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
-// which Claude and Codex follow, or as a copy, since Antigravity follows no link (see placeSkills in machine.mjs).
-const places={claude:{skills:'.claude/skills',as:'link'},codex:{skills:'.agents/skills',as:'link'},agy:{skills:'.agents/skills',as:'copy'}};
-// The skills of directory dir: their names, their files as {relative path: base64}, and the digest of those, which changes with their content.
-function bundle(dir){
- const names=fs.readdirSync(dir,{withFileTypes:true}).filter(e=>e.isDirectory()).map(e=>e.name).sort();
- const files=fs.readdirSync(dir,{recursive:true,withFileTypes:true}).filter(e=>e.isFile()).map(e=>path.relative(dir,path.join(e.parentPath,e.name))).sort().map(f=>[f,fs.readFileSync(path.join(dir,f),'base64')]);
- return {names,digest:crypto.createHash('sha256').update(JSON.stringify(files)).digest('hex'),files:Object.fromEntries(files)};
-}
-// Returns place(m, cwd, kind), which places the skills of dir, as they are now, where the agent of binding kind kind reads project skills in
-// working directory cwd on machine m, whose leading ~/ is that machine's home: the request placeSkills to the client of m through call (see
-// Clients.call), which gets the skills as data. It resolves to the paths of same-name skills that are not Bridge's, which the client left
-// alone, and rejects when the placement fails. Placements on one machine run one after another, since they share its store.
-export function skillPlacer(call,dir=bundledSkills){
- const queues=new Map();
- return (m,cwd,kind)=>enqueue(queues,m.id,()=>call(m,'placeSkills',{store,...bundle(dir),...places[kind],cwd}));
-}
 
 // The skills of the platform, which the console's Skills page manages. Each is a directory named after it under skills/ in the state
 // directory, with its SKILL.md and any other files. The state file holds only their index, the collection skills: the name, the description
-// of the frontmatter of SKILL.md, everywhere, whether every topic gets it, and the digest of its files. The state file is written whole on
-// almost every event and the console polls it every few seconds, so the files stay out of it: they are read when a skill is edited or read.
+// of the frontmatter of SKILL.md, everywhere, whether every topic gets it (see place), and the digest of its files. The state file is
+// written whole on almost every event and the console polls it every few seconds, so the files stay out of it: they are read when a skill
+// is edited, read or placed.
+
+// Where each machine keeps the skills that it got, one directory per skill (see placeSkills in machine.mjs). No agent reads it as a global
+// skill directory, unlike ~/.agents/skills, which Codex reads.
+const machineStore='~/.local/share/herdr-bridge/skills';
+// Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
+// which Claude and Codex follow, or as a copy, since Antigravity follows no link.
+const places={claude:{dir:'.claude/skills',as:'link'},codex:{dir:'.agents/skills',as:'link'},agy:{dir:'.agents/skills',as:'copy'}};
 
 // A name of the Agent Skills format: lowercase letters and digits with single hyphens between them, at most 64 characters, like its
 // directory; its description at most 1024 characters.
@@ -78,7 +61,8 @@ function checked(name,files){
  return {entries,description:f.description,digest:crypto.createHash('sha256').update(JSON.stringify(entries.map(([p,c])=>[p,c.toString('base64')]))).digest('hex')};
 }
 export class Skills{
- constructor(store){this.store=store;this.dir=path.join(store.dir,'skills');}
+ // call(m,method,params,{timeoutMs}) sends a request to the client of machine m (see Clients.call).
+ constructor(store,call){this.store=store;this.call=call;this.dir=path.join(store.dir,'skills');this.queues=new Map();}
  // The index, in the order of the names.
  list(){return this.store.data.skills;}
  // The entry of skill name; throws when there is none.
@@ -117,7 +101,7 @@ export class Skills{
   this.entry(name);fs.rmSync(path.join(this.dir,name),{recursive:true,force:true});
   this.store.data.skills=this.store.data.skills.filter(x=>x.name!==name);this.store.save();this.store.log('skill','删除了 skill '+name);
  }
- // Sets whether every topic gets skill name.
+ // Sets whether every topic gets skill name (see place).
  flag(name,everywhere){
   const s=this.entry(name);s.everywhere=Boolean(everywhere);this.store.save();
   this.store.log('skill',`skill ${name} ${s.everywhere?'改为所有项目都带':'不再所有项目都带'}`);return s;
@@ -129,5 +113,14 @@ export class Skills{
   const has=text=>{const t=text.toLowerCase();return words.every(w=>t.includes(w));},about=s=>s.name+'\n'+s.description;
   const named=this.list().filter(s=>has(about(s)));
   return [...named,...this.list().filter(s=>!named.includes(s)&&has(about(s)+'\n'+this.text(s.name)))];
+ }
+ // Places the skills that every topic gets, as they are when the placement runs, where the agent of binding kind kind reads project skills
+ // in working directory cwd on machine m, whose leading ~/ is that machine's home, and takes away those that Bridge placed there before and
+ // that every topic no longer gets: the request placeSkills to the client of m, with the skills as data. Resolves to the paths of same-name
+ // skills that are not Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after
+ // another, since they share its store.
+ place(m,cwd,kind){
+  const skills=()=>this.list().filter(s=>s.everywhere).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
+  return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:skills(),...places[kind],cwd}));
  }
 }

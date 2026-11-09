@@ -8,6 +8,7 @@ import {clip} from './request-cards.mjs';
 // like the client. The agent is its pane (HERDR_PANE_ID, which Herdr puts into the environment of a pane) in its Herdr session
 // (HERDR_SESSION, which Herdr sets in the panes of a session other than default). Reads print text for the agent, or with --json Bridge's
 // answer.
+// Its help is complete on its own: the skill that tells agents when to use it leaves the details of the command to it.
 export const usage=`用法：
   bridge-schedule add --cron <cron 表达式> --mode new|into --task <任务文字> [--tz <IANA 时区>]
   bridge-schedule list
@@ -16,10 +17,47 @@ export const usage=`用法：
   bridge-schedule pause <ID>
   bridge-schedule resume <ID>
   bridge-schedule remove <ID>
-add 和 update 在这个话题里发确认卡片，主人点「确认」后才生效；其他操作立即生效。
---mode new 每次运行开一个新话题，into 每次运行发进这个话题。--tz 默认取这台机器的时区。
-ID 可以只写开头几位（例如卡片上的 8 位）。--json 输出 Bridge 的原始结果。
---pane <pane> 和 --session <Herdr session> 默认取 HERDR_PANE_ID 和 HERDR_SESSION。
+
+由 Bridge 开的飞书话题里的 Agent 运行，管理这个话题所在绑定上的定时任务。命令只连本机的 Bridge 客户端，由客户端转给 Bridge。
+
+操作：
+  add      提交一个新的定时任务。不直接生效：Bridge 在这个话题里发一张确认卡片，写明时间、接下来 5 次运行、任务文字和模式，
+           主人点「确认」才生效，点「取消」或者 30 分钟内没有点就作废。命令输出卡片已发出和它的过期时间。
+  list     这个绑定上的定时任务：ID 的前 8 位、模式、时间的文字描述、时区和表达式、是否暂停、下一次运行、任务文字的开头。
+  runs     一个定时任务最近 20 次运行：计划时间，运行了的写第几次（晚了一分钟以上时写补跑时间），跳过、错过和失败的写原因。
+  update   修改时间、时区或任务文字，至少给一项；和 add 一样要主人在确认卡片上点「确认」。模式不能改，要换模式就 remove 后重新 add。
+  pause    暂停，立即生效。暂停期间的时间恢复后不补跑。
+  resume   恢复，立即生效，下一次运行从恢复的时刻算起。
+  remove   删除，立即生效。它开过的话题保留。
+  一个话题同时只能有一张等待确认的卡片：有卡片在等时，新的 add 和 update 被拒绝，命令写明那张卡片几点过期。
+
+选项：
+  --cron <表达式>   5 个字段：分（0-59） 时（0-23） 日（1-31） 月（1-12） 星期（0-7，0 和 7 都是星期日）。每个字段是逗号分隔的 *、
+                    数字或范围 a-b，都可以带步长 /n，n/步长 表示从 n 到这个字段的最大值；月份和星期也可以写英文的三个字母（jan、mon）。
+                    日和星期都不以 * 开头时满足其一就运行。不支持秒、@daily 这类写法和 ? L W #。时间是 --tz 时区里的墙上时间：
+                    夏令时跳过的时间那天不运行，重复的时间只运行一次。
+  --tz <时区>       IANA 时区名，例如 Asia/Shanghai、America/New_York。add 不给时取这台机器的时区。
+  --mode new|into   new：每次运行在群里发一条消息、开一个新话题，交给一个新的 Agent 从头做，它不知道这次对话；Bridge 只保留最近
+                    3 次运行的话题，更早的关闭（最近 24 小时内有人说过话的除外）。into：每次运行把任务发进这个话题，交给这里的 Agent，
+                    像主人发了一条消息；这个话题结束后定时任务自动暂停。到点时上一次还没做完（Agent 在工作或等待确认）就跳过这一次。
+  --task <文字>     到点时发给 Agent 的消息，去掉首尾空白后不能为空，太长时 Bridge 拒绝。多行文字用 --task "$(cat <<'EOF'
+                    …
+                    EOF
+                    )" 传。
+  <ID>              定时任务的 ID，可以只写开头几位，例如卡片和 list 里的 8 位；有几个定时任务以它开头时要写完整。
+  --json            输出 Bridge 返回的 JSON，而不是给人读的文字。
+  --pane <pane>     Agent 所在的 Herdr pane，默认取 HERDR_PANE_ID。
+  --session <名称>  Agent 所在的 Herdr session，默认取 HERDR_SESSION，都没有时是 default。
+  -h, --help        显示这段说明。
+  选项可以写成 --cron '0 9 * * *' 或 --cron='0 9 * * *'；选项后面的值原样使用，以 -- 开头也一样。
+
+退出码：0 成功；1 Bridge 拒绝了请求或者连不上，原因在标准错误里；2 用法错误。
+
+出错时：
+  连不上本机的 Bridge 客户端、本机的 Bridge 客户端没有连上控制面：这台机器的客户端没有运行或者没有连上 Bridge。告诉主人，不要反复重试。
+  没有权限连接本机的 Bridge 客户端，或者 Operation not permitted：命令在 Agent 的沙箱里被拦住了，按所在工具的方式申请在沙箱外运行这一条命令。
+  这个 pane 里的 Agent 不属于任何进行中的飞书话题：不是在 Bridge 的飞书话题里运行的。告诉主人。
+  其他拒绝（表达式写错、时区不对、定时任务不存在等）：按原因改正后再试。
 `;
 const ops=['add','list','runs','update','pause','resume','remove'];
 const options={'--cron':'cron','--tz':'timeZone','--task':'task','--mode':'mode','--pane':'pane','--session':'session'};

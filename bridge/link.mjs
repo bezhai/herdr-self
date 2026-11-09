@@ -6,8 +6,10 @@
 
 // The version of what the two sides send each other. The control plane refuses a client of another version (see Clients.hello). 2: the
 // client passes the requests of bridge-schedule on (schedules), which a client of 1 has no socket for. 3: the control plane does everything
-// it does on a machine through its client (see machine.mjs), whose methods a client of 2 lacks.
-export const protocol=3;
+// it does on a machine through its client (see machine.mjs), whose methods a client of 2 lacks. 4: placeSkills takes the skills of the
+// platform one by one, keeps each in the store on its own and takes away those that every topic no longer gets, where a client of 3 takes
+// one bundle with one digest.
+export const protocol=4;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 const open=1;

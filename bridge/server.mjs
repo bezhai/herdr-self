@@ -4,7 +4,7 @@ import {Platforms,normalizeApp,setPermissionMode} from './platform.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';
 import {Topics} from './topics.mjs';
-import {skillPlacer,Skills,requestLimit} from './skills.mjs';
+import {Skills,requestLimit} from './skills.mjs';
 import {Schedules} from './schedules.mjs';
 import {AgentSchedules} from './agent-schedules.mjs';
 import {staticFile,sendStatic} from './web-assets.mjs';
@@ -14,7 +14,7 @@ const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Stor
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map(),attempts=new Map();
 migrateMachines(store);
 // What Bridge does on a machine goes through the client of the machine (see operations and Clients.call).
-const call=(...args)=>clients.call(...args),ops=operations(call);
+const call=(...args)=>clients.call(...args),ops=operations(call),skills=new Skills(store,call);
 function machine(id){const m=store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;}
 // The Herdr status of machine m for the console: disabled, offline while its client is not in, else what the latest poll through the client
 // found (see refresh), connecting until the first one.
@@ -28,7 +28,7 @@ async function refresh(m){if(refreshes.has(m.id))return refreshes.get(m.id);cons
  // Topic agents' new replies and requests go back to Feishu; this does not wait for them and never throws.
  topics.sync(m,agents);
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
-const topics=new Topics(store,{...ops,placeSkills:skillPlacer(call),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
+const topics=new Topics(store,{...ops,placeSkills:(...args)=>skills.place(...args),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),pending=new PendingChats(store,{reply:(...args)=>platforms.reply(...args),onBound:(...args)=>topics.handle(...args),app:id=>platforms.app(id),machine,bridgeUrl});
 const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>pending.open(...args),onCardAction:(a,evt)=>(evt.action?.value?.schedule?agentSchedules:topics).click(a,evt)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
  if(!a.enabled||platforms.status(a).connection!=='connected'){await platforms.start(a);a.enabled=true;store.save();}
@@ -37,7 +37,7 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 }});
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
-const skills=new Skills(store),agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
+const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),skills:skills.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
 // requests of bridge-schedule on its machine (see client.mjs), which are answered for the machine of its connection; what the agent reads

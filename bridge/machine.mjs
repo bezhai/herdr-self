@@ -66,6 +66,27 @@ async function sweep(root,keep){
 export const skillMark='.herdr-bridge-skill';
 const read=p=>fs.promises.readFile(p,'utf8').catch(e=>{if(e.code==='ENOENT'||e.code==='ENOTDIR'||e.code==='EISDIR')return null;throw e;});
 const lstat=p=>fs.promises.lstat(p).catch(e=>{if(e.code==='ENOENT')return null;throw e;});
+// The skills of a request, [{name, digest, files}] with files as {relative path: base64}, once checked.
+function skillsOf(v){
+ if(!Array.isArray(v))throw invalid('skills');
+ for(const s of v){
+  name(s?.name,'skills');string(s.digest,'digest');if(!s.files||typeof s.files!=='object')throw invalid('files');
+  for(const [p,b] of Object.entries(s.files)){inside(p,'files');if(typeof b!=='string')throw invalid('files');}
+ }
+ return v;
+}
+// Puts skill {name, digest, files} into kept, the store of this machine, as the directory <kept>/<name> with Bridge's marker, which holds the
+// digest, unless that directory has the digest already. The files go into a directory beside it first, which then takes its place, so that
+// the links to it never show half a skill. Resolves to its path.
+async function stock(kept,{name:n,digest,files}){
+ const target=path.join(kept,n);if((await read(path.join(target,skillMark)))?.trim()===digest)return target;
+ await fs.promises.mkdir(kept,{recursive:true});const fresh=await fs.promises.mkdtemp(path.join(kept,'.'+n+'-'));
+ try{
+  for(const [p,b] of Object.entries(files)){await fs.promises.mkdir(path.dirname(path.join(fresh,p)),{recursive:true});await fs.promises.writeFile(path.join(fresh,p),Buffer.from(b,'base64'));}
+  await fs.promises.writeFile(path.join(fresh,skillMark),digest+'\n');await fs.promises.rm(target,{recursive:true,force:true});await fs.promises.rename(fresh,target);
+ }catch(e){await fs.promises.rm(fresh,{recursive:true,force:true});throw e;}
+ return target;
+}
 // The methods of a client whose Herdr is the program at herdr (a leading ~/ is the home directory) and whose commands run with env (see
 // loginEnvironment). Every request carries timeoutMs, the most that a command it runs may take (see run).
 export function methods({herdr,env}){
@@ -109,43 +130,46 @@ export function methods({herdr,env}){
   exists:({path:p})=>fs.promises.stat(local(p,'path')).then(()=>true,()=>false),
   // Asks claude (Claude haiku) in directory cwd for a branch name, with prompt on stdin.
   nameBranch:({cwd,prompt,timeoutMs})=>run('claude',['-p','--model','haiku'],{env,cwd:local(cwd,'cwd'),input:string(prompt,'prompt'),timeoutMs}),
-  // Places the skills names, whose files (relative path → base64) have digest digest, where an agent reads project skills: directory skills
-  // under working directory cwd. The store, a directory of this machine that no agent reads as a global skill directory, holds them as the
-  // control plane has them, and is replaced whole when its digest differs. A skill of the working directory is Bridge's when it is a link to
-  // the store or a directory with Bridge's marker, which holds the digest of the skills it was copied from. As link, a skill becomes a link
-  // to the store, which Claude and Codex follow; as copy, a copy, since Antigravity follows no link: a copy is written again when the digest
-  // changed, and a link of Bridge's that a copy has to replace is replaced. Anything else of that name is someone else's: it stays as it is
-  // and its path is in what this resolves to. In a Git repository each skill of Bridge's goes into the info/exclude of the repository that
-  // holds where it actually is, which a link in the path such as .claude/skills -> ../.agents/skills can change, as its path from the top
-  // level of that repository; linked worktrees share that file. Rejects on the first step that fails.
-  async placeSkills({store,digest,skills,as,cwd,names,files,timeoutMs}){
-   const kept=local(store,'store'),dir=path.join(local(cwd,'cwd'),inside(skills,'skills'));string(digest,'digest');
-   if(!['link','copy'].includes(as))throw invalid('as');if(!Array.isArray(names))throw invalid('names');for(const n of names)name(n,'names');
-   if(!files||typeof files!=='object')throw invalid('files');for(const [p,b] of Object.entries(files)){inside(p,'files');if(typeof b!=='string')throw invalid('files');}
-   if((await read(path.join(kept,'.digest')))?.trim()!==digest){
-    await fs.promises.mkdir(path.dirname(kept),{recursive:true});const fresh=await fs.promises.mkdtemp(kept+'.');
-    try{
-     for(const [p,b] of Object.entries(files)){await fs.promises.mkdir(path.dirname(path.join(fresh,p)),{recursive:true});await fs.promises.writeFile(path.join(fresh,p),Buffer.from(b,'base64'));}
-     await fs.promises.writeFile(path.join(fresh,'.digest'),digest+'\n');await fs.promises.rm(kept,{recursive:true,force:true});await fs.promises.rename(fresh,kept);
-    }catch(e){await fs.promises.rm(fresh,{recursive:true,force:true});throw e;}
-   }
+  // Places skills ([{name, digest, files}], files as {relative path: base64}) where an agent reads project skills, directory dir under
+  // working directory cwd, and takes away the skills that Bridge placed there before and that skills no longer has. The store, a directory
+  // of this machine that no agent reads as a global skill directory, holds each skill as the control plane has it (see stock). A skill of
+  // the working directory is Bridge's when it is a link to the store or a directory with Bridge's marker, which holds the digest of the
+  // skill it was copied from; so are the links and copies of the one skill that earlier versions of Bridge carried, which had the store
+  // in the same place, and marked their copies the same way. As link, a skill becomes a link to the store, which Claude and Codex follow;
+  // as copy, a copy, since Antigravity follows no link: a copy is written again when the digest changed, and a link of Bridge's that a
+  // copy has to replace is replaced. Anything else of a name of skills is someone else's: it stays as it is and its path is in what this
+  // resolves to. In a Git repository each skill placed goes into the info/exclude of the repository that holds where it actually is, which
+  // a link in the path such as .claude/skills -> ../.agents/skills can change, as its path from the top level of that repository; linked
+  // worktrees share that file, so a skill taken away keeps its line, which another worktree may need. Without skills, a working directory
+  // without dir does not get one. Rejects on the first step that fails.
+  async placeSkills({store,skills,dir:under,as,cwd,timeoutMs}){
+   const kept=local(store,'store'),dir=path.join(local(cwd,'cwd'),inside(under,'dir')),names=skillsOf(skills).map(s=>s.name);if(!['link','copy'].includes(as))throw invalid('as');
+   for(const s of skills)await stock(kept,s);
+   if(!names.length&&!await lstat(dir))return [];
    // The marker comes first and gets the digest last: a copy that fails half way is Bridge's, and is written again next time.
-   const copy=async(p,n)=>{await fs.promises.rm(p,{recursive:true,force:true});await fs.promises.mkdir(p);await fs.promises.writeFile(path.join(p,skillMark),'');await fs.promises.cp(path.join(kept,n),p,{recursive:true});await fs.promises.writeFile(path.join(p,skillMark),digest+'\n');};
+   const copy=async(p,{name:n,digest})=>{
+    await fs.promises.rm(p,{recursive:true,force:true});await fs.promises.mkdir(p);await fs.promises.writeFile(path.join(p,skillMark),'');
+    await fs.promises.cp(path.join(kept,n),p,{recursive:true,filter:f=>f!==path.join(kept,n,skillMark)});await fs.promises.writeFile(path.join(p,skillMark),digest+'\n');
+   };
    await fs.promises.mkdir(dir,{recursive:true});const real=await fs.promises.realpath(dir);
    // Outside a repository, or without git, there is nothing to exclude.
-   const ask=args=>git(real,args,timeoutMs).then(r=>r.code===0?r.stdout.trim():null,()=>null),root=await ask(['rev-parse','--show-toplevel']),at=root&&await ask(['rev-parse','--git-path','info/exclude']);
+   const ask=args=>git(real,args,timeoutMs).then(r=>r.code===0?r.stdout.trim():null,()=>null),root=names.length&&await ask(['rev-parse','--show-toplevel']),at=root&&await ask(['rev-parse','--git-path','info/exclude']);
    const exclude=at&&(real+'/').startsWith(root+'/')?path.resolve(real,at):null;
    const theirs=[];
-   for(const n of names){
-    const p=path.join(dir,n),s=await lstat(p);
-    if(s?.isSymbolicLink()){if(await fs.promises.readlink(p)!==path.join(kept,n)){theirs.push(p);continue;}if(as==='copy'){await fs.promises.rm(p);await copy(p,n);}}
-    else if(s){const m=await read(path.join(p,skillMark));if(m==null){theirs.push(p);continue;}if(m.trim()!==digest)await copy(p,n);}
+   for(const s of skills){
+    const n=s.name,p=path.join(dir,n),l=await lstat(p);
+    if(l?.isSymbolicLink()){if(await fs.promises.readlink(p)!==path.join(kept,n)){theirs.push(p);continue;}if(as==='copy'){await fs.promises.rm(p);await copy(p,s);}}
+    else if(l){const m=await read(path.join(p,skillMark));if(m==null){theirs.push(p);continue;}if(m.trim()!==s.digest)await copy(p,s);}
     else if(as==='link')await fs.promises.symlink(path.join(kept,n),p);
-    else await copy(p,n);
+    else await copy(p,s);
     if(!exclude)continue;
     const line=real.slice(root.length)+'/'+n,text=await read(exclude)??'';
     if(text.split('\n').includes(line))continue;
     await fs.promises.mkdir(path.dirname(exclude),{recursive:true});await fs.promises.appendFile(exclude,(text&&!text.endsWith('\n')?'\n':'')+line+'\n');
+   }
+   for(const e of await fs.promises.readdir(dir,{withFileTypes:true}))if(!names.includes(e.name)){
+    const p=path.join(dir,e.name);
+    if(e.isSymbolicLink()?await fs.promises.readlink(p)===path.join(kept,e.name):e.isDirectory()&&await read(path.join(p,skillMark))!=null)await fs.promises.rm(p,{recursive:true,force:true});
    }
    return theirs;
   },
