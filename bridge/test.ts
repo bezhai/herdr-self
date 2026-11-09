@@ -965,11 +965,13 @@ function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:
   react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);},
   updateCard:async(a,messageId,card)=>{updated.push([a.id,messageId,card as Card]);},
   request:async(a,o)=>{api.push(o as ApiRequest);await null;if(!cot)throw Object.assign(Error('飞书接口错误 99991672：Access denied'),{code:99991672});return o.method==='POST'&&o.url===cotPath?{cot_id:'c'+ ++cots,message_id:'om_cot_'+cots}:{};},...now&&{now}};
+ // Waits of the topics (see pause in Topics) only record how long they would have been.
+ const paused:number[]=[];deps.pause=async ms=>{paused.push(ms);await null;};
  const topics=new Topics(store,deps);
  const send=(msg:Partial<NormalizedMessage>)=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg} as NormalizedMessage);
  const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
  const choose=(messageId:string,field:'project'|'agentConfig',option:string,openId='ou_user',render=1)=>topics.click(allowed,{messageId,chatId:'oc_1',operator:{openId},action:{tag:'select_static',value:{restart:field,render},option}} as Click);
- return {dir,store,h,m,topics,config:store.data.agentConfigs[0],project:store.data.projects[0],replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,placed,prepared,dropped,launched,naming,starts,fake,deps,b,send,restart,choose,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,config:store.data.agentConfigs[0],project:store.data.projects[0],replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,placed,prepared,dropped,launched,naming,starts,paused,fake,deps,b,send,restart,choose,close(){fs.rmSync(dir,{recursive:true});}};
 }
 // The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
 // id, reason].
@@ -1402,10 +1404,10 @@ test('a topic whose named agent is gone is closed with one notice, and the messa
 });
 test('a failed start marks the topic failed with a notice that carries no error details; the next message retries in a new tab',async()=>{
  const f=topicFixture();try{
-  f.h.on['agent start']=()=>{throw coded('agent_pane_busy','agent target pane w1:p1 is not an available shell');};
+  f.h.on['agent start']=()=>{throw coded('agent_pane_unavailable','agent target pane w1:p1 has no live terminal');};
   await f.send({messageId:'om_1',content:'one'});
-  const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed','agent target pane w1:p1 is not an available shell']);assert.equal(new Store(f.dir).data.topics[0].state,'failed');
-  assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')]);assert.match(f.store.data.logs.at(-1)!.message,/agent target pane w1:p1 is not an available shell/);assert.equal(f.h.calls.some(c=>c[1]==='prompt'),false);
+  const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed','agent target pane w1:p1 has no live terminal']);assert.equal(new Store(f.dir).data.topics[0].state,'failed');
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')]);assert.match(f.store.data.logs.at(-1)!.message,/agent target pane w1:p1 has no live terminal/);assert.equal(f.h.calls.some(c=>c[1]==='prompt'),false);
   f.h.calls.length=0;await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
   assert.deepEqual(f.h.calls,[['workspace','list'],['tab','create','--workspace','w1','--cwd',{path:'~/work'},'--label','one','--no-focus'],['agent','start',t.agentName,'--kind','claude','--pane','w1:p2','--timeout','60000','--','--permission-mode','default'],['pane','remote-answers','w1:p2','on'],['agent','prompt','w1:p2','two']]);
   assert.deepEqual([t.state,t.error,t.paneId,f.store.data.topics.length],['ready','','w1:p2',1]);
@@ -1426,6 +1428,19 @@ test('while the client of its machine is offline, a new topic does not start and
   f.h.down=offline;f.replies.length=0;await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
   assert.deepEqual(f.replies.map(r=>r[3]),[notice('机器 cpu2 离线：它的 Bridge 客户端没有连上。这条消息没有发给 Agent，请稍后重发')]);
   assert.equal(t.state,'ready');assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['two']);
+ }finally{f.close();}
+});
+test('the agent starts once the shell of a new pane is up: a busy pane is tried again after a pause, and a pane that stays busy fails the topic',async()=>{
+ const f=topicFixture();try{
+  // The fake takes a hook once, so a busy pane sets it again for the next try.
+  let busy=2,tries=0;
+  const arm=()=>{f.h.on['agent start']=(args,run)=>{tries++;if(busy-->0){arm();throw coded('agent_pane_busy','agent target pane w1:p1 is not an available shell');}return run(args);};};
+  arm();await f.send({messageId:'om_1',content:'one'});
+  assert.equal(f.store.data.topics[0].state,'ready');assert.equal(tries,3);assert.equal(f.paused.length,2);
+  busy=Infinity;f.paused.length=0;arm();
+  await f.send({messageId:'om_2',content:'two'});
+  const t=f.store.data.topics[1];assert.equal(t.state,'failed');assert.match(t.error,/not an available shell/);
+  assert.ok(f.paused.reduce((a,b)=>a+b,0)>=10000,'waits at least ten seconds for the shell in all');
  }finally{f.close();}
 });
 test('agent_not_ready at start still opens the topic after turning on remote answers; agent_blocked sends a notice; other prompt errors are only logged',async()=>{
@@ -1481,7 +1496,7 @@ test('begin opens a topic of the binding under any root message, also one the bo
   assert.deepEqual(f.h.calls.slice(2),[['tab','rename','w1:t1','每天的报告'],['agent','start',topic.agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],['pane','remote-answers','w1:p1','on'],['agent','prompt','w1:p1','写一份报告']]);
   assert.deepEqual([f.reacted,f.replies],[[],[]]);assert.deepEqual(cotLog(f)[0],['create','om_root']);assert.equal(topic.cot!.origin,'om_root');
   // A topic that fails to start resolves to nothing.
-  f.h.on['agent start']=()=>{throw coded('agent_pane_busy','busy');};
+  f.h.on['agent start']=()=>{throw coded('agent_pane_unavailable','no live terminal');};
   assert.equal(await f.topics.begin(allowed,f.b,'om_root2',{title:'x',msg:{messageId:'om_root2',content:'x'}}).delivered,undefined);assert.equal(f.store.data.topics[1].state,'failed');
  }finally{f.close();}
 });
@@ -1771,7 +1786,7 @@ test('when a snapshot has new replies and ends a turn, the replies are sent befo
 });
 test('a message that is not prompted loses its reaction: failed start, blocked agent, prompt error or closed topic',async()=>{
  const f=topicFixture();try{
-  f.h.on['agent start']=()=>{throw coded('agent_pane_busy','busy');};await f.send({messageId:'om_1',content:'one'});
+  f.h.on['agent start']=()=>{throw coded('agent_pane_unavailable','no live terminal');};await f.send({messageId:'om_1',content:'one'});
   f.h.on['agent prompt']=()=>{throw coded('agent_blocked','blocked');};await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
   f.h.on['agent prompt']=()=>{throw coded('agent_prompt_failed','pty closed');};await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
   assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因'),notice('Agent 正在等待确认，请到 Herdr 中处理后重发这条消息')]);
@@ -2848,7 +2863,7 @@ test('a run that cannot post its card or start its agent is recorded as failed a
   f.at('2026-11-06T10:00:00+08:00');const s=f.schedules.add({...daily,cron:'*/5 * * * *'});
   f.postFails=Error('飞书未连接');f.at('2026-11-06T10:05:00+08:00');await f.schedules.tick();
   assert.deepEqual([f.store.data.topics,f.h.calls],[[],[]]);
-  f.postFails=null;f.h.on['agent start']=()=>{throw coded('agent_pane_busy','agent target pane w1:p1 is not an available shell');};f.at('2026-11-06T10:10:00+08:00');await f.schedules.tick();
+  f.postFails=null;f.h.on['agent start']=()=>{throw coded('agent_pane_unavailable','agent target pane w1:p1 has no live terminal');};f.at('2026-11-06T10:10:00+08:00');await f.schedules.tick();
   assert.equal(f.store.data.topics[0].state,'failed');assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')]);
   f.at('2026-11-06T10:15:00+08:00');await f.schedules.tick();
   assert.deepEqual(f.schedules.runs(s.id).map(r=>[r.outcome,r.n,r.reason]),[['failed',undefined,'未能在群里发出这次运行的消息'],['failed',1,'Agent 启动失败'],['started',2,undefined]]);

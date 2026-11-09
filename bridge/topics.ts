@@ -27,7 +27,7 @@ import type {Named} from './routing.ts';
 // (see operations in core.ts).
 const workspaceLabel=(b:Binding)=>'飞书 · '+b.name;
 // How long preparing a workspace (a clone and a fetch) and a launch may take.
-const workspaceTimeoutMs=600000,launchTimeoutMs=60000;
+const workspaceTimeoutMs=600000,launchTimeoutMs=60000,shellWaitMs=10000,shellPollMs=250;
 const brief=(e:Error)=>publicText(e.message).split('\n')[0].slice(0,200);
 // What a topic says when the client of its machine is offline (see Clients.call): the error names the machine, and after says what that
 // meant for the message.
@@ -63,12 +63,12 @@ export type Message=Pick<NormalizedMessage,'messageId'|'content'>&{resources?:Re
 // A message of a person in a bound chat, as Topics reads it; a missing mention or root counts as none.
 export type Inbound=Message&Pick<NormalizedMessage,'rawContentType'>&Partial<Pick<NormalizedMessage,'rootId'|'mentionedBot'>>;
 type Deps=Pick<Operations,'storeFile'|'removeDirectory'|'askCheapModel'|'prepareWorkspace'|'removeWorkspace'|'prepareLaunch'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
- herdr:Herdr,placeSkills:(m:Machine,cwd:string,kind:Kind,skills:string[])=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number};
+ herdr:Herdr,placeSkills:(m:Machine,cwd:string,kind:Kind,skills:string[])=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number,pause?:(ms:number)=>Promise<void>};
 export class Topics{
  declare store:Store;declare herdr:Herdr;declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
  declare updateCard:Deps['updateCard'];declare react:Deps['react'];declare unreact:Deps['unreact'];declare request:Deps['request'];declare download:Deps['download'];
  declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare askCheapModel:Deps['askCheapModel'];declare prepareWorkspace:Deps['prepareWorkspace'];declare removeWorkspace:Deps['removeWorkspace'];declare prepareLaunch:Deps['prepareLaunch'];
- declare placeSkills:Deps['placeSkills'];declare now:()=>number;declare topicQueues:Map<string,Promise<unknown>>;declare workspaceQueues:Map<string,Promise<unknown>>;
+ declare placeSkills:Deps['placeSkills'];declare now:()=>number;declare pause:(ms:number)=>Promise<void>;declare topicQueues:Map<string,Promise<unknown>>;declare workspaceQueues:Map<string,Promise<unknown>>;
  declare answering:Map<string,Promise<unknown>>;declare blockedSeen:Map<string,number>;declare renders:number;declare drawings:number;declare claims:Set<string>;
  // On machine m, through its client (see operations in core.ts): herdr(m,args,{timeoutMs}) runs a Herdr CLI command; storeFile(m,root,dir,name,body)
  // writes a file and resolves to its absolute path, and removeDirectory(m,dir) removes such a directory; askCheapModel(m,cwd,prompt,{timeoutMs})
@@ -80,9 +80,9 @@ export class Topics{
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes. now() is the clock.
- constructor(store:Store,{herdr,storeFile,removeDirectory,askCheapModel,prepareWorkspace,removeWorkspace,prepareLaunch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}:Deps){
+ constructor(store:Store,{herdr,storeFile,removeDirectory,askCheapModel,prepareWorkspace,removeWorkspace,prepareLaunch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now,pause=ms=>new Promise<void>(resolve=>setTimeout(resolve,ms))}:Deps){
   this.store=store;this.herdr=herdr;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.askCheapModel=askCheapModel;this.prepareWorkspace=prepareWorkspace;this.removeWorkspace=removeWorkspace;this.prepareLaunch=prepareLaunch;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.askCheapModel=askCheapModel;this.prepareWorkspace=prepareWorkspace;this.removeWorkspace=removeWorkspace;this.prepareLaunch=prepareLaunch;this.placeSkills=placeSkills;this.now=now;this.pause=pause;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>' or '<topic id> adopt' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings and one for those of the first cards of topics; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
@@ -320,7 +320,7 @@ export class Topics{
    Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t,dir)));this.store.save();
    await this.place(m,b,config.kind,dir,this.projectOf(t)?.skills??[]);
    const args=await this.launchArguments(m,config,dir);
-   try{await this.herdr(m,['agent','start',t.agentName,'--kind',config.kind,'--pane',t.paneId,'--timeout','60000',...args],{timeoutMs:70000});}
+   try{await this.startAgent(m,t,config.kind,args);}
    // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
    catch(e){if(e.code!=='agent_not_ready')throw e;}
    // Before the topic is ready, which links it to its agent only while the setting is on.
@@ -357,6 +357,15 @@ export class Topics{
   if(asking&&named.reason)this.store.log('话题会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
   if(!branch)delete t.branch;
   this.update(t,{routed:true,...project&&{projectId:project.id},...branch&&{branch}});
+ }
+ // Starts agent kind in the pane of topic t on machine m with args. The shell of a pane that was just opened may still be starting, and
+ // Herdr refuses a pane whose shell is busy (agent_pane_busy), so that is tried again for up to shellWaitMs before it counts.
+ async startAgent(m:Machine,t:Topic,kind:Kind,args:string[]){
+  for(let waited=0;;waited+=shellPollMs){
+   try{await this.herdr(m,['agent','start',t.agentName,'--kind',kind,'--pane',t.paneId,'--timeout','60000',...args],{timeoutMs:70000});return;}
+   catch(e){if(e.code!=='agent_pane_busy'||waited>=shellWaitMs)throw e;}
+   await this.pause(shellPollMs);
+  }
  }
  // Prepares the workspace of topic t on machine m and resolves to the directory its agent starts in, which the topic records. A topic of
  // before the projects has its directory already.
