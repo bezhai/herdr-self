@@ -5,18 +5,20 @@
 import crypto from 'node:crypto';import path from 'node:path';
 /** @import {Ran} from './link.ts' */
 const types=['feat','fix','refactor','docs','test','chore','perf','style'];
-// The prompt of the wt shell function, which the user's branch names come from.
+// The rules for a branch name in the prompt of the wt shell function, which the user's branch names come from. Bridge's prompt that also
+// picks a project (see routing.ts) shares them.
+export const branchRules=`Types: ${types.join(', ')}
+Rules:
+- Use lowercase kebab-case for description part
+- Max 50 chars total
+- Be specific but concise`;
 /** @param {string} desc */
 export const namingPrompt=desc=>`You are a git branch naming tool. Given a requirement, classify it and output a branch name.
 
 Output EXACTLY one line in this format, nothing else:
 BRANCH=type/short-kebab-name
 
-Types: ${types.join(', ')}
-Rules:
-- Use lowercase kebab-case for description part
-- Max 50 chars total
-- Be specific but concise
+${branchRules}
 - NO explanation, NO markdown, ONLY the BRANCH= line
 
 Requirement:

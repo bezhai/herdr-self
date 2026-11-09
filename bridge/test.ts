@@ -2,7 +2,7 @@ import test from 'node:test';import strictAssert from 'node:assert/strict';impor
 import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
 import {normalizeMachine,migrateMachines,operations,Store} from './core.ts';
-import {Skills,frontmatter,skillLimit} from './skills.ts';
+import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
@@ -2214,6 +2214,31 @@ test('worktree branches: haiku\'s answer names a branch only with a clean exit a
 const at=(iso:string)=>Date.parse(iso);
 // Upcoming run times of a cron expression in time zone tz after the ISO time from, as wall times there.
 const runsOf=(expression:string,tz:string,from:string,n:number)=>upcoming(parseCron(expression),tz,at(from),n).map(t=>when(t,tz));
+const routable_:Project[]=[{id:'p1',name:'genvi',description:'GEO 内容生成',repos:[],skills:[],workMode:'isolated'},{id:'p2',name:'promoter',description:'推广\n后台',repos:[],skills:[],workMode:'isolated'}];
+test('the model names the branch of a task alone when the project is fixed, with the prompt of the worktree-task plugin; a task without text, a failed call or an unusable answer leave no branch and say why',async()=>{
+ const asked:{cwd:string,prompt:string,timeoutMs?:number}[]=[];
+ const ask=(answer:Partial<Ran>|Error)=>loose<Operations['askCheapModel']>(async(m,cwd,prompt,options)=>{asked.push({cwd,prompt,timeoutMs:options?.timeoutMs});if(answer instanceof Error)throw answer;return {code:0,stdout:'',stderr:'',...answer};});
+ const m={id:'m'} as Machine;
+ assert.deepEqual(await nameTask(ask({stdout:'BRANCH=feat/add-login\n'}),m,'加验证码 ![image](img_a)',null),{branch:'feat/add-login'});
+ assert.deepEqual(asked,[{cwd:'~/',prompt:namingPrompt('加验证码'),timeoutMs:30000}]);
+ asked.length=0;assert.deepEqual(await nameTask(ask({}),m,' ![image](img_a) ',null),{reason:'任务描述里没有文字'});assert.deepEqual(asked,[]);
+ assert.deepEqual(await nameTask(ask({code:1,stderr:'Not logged in'}),m,'x',null),{reason:'claude 退出码 1：Not logged in'});
+ assert.deepEqual(await nameTask(ask({stdout:'BRANCH=Feature/X'}),m,'x',null),{reason:'输出里没有可用的 BRANCH= 行：BRANCH=Feature/X'});
+ assert.deepEqual(await nameTask(ask(Object.assign(Error('timeout'),{timedOut:true})),m,'x',null),{reason:'30 秒内没有返回'});
+ assert.deepEqual(await nameTask(ask(Error('spawn claude ENOENT')),m,'x',null),{reason:'无法运行 claude：spawn claude ENOENT'});
+});
+test('with the projects to choose from, one call picks the project by its exact name and names the branch; none, an unknown name or a failed call pick no project, and the branch is kept when its line is usable',async()=>{
+ const prompts:string[]=[];
+ const ask=(stdout:string,code=0)=>loose<Operations['askCheapModel']>(async(_m,_cwd,prompt)=>{prompts.push(prompt);return {code,stdout,stderr:'boom'};});
+ const m={id:'m'} as Machine;
+ assert.deepEqual(await nameTask(ask('PROJECT=promoter\nBRANCH=fix/login-page\n'),m,'修复登录页',routable_),{project:routable_[1],branch:'fix/login-page'});
+ assert.match(prompts[0],/PROJECT=<exact project name[^\n]*\nBRANCH=type\/short-kebab-name/);assert.match(prompts[0],/Projects:\n- genvi: GEO 内容生成\n- promoter: 推广 后台\n\nRequirement:\n修复登录页$/);
+ assert.deepEqual(await nameTask(ask('PROJECT=NONE\nBRANCH=chore/tidy'),m,'x',routable_),{branch:'chore/tidy'});
+ assert.deepEqual(await nameTask(ask('PROJECT=Genvi\nBRANCH=chore/tidy'),m,'x',routable_),{branch:'chore/tidy'});
+ assert.deepEqual(await nameTask(ask('PROJECT= genvi \nBRANCH=nonsense'),m,'x',routable_),{project:routable_[0],reason:'输出里没有可用的 BRANCH= 行：PROJECT= genvi \nBRANCH=nonsense'});
+ assert.deepEqual(await nameTask(ask('',1),m,'x',routable_),{reason:'claude 退出码 1：boom'});
+ prompts.length=0;assert.deepEqual(await nameTask(ask('PROJECT=genvi'),m,'![image](img_a)',routable_),{reason:'任务描述里没有文字'});assert.deepEqual(prompts,[]);
+});
 test('a cron expression has five fields of numbers, ranges, steps, lists and English names; anything else is refused, naming the field',()=>{
  for(const [expression,error] of [['',/5 个字段/],['* * * *',/5 个字段/],['* * * * * *',/5 个字段/],['@daily',/5 个字段/],['60 * * * *',/分钟/],['* 24 * * *',/小时/],['* * 0 * *',/日期/],['* * 32 * *',/日期/],['* * * 13 *',/月份/],
   ['* * * * 8',/星期/],['*/0 * * * *',/分钟/],['5-1 * * * *',/分钟/],['1,,2 * * * *',/分钟/],['-1 * * * *',/分钟/],['1.5 * * * *',/分钟/],['* * * * fri-mon',/星期/],['* * * foo *',/月份/],['* * * * monday',/星期/],['? * * * *',/分钟/],['* * L * *',/日期/],['* * * * 1#2',/星期/]] satisfies [string,RegExp][])
