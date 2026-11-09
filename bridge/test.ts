@@ -2658,6 +2658,27 @@ test('a schedule in mode new skips a time while the agent of its previous run wo
    [['2026-11-06 10:05','started',1,undefined],['2026-11-06 10:10','skipped',undefined,'上次还没结束，跳过'],['2026-11-06 10:15','skipped',undefined,'上次还没结束，跳过'],['2026-11-06 10:20','started',2,undefined]]);
  }finally{f.close();}
 });
+test('the topics that the runs of a schedule in mode new open start the way every topic does: a group\'s project gets a worktree of its own and a branch named from the task at each run, and the first card is under the card of the run',async()=>{
+ const f=scheduleFixture();withProjects(f,genvi);f.b.defaultProjectId='g';try{
+  f.at('2026-11-06T08:58:00+08:00');const s=f.schedules.add(daily);
+  f.at('2026-11-06T09:00:05+08:00');await f.schedules.tick();
+  const [t]=f.store.data.topics;
+  assert.deepEqual(f.naming.map(n=>n.prompt),[namingPrompt('总结昨天的提交')]);
+  assert.deepEqual(f.prepared.map(p=>p[1]),[{project:{id:'g',repos:genvi.repos,workMode:'isolated'},topicId:t.id,branch:'feat/add-login'}]);
+  assert.deepEqual([t.state,t.projectId,t.branch,f.starts.map(x=>[x[0],cardText(x[1])])],['ready','g','feat/add-login',[['om_post_1','genvi · 分支 feat/add-login · cpu2 · Claude']]]);
+  assert.deepEqual(f.h.calls.at(-1),['agent','prompt','w1:p1','总结昨天的提交']);assert.deepEqual(f.store.data.schedules[0].runs.map(r=>r.outcome),['started']);void s;
+ }finally{f.close();}
+});
+test('a schedule in mode new of a direct chat has the model pick the project from the text of the task, or an empty directory when it picks none',async()=>{
+ const f=scheduleFixture({binding:direct});withProjects(f,genvi,promoter);f.fake.model=prompt=>({stdout:prompt.includes('Requirement:\n总结昨天的提交')?'PROJECT=promoter\nBRANCH=docs/daily-report\n':'PROJECT=NONE\nBRANCH=chore/x\n'});try{
+  f.at('2026-11-06T08:58:00+08:00');const s=f.schedules.add(daily);
+  f.at('2026-11-06T09:00:05+08:00');await f.schedules.tick();
+  const [t]=f.store.data.topics;assert.match(f.naming[0].prompt,/- promoter: 推广后台/);
+  assert.deepEqual([t.state,t.projectId,t.branch,cardText(f.starts[0][1])],['ready','pr','docs/daily-report','promoter · 分支 docs/daily-report · cpu2 · Claude']);
+  f.schedules.update(s.id,{task:'随便聊聊'});f.at('2026-11-07T09:00:01+08:00');await f.schedules.tick();
+  const second=f.store.data.topics[1];assert.deepEqual([second.state,second.projectId,second.cwd,cardText(f.starts[1][1])],['ready',undefined,`/ws/none/${second.id}`,'没有找到对应的项目，在一个空目录里开始。\ncpu2 · Claude']);
+ }finally{f.close();}
+});
 test('at its time a schedule in mode into posts the card of the run into the thread of its topic and gives the task to the agent there as a message of a person would, in the topic queue, with the COT under the card and no reaction; it skips a time while the agent works or waits for a confirmation',async()=>{
  const f=scheduleFixture();try{
   await f.send({messageId:'om_1',content:'one'});const t=f.store.data.topics[0];delete t.cot;f.h.calls.length=0;f.api.length=0;f.reacted.length=0;
@@ -2821,7 +2842,7 @@ const confirmButtons=(id:string)=>({tag:'column_set',horizontal_spacing:'8px',co
 const nextWeekdays=['2026-11-09 周一 09:30','2026-11-10 周二 09:30','2026-11-11 周三 09:30','2026-11-12 周四 09:30','2026-11-13 周五 09:30'];
 const aboutWeekdays=(task='总结昨天的提交')=>[plainText('时间：每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）'),plainText('接下来 5 次运行：\n'+nextWeekdays.join('\n')),plainText('任务：\n'+task)];
 const newTopicMode=plainText('模式：每次开新话题。每次运行时机器人在群里发一条消息，在它下面开一个新话题，交给一个新的 Agent'),intoThisMode=plainText('模式：发进这个话题。每次运行把任务发给这个话题里的 Agent，它记得之前的对话');
-const boundTo=plainText('绑定：个人助手（work · cpu2 · Claude）');
+const boundTo=plainText('绑定：个人助手');
 test('an agent is known by the machine whose client passed its request on and by its pane: a ready topic there whose agent is still linked; any other pane, machine, Herdr session or topic is refused, and a topic whose agent is gone ends',async()=>{
  const other:Machine={id:'m2',name:'cpu1',session:'default',enabled:true};
  const f=agentFixture({machines:[other]});try{
