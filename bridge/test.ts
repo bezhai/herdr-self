@@ -3755,9 +3755,9 @@ test('the client, bridge-schedule and bridge-skill run on Node alone: bin/bridge
    for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b(?!\s+type\b)[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
   visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
  };
- assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','link.ts','machine.ts']);
- assert.deepEqual(imports('bridge-schedule.ts'),['bin/bridge-schedule.ts','client.ts','cron.ts','link.ts','machine.ts','request-cards.ts','schedule-command.ts']);
- assert.deepEqual(imports('bridge-skill.ts'),['bin/bridge-skill.ts','client.ts','link.ts','machine.ts','skill-command.ts']);
+ assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','link.ts','machine-tools.ts','machine.ts']);
+ assert.deepEqual(imports('bridge-schedule.ts'),['bin/bridge-schedule.ts','client.ts','cron.ts','link.ts','machine-tools.ts','machine.ts','request-cards.ts','schedule-command.ts']);
+ assert.deepEqual(imports('bridge-skill.ts'),['bin/bridge-skill.ts','client.ts','link.ts','machine-tools.ts','machine.ts','skill-command.ts']);
 });
 // Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
 async function stopClients(f:ClientsFixture,started:ClientProcess[]){
