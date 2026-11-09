@@ -1,8 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {enqueue} from './core.ts';
+import {enqueue,isRecord,oneOf} from './core.ts';
+import type {Store,Call} from './core.ts';
 import {skillMark} from './machine.ts';
+import type {Machine,Skill,Kind} from './state.ts';
+import type {SkillFiles} from './link.ts';
 
 // The skills of the platform, which the console's Skills page manages. Each is a directory named after it under skills/ in the state
 // directory, with its SKILL.md and any other files. The state file holds only their index, the collection skills: the name, the description
@@ -15,20 +18,20 @@ import {skillMark} from './machine.ts';
 const machineStore='~/.local/share/herdr-bridge/skills';
 // Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
 // which Claude and Codex follow, or as a copy, since Antigravity follows no link.
-const places={claude:{dir:'.claude/skills',as:'link'},codex:{dir:'.agents/skills',as:'link'},agy:{dir:'.agents/skills',as:'copy'}};
+const places:Record<Kind,{dir:string,as:'link'|'copy'}>={claude:{dir:'.claude/skills',as:'link'},codex:{dir:'.agents/skills',as:'link'},agy:{dir:'.agents/skills',as:'copy'}};
 
 // A name of the Agent Skills format: lowercase letters and digits with single hyphens between them, at most 64 characters, like its
 // directory; its description at most 1024 characters.
-const validName=n=>typeof n==='string'&&n.length<=64&&/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(n),descriptionMax=1024;
+const validName=(n:unknown):n is string=>typeof n==='string'&&n.length<=64&&/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(n),descriptionMax=1024;
 // The most that the files of a skill hold together, in bytes, and the most that a request writing one carries: their base64 in JSON, with
 // room for the rest. Skills come with scripts and references, and the 100,000 characters of other requests are too few for them.
 export const skillLimit=1<<20,requestLimit=Math.ceil(skillLimit/3)*4+65536;
 // The top-level fields of the YAML frontmatter that opens text, between two --- lines, or null without one. It reads YAML as far as skills
 // write it there: `key: value` lines whose value is plain, single- or double-quoted, and may go on in more indented lines, or is a block (|
 // or >) of those lines; a nested map is read as the value of its key and not looked into.
-export function frontmatter(text){
+export function frontmatter(text:string){
  const m=/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);if(!m)return null;
- const lines=m[1].split(/\r?\n/),fields={};
+ const lines=m[1].split(/\r?\n/),fields:Record<string,string>={};
  for(let i=0;i<lines.length;i++){
   const f=/^([\w-]+):(?:[ \t]+(.*))?$/.exec(lines[i]);if(!f)continue;
   const v=(f[2]??'').trim(),more=[];while(i+1<lines.length&&/^(\s|$)/.test(lines[i+1]))more.push(lines[++i].trim());
@@ -36,7 +39,7 @@ export function frontmatter(text){
  }
  return fields;
 }
-function unquote(v){
+function unquote(v:string):string{
  if(/^".*"$/.test(v))try{return JSON.parse(v);}catch{}
  return /^'.*'$/.test(v)?v.slice(1,-1).replaceAll("''","'"):v;
 }
@@ -44,10 +47,10 @@ function unquote(v){
 // paths, the description of its SKILL.md and the digest of its files, which changes with their content. Throws on what makes it no skill:
 // a name that is not one, a path that leaves its directory or takes the name of Bridge's marker on machines, content that is not base64,
 // files over skillLimit together, and a SKILL.md without a frontmatter that names the skill as its directory and describes it.
-function checked(name,files){
+function checked(name:unknown,files:unknown){
  if(!validName(name))throw Error(`skill 名称无效：${name}，只能用小写字母、数字和单个连字符，最多 64 个字符`);
  if(!files||typeof files!=='object'||Array.isArray(files)||!Object.values(files).every(b=>typeof b==='string'))throw Error('skill 的文件无效');
- const entries=Object.entries(files).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([p,b])=>{
+ const entries=Object.entries(files).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([p,b]):[string,Buffer]=>{
   if(path.isAbsolute(p)||p.split('/').some(s=>!s||s==='.'||s==='..')||p===skillMark)throw Error('文件路径无效：'+p);
   if(b.length%4||!/^[A-Za-z0-9+/]*={0,2}$/.test(b))throw Error('文件内容不是 base64：'+p);
   return [p,Buffer.from(b,'base64')];
@@ -60,34 +63,39 @@ function checked(name,files){
  if(!f.description||f.description.length>descriptionMax)throw Error(`SKILL.md 的 frontmatter 缺少 description，或者超过 ${descriptionMax} 个字符`);
  return {entries,description:f.description,digest:crypto.createHash('sha256').update(JSON.stringify(entries.map(([p,c])=>[p,c.toString('base64')]))).digest('hex')};
 }
+// What bridge-skill reads through the client of its machine (see answer and skill-command.ts): the request of each read and its answer.
+export type SkillReads={list:{request:{},answer:{skills:Skill[]}},search:{request:{query:string},answer:{skills:Skill[]}},
+ read:{request:{name:string},answer:{name:string,description:string,preload:boolean,text:string,files:string[],path?:string}}};
+const reads:(keyof SkillReads)[]=['list','search','read'];
 export class Skills{
+ declare store:Store;declare call:Call;declare dir:string;declare queues:Map<string,Promise<unknown>>;
  // call(m,method,params,{timeoutMs}) sends a request to the client of machine m (see Clients.call).
- constructor(store,call){this.store=store;this.call=call;this.dir=path.join(store.dir,'skills');this.queues=new Map();}
+ constructor(store:Store,call:Call){this.store=store;this.call=call;this.dir=path.join(store.dir,'skills');this.queues=new Map();}
  // The index, in the order of the names.
  list(){return this.store.data.skills;}
  // The entry of skill name; throws when there is none.
- entry(name){const s=this.store.data.skills.find(x=>x.name===name);if(!s)throw Error('skill 不存在：'+name);return s;}
+ entry(name:unknown){const s=this.store.data.skills.find(x=>x.name===name);if(!s)throw Error('skill 不存在：'+name);return s;}
  // Skill name with its files, {relative path: base64}.
- read(name){
-  const s=this.entry(name),dir=path.join(this.dir,name);
+ read(name:unknown){
+  const s=this.entry(name),dir=path.join(this.dir,s.name);
   const files=fs.readdirSync(dir,{recursive:true,withFileTypes:true}).filter(e=>e.isFile()).map(e=>path.relative(dir,path.join(e.parentPath,e.name))).sort();
   return {...s,files:Object.fromEntries(files.map(p=>[p,fs.readFileSync(path.join(dir,p),'base64')]))};
  }
  // The SKILL.md of skill name as text.
- text(name){return fs.readFileSync(path.join(this.dir,this.entry(name).name,'SKILL.md'),'utf8');}
+ text(name:string){return fs.readFileSync(path.join(this.dir,this.entry(name).name,'SKILL.md'),'utf8');}
  // Imports skill name with files ({relative path: base64}) as a whole: a new skill, or in place of all the files of the one of that name,
  // whose flag stays. Returns its entry.
- put(name,files){const s=this.write(name,files);this.store.log('skill','导入了 skill '+name);return s;}
+ put(name:string,files:unknown){const s=this.write(name,files);this.store.log('skill','导入了 skill '+name);return s;}
  // Writes text as the SKILL.md of skill name: of a new skill, the only file, when create; else of the skill of that name, whose other files
  // stay. Returns its entry.
- save(name,text,{create=false}={}){
+ save(name:string,text:unknown,{create=false}={}){
   if(create&&this.store.data.skills.some(x=>x.name===name))throw Error('skill 已存在：'+name);
   const s=this.write(name,{...!create&&this.read(name).files,'SKILL.md':Buffer.from(String(text??'')).toString('base64')});
   this.store.log('skill',create?'新建了 skill '+name:`修改了 skill ${name} 的 SKILL.md`);return s;
  }
  // The files go into a directory beside the skill's, which then takes its place; the entry follows. Synchronous, like the state file, so
  // that two writes of a skill never interleave.
- write(name,files){
+ write(name:string,files:unknown){
   const {entries,description,digest}=checked(name,files),target=path.join(this.dir,name);
   fs.mkdirSync(this.dir,{recursive:true,mode:0o700});const fresh=fs.mkdtempSync(path.join(this.dir,'.'+name+'-'));
   try{
@@ -97,20 +105,20 @@ export class Skills{
   const old=this.store.data.skills.find(x=>x.name===name),s={name,description,preload:old?.preload??false,digest};
   this.store.data.skills=[...this.store.data.skills.filter(x=>x!==old),s].sort((a,b)=>a.name<b.name?-1:1);this.store.save();return s;
  }
- remove(name){
+ remove(name:string){
   this.entry(name);fs.rmSync(path.join(this.dir,name),{recursive:true,force:true});
   this.store.data.skills=this.store.data.skills.filter(x=>x.name!==name);this.store.save();this.store.log('skill','删除了 skill '+name);
  }
  // Sets whether skill name is loaded by default (see place).
- flag(name,preload){
+ flag(name:string,preload:unknown){
   const s=this.entry(name);s.preload=Boolean(preload);this.store.save();
   this.store.log('skill',`skill ${name} 已设为${s.preload?'默认加载':'按需读取'}，之后新开的话题生效`);return s;
  }
  // The entries of the skills whose name, description or SKILL.md hold every word of query, in any case: those with them in the name or
  // the description first, each part in the order of the names.
- search(query){
+ search(query:unknown){
   const words=typeof query==='string'?query.toLowerCase().split(/\s+/).filter(Boolean):[];if(!words.length)throw Error('缺少要搜索的词');
-  const has=text=>{const t=text.toLowerCase();return words.every(w=>t.includes(w));},about=s=>s.name+'\n'+s.description;
+  const has=(text:string)=>{const t=text.toLowerCase();return words.every(w=>t.includes(w));},about=(s:Skill)=>s.name+'\n'+s.description;
   const named=this.list().filter(s=>has(about(s)));
   return [...named,...this.list().filter(s=>!named.includes(s)&&has(about(s)+'\n'+this.text(s.name)))];
  }
@@ -119,8 +127,8 @@ export class Skills{
  // that are no longer loaded by default: the request placeSkills to the client of m, with the skills as data. Resolves to the paths of same-name
  // skills that are not Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after
  // another, since they share its store.
- place(m,cwd,kind){
-  const skills=()=>this.list().filter(s=>s.preload).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
+ place(m:Machine,cwd:string,kind:Kind){
+  const skills=():SkillFiles[]=>this.list().filter(s=>s.preload).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
   return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:skills(),...places[kind],cwd}));
  }
  // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
@@ -128,14 +136,14 @@ export class Skills{
  // client of m puts into its store first, after the placements queued there, so that the answer also has their directory there, path. The
  // socket of that client takes the commands of any agent of m, and what the platform holds goes into every later agent: nothing else is
  // answered, writes least of all, and nothing on a machine that Bridge does not use.
- async answer(m,op,body){
-  if(!['list','search','read'].includes(op))throw Error('未知的操作：'+op);
-  if(!body||typeof body!=='object'||Array.isArray(body))throw Error('请求内容无效');
+ async answer(m:Machine,op:string,body:unknown):Promise<SkillReads[keyof SkillReads]['answer']>{
+  if(!oneOf(reads,op))throw Error('未知的操作：'+op);
+  if(!isRecord(body))throw Error('请求内容无效');
   if(!m.enabled)throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
   if(op==='list')return {skills:this.list()};
   if(op==='search')return {skills:this.search(body.query)};
   const {name,description,preload,digest,files}=this.read(body.name),text=Buffer.from(files['SKILL.md'],'base64').toString('utf8'),others=Object.keys(files).filter(p=>p!=='SKILL.md');
-  const read={name,description,preload,text,files:others};if(!others.length)return read;
+  const read:SkillReads['read']['answer']={name,description,preload,text,files:others};if(!others.length)return read;
   return {...read,path:await enqueue(this.queues,m.id,()=>this.call(m,'stockSkill',{store:machineStore,skill:{name,digest,files}}))};
  }
 }

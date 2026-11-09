@@ -2,6 +2,8 @@ import {registerApp} from '@larksuite/channel';
 import QRCode from 'qrcode';
 import {normalizeApp} from './platform.ts';
 import {text,uuid} from './core.ts';
+import type {Store} from './core.ts';
+import type {App} from './state.ts';
 
 // Use only the bot capabilities exercised by the bridge; no user OAuth scopes.
 export const registrationAddons={preset:false,scopes:{tenant:[
@@ -14,26 +16,32 @@ export const registrationAddons={preset:false,scopes:{tenant:[
  // Topics download the images and files of the messages they receive (see attachments.ts).
  'im:message:readonly',
 ]},events:{items:{tenant:['im.message.receive_v1']}},callbacks:{items:['card.action.trigger']}};
-const active=s=>['starting','pending','connecting'].includes(s?.status);
-const errors={access_denied:'已在飞书拒绝创建，可重新发起。',expired_token:'创建链接已过期，请重新生成。',abort:'已停止等待。如已在飞书创建应用，可通过已有应用入口添加。'};
+// A run of the registration flow (see start), with the link and its QR code while Feishu waits for the owner.
+type Registration={id:string,name:string,status:'starting'|'pending'|'connecting'|'completed'|'cancelled'|'expired'|'denied'|'error'|'needs_owner'|'connection_error',
+ controller:AbortController,message:string,timer?:NodeJS.Timeout,done?:Promise<void>,url?:string,qr?:string,expiresAt?:number,appId?:string};
+const active=(s:Registration|null)=>['starting','pending','connecting'].includes(s?.status);
+const errors:{[code:string]:string}={access_denied:'已在飞书拒绝创建，可重新发起。',expired_token:'创建链接已过期，请重新生成。',abort:'已停止等待。如已在飞书创建应用，可通过已有应用入口添加。'};
 
+type Options={register?:typeof registerApp,qr?:(url:string)=>Promise<string>,timeoutMs?:number,connect?:(a:App)=>Promise<boolean>};
 export class Registrations{
- constructor(store,{register=registerApp,qr=url=>QRCode.toDataURL(url,{width:300,margin:3,errorCorrectionLevel:'M'}),timeoutMs=25000,connect=async()=>true}={}){
+ declare store:Store;declare connect:NonNullable<Options['connect']>;declare register:typeof registerApp;declare qr:NonNullable<Options['qr']>;declare timeoutMs:number;
+ declare current:Registration|null;
+ constructor(store:Store,{register=registerApp,qr=url=>QRCode.toDataURL(url,{width:300,margin:3,errorCorrectionLevel:'M'}),timeoutMs=25000,connect=async()=>true}:Options={}){
   this.store=store;this.connect=connect;this.register=register;this.qr=qr;this.timeoutMs=timeoutMs;this.current=null;
  }
  // Explicit projection: credentials, device codes and SDK exceptions never reach the browser.
  status(){const r=this.current;if(!r)return null;return {id:r.id,name:r.name,status:r.status,url:r.url,qr:r.qr,expiresAt:r.expiresAt,appId:r.appId,message:r.message};}
- start(input){
+ start(input:{name?:unknown}){
   if(active(this.current))return this.status();
-  const r={id:uuid(),name:text(input.name||'Herdr 工作助手',60),status:'starting',controller:new AbortController(),message:'正在生成飞书创建链接…'};
+  const r:Registration={id:uuid(),name:text(input.name||'Herdr 工作助手',60),status:'starting',controller:new AbortController(),message:'正在生成飞书创建链接…'};
   this.current=r;
   r.timer=setTimeout(()=>this.finish(r,'error','生成链接超时，请稍后重试。'),this.timeoutMs);r.timer.unref?.();
   r.done=this.run(r);return this.status();
  }
- finish(r,status,message){if(!active(r))return;clearTimeout(r.timer);r.status=status;r.message=message;delete r.url;delete r.qr;r.controller.abort();}
- cancel(id){const r=this.current;if(r?.id!==id)throw Error('创建流程已变化，请刷新后重试');this.finish(r,'cancelled',errors.abort);return this.status();}
+ finish(r:Registration,status:Registration['status'],message:string){if(!active(r))return;clearTimeout(r.timer);r.status=status;r.message=message;delete r.url;delete r.qr;r.controller.abort();}
+ cancel(id:string){const r=this.current;if(r?.id!==id)throw Error('创建流程已变化，请刷新后重试');this.finish(r,'cancelled',errors.abort);return this.status();}
  stop(){if(this.current)this.finish(this.current,'cancelled',errors.abort);}
- async run(r){
+ async run(r:Registration){
   try{
    const result=await this.register({source:'herdr-bridge',createOnly:false,addons:structuredClone(registrationAddons),signal:r.controller.signal,
     appPreset:{name:r.name,desc:'通过 Herdr Bridge 连接你的原生 coding agent 会话'},

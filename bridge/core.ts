@@ -11,6 +11,8 @@ export function text(v:unknown,max=200){if(typeof v!=='string'||!v.trim()||v.len
 export const uuid=()=>crypto.randomUUID();
 // Whether v is one of list, for a value that came from outside.
 export const oneOf=<const T>(list:readonly T[],v:unknown):v is T=>list.includes(v);
+// Whether v is an object other than an array, such as the JSON of a request.
+export const isRecord=(v:unknown):v is Record<string,unknown>=>Boolean(v)&&typeof v==='object'&&!Array.isArray(v);
 // Keyed queues: tasks with the same key run one after another; a failed task does not block the next one.
 export function enqueue<T>(queues:Map<string,Promise<unknown>>,key:string,task:()=>T|Promise<T>){
  const run=(queues.get(key)||Promise.resolve()).then(task),tail=run.catch(()=>{});

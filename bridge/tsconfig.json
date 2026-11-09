@@ -18,5 +18,5 @@
   },
   // The modules typed so far; the others follow.
   "include": ["array-includes.d.ts", "state.ts", "core.ts", "link.ts", "machine.ts", "platform.ts", "commands.ts", "cot.ts", "request-cards.ts", "message-cards.ts",
-    "attachments.ts", "cron.ts", "web-assets.ts"]
+    "attachments.ts", "cron.ts", "web-assets.ts", "skills.ts", "clients.ts", "registration.ts", "pending-chats.ts"]
 }
