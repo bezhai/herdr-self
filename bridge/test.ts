@@ -2,7 +2,7 @@ import test from 'node:test';import strictAssert from 'node:assert/strict';impor
 import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
 import {normalizeMachine,migrateMachines,operations,Store,publicText} from './core.ts';
-import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';
+import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';import {modelFrom} from './model.ts';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
@@ -2577,6 +2577,31 @@ const at=(iso:string)=>Date.parse(iso);
 // Upcoming run times of a cron expression in time zone tz after the ISO time from, as wall times there.
 const runsOf=(expression:string,tz:string,from:string,n:number)=>upcoming(parseCron(expression),tz,at(from),n).map(t=>when(t,tz));
 const routable_:Project[]=[{id:'p1',name:'genvi',description:'GEO 内容生成',repos:[],skills:[],workMode:'isolated'},{id:'p2',name:'promoter',description:'推广\n后台',repos:[],skills:[],workMode:'isolated'}];
+test('the model service is one chat completion call with the key as a bearer token, whose first choice is the answer; a missing configuration, a refusal, a silent server, an answer without text and an unreachable server reject without the key in the message',async()=>{
+ const seen:{url?:string,auth?:string,body?:unknown}[]=[];let respond:(res:http.ServerResponse)=>void=res=>{res.end(JSON.stringify({choices:[{message:{content:'  BRANCH=feat/x\n',reasoning_content:'thinking'}}]}));};
+ const server=http.createServer((req,res)=>{let body='';req.on('data',c=>{body+=c;});req.on('end',()=>{seen.push({url:req.url,auth:req.headers.authorization,body:JSON.parse(body)});respond(res);});});
+ await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/`;
+ const key='sk-secret-key',env=(extra:Record<string,string>={})=>({BRIDGE_MODEL_BASE_URL:base,BRIDGE_MODEL_API_KEY:key,BRIDGE_MODEL_NAME:'auto',...extra});
+ const failure=async(ask:ReturnType<typeof modelFrom>)=>{try{await ask('p');}catch(e){return e.message as string;}throw Error('did not reject');};
+ try{
+  assert.equal(await modelFrom(env())('hello'),'BRANCH=feat/x');
+  assert.deepEqual(seen,[{url:'/v1/chat/completions',auth:'Bearer '+key,body:{model:'auto',messages:[{role:'user',content:'hello'}]}}]);
+  // Any one of the three settings missing, or empty, means no model.
+  for(const name of ['BRIDGE_MODEL_BASE_URL','BRIDGE_MODEL_API_KEY','BRIDGE_MODEL_NAME'])assert.match(await failure(modelFrom(env({[name]:' '}))),new RegExp('没有配置模型服务.*'+name));
+  assert.equal(seen.length,1);
+  // A refusal says the status and what the server said, with the key taken out should the server repeat it.
+  respond=res=>{res.statusCode=401;res.end(`bad key ${key}`);};
+  const refused=await failure(modelFrom(env()));assert.match(refused,/HTTP 401/);assert.match(refused,/bad key/);assert.ok(!refused.includes(key));
+  // Answers without text.
+  for(const body of ['{"choices":[]}','{"choices":[{"message":{"content":"  "}}]}','{"choices":[{"message":{"reasoning_content":"x"}}]}','not json'])
+   {respond=res=>{res.end(body);};assert.match(await failure(modelFrom(env())),/没有返回可用的文字/,body);}
+  // A server that does not answer in time.
+  respond=()=>{};assert.match(await failure(modelFrom(env(),{timeoutMs:50})),/模型服务 0\.05 秒内没有返回/);
+  // A server that is not there.
+  const dead=await new Promise<string>(r=>{const s=http.createServer().listen(0,'127.0.0.1',()=>{const u=`http://127.0.0.1:${(s.address() as AddressInfo).port}/v1`;s.close(()=>r(u));});});
+  const down=await failure(modelFrom(env({BRIDGE_MODEL_BASE_URL:dead})));assert.match(down,/无法连接模型服务/);assert.ok(!down.includes(key));
+ }finally{server.closeAllConnections();server.close();}
+});
 test('the model names the branch of a task alone when the project is fixed, with the prompt of the worktree-task plugin; a task without text, a failed call or an unusable answer leave no branch and say why',async()=>{
  const asked:{cwd:string,prompt:string,timeoutMs?:number}[]=[];
  const ask=(answer:Partial<Ran>|Error)=>loose<Operations['askCheapModel']>(async(m,cwd,prompt,options)=>{asked.push({cwd,prompt,timeoutMs:options?.timeoutMs});if(answer instanceof Error)throw answer;return {code:0,stdout:'',stderr:'',...answer};});
