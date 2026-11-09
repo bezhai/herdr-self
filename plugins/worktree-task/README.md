@@ -130,4 +130,4 @@ cd plugins/worktree-task
 node --test
 ```
 
-分支名的解析、校验和随机备用名、worktree 路径这些共用逻辑的单元测试在 `bridge/test.mjs` 里。测试在临时目录里建 Git 仓库，用假的 `herdr`、`claude` 和一个记录参数的 `git` 包装（`testing/` 下，内部调用真实的 git）替换 PATH 上的同名命令，并去掉当前会话的 `HERDR_*` 变量，不会连接正在运行的 herdr，也不会调用真实的 Claude。`just check` 不包含这些测试。
+分支名的解析、校验和随机备用名、worktree 路径这些共用逻辑的单元测试在 `bridge/test.ts` 里。测试在临时目录里建 Git 仓库，用假的 `herdr`、`claude` 和一个记录参数的 `git` 包装（`testing/` 下，内部调用真实的 git）替换 PATH 上的同名命令，并去掉当前会话的 `HERDR_*` 变量，不会连接正在运行的 herdr，也不会调用真实的 Claude。`just check` 不包含这些测试。

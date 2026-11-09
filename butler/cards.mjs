@@ -10,7 +10,7 @@
 export const AGENT_GROUP='herdr bridge 里绑定了管家 agent 的飞书群';
 
 // Feishu refuses a card message whose request body exceeds 30 KB; the card travels serialized as a string inside
-// that body (see bridge/message-cards.mjs, which keeps 28000 bytes for the same reason).
+// that body (see bridge/message-cards.ts, which keeps 28000 bytes for the same reason).
 export const CARD_BYTES=28000;
 // Feishu takes at most 200 components in a card, text objects (tag plain_text) counted among them.
 export const MAX_COMPONENTS=200;
