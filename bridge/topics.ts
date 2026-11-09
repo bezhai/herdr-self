@@ -8,6 +8,10 @@ import {attachmentsOf,promptOf,fileName,titleOf,limits,label,reason} from './att
 import {slash} from './commands.ts';
 import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,steps} from './cot.ts';
 import {attachmentFolder} from './machine.ts';
+import {nameTask} from './routing.ts';
+import {startCard} from './topic-cards.ts';
+import {workspaceOf,hasBranch} from './workspaces.ts';
+import {randomBranch} from './worktree-branch.mjs';
 import type {NormalizedMessage,ResourceDescriptor} from '@larksuite/channel';
 import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';
 import type {App,Binding,Machine,Topic,Reaction,RequestCard,Kind,Project,AgentConfig} from './state.ts';
@@ -16,19 +20,22 @@ import type {Click,HerdrRequest,Answer} from './request-cards.ts';
 import type {Choice,Offered,Group} from './adoption.ts';
 import type {Reply} from './message-cards.ts';
 import type {Event} from './cot.ts';
+import type {Named} from './routing.ts';
 // One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, or one that already
 // runs in any pane of any machine and that the topic adopted (/adopt). Everything goes through the Herdr CLI, besides what the project's
 // workspace, the launch of an agent, attachments and Bridge's skills need on the machine; all of it through the client of the machine
 // (see operations in core.ts).
 const workspaceLabel=(b:Binding)=>'飞书 · '+b.name;
-// Arguments that Herdr passes on to the agent it starts, after --, per kind of agent configuration. Claude gets the configuration's permission mode. Codex runs
-// in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
-// that server, and with the network of its workspace-write sandbox on: without it the sandbox refuses connect() on every socket, that of
-// the Bridge client too (see client.ts), which bridge-schedule needs; the network is all or nothing, and the limits on writing files stay.
-// Codex also skips the trust of its hooks: whenever hooks.json changes, for example after Herdr updates its integration, Codex waits on
-// a screen to review the new hooks, which a Feishu topic cannot answer; the hooks are the owner's own. Antigravity (agy) gets nothing,
-// not even the --.
-const agentArgs:Record<Kind,(c:AgentConfig)=>string[]>={claude:c=>['--','--permission-mode',permissionMode(c)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:()=>[]};
+// Arguments that Herdr passes on to the agent it starts, after --, that every topic gets besides those that the client prepares for the
+// configuration (see launchArguments): its model, permission mode and trust. Codex runs in the topic pane instead of attaching to its
+// shared background server, whose hooks carry the Herdr variables of the pane that started that server, and with the network of its
+// workspace-write sandbox on: without it the sandbox refuses connect() on every socket, that of the Bridge client too (see client.ts),
+// which bridge-schedule needs; the network is all or nothing, and the limits on writing files stay. Codex also skips the trust of its
+// hooks: whenever hooks.json changes, for example after Herdr updates its integration, Codex waits on a screen to review the new hooks,
+// which a Feishu topic cannot answer; the hooks are the owner's own. Claude and Antigravity (agy) get nothing.
+const launchBase:Record<Kind,string[]>={claude:[],codex:['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:[]};
+// How long preparing a workspace (a clone and a fetch) and a launch may take.
+const workspaceTimeoutMs=600000,launchTimeoutMs=60000;
 const brief=(e:Error)=>publicText(e.message).split('\n')[0].slice(0,200);
 // What a topic says when the client of its machine is offline (see Clients.call): the error names the machine, and after says what that
 // meant for the message.
@@ -63,30 +70,31 @@ const toast=(type:string,content:string)=>({toast:{type,content}});
 export type Message=Pick<NormalizedMessage,'messageId'|'content'>&{resources?:ResourceDescriptor[]};
 // A message of a person in a bound chat, as Topics reads it; a missing mention or root counts as none.
 export type Inbound=Message&Pick<NormalizedMessage,'rawContentType'>&Partial<Pick<NormalizedMessage,'rootId'|'mentionedBot'>>;
-type Deps=Pick<Operations,'makeDirectory'|'storeFile'|'removeDirectory'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
- herdr:Herdr,placeSkills:(m:Machine,cwd:string,kind:Kind)=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number};
+type Deps=Pick<Operations,'storeFile'|'removeDirectory'|'askCheapModel'|'prepareWorkspace'|'removeWorkspace'|'prepareLaunch'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
+ herdr:Herdr,placeSkills:(m:Machine,cwd:string,kind:Kind,skills:string[])=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number};
 export class Topics{
- declare store:Store;declare herdr:Herdr;declare makeDirectory:Deps['makeDirectory'];declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
+ declare store:Store;declare herdr:Herdr;declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
  declare updateCard:Deps['updateCard'];declare react:Deps['react'];declare unreact:Deps['unreact'];declare request:Deps['request'];declare download:Deps['download'];
- declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];
+ declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare askCheapModel:Deps['askCheapModel'];declare prepareWorkspace:Deps['prepareWorkspace'];declare removeWorkspace:Deps['removeWorkspace'];declare prepareLaunch:Deps['prepareLaunch'];
  declare placeSkills:Deps['placeSkills'];declare now:()=>number;declare topicQueues:Map<string,Promise<unknown>>;declare workspaceQueues:Map<string,Promise<unknown>>;
- declare answering:Map<string,Promise<unknown>>;declare blockedSeen:Map<string,number>;declare renders:number;declare claims:Set<string>;
- // On machine m, through its client (see operations in core.ts): herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path)
- // creates a directory and its parents; storeFile(m,root,dir,name,body) writes a file and resolves to its absolute path, and
- // removeDirectory(m,dir) removes such a directory. Each rejects with the code client_offline while the client of m is offline. placeSkills(m,cwd,kind)
- // places the skills loaded by default where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
- // that Bridge placed there before and that are no longer loaded by default, and resolves to the paths of same-name skills of others (see Skills.place). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
+ declare answering:Map<string,Promise<unknown>>;declare blockedSeen:Map<string,number>;declare renders:number;declare drawings:number;declare claims:Set<string>;
+ // On machine m, through its client (see operations in core.ts): herdr(m,args,{timeoutMs}) runs a Herdr CLI command; storeFile(m,root,dir,name,body)
+ // writes a file and resolves to its absolute path, and removeDirectory(m,dir) removes such a directory; askCheapModel(m,cwd,prompt,{timeoutMs})
+ // asks the cheap model (see routing.ts); prepareWorkspace, removeWorkspace and prepareLaunch take the params of their ClientApi entry (see
+ // link.ts). Each rejects with the code client_offline while the client of m is offline. placeSkills(m,cwd,kind,skills)
+ // places the skills loaded by default and those of a project, named in skills, where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
+ // that Bridge placed there before and that are no longer wanted, and resolves to the paths of same-name skills of others (see Skills.place). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
  // answers in the topic thread with a card and resolves to the message id; updateCard(app,messageId,card) replaces a card sent that way;
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes. now() is the clock.
- constructor(store:Store,{herdr,makeDirectory,storeFile,removeDirectory,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}:Deps){
-  this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
+ constructor(store:Store,{herdr,storeFile,removeDirectory,askCheapModel,prepareWorkspace,removeWorkspace,prepareLaunch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}:Deps){
+  this.store=store;this.herdr=herdr;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.askCheapModel=askCheapModel;this.prepareWorkspace=prepareWorkspace;this.removeWorkspace=removeWorkspace;this.prepareLaunch=prepareLaunch;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>' or '<topic id> adopt' → the promise of their handling; per topic the
-  // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings; and the panes being
+  // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings and one for those of the first cards of topics; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
-  this.answering=new Map();this.blockedSeen=new Map();this.renders=0;this.claims=new Set();
+  this.answering=new Map();this.blockedSeen=new Map();this.renders=0;this.drawings=0;this.claims=new Set();
   // A start interrupted by a restart cannot be resumed; the next message in the topic retries it.
   const interrupted=store.data.topics.filter(t=>t.state==='starting');
   for(const t of interrupted)Object.assign(t,{state:'failed',error:'Bridge 重启时 Agent 启动未完成'});
@@ -120,7 +128,7 @@ export class Topics{
  begin(a:App,b:Binding,rootId:string,{title,msg,reaction,fields}:{title:string,msg:Message,reaction?:string,fields?:Pick<Topic,'scheduled'>}){
   const id=uuid(),config=this.store.data.agentConfigs.find(c=>c.id===b.defaultAgentConfigId);
   const t:Topic={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:config?.machineId??'',...b.defaultProjectId&&{projectId:b.defaultProjectId},agentConfigId:b.defaultAgentConfigId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
-   title,state:'starting',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],...fields,createdAt:this.now()};
+   title,state:'starting',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],task:{messageId:msg.messageId,content:msg.content,...msg.resources&&{resources:msg.resources}},...fields,createdAt:this.now()};
   this.store.data.topics.push(t);this.store.save();
   return {topic:t,delivered:this.deliver(a,b,t,msg,{reaction})};
  }
@@ -130,10 +138,16 @@ export class Topics{
  // prompted agent, or to nothing. Never rejects.
  deliver(a:App,b:Binding,t:Topic,msg:Message,{reaction}:{reaction?:string}={}){
   const reacted=reaction&&this.addReaction(a,t,reaction);
-  return enqueue(this.topicQueues,t.id,()=>this.prompt(a,b,t,msg,{reacted})).catch(async(e):Promise<undefined>=>{
+  return enqueue(this.topicQueues,t.id,()=>this.promptOrNotify(a,b,t,msg,reacted));
+ }
+ // prompt for a message that deliver or restart gives, in the queue of topic t: a failure is logged, and a client that is offline gets a
+ // notice that says so. Resolves to the prompted agent, or to nothing. Never rejects.
+ async promptOrNotify(a:App,b:Binding,t:Topic,msg:Message,reacted?:Promise<Reaction|null>|''){
+  try{return await this.prompt(a,b,t,msg,{reacted});}
+  catch(e){
    this.store.log('消息投递',`${a.name} → ${b.name}：${brief(e)}`,'error');
    if(e.code==='client_offline')await this.notify(a,t,offline(e,'这条消息没有发给 Agent，请稍后重发'));
-  });
+  }
  }
  // Runs task in the queue of topic t, after what is queued there, and resolves or rejects like it.
  queue<T>(t:Topic,task:()=>T|Promise<T>){return enqueue(this.topicQueues,t.id,task);}
@@ -276,21 +290,25 @@ export class Topics{
    this.store.log('话题会话',`${t.agentName}：已关闭 pane ${t.paneId}`);await this.end(a,t,text);
   });
  }
- // Opens a tab for the topic, places Bridge's skills there (see place) and starts its agent there. Returns false when that failed; the
- // topic is then failed and notified.
+ // Starts the agent of topic t: decides its project and branch (see route), prepares the workspace on the machine, places Bridge's skills in
+ // it, prepares the launch, opens a tab there and starts the agent, and shows the card with the settings it started with (see showCard).
+ // Returns false when that failed; the topic is then failed and notified, and the card is there to start it again with other settings.
  async open(a:App,b:Binding,t:Topic){
-  this.update(t,{state:'starting',error:''});let m:Machine;
+  this.update(t,{state:'starting',error:''});delete t.endedAt;delete t.swept;let m:Machine;
   try{
-   m=this.target(t);const config=this.agentConfig(t),dir=this.startDirectory(t);this.update(t,{cwd:dir});
+   const config=this.agentConfig(t);m=this.target(t);
+   await this.route(m,b,t);if(t.routed)await this.showCard(a,t);
+   const dir=await this.workspace(m,t);
    Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t,dir)));this.store.save();
-   await this.place(m,b,config.kind,dir);
-   try{await this.herdr(m,['agent','start',t.agentName,'--kind',config.kind,'--pane',t.paneId,'--timeout','60000',...agentArgs[config.kind](config)],{timeoutMs:70000});}
+   await this.place(m,b,config.kind,dir,this.projectOf(t)?.skills??[]);
+   const args=await this.launchArguments(m,config,dir);
+   try{await this.herdr(m,['agent','start',t.agentName,'--kind',config.kind,'--pane',t.paneId,'--timeout','60000',...args],{timeoutMs:70000});}
    // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
    catch(e){if(e.code!=='agent_not_ready')throw e;}
    // Before the topic is ready, which links it to its agent only while the setting is on.
    await this.herdr(m,remoteAnswers(t.paneId,true));
   }catch(e){
-   this.update(t,{state:'failed',error:brief(e)});this.store.log('话题会话',`${b.name}：启动失败，${t.error}`,'error');
+   this.update(t,{state:'failed',error:brief(e),endedAt:this.now()});this.store.log('话题会话',`${b.name}：启动失败，${t.error}`,'error');
    // Details can hold local paths and raw Herdr errors; they stay in the topic and the log, unless the client of the machine is offline,
    // which the person can wait out.
    await this.notify(a,t,e.code==='client_offline'?offline(e,'话题没有启动，请稍后重发消息'):'启动失败，请在 Bridge 管理台查看原因');
@@ -302,26 +320,61 @@ export class Topics{
  agentConfig(t:Topic){
   const config=this.store.data.agentConfigs.find(c=>c.id===t.agentConfigId);if(!config)throw Error('Agent 配置不存在');return config;
  }
- // The directory in which the agent of topic t starts: the one it started in before, else for now the directory that its project adopted on
- // its machine. Every other project waits for the workspace that the client prepares for it (see prepareWorkspace in link.ts).
- startDirectory(t:Topic){
-  if(t.cwd)return t.cwd;
-  const project=this.store.data.projects.find(p=>p.id===t.projectId);if(!project)throw Error('项目不存在');
-  if(project.adopted?.machineId!==t.machineId)throw Error('这个项目的话题目录还没有实现');return project.adopted.dir;
+ // The project of topic t, or nothing for a topic that found none.
+ projectOf(t:Topic){return this.store.data.projects.find(p=>p.id===t.projectId);}
+ // Decides, once, the project of topic t and the branch of its worktrees; the topic is routed then, and a start that failed later does not
+ // decide again. The project of a group is the binding's, and one call of the cheap model names the branch when its worktrees have one; in a
+ // direct chat the same call also picks the project of all projects by the task, and a topic whose call picks none works in an empty
+ // directory. A branch that the topic has already is kept (see restart), and a model that fails or names none gives a random branch.
+ // A topic of before the projects has a directory and is never routed.
+ async route(m:Machine,b:Binding,t:Topic){
+  if(t.routed||t.cwd)return;
+  const projects=this.store.data.projects,direct=!t.projectId;let project=this.projectOf(t);
+  if(!direct&&!project)throw Error('项目不存在');
+  const asking=direct?projects.length>0:hasBranch(project)&&!t.branch;let named:Named={};
+  if(asking){named=await nameTask(this.askCheapModel,m,t.task!.content,direct?projects:null);if(direct)project=named.project;}
+  const branch=hasBranch(project)?t.branch??named.branch??randomBranch():undefined;
+  if(asking&&named.reason)this.store.log('话题会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
+  this.update(t,{routed:true,...project&&{projectId:project.id},...branch&&{branch}});
  }
- // Places the skills loaded by default for the agent of kind kind in its working directory cwd on machine m, which exists by then, right
- // before the agent starts and loads them (see Skills.place). Same-name skills of others are left alone and logged. Never rejects: a failure is only logged, and
- // the agent starts without the skills.
- async place(m:Machine,b:Binding,kind:Kind,cwd:string){
-  try{for(const p of await this.placeSkills(m,cwd,kind))this.store.log('skill',`${b.name}：${p} 已有同名 skill，不是 Bridge 放的，没有改动`);}
+ // Prepares the workspace of topic t on machine m and resolves to the directory its agent starts in, which the topic records. A topic of
+ // before the projects has its directory already.
+ async workspace(m:Machine,t:Topic){
+  if(!t.routed)return t.cwd!;
+  const {dir}=await this.prepareWorkspace(m,{project:workspaceOf(this.projectOf(t),m.id),topicId:t.id,...t.branch&&{branch:t.branch}},{timeoutMs:workspaceTimeoutMs});
+  this.update(t,{cwd:dir});return dir;
+ }
+ // What follows the -- of `agent start` for configuration config in directory dir: what every topic passes to the kind of agent and what
+ // the client prepares on the machine, such as the trust of the directory, and the model and the permission mode (see prepareLaunch in link.ts).
+ // Antigravity gets nothing, not even the --.
+ async launchArguments(m:Machine,config:AgentConfig,dir:string){
+  const {args}=await this.prepareLaunch(m,{kind:config.kind,...config.model&&{model:config.model},...config.kind==='claude'&&{permissionMode:permissionMode(config)},
+   ...config.allowedCommands&&{allowedCommands:config.allowedCommands},dir},{timeoutMs:launchTimeoutMs});
+  const all=[...launchBase[config.kind],...args];return all.length?['--',...all]:[];
+ }
+ // Shows the first card of topic t, which the first start posts into the thread and every start after it draws again (see startCard): the
+ // project, the branch, the agent configuration, and the dropdowns that offer the other projects and configurations. Never rejects: a card
+ // that cannot be sent is logged, and the topic starts without it.
+ async showCard(a:App,t:Topic){
+  const project=this.projectOf(t),config=this.agentConfig(t),choice=({id,name}:{id:string,name:string})=>({id,name});
+  const card=startCard({project:project?.name??null,...t.branch&&{branch:t.branch},config:config.name,
+   projects:this.store.data.projects.filter(p=>p!==project).map(choice),configs:this.store.data.agentConfigs.filter(c=>c!==config).map(choice)},++this.drawings);
+  try{
+   if(t.startCard)await this.updateCard(a,t.startCard,card);
+   else this.update(t,{startCard:await this.reply(a,t.chatId,t.rootId,{card})});
+  }catch(e){this.store.log('话题通知',`${a.name}：话题的第一张卡片未发出，${brief(e)}`,'error');}
+ }
+ // Places the skills loaded by default and those of the project, named in skills, for the agent of kind kind in its working directory cwd on
+ // machine m, which exists by then, right before the agent starts and loads them (see Skills.place). Same-name skills of others are left
+ // alone and logged. Never rejects: a failure is only logged, and the agent starts without the skills.
+ async place(m:Machine,b:Binding,kind:Kind,cwd:string,skills:string[]){
+  try{for(const p of await this.placeSkills(m,cwd,kind,skills))this.store.log('skill',`${b.name}：${p} 已有同名 skill，不是 Bridge 放的，没有改动`);}
   catch(e){this.store.log('skill',`${b.name}：未能在 ${cwd} 放置 skill，${brief(e)}`,'error');}
  }
  // The binding's workspace on machine m is created on first use and again after it was closed in Herdr; its root tab serves the topic that
  // created it. Herdr reuses workspace ids after a server restart, so the stored id counts only while the workspace still carries the
- // binding's label. The tab starts in directory dir. Runs in the binding's queue so that topics opened together create the workspace once.
+ // binding's label. The tab starts in directory dir, which exists: Herdr would fall back to the home directory otherwise. Runs in the binding's queue so that topics opened together create the workspace once.
  async openTab(m:Machine,b:Binding,t:Topic,dir:string){
-  // Herdr falls back to the home directory for a --cwd that does not exist. Created for every tab: it may have been removed since the workspace was.
-  await this.makeDirectory(m,dir);
   const {workspaces}=await this.herdr(m,['workspace','list']),known=b.workspaces?.[m.id];
   if(known&&workspaces.some(w=>w.workspace_id===known&&w.label===workspaceLabel(b))){
    const r=await this.herdr(m,['tab','create','--workspace',known,'--cwd',{path:dir},'--label',t.title,'--no-focus']);

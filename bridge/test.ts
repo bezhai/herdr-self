@@ -565,27 +565,6 @@ test('a resource of a received message is downloaded through the connected chann
   answers.push(()=>{throw Error('timeout of 10000ms exceeded');});await assert.rejects(f.platforms.download(allowed,'om_6',{type:'image',fileKey:'img_6'},10),/^Error: timeout of 10000ms exceeded$/);
  }finally{f.close();}
 });
-test('a topic starts on the machine of the binding\'s agent configuration, in the directory its project adopted there, and records the project, the configuration and the directory it started with; the workspace is the binding\'s on that machine',async()=>{
- const f=topicFixture({machines:[{id:'n',name:'cpu1',session:'default',enabled:true}],config:{machineId:'n',kind:'codex'},project:{adopted:{machineId:'n',dir:'~/other'}}});try{
-  await f.send({messageId:'om_1',content:'one'});
-  const [t]=f.store.data.topics;assert.deepEqual([t.state,t.machineId,t.projectId,t.agentConfigId,t.cwd,t.workspaceId],['ready','n','p','c','~/other','w1']);
-  assert.deepEqual([...new Set(f.h.machines)],['n']);assert.deepEqual(f.h.calls[1],['workspace','create','--cwd',{path:'~/other'},'--label','飞书 · 个人助手','--no-focus']);
-  assert.deepEqual(f.b.workspaces,{n:'w1'});assert.deepEqual(f.placed.map(p=>p.slice(0,3)),[['n','~/other','codex']]);
-  // A reply starts nothing again and a topic that failed and is retried starts in the directory it chose first.
-  f.project.adopted!.dir='~/moved';t.state='failed';await f.send({messageId:'om_2',rootId:'om_1',content:'again'});
-  assert.deepEqual([t.state,t.cwd],['ready','~/other']);
- }finally{f.close();}
-});
-test('a topic whose project adopted its directory on another machine, that has no project (a direct chat) or whose agent configuration is gone fails to start with the reason, and its thread gets the notice',async()=>{
- const direct:Partial<Binding>={chatType:'p2p',defaultProjectId:undefined};
- for(const [options,reason] of [[{project:{adopted:{machineId:'n',dir:'~/other'}}},'这个项目的话题目录还没有实现'],[{project:{adopted:undefined}},'这个项目的话题目录还没有实现'],[{binding:direct},'项目不存在'],[{binding:{defaultAgentConfigId:'gone'}},'机器连接不存在']] satisfies [TopicOptions,string][]){
-  const f=topicFixture(options);try{
-   await f.send({messageId:'om_1',content:'one'});
-   assert.deepEqual([f.store.data.topics[0].state,f.store.data.topics[0].error],['failed',reason]);assert.deepEqual(f.h.calls,[]);
-   assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')],reason);
-  }finally{f.close();}
- }
-});
 test('a start failure with a local path and an English Herdr error keeps them out of the Feishu notice',async()=>{
  const f=topicFixture(),raw='no herdr server is running at /home/someone/.config/herdr/herdr.sock; run `herdr server`';try{
   f.h.on['workspace list']=()=>{throw Error(raw);};await f.send({messageId:'om_1',content:'one'});
@@ -797,6 +776,9 @@ test('skill placements run one after another on a machine and at once on differe
   f.skills.flag('beta',false);f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','changed')}));await place(two,'/w','claude');
   assert.deepEqual(on('m2')[1].skills,sent('alpha'));assert.notEqual(on('m2')[1].skills[0].digest,first.skills[0].digest);
   f.skills.flag('alpha',false);await place(two,'/w','claude');assert.deepEqual(on('m2')[2].skills,[]);
+  // The skills of a project come with those loaded by default, and a name that is no skill any more is left out.
+  f.skills.put('delta',encoded({'SKILL.md':skillText('delta','d')}));f.skills.flag('beta',true);await place(two,'/w','claude',['delta','ghost']);
+  assert.deepEqual(on('m2')[3].skills,sent('beta','delta'));
  }finally{f.close();}
 });
 
@@ -830,14 +812,15 @@ const git=(cwd:string,...args:string[])=>execFileSync('git',args,{cwd,env:gitEnv
 const flags=(args:string[]):Record<string,string>=>Object.fromEntries(args.flatMap((a,i)=>a.startsWith('--')&&typeof args[i+1]==='string'&&!args[i+1].startsWith('--')?[[a,args[i+1]]]:[]));
 // In-memory Herdr: records every CLI call; h.on['<group> <verb>'] replaces the next such call and may call run(args) for the default result.
 // Agents start idle with state_change_seq 1; a prompt returns the agent as it is.
-// h.retained[paneId] holds the replies Herdr keeps for the agent of that pane. h.made records every makeDirectory as [machine id, path].
+// h.retained[paneId] holds the replies Herdr keeps for the agent of that pane.
 // h.requests[paneId] holds the requests the agent of that pane waits on; an answer removes its request.
 // `pane remote-answers <pane> on|off` sets or clears remote_answers on the agent of that pane; turning it on for a pane without an agent fails.
 // `pane close <pane>` removes the agent of that pane.
 // `api snapshot` returns the agents with h.workspaces, h.tabs and h.panes, the entries that only carry what Bridge reads (ids and labels).
 // h.hosts[machine id], when present, is another machine with its own agents, retained replies and requests; every call to a host with
 // down fails with that message, or with down itself when it is an Error, such as the one of a machine whose client is offline; so does
-// makeDirectory on h with down. h.toolCalls[paneId] holds the tool call records Herdr keeps for the agent of that pane; `agent send-keys`
+// every operation of topicFixture on that machine.
+// h.toolCalls[paneId] holds the tool call records Herdr keeps for the agent of that pane; `agent send-keys`
 // only succeeds.
 const down=(host:{down?:string|Error})=>host.down instanceof Error?host.down:Error(host.down);
 // What the fake Herdr keeps of a machine (see h.hosts).
@@ -847,11 +830,11 @@ type FakeHost={agents:Agent[],retained:Record<string,Reply[]>,requests:Record<st
 // A hook of h.on: the arguments of the call, and run for the default result.
 type Hook=(args:string[],run:(args:string[])=>unknown)=>unknown;
 type FakeHerdr=FakeHost&Required<Pick<FakeHost,'workspaces'|'tabs'|'panes'|'toolCalls'>>&{calls:(readonly HerdrArg[])[],timeouts:(number|undefined)[],machines:string[],
- hosts:Record<string,FakeHost>,made:[string,string][],created:number,opened:number,on:Record<string,Hook>,placing?:string[]|Error,
- herdr:(m:Machine,args:readonly HerdrArg[],options?:{timeoutMs?:number})=>Promise<unknown>,makeDirectory:(m:Machine,dir:string)=>Promise<void>};
+ hosts:Record<string,FakeHost>,created:number,opened:number,on:Record<string,Hook>,placing?:string[]|Error,
+ herdr:(m:Machine,args:readonly HerdrArg[],options?:{timeoutMs?:number})=>Promise<unknown>};
 function fakeHerdr(){
- // herdr and makeDirectory follow.
- const h={calls:[],timeouts:[],machines:[],workspaces:[],tabs:[],panes:[],agents:[],retained:{},requests:{},toolCalls:{},hosts:{},made:[],created:0,opened:0,on:{}} as unknown as FakeHerdr;
+ // herdr follows.
+ const h={calls:[],timeouts:[],machines:[],workspaces:[],tabs:[],panes:[],agents:[],retained:{},requests:{},toolCalls:{},hosts:{},created:0,opened:0,on:{}} as unknown as FakeHerdr;
  const run=(args:string[],host:FakeHost=h)=>{
   const [group,verb]=args;
   if(group==='workspace'&&verb==='list')return {type:'workspace_list',workspaces:h.workspaces};
@@ -883,7 +866,6 @@ function fakeHerdr(){
   h.calls.push(args);h.timeouts.push(options.timeoutMs);h.machines.push(m.id);await null;const host=h.hosts[m.id]||h;if(host.down)throw down(host);
   const key=args[0]+' '+args[1],hook=h.on[key];if(hook){delete h.on[key];return hook(args as string[],a=>run(a,host));}return run(args as string[],host);
  };
- h.makeDirectory=async(m,dir)=>{h.made.push([m.id,dir]);await null;if(h.down)throw down(h);};
  return h;
 }
 // Calls as [machine id, ...args].
@@ -896,36 +878,67 @@ const cotPath='/open-apis/im/v1/message_cot';
 // f.downloads records every attachment download as [app id, message id, type, file key, limit]; f.resources[file key], when present,
 // answers it, an error by throwing it, else the body is 'data:<file key>' of type image/png. f.stored records every file written as
 // [machine id, root, dir, name, body as text], which resolves to its path with ~/ as /home/u/; f.removed every directory removed as
-// [machine id, dir]. f.placed records every placement
-// of Bridge's skills as [machine id, directory, agent kind, number of Herdr calls made before it]; it resolves to f.h.placing, by default
-// no skills of others, or rejects with it when it is an Error.
+// [machine id, dir]. f.placed records every placement of Bridge's skills as [machine id, directory, agent kind, names of the project's
+// skills, number of Herdr calls made before it]; it resolves to f.h.placing, by default no skills of others, or rejects with it when it is
+// an Error.
+// The operations of the client that prepare a topic (see ClientApi in link.ts) are faked on whichever machine, and fail like Herdr there when
+// the machine is down (see h.hosts). f.prepared records prepareWorkspace as [machine id, params, timeoutMs], and its dir is the adopted
+// directory, else /ws/<project id> for a shared project and /ws/<project id>/<topic id> for an isolated one; f.dropped records
+// removeWorkspace the same way, and f.launched prepareLaunch as [machine id, params], which answers with the model and permission mode
+// as flags of the agent. f.fail.prepare, .remove and .launch, when set, make that operation reject with it; f.fail.kept is what
+// removeWorkspace reports as branchKept. f.model answers askCheapModel from its prompt, by default a PROJECT=NONE line when the prompt asks
+// for a project and BRANCH=feat/add-login, as {code, stdout, stderr} or an Error to reject with; f.naming records each call as
+// {cwd, prompt, timeoutMs}.
+// The first card of each topic (see startCard in topic-cards.ts) is left out of f.replies and takes its id from om_start_<n>, so that the
+// tests of everything else need not mention it: f.starts records it as [root id, card], and a click on its dropdown is f.choose(message id,
+// 'project' or 'agentConfig', the id chosen).
 type TopicOptions={binding?:Partial<Binding>,config?:Partial<AgentConfig>,project?:Partial<Project>,machine?:Partial<Machine>,machines?:Machine[],cot?:boolean,now?:()=>number};
 // A card as a test reads it: the JSON that Bridge built.
 type Card={schema?:string,config?:Record<string,any>,header?:{title:{tag?:string,content:string},template:string},body:{elements:Record<string,any>[]},[field:string]:unknown};
 // An OpenAPI request of Bridge as a test reads it.
 type ApiRequest={method:string,url:string,data:Record<string,any>,params?:Record<string,any>};
+type Fake={fail:{prepare?:Error,remove?:Error,launch?:Error,kept?:boolean},model:(prompt:string)=>Partial<Ran>|Error};
 function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:TopicOptions={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies:[string,string,string,{card:Card}][]=[],reacted:string[][]=[],unreacted:string[][]=[],
   updated:[string,string,Card][]=[],api:ApiRequest[]=[],m={id:'m',name:'cpu2',enabled:true,...machine} as Machine;
  const downloads:unknown[][]=[],resources:Record<string,{body:Buffer<ArrayBuffer>,type:string}|Error>={},stored:unknown[][]=[],removed:unknown[][]=[],
-  placed:unknown[][]=[];
+  placed:unknown[][]=[],prepared:unknown[][]=[],dropped:unknown[][]=[],launched:unknown[][]=[],naming:{cwd:string,prompt:string,timeoutMs?:number}[]=[],starts:[string,Card][]=[];
+ const fake:Fake={fail:{},model:prompt=>({stdout:(prompt.includes('PROJECT=')?'PROJECT=NONE\n':'')+'BRANCH=feat/add-login\n'})};
  store.data.machines=[m,...machines];store.data.projects=[{...routeProject,...project}];store.data.agentConfigs=[{...routeConfig,...config}];store.data.bindings=[{...route,...binding}];store.save();
- const b=store.data.bindings[0];let sent=0,cots=0;
+ const b=store.data.bindings[0];let sent=0,cots=0,begun=0;
+ const reach=(m:Machine)=>{const host=h.hosts[m.id]||h;if(host.down)throw down(host);};
  // Every reply resolves to the next message id om_bot_<n>.
  // The fake answers each command with what Herdr prints for it, which its type cannot tie to the command.
- const deps:DepsOf<typeof Topics>={herdr:h.herdr as Herdr,makeDirectory:h.makeDirectory,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
+ const deps:DepsOf<typeof Topics>={herdr:h.herdr as Herdr,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
   download:async(a,messageId,r,limit)=>{downloads.push([a.id,messageId,r.type,r.fileKey,limit]);await null;const x=resources[r.fileKey];if(x instanceof Error)throw x;return x||{body:Buffer.from('data:'+r.fileKey),type:'image/png'};},
   storeFile:async(m,root,dir,name,body)=>{stored.push([m.id,root,dir,name,String(body)]);await null;return root.replace(/^~\//,'/home/u/')+'/'+dir+'/'+name;},
   removeDirectory:async(m,dir)=>{removed.push([m.id,dir]);await null;},
-  placeSkills:async(m,cwd,kind)=>{placed.push([m.id,cwd,kind,h.calls.length]);await null;if(h.placing instanceof Error)throw h.placing;return h.placing||[];},
-  reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content as {card:Card}]);return 'om_bot_'+ ++sent;},
+  placeSkills:async(m,cwd,kind,skills)=>{placed.push([m.id,cwd,kind,skills,h.calls.length]);await null;if(h.placing instanceof Error)throw h.placing;return h.placing||[];},
+  prepareWorkspace:async(m,params,options)=>{
+   prepared.push([m.id,params,options?.timeoutMs]);await null;reach(m);if(fake.fail.prepare)throw fake.fail.prepare;
+   return {dir:params.project.adoptedDir??`/ws/${params.project.id}${params.project.workMode==='isolated'?'/'+params.topicId:''}`};
+  },
+  removeWorkspace:async(m,params,options)=>{dropped.push([m.id,params,options?.timeoutMs]);await null;reach(m);if(fake.fail.remove)throw fake.fail.remove;return {branchKept:Boolean(fake.fail.kept)};},
+  prepareLaunch:async(m,params)=>{
+   launched.push([m.id,params]);await null;reach(m);if(fake.fail.launch)throw fake.fail.launch;
+   return {args:[...params.permissionMode?['--permission-mode',params.permissionMode]:[],...params.model?['--model',params.model]:[]]};
+  },
+  askCheapModel:async(m,cwd,prompt,{timeoutMs}={})=>{
+   naming.push({cwd,prompt,timeoutMs});await null;reach(m);const r=fake.model(prompt);if(r instanceof Error)throw r;return {code:0,stdout:'',stderr:'',...r};
+  },
+  reply:async(a,chatId,rootId,content)=>{
+   const card=(content as {card:Card}).card;
+   if(card.config?.update_multi&&!card.header){starts.push([rootId,card]);return 'om_start_'+ ++begun;}
+   replies.push([a.id,chatId,rootId,content as {card:Card}]);return 'om_bot_'+ ++sent;
+  },
   react:async(a,messageId,emojiType)=>{reacted.push([a.id,messageId,emojiType]);return 'r_'+messageId;},unreact:async(a,messageId,reactionId)=>{unreacted.push([a.id,messageId,reactionId]);},
   updateCard:async(a,messageId,card)=>{updated.push([a.id,messageId,card as Card]);},
   request:async(a,o)=>{api.push(o as ApiRequest);await null;if(!cot)throw Object.assign(Error('飞书接口错误 99991672：Access denied'),{code:99991672});return o.method==='POST'&&o.url===cotPath?{cot_id:'c'+ ++cots,message_id:'om_cot_'+cots}:{};},...now&&{now}};
  const topics=new Topics(store,deps);
  const send=(msg:Partial<NormalizedMessage>)=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg} as NormalizedMessage);
  const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
- return {dir,store,h,m,topics,config:store.data.agentConfigs[0],project:store.data.projects[0],replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,placed,b,send,restart,close(){fs.rmSync(dir,{recursive:true});}};
+ const choose=(messageId:string,field:'project'|'agentConfig',option:string,openId='ou_user',render=1)=>topics.click(allowed,{messageId,chatId:'oc_1',operator:{openId},action:{tag:'select_static',value:{restart:field,render},option}} as Click);
+ return {dir,store,h,m,topics,config:store.data.agentConfigs[0],project:store.data.projects[0],replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,placed,prepared,dropped,launched,naming,starts,fake,deps,b,send,restart,choose,close(){fs.rmSync(dir,{recursive:true});}};
 }
 // The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
 // id, reason].
@@ -942,7 +955,7 @@ test('a new topic creates the binding workspace, names its root tab after the to
   assert.equal(agentName,'feishu-'+id.slice(0,8));assert.match(agentName,/^feishu-[0-9a-f]{8}$/);assert.ok(createdAt>0);
   assert.deepEqual(f.h.calls,[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w1:t1',title],['agent','start',agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],['pane','remote-answers','w1:p1','on'],['agent','prompt','w1:p1',text]]);
   assert.deepEqual(f.h.timeouts,[undefined,undefined,undefined,70000,undefined,undefined]);assert.deepEqual([...new Set(f.h.machines)],['m']);assert.equal(f.h.agents[0].remote_answers,true);
-  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',projectId:'p',agentConfigId:'c',cwd:'~/work',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[],cards:[],
+  assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',projectId:'p',agentConfigId:'c',routed:true,task:{messageId:'om_1',content:' '+text+'\n'},startCard:'om_start_1',cwd:'~/work',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[],cards:[],
    cot:{cotId:'c1',messageId:'om_cot_1',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false}});
   assert.deepEqual(new Store(f.dir).data.bindings[0].workspaces,{m:'w1'});assert.equal(new Store(f.dir).data.topics[0].state,'ready');
   assert.deepEqual(f.replies,[]);assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['话题会话','info',`个人助手：已在 cpu2 启动 ${agentName}`],['消息投递','info',`bot → 个人助手：已发送到 ${agentName}`]]);
@@ -1018,23 +1031,154 @@ test('a workspace id that Herdr reassigned to another workspace is not reused; a
   assert.equal(f.h.calls.some(c=>c[0]==='tab'&&c[1]==='create'),false);assert.deepEqual([f.b.workspaces!.m,f.store.data.topics[1].paneId],['w2','w2:p2']);
  }finally{f.close();}
 });
-test('each new topic creates its working directory on the machine before any workspace call, whether it creates the workspace or a tab in it',async()=>{
+// Projects for the tests of the start path: genvi has a repository and works in a worktree of its own per topic; notes has none and shares
+// a fixed directory; promoter is a second repository project. The first card as a test reads it: its text, and the dropdowns as
+// [placeholder, [[option text, option value]], callback value].
+const genvi:Project={id:'g',name:'genvi',description:'GEO 内容生成',repos:['git@code.byted.org:growth/genvi.git'],skills:['butler','gone'],workMode:'isolated'};
+const notes:Project={id:'n1',name:'notes',description:'随手记',repos:[],skills:[],workMode:'shared'};
+const promoter:Project={id:'pr',name:'promoter',description:'推广后台',repos:['git@code.byted.org:growth/promoter.git'],skills:[],workMode:'isolated'};
+const withProjects=(f:{store:Store},...projects:Project[])=>{f.store.data.projects.push(...projects);f.store.data.skills=[{name:'butler',description:'x',preload:false,digest:'d'}];f.store.save();};
+const cardText=(c:Card)=>c.body.elements[0].text.content;
+const menus=(c:Card)=>c.body.elements.slice(1).map(e=>[e.placeholder.content,e.options.map((o:{text:{content:string},value:string})=>[o.text.content,o.value]),e.behaviors[0].value]);
+const direct:Partial<Binding>={chatType:'p2p',defaultProjectId:undefined};
+test('each new topic has its workspace prepared on the machine of its agent configuration before any Herdr call, with the long timeout of a clone; the agent starts in the directory it returns, whether Herdr creates the workspace or a tab in it; a message in a ready topic prepares nothing',async()=>{
  const f=topicFixture();try{
-  const seen:[string,string][][]=[],before:Hook=(args,run)=>{seen.push([...f.h.made]);return run(args);};
+  const seen:number[]=[],before:Hook=(args,run)=>{seen.push(f.prepared.length);return run(args);};
   f.h.on['workspace list']=before;await f.send({messageId:'om_1',content:'one'});
   f.h.on['workspace list']=before;await f.send({messageId:'om_2',content:'two'});
-  assert.deepEqual(seen,[[['m','~/work']],[['m','~/work'],['m','~/work']]]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='create').map(c=>c[0]),['workspace','tab']);
-  // A message in a ready topic opens no tab and creates nothing.
-  await f.send({messageId:'om_3',rootId:'om_1',content:'three'});assert.equal(f.h.made.length,2);
+  assert.deepEqual(seen,[1,2]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='create').map(c=>c[0]),['workspace','tab']);
+  const [one,two]=f.store.data.topics;
+  assert.deepEqual(f.prepared,[['m',{project:{id:'p',repos:[],workMode:'shared',adoptedDir:'~/work'},topicId:one.id},600000],['m',{project:{id:'p',repos:[],workMode:'shared',adoptedDir:'~/work'},topicId:two.id},600000]]);
+  await f.send({messageId:'om_3',rootId:'om_1',content:'three'});assert.equal(f.prepared.length,2);
  }finally{f.close();}
 });
-test('a working directory that cannot be created fails the start like any start failure, before any workspace or tab is created',async()=>{
- const f=topicFixture(),raw="mkdir: cannot create directory '/srv/app': Permission denied";try{
-  f.topics.makeDirectory=async()=>{throw Error(raw);};
-  await f.send({messageId:'om_1',content:'one'});
-  const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed',raw]);assert.equal(new Store(f.dir).data.topics[0].state,'failed');
+test('a workspace that cannot be prepared fails the start like any start failure, before any Herdr call, and the next message prepares it again',async()=>{
+ const f=topicFixture(),raw="fatal: could not read from remote repository /srv/genvi.git";try{
+  f.fake.fail.prepare=Error(raw);await f.send({messageId:'om_1',content:'one'});
+  const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error,t.cwd],['failed',raw,undefined]);assert.equal(new Store(f.dir).data.topics[0].state,'failed');
   assert.deepEqual(f.h.calls,[]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')]);
-  assert.deepEqual(f.unreacted,[['a','om_1','r_om_1']]);assert.match(f.store.data.logs.at(-1)!.message,/启动失败.*Permission denied/);
+  assert.deepEqual(f.unreacted,[['a','om_1','r_om_1']]);assert.match(f.store.data.logs.at(-1)!.message,/启动失败.*could not read/);
+  delete f.fake.fail.prepare;await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
+  assert.deepEqual([t.state,f.prepared.length],['ready',2]);
+ }finally{f.close();}
+});
+test('a topic that cannot start for lack of a project or an agent configuration fails with the reason, and its thread gets the notice',async()=>{
+ for(const [options,reason] of [[{binding:{defaultProjectId:'gone'}},'项目不存在'],[{binding:{defaultAgentConfigId:'gone'}},'Agent 配置不存在']] satisfies [TopicOptions,string][]){
+  const f=topicFixture(options);try{
+   await f.send({messageId:'om_1',content:'one'});
+   assert.deepEqual([f.store.data.topics[0].state,f.store.data.topics[0].error],['failed',reason]);assert.deepEqual([f.h.calls,f.prepared],[[],[]]);
+   assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')],reason);
+  }finally{f.close();}
+ }
+});
+test('a project that adopted a directory on another machine than the agent configuration\'s is prepared without it; the project of a group works in a worktree of its own, named by the cheap model once, with the repositories, branch and skills of the project',async()=>{
+ const f=topicFixture({machines:[{id:'n',name:'cpu1',session:'default',enabled:true}],project:{adopted:{machineId:'n',dir:'~/other'}}});withProjects(f,genvi);f.b.defaultProjectId='g';try{
+  await f.send({messageId:'om_1',content:'给登录页加验证码 ![image](img_a)',resources:[{type:'image',fileKey:'img_a'}]});
+  const [t]=f.store.data.topics;
+  assert.deepEqual(f.naming,[{cwd:'~/',prompt:namingPrompt('给登录页加验证码'),timeoutMs:30000}]);
+  assert.deepEqual(f.prepared,[['m',{project:{id:'g',repos:genvi.repos,workMode:'isolated'},topicId:t.id,branch:'feat/add-login'},600000]]);
+  assert.deepEqual([t.state,t.projectId,t.branch,t.cwd,t.routed,t.machineId],['ready','g','feat/add-login',`/ws/g/${t.id}`,true,'m']);
+  assert.deepEqual(f.h.calls[1],['workspace','create','--cwd',{path:`/ws/g/${t.id}`},'--label','飞书 · 个人助手','--no-focus']);
+  assert.deepEqual(f.placed,[['m',`/ws/g/${t.id}`,'claude',['butler','gone'],f.placed[0][4]]]);assert.deepEqual(f.launched,[['m',{kind:'claude',permissionMode:'default',dir:`/ws/g/${t.id}`}]]);
+  assert.deepEqual(new Store(f.dir).data.topics[0].task,{messageId:'om_1',content:'给登录页加验证码 ![image](img_a)',resources:[{type:'image',fileKey:'img_a'}]});
+  assert.equal(f.replies.length,0);assert.equal(f.starts.length,1);
+  // The cheap model is asked once per root message: a reply, and a topic that has to start again after a failure, ask nothing.
+  await f.send({messageId:'om_2',rootId:'om_1',content:'继续'});assert.equal(f.naming.length,1);
+ }finally{f.close();}
+});
+test('the project of a group that shares a fixed directory or has no repository needs no branch and no call of the cheap model; the card shows no branch',async()=>{
+ for(const project of [notes,{...genvi,workMode:'shared'},{...genvi,repos:[]}] satisfies Project[]){
+  const f=topicFixture();withProjects(f,project);f.b.defaultProjectId=project.id;try{
+   await f.send({messageId:'om_1',content:'写点东西'});
+   const [t]=f.store.data.topics;assert.deepEqual([f.naming,t.branch,t.state],[[],undefined,'ready'],project.name);assert.equal('branch' in (f.prepared[0][1] as Sent),false);
+   assert.equal(cardText(f.starts[0][1]),`${project.name} · cpu2 · Claude`);
+  }finally{f.close();}
+ }
+});
+test('when the cheap model fails, says nothing usable or the task has no text, a group topic still starts, on a random branch, and the log says why',async()=>{
+ for(const [model,content,why] of [[Error('spawn claude ENOENT'),'做点事','无法运行 claude：spawn claude ENOENT'],[()=>({code:1,stderr:'Not logged in'}),'做点事','claude 退出码 1：Not logged in'],[()=>({stdout:'好的'}),'做点事','输出里没有可用的 BRANCH= 行：好的'],[()=>({stdout:'BRANCH=feat/x'}),' ![image](img_a)','任务描述里没有文字']] as [Error|(()=>Partial<Ran>),string,string][]){
+  const f=topicFixture();withProjects(f,genvi);f.b.defaultProjectId='g';f.fake.model=model instanceof Error?()=>model:model;try{
+   await f.send({messageId:'om_1',content,resources:[{type:'image',fileKey:'img_a'}]});
+   const [t]=f.store.data.topics;assert.equal(t.state,'ready',why);assert.match(t.branch!,/^worktree\/[a-z]+-[a-z]+-[0-9a-f]{4}$/);assert.equal((f.prepared[0][1] as Sent).branch,t.branch);
+   assert.deepEqual(f.store.data.logs.find(l=>l.kind==='话题会话'&&l.message.includes('起名'))?.message,`个人助手：起名失败（${why}），改用随机分支名`);
+   assert.ok(cardText(f.starts[0][1]).includes('分支 '+t.branch));
+  }finally{f.close();}
+ }
+});
+test('a direct chat has no project: one call of the cheap model picks one of all projects by name and names the branch, and the topic works in it',async()=>{
+ const f=topicFixture({binding:direct});withProjects(f,genvi,notes,promoter);f.fake.model=()=>({stdout:'PROJECT=promoter\nBRANCH=fix/login-page\n'});try{
+  await f.send({messageId:'om_1',content:'修复推广后台的登录页'});
+  const [t]=f.store.data.topics;
+  assert.equal(f.naming.length,1);assert.match(f.naming[0].prompt,/Projects:\n- work\n- genvi: GEO 内容生成\n- notes: 随手记\n- promoter: 推广后台\n\nRequirement:\n修复推广后台的登录页$/);
+  assert.deepEqual([t.state,t.projectId,t.branch,t.cwd],['ready','pr','fix/login-page',`/ws/pr/${t.id}`]);
+  assert.deepEqual(f.prepared[0][1],{project:{id:'pr',repos:promoter.repos,workMode:'isolated'},topicId:t.id,branch:'fix/login-page'});
+  assert.equal(cardText(f.starts[0][1]),'promoter · 分支 fix/login-page · cpu2 · Claude');
+  // A picked project that needs no branch leaves none.
+  f.fake.model=()=>({stdout:'PROJECT=notes\nBRANCH=fix/whatever\n'});await f.send({messageId:'om_2',content:'记一下'});
+  const second=f.store.data.topics[1];assert.deepEqual([second.projectId,second.branch,'branch' in (f.prepared[1][1] as Sent)],['n1',undefined,false]);
+ }finally{f.close();}
+});
+test('a direct chat topic whose task fits no project, or whose model call fails, works in an empty directory of its own, and its first card says so; with no project at all the model is not asked',async()=>{
+ for(const [model,projects,why] of [[()=>({stdout:'PROJECT=NONE\nBRANCH=chore/misc'}),[genvi],undefined],[()=>({stdout:'PROJECT=ghost\nBRANCH=chore/misc'}),[genvi],undefined],[Error('boom'),[genvi],'无法运行 claude：boom'],[()=>({stdout:'BRANCH=chore/misc'}),[],undefined]] as [Error|(()=>Partial<Ran>),Project[],string|undefined][]){
+  const f=topicFixture({binding:direct});f.store.data.projects=[];withProjects(f,...projects);f.fake.model=model instanceof Error?()=>model:model;try{
+   await f.send({messageId:'om_1',content:'随便聊聊'});
+   const [t]=f.store.data.topics;assert.equal(f.naming.length,projects.length?1:0);
+   assert.deepEqual([t.state,t.projectId,t.branch,t.routed,t.cwd],['ready',undefined,undefined,true,`/ws/none/${t.id}`]);
+   assert.deepEqual(f.prepared[0][1],{project:{id:'none',repos:[],workMode:'isolated'},topicId:t.id});
+   assert.equal(cardText(f.starts[0][1]),'没有找到对应的项目，在一个空目录里开始。\ncpu2 · Claude');assert.deepEqual(f.replies,[]);
+   if(why)assert.ok(f.store.data.logs.some(l=>l.message.includes(why)));
+  }finally{f.close();}
+ }
+});
+test('the first card of a topic names the project, the branch where there is one and the agent configuration, and offers every other project and agent configuration in a dropdown each; a dropdown with nothing else to choose is left out',async()=>{
+ const f=topicFixture({machines:[{id:'n',name:'cpu1',session:'default',enabled:true}]});withProjects(f,genvi);f.b.defaultProjectId='g';
+ f.store.data.agentConfigs.push({id:'c2',name:'cpu1 · Codex',machineId:'n',kind:'codex'});try{
+  await f.send({messageId:'om_1',content:'做点事'});
+  const [[root,card]]=f.starts,t=f.store.data.topics[0];
+  assert.equal(root,'om_1');assert.equal(cardText(card),'genvi · 分支 feat/add-login · cpu2 · Claude');assert.equal(card.header,undefined);assert.equal(card.config!.summary.content,'genvi · 分支 feat/add-login · cpu2 · Claude');
+  assert.deepEqual(menus(card),[['换项目',[['work','p']],{restart:'project',render:menus(card)[0][2].render}],['换 Agent 配置',[['cpu1 · Codex','c2']],{restart:'agentConfig',render:menus(card)[1][2].render}]]);
+  assert.equal(t.startCard,'om_start_1');assert.deepEqual(new Store(f.dir).data.topics[0].startCard,'om_start_1');
+  const g=topicFixture();try{await g.send({messageId:'om_1',content:'one'});assert.deepEqual(menus(g.starts[0][1]),[]);}finally{g.close();}
+ }finally{f.close();}
+});
+test('the configuration of an agent decides how it is launched: its model, its permission mode and its commands go to the client with the directory, and what the client returns follows the -- of agent start, after what the topics always pass to Codex',async()=>{
+ for(const [config,params,args] of [
+  [{permissionMode:'auto',model:'sonnet',allowedCommands:['butler']},{kind:'claude',permissionMode:'auto',model:'sonnet',allowedCommands:['butler']},['--','--permission-mode','auto','--model','sonnet']],
+  [{permissionMode:undefined},{kind:'claude',permissionMode:'default'},['--','--permission-mode','default']],
+  [{kind:'codex',model:'gpt-5'},{kind:'codex',model:'gpt-5'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust','--model','gpt-5']],
+  [{kind:'codex'},{kind:'codex'},['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust']],
+  [{kind:'agy'},{kind:'agy'},[]]] satisfies [Partial<AgentConfig>,Sent,string[]][]){
+  const f=topicFixture({config});try{
+   await f.send({messageId:'om_1',content:'one'});
+   assert.deepEqual(f.launched,[['m',{...params,dir:'~/work'}]],JSON.stringify(config));
+   assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',params.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(config));
+  }finally{f.close();}
+ }
+});
+test('a launch that cannot be prepared fails the start before the agent is started, but after the workspace and the tab exist; a changed permission mode applies to the topics opened afterwards',async()=>{
+ const f=topicFixture();try{
+  f.fake.fail.launch=Error('~/.claude.json 写不进去');await f.send({messageId:'om_1',content:'one'});
+  const t=f.store.data.topics[0];assert.deepEqual([t.state,t.error],['failed','~/.claude.json 写不进去']);assert.equal(f.h.calls.some(c=>c[1]==='start'),false);
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('启动失败，请在 Bridge 管理台查看原因')]);
+  delete f.fake.fail.launch;f.config.permissionMode='auto';await f.send({messageId:'om_2',rootId:'om_1',content:'two'});
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='start').map(c=>c.slice(-3)),[['--','--permission-mode','auto']]);
+ }finally{f.close();}
+});
+test('the topics of a binding of an older version keep the directory they started in: a failed one is started again there, without the project\'s workspace or the cheap model',async()=>{
+ const f=topicFixture();try{
+  await f.send({messageId:'om_1',content:'one'});
+  const [t]=f.store.data.topics;delete t.routed;delete t.startCard;t.cwd='~/old';t.state='failed';f.prepared.length=0;f.starts.length=0;
+  await f.send({messageId:'om_2',rootId:'om_1',content:'again'});
+  assert.deepEqual([t.state,t.cwd,f.prepared,f.naming,f.starts],['ready','~/old',[],[],[]]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='create').at(-1)?.slice(4,6),['--cwd',{path:'~/old'}]);
+ }finally{f.close();}
+});
+test('/wt is a message like any other: a root message that starts with it is the task, and nothing of Bridge still reads it',async()=>{
+ const f=topicFixture();try{
+  await f.send({messageId:'om_1',content:'/wt 给登录页加验证码'});await f.send({messageId:'om_2',content:'/wt'});
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['/wt 给登录页加验证码','/wt']);assert.deepEqual(f.store.data.topics.map(t=>t.title),['/wt 给登录页加验证码','/wt']);
+  const sources=fs.readdirSync('.').filter(n=>/\.ts$/.test(n)&&!['test.ts','commands.ts'].includes(n));
+  for(const n of sources)assert.doesNotMatch(fs.readFileSync(n,'utf8'),/\/wt\b|slash\.wt|wtRequest|createWorktree|removeWorktree/,n);
+  assert.equal(fs.existsSync('worktrees.ts'),false);
  }finally{f.close();}
 });
 const skillLogs=(f:{store:Store})=>f.store.data.logs.filter(l=>l.kind==='skill').map(l=>[l.level,l.message]);
@@ -1045,7 +1189,7 @@ test('right before a new topic starts its agent, Bridge\'s skills are placed for
    await f.topics.begin(allowed,f.b,'om_root',{title:'报告',msg:{messageId:'om_root',content:'写报告'}}).delivered;
    await f.send({messageId:'om_3',rootId:'om_1',content:'three'});
    const starts=f.h.calls.flatMap((c,i)=>c[1]==='start'?[i]:[]);assert.equal(starts.length,3);
-   assert.deepEqual(f.placed,starts.map(i=>['m','~/work',kind,i]),kind);assert.deepEqual(skillLogs(f),[]);
+   assert.deepEqual(f.placed,starts.map(i=>['m','~/work',kind,[],i]),kind);assert.deepEqual(skillLogs(f),[]);
   }finally{f.close();}
  }
 });

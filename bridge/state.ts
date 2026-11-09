@@ -1,3 +1,4 @@
+import type {ResourceDescriptor} from '@larksuite/channel';
 import type {Cot} from './cot.ts';
 // What Bridge keeps in its state file, collection by collection (see Store in core.ts). Types only: every module that reads or writes a
 // collection takes its shape from here.
@@ -33,12 +34,16 @@ export type AgentConfig={id:string,name:string,machineId:string,kind:Kind,model?
 export type Binding={id:string,name:string,appId:string,chatId:string,chatType:'p2p'|'group',requireMention:boolean,enabled:boolean,defaultProjectId?:string,defaultAgentConfigId:string,
  workspaces?:Record<string,string>};
 // A topic of a binding (see topics.ts). An adopted topic waits for an agent to adopt while choosing. A topic that a schedule opened is scheduled by run n of schedule id; a topic of an agent that submitted a schedule holds its
-// proposal until the card is clicked or expires (see AgentSchedules). A topic that Bridge started has the project and the agent configuration
-// it started with, the branch of its worktrees (a project with repos that is isolated) and the directory its agent started in, which is what
-// a reply needs to restore its workspace; an adopted topic has none of them.
+// proposal until the card is clicked or expires (see AgentSchedules). A topic that Bridge started has the message that opened it (task), the
+// project and the agent configuration it started with, the branch of its worktrees (a project with repos that is isolated) and the directory
+// its agent started in, which is what a reply needs to restore its workspace; an adopted topic has none of them. routed tells that the
+// project and the branch are decided (see Topics.route), which a topic of before the projects never was: it keeps the directory it has. The
+// first card of the topic, with the dropdowns that start it again, is startCard. A topic that ended or failed has endedAt, and swept once its
+// workspace was removed (see Topics.sweep).
 export type Topic={id:string,bindingId:string,appId:string,chatId:string,rootId:string,machineId:string,workspaceId:string,tabId:string,paneId:string,agentName:string,title:string,
  state:'starting'|'ready'|'failed'|'closed'|'choosing',error:string,messageIds:string[],replySeq:number,reactions:Reaction[],cards:RequestCard[],createdAt:number,
- adopted?:{picker?:string,kind?:string,session?:string},projectId?:string,agentConfigId?:string,branch?:string,cwd?:string,scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number};
+ adopted?:{picker?:string,kind?:string,session?:string},task?:{messageId:string,content:string,resources?:ResourceDescriptor[]},projectId?:string,agentConfigId?:string,branch?:string,cwd?:string,routed?:true,startCard?:string,endedAt?:number,swept?:true,
+ scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number};
 // A message of a person that the topic marked, with the state_change_seq of the prompt once it was prompted (see Topics.addReaction).
 export type Reaction={messageId:string,reactionId:string,stateSeq:number|null};
 // The card of a request the agent waits on (see Topics.cards).

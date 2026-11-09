@@ -122,13 +122,14 @@ export class Skills{
   const named=this.list().filter(s=>has(about(s)));
   return [...named,...this.list().filter(s=>!named.includes(s)&&has(about(s)+'\n'+this.text(s.name)))];
  }
- // Places the skills loaded by default, as they are when the placement runs, where the agent of binding kind kind reads project skills
- // in working directory cwd on machine m, whose leading ~/ is that machine's home, and takes away those that Bridge placed there before and
- // that are no longer loaded by default: the request placeSkills to the client of m, with the skills as data. Resolves to the paths of same-name
+ // Places the skills loaded by default and those named in extra (the skills of the topic's project), as they are when the placement runs,
+ // where the agent of binding kind kind reads project skills in working directory cwd on machine m, whose leading ~/ is that machine's
+ // home, and takes away those that Bridge placed there before and that are no longer wanted: the request placeSkills to the client of m,
+ // with the skills as data. A name of extra that is no skill of the platform any more is left out. Resolves to the paths of same-name
  // skills that are not Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after
  // another, since they share its store.
- place(m:Machine,cwd:string,kind:Kind){
-  const skills=():SkillFiles[]=>this.list().filter(s=>s.preload).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
+ place(m:Machine,cwd:string,kind:Kind,extra:string[]=[]){
+  const skills=():SkillFiles[]=>this.list().filter(s=>s.preload||extra.includes(s.name)).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
   return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:skills(),...places[kind],cwd}));
  }
  // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
