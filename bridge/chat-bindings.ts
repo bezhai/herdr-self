@@ -3,16 +3,17 @@ import {addBinding,chatLabel} from './platform.ts';
 import {notice,untitled} from './message-cards.ts';
 import {plain,option,select,submitForm} from './request-cards.ts';
 import type {NormalizedMessage,CardActionResponse} from '@larksuite/channel';
-import type {Store,Operations} from './core.ts';
+import type {Store} from './core.ts';
+import type {AskModel} from './model.ts';
 import type {Platforms} from './platform.ts';
 import type {App,Binding,AgentConfig,Project,State} from './state.ts';
 import type {Click} from './request-cards.ts';
 // A chat that writes to an app before it has a binding gets a card in the chat to make one, where Bridge cannot know the project and the
-// agent configuration the person wants but can guess them: the project of a group by the cheap model from the group's name, the
+// agent configuration the person wants but can guess them: the project of a group by the model from the group's name, the
 // configuration as the one the latest binding used. Both are dropdowns, so a wrong guess costs one click, and 绑定 creates the binding and
 // starts the message that asked for it as the first task. Only people on the app's allowlist write here or click (see Platforms.receive and
 // Platforms.cardAction). What a card waits for is in memory: a restart forgets it, and the next message gets a new card.
-const lifetime=30*60000,guessMs=20000;
+const lifetime=30*60000;
 const heading='这个聊天还没有绑定 Bridge。';
 const toast=(type:string,content:string)=>({toast:{type,content}});
 const oneLine=(s:string)=>s.replace(/\s+/g,' ').trim();
@@ -38,15 +39,14 @@ const bindCard=(data:Pick<State,'projects'|'agentConfigs'>,group:boolean,render:
 // A chat with a card: the app and the message that asked, the name its binding gets, the id of the card once it is sent, and the words of the
 // reply once the card made the binding; lacking says it got the notice of what must exist first instead of a card.
 type Waiting={app:string,msg:NormalizedMessage,name:string,expires:number,card?:string,bound?:string,lacking?:boolean};
-type Deps=Pick<Platforms,'reply'|'updateCard'|'chatName'>&Pick<Operations,'askCheapModel'>&{handle:(a:App,b:Binding,msg:NormalizedMessage)=>unknown,now?:()=>number};
+type Deps=Pick<Platforms,'reply'|'updateCard'|'chatName'>&{askModel:AskModel,handle:(a:App,b:Binding,msg:NormalizedMessage)=>unknown,now?:()=>number};
 export class ChatBindings{
- declare store:Store;declare reply:Deps['reply'];declare updateCard:Deps['updateCard'];declare chatName:Deps['chatName'];declare askCheapModel:Deps['askCheapModel'];
+ declare store:Store;declare reply:Deps['reply'];declare updateCard:Deps['updateCard'];declare chatName:Deps['chatName'];declare askModel:AskModel;
  declare handle:Deps['handle'];declare now:()=>number;declare waiting:Map<string,Waiting>;declare renders:number;
  // reply(app,chatId,rootId,{card}) answers in the thread of a message with a card and resolves to the id of the card; updateCard(app,messageId,card)
- // replaces it; chatName(app,chatId) resolves to the name of a group in Feishu; askCheapModel(machine,cwd,prompt,{timeoutMs}) asks the cheap
- // model (see operations in core.ts); handle(app,binding,msg) takes a message of a bound chat, as Topics.handle does.
- constructor(store:Store,{reply,updateCard,chatName,askCheapModel,handle,now=Date.now}:Deps){
-  this.store=store;this.reply=reply;this.updateCard=updateCard;this.chatName=chatName;this.askCheapModel=askCheapModel;this.handle=handle;this.now=now;this.waiting=new Map();this.renders=0;
+ // replaces it; chatName(app,chatId) resolves to the name of a group in Feishu; askModel(prompt) asks the model (see model.ts); handle(app,binding,msg) takes a message of a bound chat, as Topics.handle does.
+ constructor(store:Store,{reply,updateCard,chatName,askModel,handle,now=Date.now}:Deps){
+  this.store=store;this.reply=reply;this.updateCard=updateCard;this.chatName=chatName;this.askModel=askModel;this.handle=handle;this.now=now;this.waiting=new Map();this.renders=0;
  }
  // The projects and agent configurations that must exist before a chat (of a group or not) can be bound, by their names in the notice.
  missing(group:boolean){
@@ -67,23 +67,21 @@ export class ChatBindings{
    const missing=this.missing(group);
    if(missing.length){await this.reply(a,msg.chatId,msg.messageId,{card:notice(`请先在 Bridge 管理台创建${missing.map(x=>`「${x}」`).join('和')}，再绑定这个聊天。`)});w.lacking=true;return;}
    const config=agentConfigs.find(c=>c.id===this.store.data.lastAgentConfigId)??agentConfigs[0];
-   const project=group?await this.guess(a,w,config):undefined;
+   const project=group?await this.guess(a,w):undefined;
    w.card=await this.reply(a,msg.chatId,msg.messageId,{card:bindCard(this.store.data,group,++this.renders,{project,config})});
   }catch(e){this.waiting.delete(key);this.store.log('会话绑定',`${a.name}：绑定卡片未发出，${e.message}`,'error');}
  }
- // The project of the group of w by the cheap model, on the machine of config, from the group's name in Feishu; none when there is nothing
+ // The project of the group of w by the model from the group's name in Feishu; none when there is nothing
  // to go by, nothing fits or the model cannot answer, which only costs the person a click. The only project there is needs no guess.
- async guess(a:App,w:Waiting,config:AgentConfig){
-  const {projects,machines}=this.store.data;
+ async guess(a:App,w:Waiting){
+  const {projects}=this.store.data;
   let known=false;
   try{const name=await this.chatName(a,w.msg.chatId);if(name){w.name=chatLabel('group',name);known=true;}}
   catch(e){this.store.log('会话绑定',`${a.name}：未能读取群名称，${e.message}`,'error');}
   if(projects.length===1)return projects[0];
-  const machine=machines.find(m=>m.id===config.machineId);if(!known||!machine?.enabled)return;
+  if(!known)return;
   try{
-   const r=await this.askCheapModel(machine,'~/',choosingPrompt(w.name,projects),{timeoutMs:guessMs});
-   if(r.code!==0)throw Error(`claude 退出码 ${r.code}：${r.stderr.trim().slice(-300)}`);
-   return projectOf(r.stdout,projects);
+   return projectOf(await this.askModel(choosingPrompt(w.name,projects)),projects);
   }catch(e){this.store.log('会话绑定',`${a.name}：未能猜出群的项目，${e.message}`,'error');}
  }
  // A click on 绑定 by someone on the app's allowlist. It answers at once: a binding is made here and then the rest follows (see finish).

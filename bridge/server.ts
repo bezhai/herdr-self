@@ -1,6 +1,7 @@
 import http from 'node:http';import fs from 'node:fs';import path from 'node:path';import os from 'node:os';import crypto from 'node:crypto';
 import {Store,normalizeMachine,migrateMachines,operations,publicText,stateDir,enqueue,isRecord} from './core.ts';
 import {Platforms,normalizeApp,changeBinding,bindingTarget} from './platform.ts';
+import {modelFrom} from './model.ts';
 import {saveProject,removeProject,fillDescription} from './projects.ts';
 import {saveAgentConfig,removeAgentConfig} from './agent-configs.ts';
 import {ChatBindings} from './chat-bindings.ts';
@@ -21,7 +22,7 @@ const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Stor
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map<string|undefined,number>(),attempts=new Map<string|undefined,{at:number,n:number}>();
 migrateMachines(store);migrateBindings(store);
 // What Bridge does on a machine goes through the client of the machine (see operations and Clients.call).
-const call:Call=(...args)=>clients.call(...args),ops=operations(call),skills=new Skills(store,call);
+const askModel=modelFrom(process.env),call:Call=(...args)=>clients.call(...args),ops=operations(call),skills=new Skills(store,call);
 function machine(id:unknown){const m=store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;}
 function binding(id:unknown){const b=store.data.bindings.find(x=>x.id===id);if(!b)throw Error('会话绑定不存在');return b;}
 // The Herdr status of machine m for the console: disabled, offline while its client is not in, else what the latest poll through the client
@@ -36,7 +37,7 @@ async function refresh(m:Machine){if(refreshes.has(m.id))return refreshes.get(m.
  // Topic agents' new replies and requests go back to Feishu; this does not wait for them and never throws.
  topics.sync(m,agents);
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
-const topics=new Topics(store,{...ops,placeSkills:(...args)=>skills.place(...args),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),chatBindings=new ChatBindings(store,{reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),chatName:(...args)=>platforms.chatName(...args),askCheapModel:ops.askCheapModel,handle:(...args)=>topics.handle(...args)});
+const topics=new Topics(store,{...ops,askModel,placeSkills:(...args)=>skills.place(...args),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),chatBindings=new ChatBindings(store,{reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),chatName:(...args)=>platforms.chatName(...args),askModel,handle:(...args)=>topics.handle(...args)});
 const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>chatBindings.open(...args),onCardAction:(a,evt)=>(evt.action?.value?.bind?chatBindings:evt.action?.value?.schedule?agentSchedules:topics).click(a,evt)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
  if(!a.enabled||platforms.status(a).connection!=='connected'){await platforms.start(a);a.enabled=true;store.save();}

@@ -100,9 +100,6 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
    const target=path.join(parent,path.basename(p)),s=await lstat(target);if(!s)return {};if(!s.isDirectory())throw denied();
    await fs.promises.rm(target,{recursive:true,force:true});return {};
   },
-  // Asks the cheap model (Claude haiku, through claude) in directory cwd, with prompt on stdin. What it is asked for, such as a branch name, is
-  // the control plane's business.
-  askCheapModel:({cwd,prompt,timeoutMs})=>ask(local(cwd,'cwd'),string(prompt,'prompt'),timeoutMs),
   // The origin URL as the repository configures it when path is the root of a Git repository or of a linked worktree, which is the top level
   // of its checkout once links are resolved; null for anything else: a directory inside a repository, a directory that only holds clones,
   // a missing one, a repository without origin.

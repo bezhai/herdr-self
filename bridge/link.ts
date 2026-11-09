@@ -11,8 +11,8 @@ import type {Kind,PermissionMode,WorkMode} from './state.ts';
 // platform one by one, keeps each in the store on its own and takes away those no longer loaded by default, where a client of 3 takes
 // one bundle with one digest; the client passes the reads of bridge-skill on (skills) and puts a skill read into its store (stockSkill). 5: the
 // client prepares the workspace of a topic, launches agents and inspects directories for projects (see ClientApi), and nameBranch is
-// askCheapModel.
-export const protocol=5;
+// askCheapModel. 6: the control plane asks the model itself, so askCheapModel is gone.
+export const protocol=6;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 // What one side may ask of the other: the params of each method and what it resolves to. A side's methods (see link) are async functions
@@ -36,7 +36,6 @@ export type ClientApi={
  herdr:{params:Timed<{session:string,args:readonly HerdrArg[]}>,result:Ran},
  storeFile:{params:Timed<{root:string,dir:string,name:string,body:string}>,result:string},
  removeDirectory:{params:Timed<{path:string}>,result:{}},
- askCheapModel:{params:Timed<{cwd:string,prompt:string}>,result:Ran},
  inspectDirectory:{params:Timed<{path:string}>,result:{origin:string|null}},
  // inspectDirectory: the origin URL of the repository whose root path is, null when path is no root or the repository has no origin.
  // The following four are the machine side of projects, where the paths on the machine are the client's business and the control plane never

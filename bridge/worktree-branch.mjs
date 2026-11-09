@@ -28,13 +28,18 @@ export const parseBranch=out=>/BRANCH=(\S+)/.exec(out)?.[1];
 // A type prefix and a lowercase kebab-case slug. The prompt asks for 50 characters; a few more are still a usable name.
 /** @param {string} b */
 export const validBranch=b=>b.length<=64&&new RegExp(`^(${types.join('|')})/[a-z0-9]+(-[a-z0-9]+)*$`).test(b);
-// The branch that the answer r ({code, stdout, stderr}) of `claude -p --model haiku` to namingPrompt names: {branch}, or {reason} when
-// claude exited with an error or named none that fits. A call that cannot run or does not answer in time is the caller's to tell.
+// The branch that the text a model answered to namingPrompt names: {branch}, or {reason} when it names none that fits.
+/** @param {string} text */
+export function branchFromText(text){
+ const branch=parseBranch(text);
+ return branch&&validBranch(branch)?{branch}:{reason:`输出里没有可用的 BRANCH= 行：${text.trim().slice(0,300)}`};
+}
+// The same for the answer r ({code, stdout, stderr}) of `claude -p --model haiku`, which the worktree-task plugin asks: {reason} when
+// claude exited with an error. A call that cannot run or does not answer in time is the caller's to tell.
 /** @param {Ran} r */
 export function branchOf(r){
  if(r.code!==0)return {reason:`claude 退出码 ${r.code}：${r.stderr.trim().slice(-300)}`};
- const branch=parseBranch(r.stdout);
- return branch&&validBranch(branch)?{branch}:{reason:`输出里没有可用的 BRANCH= 行：${r.stdout.trim().slice(0,300)}`};
+ return branchFromText(r.stdout);
 }
 // The fallback when naming fails, in the form of the names Herdr generates itself (generated_branch_slug in src/worktree.rs), which a
 // worktree beside the repository cannot use: its path has to be known before Herdr picks the name. The prefix is worktree/, as Herdr's

@@ -69,7 +69,6 @@ export type HerdrResult<A>=
 // Bridge owns, a .herdr-bridge directory: it gets a .gitignore of * unless it has one, and its directories other than dir that have not
 // changed for 7 days are removed along the way. Directories are created 0700 and the file 0600. The caller removes dir later with
 // removeDirectory(m,dir), which removes only such a directory, with what it holds; one that is gone already is fine.
-// askCheapModel(m,cwd,prompt,{timeoutMs}) asks the cheap model in cwd and resolves to {code, stdout, stderr} whatever the exit status.
 // inspectDirectory(m,path) resolves to {origin}, the
 // URL of the origin remote when path is the root of a Git repository (or of a linked worktree) that has one, else null. prepareWorkspace,
 // removeWorkspace, prepareLaunch and describeRepos take the params of their ClientApi entry (see link.ts, where their semantics are).
@@ -85,7 +84,6 @@ export function operations(call:Call){
   },
   storeFile:(m:Machine,root:string,dir:string,name:string,body:Uint8Array)=>call(m,'storeFile',{root,dir,name,body:Buffer.from(body).toString('base64')},{timeoutMs:60000}),
   removeDirectory:async(m:Machine,dir:string)=>{await call(m,'removeDirectory',{path:dir});},
-  askCheapModel:(m:Machine,cwd:string,prompt:string,options?:Options)=>call(m,'askCheapModel',{cwd,prompt},options),
   inspectDirectory:(m:Machine,p:string,options?:Options)=>call(m,'inspectDirectory',{path:p},options),
   prepareWorkspace:(m:Machine,params:ClientApi['prepareWorkspace']['params'],options?:Options)=>call(m,'prepareWorkspace',params,options),
   removeWorkspace:(m:Machine,params:ClientApi['removeWorkspace']['params'],options?:Options)=>call(m,'removeWorkspace',params,options),

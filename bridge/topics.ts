@@ -13,7 +13,7 @@ import {startCard} from './topic-cards.ts';
 import {workspaceOf,hasBranch,sweepable,unused,freeBranch} from './workspaces.ts';
 import {randomBranch} from './worktree-branch.mjs';
 import type {NormalizedMessage,ResourceDescriptor} from '@larksuite/channel';
-import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';
+import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';import type {AskModel} from './model.ts';
 import type {App,Binding,Machine,Topic,Reaction,RequestCard,Kind,Project,AgentConfig} from './state.ts';
 import type {Platforms} from './platform.ts';
 import type {Click,HerdrRequest,Answer} from './request-cards.ts';
@@ -62,17 +62,17 @@ const toast=(type:string,content:string)=>({toast:{type,content}});
 export type Message=Pick<NormalizedMessage,'messageId'|'content'>&{resources?:ResourceDescriptor[]};
 // A message of a person in a bound chat, as Topics reads it; a missing mention or root counts as none.
 export type Inbound=Message&Pick<NormalizedMessage,'rawContentType'>&Partial<Pick<NormalizedMessage,'rootId'|'mentionedBot'>>;
-type Deps=Pick<Operations,'storeFile'|'removeDirectory'|'askCheapModel'|'prepareWorkspace'|'removeWorkspace'|'prepareLaunch'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
- herdr:Herdr,placeSkills:(m:Machine,cwd:string,kind:Kind,skills:string[])=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number,pause?:(ms:number)=>Promise<void>};
+type Deps=Pick<Operations,'storeFile'|'removeDirectory'|'prepareWorkspace'|'removeWorkspace'|'prepareLaunch'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
+ herdr:Herdr,askModel:AskModel,placeSkills:(m:Machine,cwd:string,kind:Kind,skills:string[])=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number,pause?:(ms:number)=>Promise<void>};
 export class Topics{
  declare store:Store;declare herdr:Herdr;declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
  declare updateCard:Deps['updateCard'];declare react:Deps['react'];declare unreact:Deps['unreact'];declare request:Deps['request'];declare download:Deps['download'];
- declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare askCheapModel:Deps['askCheapModel'];declare prepareWorkspace:Deps['prepareWorkspace'];declare removeWorkspace:Deps['removeWorkspace'];declare prepareLaunch:Deps['prepareLaunch'];
+ declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare askModel:AskModel;declare prepareWorkspace:Deps['prepareWorkspace'];declare removeWorkspace:Deps['removeWorkspace'];declare prepareLaunch:Deps['prepareLaunch'];
  declare placeSkills:Deps['placeSkills'];declare now:()=>number;declare pause:(ms:number)=>Promise<void>;declare topicQueues:Map<string,Promise<unknown>>;declare workspaceQueues:Map<string,Promise<unknown>>;
  declare answering:Map<string,Promise<unknown>>;declare blockedSeen:Map<string,number>;declare renders:number;declare drawings:number;declare claims:Set<string>;
  // On machine m, through its client (see operations in core.ts): herdr(m,args,{timeoutMs}) runs a Herdr CLI command; storeFile(m,root,dir,name,body)
- // writes a file and resolves to its absolute path, and removeDirectory(m,dir) removes such a directory; askCheapModel(m,cwd,prompt,{timeoutMs})
- // asks the cheap model (see routing.ts); prepareWorkspace, removeWorkspace and prepareLaunch take the params of their ClientApi entry (see
+ // writes a file and resolves to its absolute path, and removeDirectory(m,dir) removes such a directory; askModel(prompt)
+ // asks the model (see routing.ts); prepareWorkspace, removeWorkspace and prepareLaunch take the params of their ClientApi entry (see
  // link.ts). Each rejects with the code client_offline while the client of m is offline. placeSkills(m,cwd,kind,skills)
  // places the skills loaded by default and those of a project, named in skills, where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
  // that Bridge placed there before and that are no longer wanted, and resolves to the paths of same-name skills of others (see Skills.place). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
@@ -80,9 +80,9 @@ export class Topics{
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes. now() is the clock.
- constructor(store:Store,{herdr,storeFile,removeDirectory,askCheapModel,prepareWorkspace,removeWorkspace,prepareLaunch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now,pause=ms=>new Promise<void>(resolve=>setTimeout(resolve,ms))}:Deps){
+ constructor(store:Store,{herdr,storeFile,removeDirectory,askModel,prepareWorkspace,removeWorkspace,prepareLaunch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now,pause=ms=>new Promise<void>(resolve=>setTimeout(resolve,ms))}:Deps){
   this.store=store;this.herdr=herdr;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.askCheapModel=askCheapModel;this.prepareWorkspace=prepareWorkspace;this.removeWorkspace=removeWorkspace;this.prepareLaunch=prepareLaunch;this.placeSkills=placeSkills;this.now=now;this.pause=pause;this.topicQueues=new Map();this.workspaceQueues=new Map();
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.askModel=askModel;this.prepareWorkspace=prepareWorkspace;this.removeWorkspace=removeWorkspace;this.prepareLaunch=prepareLaunch;this.placeSkills=placeSkills;this.now=now;this.pause=pause;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>' or '<topic id> adopt' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings and one for those of the first cards of topics; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
@@ -315,7 +315,7 @@ export class Topics{
   this.update(t,{state:'starting',error:''});delete t.endedAt;delete t.swept;let m:Machine;
   try{
    const config=this.agentConfig(t);m=this.target(t);
-   await this.route(m,b,t);if(t.routed)await this.showCard(a,t);
+   await this.route(b,t);if(t.routed)await this.showCard(a,t);
    const dir=await this.workspace(m,t);
    Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t,dir)));this.store.save();
    await this.place(m,b,config.kind,dir,this.projectOf(t)?.skills??[]);
@@ -341,18 +341,18 @@ export class Topics{
  // The project of topic t, or nothing for a topic that found none.
  projectOf(t:Topic){return this.store.data.projects.find(p=>p.id===t.projectId);}
  // Decides, once, the project of topic t and the branch of its worktrees; the topic is routed then, and a start that failed later does not
- // decide again. The project of a group is the binding's, and one call of the cheap model names the branch when its worktrees have one; in a
+ // decide again. The project of a group is the binding's, and one call of the model names the branch when its worktrees have one; in a
  // direct chat the same call also picks the project of all projects by the task, and a topic whose call picks none works in an empty
  // directory. A branch that the topic has already is kept (see restart), and a model that fails or names none gives a random branch; one that another topic has gets a number (see freeBranch), which is decided
  // in the same step that records it, so that topics named at once do not take the same one.
  // A topic of before the projects has a directory and is never routed. Fails when the project of the topic is gone.
- async route(m:Machine,b:Binding,t:Topic){
+ async route(b:Binding,t:Topic){
   // Also for a topic that is routed: one that ended in a project deleted since must not start in the empty directory of a topic without one.
   if(t.projectId&&!this.projectOf(t))throw Error('项目不存在');
   if(t.routed||t.cwd)return;
   const projects=this.store.data.projects,direct=!t.projectId;let project=this.projectOf(t);
   const asking=direct?projects.length>0:hasBranch(project)&&!t.branch;let named:Named={};
-  if(asking){named=await nameTask(this.askCheapModel,m,t.task!.content,direct?projects:null);if(direct)project=named.project;}
+  if(asking){named=await nameTask(this.askModel,t.task!.content,direct?projects:null);if(direct)project=named.project;}
   const branch=hasBranch(project)?t.branch??freeBranch(named.branch??randomBranch('topic'),t,this.store.data.topics):undefined;
   if(asking&&named.reason)this.store.log('话题会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
   if(!branch)delete t.branch;
@@ -488,7 +488,7 @@ export class Topics{
  }
  // Starts topic t again under another project or agent configuration (change), in its queue: the agent ends if it still runs, the workspace
  // of the old settings is removed (the branch stays where it has commits), and the task of the topic goes through the way a new topic starts,
- // with the branch the topic has, so that the cheap model is not asked again. said is the notice that follows once the agent is up. An agent that cannot be closed leaves the topic as it was; a workspace that cannot be removed is only logged. Never rejects.
+ // with the branch the topic has, so that the model is not asked again. said is the notice that follows once the agent is up. An agent that cannot be closed leaves the topic as it was; a workspace that cannot be removed is only logged. Never rejects.
  async restart(a:App,b:Binding,t:Topic,change:{projectId:string}|{agentConfigId:string},said:string){
   try{
    const m=this.target(t);
