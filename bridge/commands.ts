@@ -7,8 +7,8 @@ export const commands={adopt:'接管正在运行的 Agent',release:'结束接管
 // own commands, so only a command with this name and this description counts as Bridge's to delete; the same name with another description
 // is the app's own.
 const retired={wt:'在新的 Git worktree 里开一个话题'};
-// Each command as sent, such as /adopt. wt stays here only until worktrees.ts stops parsing it; it is not offered.
-export const slash=Object.fromEntries([...Object.keys(commands),'wt'].map(c=>[c,'/'+c])) as Record<keyof typeof commands|'wt',string>;
+// Each command as sent, such as /adopt.
+export const slash=Object.fromEntries(Object.keys(commands).map(c=>[c,'/'+c])) as Record<keyof typeof commands,string>;
 const path='/open-apis/application/v7/app_slash_commands';
 const describe=(text:string)=>({default_value:text,i18n:{zh_cn:text}});
 type Listed={command:string,command_id:string,description?:{default_value?:string,i18n?:{zh_cn?:string}}};

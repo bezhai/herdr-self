@@ -1312,7 +1312,7 @@ test('/wt is a message like any other: a root message that starts with it is the
  const f=topicFixture();try{
   await f.send({messageId:'om_1',content:'/wt 给登录页加验证码'});await f.send({messageId:'om_2',content:'/wt'});
   assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['/wt 给登录页加验证码','/wt']);assert.deepEqual(f.store.data.topics.map(t=>t.title),['/wt 给登录页加验证码','/wt']);
-  const sources=fs.readdirSync('.').filter(n=>/\.ts$/.test(n)&&!['test.ts','commands.ts'].includes(n));
+  const sources=fs.readdirSync('.').filter(n=>/\.ts$/.test(n)&&!['test.ts'].includes(n));
   for(const n of sources)assert.doesNotMatch(fs.readFileSync(n,'utf8'),/\/wt\b|slash\.wt|wtRequest|createWorktree|removeWorktree/,n);
   assert.equal(fs.existsSync('worktrees.ts'),false);
  }finally{f.close();}
