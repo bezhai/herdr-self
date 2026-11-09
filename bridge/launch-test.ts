@@ -61,9 +61,9 @@ test('Claude with commands to run is limited to Bash, Skill and Read, allowed on
  assert.deepEqual(decide('lark-cli docs',hook),{status:0,decision:'allow'});assert.deepEqual(decide('butler x',hook),{status:0,decision:'allow'});assert.deepEqual(decide('rm x',hook),{status:0,decision:'deny'});
  assert.deepEqual(await launch({kind:'claude',allowedCommands:[],dir:d}),['--permission-mode','default']);
 });
-test('Codex runs in its pane with the network its sandbox needs and trusts the real path of the directory, with the model when there is one; Antigravity trusts the path as it is given',async()=>{
+test('Codex runs in its pane with the network its sandbox needs, never stops at its update prompt, and trusts the real path of the directory, with the model when there is one; Antigravity trusts the path as it is given',async()=>{
  const real=dir('real'),link=path.join(root,'link');fs.symlinkSync(real,link);fs.rmSync(claudeJson,{force:true});
- const base=['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'];
+ const base=['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust','-c','check_for_update_on_startup=false'];
  assert.deepEqual(await launch({kind:'codex',dir:link}),[...base,'-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`]);
  assert.deepEqual(await launch({kind:'codex',model:'gpt-5.5',dir:real}),[...base,'-m','gpt-5.5','-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`]);
  assert.deepEqual(await launch({kind:'agy',dir:link}),['--settings',JSON.stringify({trustedWorkspaces:[link]})]);

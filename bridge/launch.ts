@@ -63,7 +63,9 @@ export function launchMethods(env:NodeJS.ProcessEnv):Pick<Methods<ClientApi>,'pr
    const dir=local(given,'dir'),real=await fs.promises.realpath(dir).catch(()=>{throw invalid(`dir 不存在：${dir}`);});
    if(kind==='codex'){
     // The dotted key form of -c does not work for a path, only a table. A path is a TOML string, which JSON.stringify writes the same way.
-    return {args:['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust',...model?['-m',model]:[],'-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`]};
+    // Codex asks whether to update before it takes a prompt when a new version is out (seen with 0.166.0 on 2026-11-09), which no one in
+    // a Feishu topic can answer, so it does not check.
+    return {args:['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust','-c','check_for_update_on_startup=false',...model?['-m',model]:[],'-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`]};
    }
    // Antigravity compares the path with $PWD, so the path as it is given, not the real one.
    if(kind==='agy')return {args:[...model?['--model',model]:[],'--settings',JSON.stringify({trustedWorkspaces:[dir]})]};
