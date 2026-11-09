@@ -308,9 +308,9 @@ test('a project saved with repositories and no description gets one from the che
   await later(10);empty.description='我写的';release({description:'生成的'});await pending;assert.equal(empty.description,'我写的');
   empty.description='';answer=Promise.resolve({description:'  '});await fillDescription(f.store,empty,()=>[m1],describe);assert.equal(empty.description,'');
   answer=new Promise(r=>{release=r;});const moved=fillDescription(f.store,empty,()=>[m1],describe);await later(10);empty.repos=['https://host.example/other'];release({description:'旧仓库的'});await moved;assert.equal(empty.description,'');
-  // A machine that cannot answer is logged and nothing else happens, also for the error of a client that has not got the operation yet.
-  answer=Object.assign(Error('这个操作还没有实现：describeRepos'),{code:'not_implemented'});await fillDescription(f.store,empty,()=>[m1],describe);assert.equal(empty.description,'');
-  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['项目','error','empty：未能从仓库生成描述，这个操作还没有实现：describeRepos']]);
+  // A machine that cannot answer is logged and nothing else happens.
+  answer=Error('这些仓库里都没有 README');await fillDescription(f.store,empty,()=>[m1],describe);assert.equal(empty.description,'');
+  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['项目','error','empty：未能从仓库生成描述，这些仓库里都没有 README']]);
  }finally{f.close();}
 });
 const configData=(configs:AgentConfig[]=[])=>({machines:[{id:'m',name:'cpu1'},{id:'n',name:'cpu2'}] as Machine[],agentConfigs:configs});
@@ -4271,4 +4271,21 @@ test('only people on the allowlist get a binding card and can use it: the platfo
   assert.deepEqual(handlers.cardAction(f.click('om_card1',{project:'p1',config:'c1'},'ou_stranger')),refused);await settle();assert.deepEqual([f.store.data.bindings,f.handled],[[],[]]);
   assert.deepEqual(handlers.cardAction(f.click('om_card1',{project:'p1',config:'c1'},'ou_user')),{});await settle();assert.equal(f.store.data.bindings.length,1);assert.equal(f.handled.length,1);
  }finally{f.close();p.close();}
+});
+test('the first task of a chat bound with the card starts like any topic of a bound chat: the workspace of the chosen project is prepared on the machine of the chosen configuration, the launch is prepared for it, and the agent starts with what the client returned after the --',async()=>{
+ const f=topicFixture();try{
+  const cards:[string,unknown][]=[],chats=new ChatBindings(f.store,{
+   reply:loose<DepsOf<typeof ChatBindings>['reply']>(async()=>'om_card'),updateCard:loose<DepsOf<typeof ChatBindings>['updateCard']>(async(a,id,card)=>{cards.push([id,card]);}),
+   chatName:loose<DepsOf<typeof ChatBindings>['chatName']>(async()=>'新项目群'),askCheapModel:f.deps.askCheapModel,handle:f.topics.handle.bind(f.topics)});
+  const msg={...inbound,chatId:'oc_new',chatType:'group',messageId:'om_task',mentionedBot:true,content:'修复登录页'} as NormalizedMessage;
+  await chats.open(allowed,msg);assert.deepEqual(f.store.data.topics,[]);
+  chats.click(allowed,{messageId:'om_card',chatId:'oc_new',operator:{openId:'ou_user'},action:{tag:'button',value:{bind:true,render:1},formValue:{project:'p',config:'c'}}} as Clicked);
+  await later(50);
+  const [binding]=f.store.data.bindings.filter(x=>x.chatId==='oc_new'),[topic]=f.store.data.topics;
+  assert.deepEqual([binding.name,binding.defaultProjectId,binding.defaultAgentConfigId,binding.requireMention],['新项目群','p','c',true]);
+  assert.deepEqual(cards,[['om_card',notice('已绑定：项目 work，Agent 配置 cpu2 · Claude。').card]]);
+  assert.deepEqual([topic.bindingId,topic.rootId,topic.state,topic.projectId,topic.agentConfigId,topic.cwd],[binding.id,'om_task','ready','p','c','~/work']);
+  assert.deepEqual(f.prepared.map(p=>[p[0],(p[1] as {project:{id:string}}).project.id]),[['m','p']]);assert.deepEqual(f.launched,[['m',{kind:'claude',permissionMode:'default',dir:'~/work'}]]);
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='start').map(c=>c.slice(-3)),[['--','--permission-mode','default']]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['修复登录页']);
+ }finally{f.close();}
 });
