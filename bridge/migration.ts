@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import {uuid,publicText} from './core.ts';
 import {configName,permissionMode} from './agent-configs.ts';
@@ -26,9 +27,13 @@ const trimmed=(dir:string)=>dir.length>1?dir.replace(/\/+$/,'')||'/':dir;
 // - The binding keeps its id, its name and its chat; the topics and schedules that refer to it keep working. Its topics get the project and
 //   the configuration of their binding and the directory the binding had, which they keep until they end; topics that adopted an agent
 //   and those that wait for one to adopt have none.
-// A state without such bindings is left as it is.
+// The state file as it was goes to state.json.before-projects first, unless that exists. A state without such bindings is left as it is.
 export function migrateBindings(store:Store){
  const {data}=store,old=data.bindings.filter(isOld);if(!old.length)return;
+ // The old version cannot read what this writes, and the first save follows at once: the file as it is goes beside it, the first time only.
+ const copy=store.file+'.before-projects';
+ try{fs.copyFileSync(store.file,copy,fs.constants.COPYFILE_EXCL);}
+ catch(e){if(e.code!=='EEXIST'&&e.code!=='ENOENT')store.log('数据迁移',`状态文件没能备份到 ${path.basename(copy)}：${e.message}`,'error');}
  const machineName=(id:string)=>data.machines.find(m=>m.id===id)?.name??'已删除的机器';
  const projects=new Map<string,Project>(),configs=new Map<string,AgentConfig>(),uses=new Map<Project,number>(),modes=new Map<AgentConfig,PermissionMode|undefined>();
  const projectOf=(b:OldBinding)=>{

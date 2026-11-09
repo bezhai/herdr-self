@@ -184,6 +184,14 @@ test('every old binding becomes a binding of the same id with a default agent co
   assert.equal(f.store.data.logs[0].message,'8 个会话绑定已迁移为 6 个项目和 5 个 Agent 配置');assert.equal(f.store.data.logs[1].message,'项目「test」沿用 cpu1 上的 ~/code/test，被 2 个会话绑定使用');
  }finally{f.close();}
 });
+test('the state file as the old version wrote it is copied beside it before the first migration, once, so that an old Bridge can be put back',()=>{
+ const f=oldStore();try{
+  const before=fs.readFileSync(path.join(f.dir,'state.json'),'utf8'),copy=path.join(f.dir,'state.json.before-projects');
+  migrateBindings(f.store);assert.equal(fs.readFileSync(copy,'utf8'),before);assert.ok('cwd' in JSON.parse(before).bindings[0]);assert.equal('cwd' in JSON.parse(fs.readFileSync(path.join(f.dir,'state.json'),'utf8')).bindings[0],false);
+  // A later migration of an old binding that something wrote again does not replace the copy.
+  f.store.data.bindings.push(oldBinding('late',{machineId:'m1',cwd:'~/late',kind:'claude'}) as unknown as Binding);f.store.save();migrateBindings(f.store);assert.equal(fs.readFileSync(copy,'utf8'),before);
+ }finally{f.close();}
+});
 test('a state that is migrated already is left alone, without a save or a log line',()=>{
  const f=oldStore();try{
   migrateBindings(f.store);const saved=fs.readFileSync(path.join(f.dir,'state.json'),'utf8'),save=f.store.save.bind(f.store);let saves=0;f.store.save=()=>{saves++;save();};
