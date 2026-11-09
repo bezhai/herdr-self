@@ -160,6 +160,18 @@ test('the sidebar groups the pages into connections, work configuration and what
   ]);
 });
 
+test('the breadcrumb names the sidebar group of the page', async () => {
+  stubFetch({ '/api/state': sampleState() });
+  const user = userEvent.setup();
+  render(<App />);
+  await screen.findByRole('button', { name: '+ 添加飞书' });
+  const crumbs = () => document.querySelector('.topbar .crumbs')!.textContent;
+  for (const [button, crumb] of [['项目2', '工作配置/项目'], ['Skills2', '工作配置/Skills'], ['连接日志', '运行情况/连接日志'], ['会话绑定1', '连接管理/会话绑定']]) {
+    await user.click(within(document.querySelector<HTMLElement>('.sidebar')!).getByRole('button', { name: button }));
+    expect(crumbs()).toBe(crumb);
+  }
+});
+
 test('the topbar ends with the theme button', async () => {
   stubFetch({ '/api/state': sampleState() });
   const user = userEvent.setup();

@@ -13,5 +13,13 @@ export const pageInfo = {
 
 export type Page = keyof typeof pageInfo;
 
+// The sidebar's groups in order, whose label is also the first part of a page's breadcrumb.
+export const pageGroups: { label: string, pages: Page[] }[] = [
+  { label: '连接管理', pages: ['platforms', 'machines', 'bindings'] },
+  { label: '工作配置', pages: ['projects', 'agentConfigs', 'skills'] },
+  { label: '运行情况', pages: ['logs'] },
+];
+export const groupOf = (page: Page) => pageGroups.find((g) => g.pages.includes(page))!.label;
+
 // What App passes to every page but the logs: the state, refresh() and toast(text).
 export type PageProps = { state: BridgeState, refresh: () => Promise<void>, toast: (text: string) => void };

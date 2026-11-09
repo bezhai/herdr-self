@@ -1,4 +1,5 @@
-import { pageInfo } from '../pages/pageInfo.ts';
+import { Fragment } from 'react';
+import { pageGroups, pageInfo } from '../pages/pageInfo.ts';
 import type { Page } from '../pages/pageInfo.ts';
 import type { BridgeState } from '../useBridge.ts';
 import { Icon } from './Icon.tsx';
@@ -13,6 +14,12 @@ function NavButton({ page, current, count, onNavigate }: { page: Page, current: 
   );
 }
 
+// The number beside each page's name; the logs have none.
+const counts = (state: BridgeState): Partial<Record<Page, number>> => ({
+  platforms: state.apps.length, machines: state.machines.length, bindings: state.bindings.length,
+  projects: state.projects.length, agentConfigs: state.agentConfigs.length, skills: state.skills.length,
+});
+
 // online: null before the first refresh, then whether the last refresh succeeded.
 type SidebarProps = { state: BridgeState, page: Page, online: boolean | null, open: boolean, onNavigate: (page: Page) => void, onLogout: () => void };
 export function Sidebar({ state, page, online, open, onNavigate, onLogout }: SidebarProps) {
@@ -21,22 +28,12 @@ export function Sidebar({ state, page, online, open, onNavigate, onLogout }: Sid
     <aside className={open ? 'sidebar open' : 'sidebar'}>
       <Brand />
       <div className="host"><i className="dot" /><strong>{state.host}</strong><span>Bridge 主机</span></div>
-      <p className="nav-label">连接管理</p>
-      <nav>
-        <NavButton page="platforms" count={state.apps.length} {...nav} />
-        <NavButton page="machines" count={state.machines.length} {...nav} />
-        <NavButton page="bindings" count={state.bindings.length} {...nav} />
-      </nav>
-      <p className="nav-label">工作配置</p>
-      <nav>
-        <NavButton page="projects" count={state.projects.length} {...nav} />
-        <NavButton page="agentConfigs" count={state.agentConfigs.length} {...nav} />
-        <NavButton page="skills" count={state.skills.length} {...nav} />
-      </nav>
-      <p className="nav-label">运行情况</p>
-      <nav>
-        <NavButton page="logs" {...nav} />
-      </nav>
+      {pageGroups.map((group) => (
+        <Fragment key={group.label}>
+          <p className="nav-label">{group.label}</p>
+          <nav>{group.pages.map((p) => <NavButton key={p} page={p} count={counts(state)[p]} {...nav} />)}</nav>
+        </Fragment>
+      ))}
       <div className="sidebar-footer">
         <span className="status">
           <i className={online === false ? 'dot bad' : 'dot'} />

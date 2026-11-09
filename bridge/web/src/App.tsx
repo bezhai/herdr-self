@@ -109,7 +109,7 @@ export function App() {
       <div className="shell">
         <Sidebar state={state} page={page} online={online} open={menuOpen} onNavigate={navigate} onLogout={logout} />
         <main>
-          <Topbar title={info.title} onMenu={() => setMenuOpen((open) => !open)} />
+          <Topbar page={page} onMenu={() => setMenuOpen((open) => !open)} />
           <div className="page-scroll">
             <div className="content">
               <PageHeading info={info} onAction={pageActions[page]} />
