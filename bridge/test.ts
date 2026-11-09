@@ -1497,12 +1497,13 @@ test('retiring a ready topic closes the pane of its agent, which takes its tab a
   f.h.calls.length=0;await f.topics.retire(one,'已关闭');assert.deepEqual(f.h.calls,[]);
  }finally{f.close();}
 });
-test('topics still starting when Bridge restarts are marked failed',()=>{
+test('topics still starting when Bridge restarts are marked failed, and ended at that time so that the sweep removes the workspace they may have',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-'));try{
   const store=new Store(dir);store.data.topics=[{id:'t1',state:'starting',error:''},{id:'t2',state:'ready',error:''},{id:'t3',state:'choosing',error:'',adopted:{picker:'om_card'}}] as Topic[];store.save();
   // Starting reads only the state file.
-  new Topics(new Store(dir),{herdr:async()=>{},machine:()=>{},reply:async()=>{}} as unknown as DepsOf<typeof Topics>);
-  assert.deepEqual(new Store(dir).data.topics.map(t=>[t.state,t.error]),[['failed','Bridge 重启时 Agent 启动未完成'],['ready',''],['choosing','']]);
+  const before=Date.now();new Topics(new Store(dir),{herdr:async()=>{},machine:()=>{},reply:async()=>{}} as unknown as DepsOf<typeof Topics>);
+  const topics=new Store(dir).data.topics;assert.deepEqual(topics.map(t=>[t.state,t.error]),[['failed','Bridge 重启时 Agent 启动未完成'],['ready',''],['choosing','']]);
+  assert.ok(topics[0].endedAt!>=before&&topics[0].endedAt!<=Date.now());assert.deepEqual([topics[1].endedAt,topics[2].endedAt],[undefined,undefined]);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 const attachmentLogs=(f:{store:Store})=>f.store.data.logs.filter(l=>l.kind==='附件').map(l=>[l.level,l.message]);
@@ -3382,7 +3383,7 @@ test('the server changes the defaults of a binding that exists and creates none,
   assert.deepEqual(s.projects,[{...project,id:'p-1',name:'work',adopted:true},{...project,id:'p-2',name:'other',adopted:false}]);assert.deepEqual(s.agentConfigs,agentConfigs);
   // The console sees a binding without the Herdr workspaces of its topics.
   const {workspaces,...shown}=group;assert.deepEqual(s.bindings.map((b:Binding)=>b.id),['b-old','b-group','b-direct']);assert.deepEqual(s.bindings.slice(1),[shown,direct]);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
-  const {messageIds,reactions,cards,cot,proposal,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards','cot','proposal'])assert.equal(key in s.topics[1],false,key);
+  const {messageIds,reactions,cards,cot,proposal,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成',endedAt:s.topics[0].endedAt};assert.deepEqual(s.topics[0],listed);assert.equal(typeof s.topics[0].endedAt,'number');for(const key of ['messageIds','reactions','cards','cot','proposal'])assert.equal(key in s.topics[1],false,key);
   // The console only changes the defaults of a binding: other fields sent along are ignored, and a refused change keeps the saved bindings as they are.
   assert.deepEqual(await api('bindings/save',{id:'b-group',defaultProjectId:'p-2',defaultAgentConfigId:'c-2',requireMention:true,name:'改名',chatId:'oc_x',chatType:'p2p',workspaces:{}}),{status:200,body:{ok:true}});
   for(const [body,error] of [[{id:'b-group',defaultProjectId:'gone'},'项目不存在'],[{id:'b-group',defaultAgentConfigId:'gone'},'Agent 配置不存在'],[{id:'b-direct',defaultProjectId:'p-1'},'私聊不固定项目'],

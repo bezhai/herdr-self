@@ -89,7 +89,8 @@ export class Topics{
   this.answering=new Map();this.blockedSeen=new Map();this.renders=0;this.drawings=0;this.claims=new Set();
   // A start interrupted by a restart cannot be resumed; the next message in the topic retries it.
   const interrupted=store.data.topics.filter(t=>t.state==='starting');
-  for(const t of interrupted)Object.assign(t,{state:'failed',error:'Bridge 重启时 Agent 启动未完成'});
+  // It ended now, so that the sweep removes the workspace it may have prepared (see sweepable).
+  for(const t of interrupted)Object.assign(t,{state:'failed',error:'Bridge 重启时 Agent 启动未完成',endedAt:this.now()});
   if(interrupted.length)store.save();
  }
  // A routed message. Never rejects: failures end up as topic states, notices in the thread or error logs.
