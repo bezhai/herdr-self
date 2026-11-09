@@ -50,6 +50,8 @@ export type ClientApi={
  // repos), made from origin: it fetches, checks out the existing branch or else creates it from the default branch of origin. A project without
  // repos gets an empty directory, fixed when shared and of this topic when isolated. It can be called again for a topic that has its
  // workspace, as the way to restore one whose worktrees were removed: what exists stays, what is missing is recreated from the branch.
+ // dir is the worktree or checkout itself for a project of one repo (not adopted), else the directory that holds them; a shared project
+ // fetches the checkouts it has and never changes them, and an adoptedDir is dir itself, in which only the missing repos are cloned.
  // removeWorkspace: removes what prepareWorkspace made for the topic (its directory and the worktrees in it), never the fixed directory of a
  // shared project or an adoptedDir. It deletes branch in each repo when the branch has no commit of its own (nothing beyond the default
  // branch) and keeps it otherwise; branchKept tells whether it kept the branch in any repo. Called again for a workspace that is gone, it

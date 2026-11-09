@@ -3465,7 +3465,7 @@ test('the server migrates the bindings of an older state file at start, and once
   assert.equal('adopted' in saved.projects[0],false);
  }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
 });
-test('the server creates, changes and removes projects and agent configurations, refuses what is invalid or still in use, and only reads requests that are JSON objects; a project saved with repositories asks a machine to describe them, which fails harmlessly while no client can',async()=>{
+test('the server creates, changes and removes projects and agent configurations, refuses what is invalid or still in use, and only reads requests that are JSON objects; a project saved with repositories asks a machine to describe them, which fails harmlessly when the repository cannot be cloned',async()=>{
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  fs.mkdirSync(home);fs.mkdirSync(state);
  fs.writeFileSync(path.join(state,'state.json'),JSON.stringify({machines:[{id:'m',name:'cpu1',session:'default',enabled:true}]}));
@@ -3500,9 +3500,9 @@ test('the server creates, changes and removes projects and agent configurations,
   const {config:text}=(await api('machines/token',{id:'m'})).body;
   client=bridgeClient(configFile(dir,'client.json',JSON.stringify({...JSON.parse(text),herdr:fakeHerdrBinary(dir)})),{HOME:home,BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock')});
   await until(async()=>(await shown()).machines[0].client.state==='online','the client is online');
-  const other=await api('projects/save',{name:'promoter',repos:['git@code.byted.org:growth/promoter.git']});assert.equal(other.status,200);
+  const other=await api('projects/save',{name:'promoter',repos:['ssh://git@127.0.0.1:1/growth/promoter.git']});assert.equal(other.status,200);
   const log=await until(async()=>(await shown()).logs.find((l:Log)=>l.kind==='项目'),'the failed description is logged');
-  assert.deepEqual([log.level,log.message],['error','promoter：未能从仓库生成描述，这个操作还没有实现：describeRepos']);assert.equal((await shown()).projects.find((p:Project)=>p.name==='promoter').description,'');
+  assert.equal(log.level,'error');assert.match(log.message,/^promoter：未能从仓库生成描述，git clone /);assert.equal((await shown()).projects.find((p:Project)=>p.name==='promoter').description,'');
   assert.deepEqual(await api('projects/remove',{id:other.body.id}),{status:200,body:{ok:true}});assert.deepEqual(await api('projects/remove',{id:other.body.id}),{status:400,body:{error:'项目不存在'}});
   assert.deepEqual(await api('agent-configs/remove',{id:config}),{status:200,body:{ok:true}});assert.deepEqual(await api('agent-configs/remove',{id:config}),{status:400,body:{error:'Agent 配置不存在'}});
   assert.deepEqual((await shown()).agentConfigs,[]);
@@ -3755,9 +3755,9 @@ test('the client, bridge-schedule and bridge-skill run on Node alone: bin/bridge
    for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b(?!\s+type\b)[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
   visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
  };
- assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','link.ts','machine-tools.ts','machine.ts']);
- assert.deepEqual(imports('bridge-schedule.ts'),['bin/bridge-schedule.ts','client.ts','cron.ts','link.ts','machine-tools.ts','machine.ts','request-cards.ts','schedule-command.ts']);
- assert.deepEqual(imports('bridge-skill.ts'),['bin/bridge-skill.ts','client.ts','link.ts','machine-tools.ts','machine.ts','skill-command.ts']);
+ assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','core.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','workspace.ts']);
+ assert.deepEqual(imports('bridge-schedule.ts'),['bin/bridge-schedule.ts','client.ts','core.ts','cron.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','request-cards.ts','schedule-command.ts','workspace.ts']);
+ assert.deepEqual(imports('bridge-skill.ts'),['bin/bridge-skill.ts','client.ts','core.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','skill-command.ts','workspace.ts']);
 });
 // Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
 async function stopClients(f:ClientsFixture,started:ClientProcess[]){
@@ -3976,12 +3976,11 @@ test('the client creates directories, stores attachments only under a .herdr-bri
   await removeDirectory(m,'~/gone/.herdr-bridge/t1');await removeDirectory(m,'~/work/.herdr-bridge/t9');
  }finally{await f.close();fs.rmSync(dir,{recursive:true});}
 });
-test('the operations that prepare a topic\'s workspace, remove it, prepare an agent\'s launch and describe repositories are in the contract and refuse, as not implemented yet, until a client implements them',async()=>{
- const f=await machineFixture(),project={id:'p',repos:['git@example.com:team/app.git'],workMode:'isolated' as const},{ops,m}=f;
+test('the operation that prepares an agent\'s launch is in the contract and refuses, as not implemented yet, until a client implements it',async()=>{
+ const f=await machineFixture(),{ops,m}=f;
  try{
   const refused=(e:Thrown)=>e.code==='not_implemented'&&/^Error: 这个操作还没有实现：/.test(String(e));
-  await assert.rejects(ops.prepareWorkspace(m,{project,topicId:'t',branch:'topic/x'}),refused);await assert.rejects(ops.removeWorkspace(m,{project,topicId:'t',branch:'topic/x'}),refused);
-  await assert.rejects(ops.prepareLaunch(m,{kind:'claude',model:'sonnet',permissionMode:'auto',allowedCommands:['butler'],dir:'~/work'}),refused);await assert.rejects(ops.describeRepos(m,{repos:project.repos}),refused);
+  await assert.rejects(ops.prepareLaunch(m,{kind:'claude',model:'sonnet',permissionMode:'auto',allowedCommands:['butler'],dir:'~/work'}),refused);
  }finally{await f.close();}
 });
 test('the client says whether a directory is the root of a Git repository and what its origin is: nothing for a directory that is not a root, one that is missing or a repository without origin',async()=>{

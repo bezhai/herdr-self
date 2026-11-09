@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {invalid,refused,string,local,inside,name,run,gitRunner} from './machine-tools.ts';
+import {workspaceMethods} from './workspace.ts';
 import type {Methods,ClientApi,SkillFiles} from './link.ts';
 // What the client of a machine (see client.ts) does there for the control plane: a fixed set of methods, each of which runs a program of
 // its own choosing, if any, never one that the control plane names. The control plane decides when and why (see operations in core.ts);
@@ -69,7 +70,7 @@ async function stock(kept:string,{name:n,digest,files}:SkillFiles){
 // loginEnvironment). Every request carries timeoutMs, the most that a command it runs may take (see run).
 export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<Methods<ClientApi>,'ping'>{
  const program=herdr.replace(/^~\//,os.homedir()+'/');
- const git=gitRunner(env);
+ const git=gitRunner(env),ask=(cwd:string,prompt:string,timeoutMs?:number)=>run('claude',['-p','--model','haiku'],{env,cwd,input:prompt,timeoutMs});
  return {
   // The Herdr CLI in session session with args, each a string passed as it is or {path} for a path of this machine (Herdr itself does not
   // expand ~ in --cwd).
@@ -107,7 +108,7 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   exists:({path:p})=>fs.promises.stat(local(p,'path')).then(()=>true,()=>false),
   // Asks the cheap model (Claude haiku, through claude) in directory cwd, with prompt on stdin. What it is asked for, such as a branch name, is
   // the control plane's business.
-  askCheapModel:({cwd,prompt,timeoutMs})=>run('claude',['-p','--model','haiku'],{env,cwd:local(cwd,'cwd'),input:string(prompt,'prompt'),timeoutMs}),
+  askCheapModel:({cwd,prompt,timeoutMs})=>ask(local(cwd,'cwd'),string(prompt,'prompt'),timeoutMs),
   // The origin URL as the repository configures it when path is the root of a Git repository or of a linked worktree, which is the top level
   // of its checkout once links are resolved; null for anything else: a directory inside a repository, a directory that only holds clones,
   // a missing one, a repository without origin.
@@ -164,6 +165,7 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   // Puts skill {name, digest, files}, which an agent of this machine reads through bridge-skill, into the store (see stock) and resolves to
   // its directory there, where its other files are for the agent to open.
   stockSkill:({store,skill})=>stock(local(store,'store'),skillsOf([skill])[0]),
-  prepareWorkspace:unfinished('prepareWorkspace'),removeWorkspace:unfinished('removeWorkspace'),prepareLaunch:unfinished('prepareLaunch'),describeRepos:unfinished('describeRepos'),
+  ...workspaceMethods(git,ask),
+  prepareLaunch:unfinished('prepareLaunch'),
  };
 }
