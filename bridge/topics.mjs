@@ -54,8 +54,8 @@ export class Topics{
  // creates a directory and its parents; storeFile(m,root,dir,name,body) writes a file and resolves to its absolute path, and
  // removeDirectory(m,dir) removes such a directory; git(m,cwd,args,{timeoutMs}), exists(m,path) and nameBranch(m,cwd,prompt,{timeoutMs})
  // serve /wt topics (see worktrees.mjs). Each rejects with the code client_offline while the client of m is offline. placeSkills(m,cwd,kind)
- // places the skills that every topic gets where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
- // that Bridge placed there before and every topic no longer gets, and resolves to the paths of same-name skills of others (see Skills.place). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
+ // places the skills loaded by default where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
+ // that Bridge placed there before and that are no longer loaded by default, and resolves to the paths of same-name skills of others (see Skills.place). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
  // answers in the topic thread with a card and resolves to the message id; updateCard(app,messageId,card) replaces a card sent that way;
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
@@ -296,7 +296,7 @@ export class Topics{
   }
   this.update(t,{state:'ready'});this.store.log('话题会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}`);return true;
  }
- // Places the skills that every topic gets for the agent of binding b in its working directory cwd on machine m, which exists by then, right
+ // Places the skills loaded by default for the agent of binding b in its working directory cwd on machine m, which exists by then, right
  // before the agent starts and loads them (see Skills.place). Same-name skills of others are left alone and logged. Never rejects: a failure is only logged, and
  // the agent starts without the skills.
  async place(m,b,cwd){

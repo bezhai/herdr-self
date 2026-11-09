@@ -84,7 +84,7 @@ const server=http.createServer(async(req,res)=>{try{
  // agent can be talked into anything by what it reads.
  else if(p==='/api/skills/save'){skills.save(b.name,b.text,{create:Boolean(b.create)});}
  else if(p==='/api/skills/import'){skills.put(b.name,b.files);}
- else if(p==='/api/skills/everywhere'){skills.flag(b.name,b.everywhere);}
+ else if(p==='/api/skills/preload'){skills.flag(b.name,b.preload);}
  else if(p==='/api/skills/remove'){skills.remove(b.name);}
  else return json(res,404,{error:'接口不存在'});
  return json(res,200,result);

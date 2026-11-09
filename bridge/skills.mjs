@@ -6,9 +6,9 @@ import {skillMark} from './machine.mjs';
 
 // The skills of the platform, which the console's Skills page manages. Each is a directory named after it under skills/ in the state
 // directory, with its SKILL.md and any other files. The state file holds only their index, the collection skills: the name, the description
-// of the frontmatter of SKILL.md, everywhere, whether every topic gets it (see place), and the digest of its files. The state file is
-// written whole on almost every event and the console polls it every few seconds, so the files stay out of it: they are read when a skill
-// is edited, read or placed.
+// of the frontmatter of SKILL.md, preload, whether it is loaded by default (placed in the working directory of every topic before its agent
+// starts, see place) or read on demand, and the digest of its files. The state file is written whole on almost every event and the console
+// polls it every few seconds, so the files stay out of it: they are read when a skill is edited, read or placed.
 
 // Where each machine keeps the skills that it got, one directory per skill (see placeSkills in machine.mjs). No agent reads it as a global
 // skill directory, unlike ~/.agents/skills, which Codex reads.
@@ -94,17 +94,17 @@ export class Skills{
    for(const [p,c] of entries){fs.mkdirSync(path.dirname(path.join(fresh,p)),{recursive:true});fs.writeFileSync(path.join(fresh,p),c);}
    fs.rmSync(target,{recursive:true,force:true});fs.renameSync(fresh,target);
   }catch(e){fs.rmSync(fresh,{recursive:true,force:true});throw e;}
-  const old=this.store.data.skills.find(x=>x.name===name),s={name,description,everywhere:old?.everywhere??false,digest};
+  const old=this.store.data.skills.find(x=>x.name===name),s={name,description,preload:old?.preload??false,digest};
   this.store.data.skills=[...this.store.data.skills.filter(x=>x!==old),s].sort((a,b)=>a.name<b.name?-1:1);this.store.save();return s;
  }
  remove(name){
   this.entry(name);fs.rmSync(path.join(this.dir,name),{recursive:true,force:true});
   this.store.data.skills=this.store.data.skills.filter(x=>x.name!==name);this.store.save();this.store.log('skill','删除了 skill '+name);
  }
- // Sets whether every topic gets skill name (see place).
- flag(name,everywhere){
-  const s=this.entry(name);s.everywhere=Boolean(everywhere);this.store.save();
-  this.store.log('skill',`skill ${name} ${s.everywhere?'改为所有项目都带':'不再所有项目都带'}`);return s;
+ // Sets whether skill name is loaded by default (see place).
+ flag(name,preload){
+  const s=this.entry(name);s.preload=Boolean(preload);this.store.save();
+  this.store.log('skill',`skill ${name} 已设为${s.preload?'默认加载':'按需读取'}，之后新开的话题生效`);return s;
  }
  // The entries of the skills whose name, description or SKILL.md hold every word of query, in any case: those with them in the name or
  // the description first, each part in the order of the names.
@@ -114,13 +114,13 @@ export class Skills{
   const named=this.list().filter(s=>has(about(s)));
   return [...named,...this.list().filter(s=>!named.includes(s)&&has(about(s)+'\n'+this.text(s.name)))];
  }
- // Places the skills that every topic gets, as they are when the placement runs, where the agent of binding kind kind reads project skills
+ // Places the skills loaded by default, as they are when the placement runs, where the agent of binding kind kind reads project skills
  // in working directory cwd on machine m, whose leading ~/ is that machine's home, and takes away those that Bridge placed there before and
- // that every topic no longer gets: the request placeSkills to the client of m, with the skills as data. Resolves to the paths of same-name
+ // that are no longer loaded by default: the request placeSkills to the client of m, with the skills as data. Resolves to the paths of same-name
  // skills that are not Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after
  // another, since they share its store.
  place(m,cwd,kind){
-  const skills=()=>this.list().filter(s=>s.everywhere).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
+  const skills=()=>this.list().filter(s=>s.preload).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
   return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:skills(),...places[kind],cwd}));
  }
  // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
@@ -134,8 +134,8 @@ export class Skills{
   if(!m.enabled)throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
   if(op==='list')return {skills:this.list()};
   if(op==='search')return {skills:this.search(body.query)};
-  const {name,description,everywhere,digest,files}=this.read(body.name),text=Buffer.from(files['SKILL.md'],'base64').toString('utf8'),others=Object.keys(files).filter(p=>p!=='SKILL.md');
-  const read={name,description,everywhere,text,files:others};if(!others.length)return read;
+  const {name,description,preload,digest,files}=this.read(body.name),text=Buffer.from(files['SKILL.md'],'base64').toString('utf8'),others=Object.keys(files).filter(p=>p!=='SKILL.md');
+  const read={name,description,preload,text,files:others};if(!others.length)return read;
   return {...read,path:await enqueue(this.queues,m.id,()=>this.call(m,'stockSkill',{store:machineStore,skill:{name,digest,files}}))};
  }
 }

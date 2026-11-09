@@ -14,31 +14,31 @@ export const usage=`用法：
   bridge-skill read <名称> [--json]
   bridge-skill import <目录>
   bridge-skill export <名称> [<目录>]
-  bridge-skill everywhere <名称> on|off
+  bridge-skill preload <名称> on|off
   bridge-skill remove <名称>
 
-查找、阅读和管理 Bridge 平台上的 skill。平台上的 skill 由主人在 Bridge 管理台的 Skills 页或者用这个命令维护：标为「所有项目都带」的，
-Bridge 在开话题时放进 Agent 的工作目录，Agent 启动时就能看到；其他的不放，Agent 需要时用这个命令查找和阅读。
+查找、阅读和管理 Bridge 平台上的 skill。平台上的 skill 由主人在 Bridge 管理台的 Skills 页或者用这个命令维护，分两种：「默认加载」的，
+Bridge 在开话题时放进 Agent 的工作目录，Agent 启动时就能看到；「按需读取」的不放，Agent 需要时用这个命令查找和阅读。
 
 读（list、search、read）只连本机的 Bridge 客户端，由客户端转给 Bridge，不需要密钥，这台机器上的 Agent 都可以运行。
-管理（import、export、everywhere、remove）直接连 Bridge 的管理台，要设置两个环境变量：
+管理（import、export、preload、remove）直接连 Bridge 的管理台，要设置两个环境变量：
   BRIDGE_URL         管理台的地址，例如 http://<控制面>:8080。
   BRIDGE_ACCESS_KEY  管理台的访问密钥，在控制面状态目录的 access-key 文件里。
 平台上的 skill 会进入之后所有 Agent 的工作目录或上下文，由主人管理：Agent 只在主人明确要求时运行管理操作。
 
 操作：
-  list        平台上所有的 skill：名称、是否所有项目都带、描述。所有项目都带的已经在 Agent 的工作目录里，不用再 read。
+  list        平台上所有的 skill：名称、默认加载还是按需读取、描述。默认加载的已经在 Agent 的工作目录里，不用再 read。
   search      名称、描述或 SKILL.md 正文里包含所有这些词的 skill，不分大小写，名称或描述里包含的排在前面。
   read        输出一个 skill 的 SKILL.md 全文。skill 带有其他文件（脚本、参考文档等）时，客户端先把它们放进这台机器的
               ~/.local/share/herdr-bridge/skills/<名称> 目录，命令在正文前写出这个目录和文件列表；SKILL.md 里提到的相对路径都相对
               这个目录。
   import      把一个目录导入为 skill，名称取目录名。目录里要有 SKILL.md，开头是 frontmatter：以 --- 开始和结束，写着 name（和目录名
               一致，只用小写字母、数字和单个连字符）和 description（什么时候该用它）。目录里只能有普通文件和子目录，软链接会被拒绝；
-              文件合计超过上限时 Bridge 拒绝。已有同名 skill 时整个替换它的文件，是否所有项目都带不变。
+              文件合计超过上限时 Bridge 拒绝。已有同名 skill 时整个替换它的文件，是否默认加载不变。
   export      把一个 skill 的文件写到 <目录>/<名称>，不给目录时写到当前目录；<目录>/<名称> 已经存在时拒绝，不覆盖。
-  everywhere  on：设为所有项目都带，之后新开的话题，Bridge 都会把它放进 Agent 的工作目录；off：取消，之后新开话题时 Bridge 把它
-              从工作目录里移走。已经开着的话题不受影响。
-  remove      删除一个 skill。它所有项目都带时，之后新开话题时 Bridge 也把它从工作目录里移走。
+  preload     on：设为默认加载，之后新开的话题，Bridge 都会把它放进 Agent 的工作目录；off：设为按需读取，之后新开话题时 Bridge
+              把它从工作目录里移走。已经开着的话题不受影响。
+  remove      删除一个 skill。默认加载的 skill 删除后，Bridge 在之后新开话题时也把它从工作目录里移走。
 
 选项：
   --json      list、search 和 read 输出 Bridge 返回的 JSON，而不是给人读的文字。
@@ -54,7 +54,7 @@ Bridge 在开话题时放进 Agent 的工作目录，Agent 启动时就能看到
   不允许的 Host：控制面只接受用它的主机名、localhost、127.0.0.1 和它的 BRIDGE_HOSTS 里的名字访问，BRIDGE_URL 换成其中一个。
   其他拒绝（skill 名称无效、SKILL.md 缺少 frontmatter 等）：按原因改正后再试。
 `;
-const reads=['list','search','read'],ops=[...reads,'import','export','everywhere','remove'];
+const reads=['list','search','read'],ops=[...reads,'import','export','preload','remove'];
 const usageError=message=>Object.assign(Error(message),{usage:true});
 // The operation of args with the arguments it takes, and --json; anything else is a usage error.
 export function parse(args){
@@ -65,16 +65,16 @@ export function parse(args){
  }
  if(out.help)return out;
  if(!ops.includes(op))throw usageError(op?'未知的操作：'+op:'缺少操作');
- const [first,second]=out.args,most={list:0,search:Infinity,read:1,import:1,export:2,everywhere:2,remove:1}[op];
+ const [first,second]=out.args,most={list:0,search:Infinity,read:1,import:1,export:2,preload:2,remove:1}[op];
  if(op==='search'&&first==null)throw usageError('缺少要搜索的词');
  if(op==='import'&&first==null)throw usageError('缺少 skill 的目录');
  if(!['list','search','import'].includes(op)&&first==null)throw usageError('缺少 skill 的名称');
  if(out.args.length>most)throw usageError('多余的参数：'+out.args.slice(most).join(' '));
- if(op==='everywhere'&&!['on','off'].includes(second))throw usageError('everywhere 要写 on 或 off');
+ if(op==='preload'&&!['on','off'].includes(second))throw usageError('preload 要写 on 或 off');
  if(out.json&&!reads.includes(op))throw usageError('--json 只用于 list、search 和 read');
  return {op,...out};
 }
-const entry=s=>[s.name+(s.everywhere?' · 所有项目都带':''),'  '+s.description.replace(/\s+/g,' ').trim()];
+const entry=s=>[`${s.name} · ${s.preload?'默认加载':'按需读取'}`,'  '+s.description.replace(/\s+/g,' ').trim()];
 // Bridge's answer r to read op with args as text for the agent.
 export function format(op,r,args){
  switch(op){
@@ -118,8 +118,7 @@ async function manage(op,[first,second],env){
    for(const [p,b] of Object.entries(files)){await fs.promises.mkdir(path.dirname(path.join(target,p)),{recursive:true});await fs.promises.writeFile(path.join(target,p),Buffer.from(b,'base64'));}
    return `已导出到 ${target}。`;
   }
-  case 'everywhere':await api('skills/everywhere',{name:first,everywhere:second==='on'});
-   return second==='on'?`${first} 已设为所有项目都带：之后新开的话题，Bridge 都会把它放进 Agent 的工作目录。`:`${first} 已取消所有项目都带：之后新开话题时，Bridge 会把它从 Agent 的工作目录里移走。`;
+  case 'preload':await api('skills/preload',{name:first,preload:second==='on'});return `已把 skill ${first} 设为${second==='on'?'默认加载':'按需读取'}，之后新开的话题生效。`;
   default:await api('skills/remove',{name:first});return `已删除 skill ${first}。`;
  }
 }

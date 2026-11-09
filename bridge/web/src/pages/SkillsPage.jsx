@@ -4,9 +4,12 @@ import { Badge } from '../components/Badge.jsx';
 import { EmptyState } from '../components/EmptyState.jsx';
 import { Icon } from '../components/Icon.jsx';
 
-// A skill of the platform. One that every topic gets (everywhere) is placed in the working directory of each topic's agent before it
-// starts; agents read the others when they need them. Only a skill that not every topic gets can be removed, so that a click cannot take
-// one away from every topic. Editing reads the skill with its files first (see SkillDialog).
+// How a skill reaches agents, as the card names it.
+const loading = (preload) => (preload ? '默认加载' : '按需读取');
+
+// A skill of the platform, loaded by default (preload) or read on demand. One loaded by default is placed in the working directory of each
+// topic's agent before it starts; agents read the others when they need them. Only a skill read on demand can be removed, so that a click
+// cannot take one away from every topic. Editing reads the skill with its files first (see SkillDialog).
 function SkillCard({ skill: s, refresh, toast, openSkill }) {
   async function act(path, body, message) {
     await request(path, body);
@@ -16,19 +19,17 @@ function SkillCard({ skill: s, refresh, toast, openSkill }) {
   async function edit() {
     openSkill(await request(`/skills/read?name=${encodeURIComponent(s.name)}`));
   }
-  const flag = { name: s.name, everywhere: !s.everywhere };
+  const other = loading(!s.preload);
   return (
     <article className="card">
       <div className="card-head">
         <span className="card-icon"><Icon name="skill" /></span>
         <div className="card-title"><strong>{s.name}</strong></div>
-        <Badge tone={s.everywhere ? 'ok' : 'neutral'}>{s.everywhere ? '所有项目都带' : '按需读取'}</Badge>
+        <Badge tone={s.preload ? 'ok' : 'neutral'}>{loading(s.preload)}</Badge>
         <div className="card-actions">
-          <ActionButton run={() => act('/skills/everywhere', flag, `${s.name} ${s.everywhere ? '已取消' : '已设为'}所有项目都带`)} onError={toast}>
-            {s.everywhere ? '取消所有项目都带' : '设为所有项目都带'}
-          </ActionButton>
+          <ActionButton run={() => act('/skills/preload', { name: s.name, preload: !s.preload }, `${s.name} 已设为${other}`)} onError={toast}>{`设为${other}`}</ActionButton>
           <ActionButton run={edit} onError={toast}>编辑</ActionButton>
-          {!s.everywhere && <ActionButton className="text-button danger" run={() => act('/skills/remove', { name: s.name })} onError={toast}>删除</ActionButton>}
+          {!s.preload && <ActionButton className="text-button danger" run={() => act('/skills/remove', { name: s.name })} onError={toast}>删除</ActionButton>}
         </div>
       </div>
       <div className="card-detail"><span>{s.description}</span></div>

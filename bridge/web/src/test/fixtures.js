@@ -96,8 +96,8 @@ export function sampleState() {
     ],
     // The index of the skills, without their files.
     skills: [
-      { name: 'bridge-schedule', description: '在飞书话题里用定时任务做事时使用。', everywhere: true, digest: 'a'.repeat(64) },
-      { name: 'deploy-notes', description: '部署前后要检查的事项。', everywhere: false, digest: 'b'.repeat(64) },
+      { name: 'bridge-schedule', description: '在飞书话题里用定时任务做事时使用。', preload: true, digest: 'a'.repeat(64) },
+      { name: 'deploy-notes', description: '部署前后要检查的事项。', preload: false, digest: 'b'.repeat(64) },
     ],
     logs: [{ at: 1, kind: '机器连接', message: 'cpu2 已连接', level: 'info' }],
   };

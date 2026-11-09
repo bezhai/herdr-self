@@ -416,13 +416,13 @@ test('each binding lists its topics newest first with state, pane and creation t
   expect(ready.querySelector('.topic-error')).toBeNull();
 });
 
-test('skill cards show the name, the description and whether every topic gets the skill; that is set and unset on the card, only a skill that not every topic gets can be removed, and editing reads the skill before its form opens', async () => {
+test('skill cards show the name, the description and whether the skill is loaded by default or read on demand; the card switches between the two, only a skill read on demand can be removed, and editing reads the skill before its form opens', async () => {
   const state = sampleState();
   const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI。\n';
   const fetch = stubFetch({
     '/api/state': () => state,
-    '/api/skills/everywhere': ({ name, everywhere }) => {
-      state.skills = state.skills.map((s) => (s.name === name ? { ...s, everywhere } : s));
+    '/api/skills/preload': ({ name, preload }) => {
+      state.skills = state.skills.map((s) => (s.name === name ? { ...s, preload } : s));
       return { ok: true };
     },
     '/api/skills/remove': ({ name }) => {
@@ -439,19 +439,20 @@ test('skill cards show the name, the description and whether every topic gets th
   const schedule = card('bridge-schedule');
   expect(schedule.querySelector('.card-icon use').getAttribute('href')).toBe('#i-skill');
   expect(within(schedule).getByText('在飞书话题里用定时任务做事时使用。')).toBeTruthy();
-  expect(within(schedule).getByText('所有项目都带').className).toBe('badge');
+  expect(within(schedule).getByText('默认加载').className).toBe('badge');
+  expect(within(schedule).getByRole('button', { name: '设为按需读取' })).toBeTruthy();
   expect(within(schedule).queryByRole('button', { name: '删除' })).toBeNull();
   const notes = card('deploy-notes');
   expect(within(notes).getByText('按需读取').classList.contains('neutral')).toBe(true);
   expect(within(notes).getByRole('button', { name: '删除' })).toBeTruthy();
 
-  await user.click(within(notes).getByRole('button', { name: '设为所有项目都带' }));
-  expect(bodyOf(fetch, '/api/skills/everywhere')).toEqual({ name: 'deploy-notes', everywhere: true });
-  await waitFor(() => expect(within(card('deploy-notes')).getByText('所有项目都带')).toBeTruthy());
-  expect(toast()).toBe('deploy-notes 已设为所有项目都带');
-  await user.click(within(card('bridge-schedule')).getByRole('button', { name: '取消所有项目都带' }));
-  expect(bodyOf(fetch, '/api/skills/everywhere')).toEqual({ name: 'bridge-schedule', everywhere: false });
-  await waitFor(() => expect(toast()).toBe('bridge-schedule 已取消所有项目都带'));
+  await user.click(within(notes).getByRole('button', { name: '设为默认加载' }));
+  expect(bodyOf(fetch, '/api/skills/preload')).toEqual({ name: 'deploy-notes', preload: true });
+  await waitFor(() => expect(within(card('deploy-notes')).getByText('默认加载')).toBeTruthy());
+  expect(toast()).toBe('deploy-notes 已设为默认加载');
+  await user.click(within(card('bridge-schedule')).getByRole('button', { name: '设为按需读取' }));
+  expect(bodyOf(fetch, '/api/skills/preload')).toEqual({ name: 'bridge-schedule', preload: false });
+  await waitFor(() => expect(toast()).toBe('bridge-schedule 已设为按需读取'));
   await user.click(await within(card('bridge-schedule')).findByRole('button', { name: '删除' }));
   expect(bodyOf(fetch, '/api/skills/remove')).toEqual({ name: 'bridge-schedule' });
   await waitFor(() => expect(screen.queryByText('bridge-schedule')).toBeNull());
@@ -467,7 +468,7 @@ test('adding a skill saves it as a new one, closes the form and fetches the skil
   const fetch = stubFetch({
     '/api/state': () => state,
     '/api/skills/save': ({ name }) => {
-      state.skills = [...state.skills, { name, description: '新的', everywhere: false, digest: 'c'.repeat(64) }];
+      state.skills = [...state.skills, { name, description: '新的', preload: false, digest: 'c'.repeat(64) }];
       return { ok: true };
     },
   });

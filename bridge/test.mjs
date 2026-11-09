@@ -293,22 +293,22 @@ const encoded=files=>Object.fromEntries(Object.entries(files).map(([p,text])=>[p
 const skillText=(name,description,body='')=>`---\nname: ${name}\ndescription: ${description}\n---\n${body}`;
 // The skills of a platform with its state in a directory of its own; call, when given, is how they reach the clients of machines (see Clients.call).
 function skillsFixture(call){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-store-')),store=new Store(dir);return {dir,store,skills:new Skills(store,call),close(){fs.rmSync(dir,{recursive:true});}};}
-test('the platform keeps a skill as a directory of files under the state directory and only its index in the state file: the name, the description of its frontmatter, whether every topic gets it and the digest of its files',()=>{
+test('the platform keeps a skill as a directory of files under the state directory and only its index in the state file: the name, the description of its frontmatter, whether it is loaded by default and the digest of its files',()=>{
  const f=skillsFixture();try{
   const files=encoded({'SKILL.md':skillText('alpha','用来测试','secret-body\n'),'ref/notes.md':'notes\n'}),entry=f.skills.put('alpha',files);
-  assert.deepEqual(entry,{name:'alpha',description:'用来测试',everywhere:false,digest:entry.digest});assert.match(entry.digest,/^[0-9a-f]{64}$/);
+  assert.deepEqual(entry,{name:'alpha',description:'用来测试',preload:false,digest:entry.digest});assert.match(entry.digest,/^[0-9a-f]{64}$/);
   assert.deepEqual(f.store.data.skills,[entry]);assert.deepEqual(new Store(f.dir).data.skills,[entry]);
   assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('secret-body'));
   assert.deepEqual(tree(path.join(f.dir,'skills','alpha')),{'SKILL.md':skillText('alpha','用来测试','secret-body\n'),'ref/notes.md':'notes\n'});
   assert.deepEqual(f.skills.read('alpha'),{...entry,files});
   // The flag stays when the files are replaced; files that the new ones lack are gone, and the digest follows the content.
   f.skills.flag('alpha',true);const changed=f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','改过')}));
-  assert.deepEqual(changed,{name:'alpha',description:'改过',everywhere:true,digest:changed.digest});assert.notEqual(changed.digest,entry.digest);
+  assert.deepEqual(changed,{name:'alpha',description:'改过',preload:true,digest:changed.digest});assert.notEqual(changed.digest,entry.digest);
   assert.deepEqual(tree(path.join(f.dir,'skills','alpha')),{'SKILL.md':skillText('alpha','改过')});assert.deepEqual(fs.readdirSync(path.join(f.dir,'skills')),['alpha']);
   // The index is in the order of the names; a skill goes with its files.
   f.skills.put('beta',encoded({'SKILL.md':skillText('beta','b')}));f.skills.put('a1',encoded({'SKILL.md':skillText('a1','a')}));
   assert.deepEqual(f.skills.list().map(s=>s.name),['a1','alpha','beta']);
-  f.skills.flag('alpha',false);assert.equal(f.skills.list()[1].everywhere,false);
+  f.skills.flag('alpha',false);assert.equal(f.skills.list()[1].preload,false);
   f.skills.remove('alpha');assert.deepEqual(f.store.data.skills.map(s=>s.name),['a1','beta']);assert.deepEqual(fs.readdirSync(path.join(f.dir,'skills')).sort(),['a1','beta']);
   for(const run of [()=>f.skills.read('alpha'),()=>f.skills.remove('alpha'),()=>f.skills.flag('alpha',true)])assert.throws(run,/^Error: skill 不存在：alpha$/);
  }finally{f.close();}
@@ -316,7 +316,7 @@ test('the platform keeps a skill as a directory of files under the state directo
 test('the console writes the SKILL.md of a skill as text: a new skill has that file alone and refuses a name in use; an edit keeps the other files and refuses a skill that does not exist',()=>{
  const f=skillsFixture();try{
   const entry=f.skills.save('gamma',skillText('gamma','g','正文\n'),{create:true});
-  assert.deepEqual(entry,{name:'gamma',description:'g',everywhere:false,digest:entry.digest});assert.deepEqual(tree(path.join(f.dir,'skills','gamma')),{'SKILL.md':skillText('gamma','g','正文\n')});
+  assert.deepEqual(entry,{name:'gamma',description:'g',preload:false,digest:entry.digest});assert.deepEqual(tree(path.join(f.dir,'skills','gamma')),{'SKILL.md':skillText('gamma','g','正文\n')});
   assert.throws(()=>f.skills.save('gamma',skillText('gamma','g'),{create:true}),/^Error: skill 已存在：gamma$/);
   f.skills.put('delta',encoded({'SKILL.md':skillText('delta','d'),'scripts/run.sh':'echo\n'}));f.skills.save('delta',skillText('delta','改过'));
   assert.deepEqual(tree(path.join(f.dir,'skills','delta')),{'SKILL.md':skillText('delta','改过'),'scripts/run.sh':'echo\n'});
@@ -362,7 +362,7 @@ test('a search finds the skills whose name, description or SKILL.md hold every w
  }finally{f.close();}
 });
 
-// Two skills of the platform for the placement tests, both for every topic: alpha, with a file in a subdirectory and text that a shell would
+// Two skills of the platform for the placement tests, both loaded by default: alpha, with a file in a subdirectory and text that a shell would
 // change, and beta.
 function skillSource(skills){
  skills.put('alpha',encoded({'SKILL.md':skillText('alpha','a',"secret-marker ' \" $(id) `id`\n"),'ref/notes.md':'notes\n'}));skills.put('beta',encoded({'SKILL.md':skillText('beta','b')}));
@@ -415,7 +415,7 @@ async function placeSkillsBehaves(call,m,dir){
  assert.equal(fs.readFileSync(exclude,'utf8'),'# mine\n/.agents/skills/alpha\n/sub/.claude/skills/alpha\n/sub/.claude/skills/beta\n');assert.equal(git(repo,'status','--porcelain'),'');
  // A directory where the skills directory cannot be created fails the placement with what failed.
  fs.writeFileSync(path.join(home,'file'),'');await assert.rejects(place(path.join(home,'file'),'claude'),/file/);
- // A skill that every topic no longer gets, or that is gone, goes from where Bridge placed it, as a link or a copy, at the next placement
+ // A skill that is no longer loaded by default, or that is gone, goes from where Bridge placed it, as a link or a copy, at the next placement
  // there; same-name skills of others stay, and the lines of info/exclude too, which the linked worktrees of the repository share.
  skills.flag('beta',false);
  assert.deepEqual(await place(plain,'claude'),[]);await place(plain,'agy');await place(other,'agy');await place(path.join(repo,'sub'),'claude');
@@ -430,7 +430,7 @@ async function placeSkillsBehaves(call,m,dir){
  const fresh=path.join(home,'fresh');fs.mkdirSync(fresh);assert.deepEqual(await place(fresh,'claude'),[]);assert.deepEqual(fs.readdirSync(fresh),[]);
  // What the skill that came with earlier versions of Bridge left behind is Bridge's too: a store with the digest of the whole bundle at its
  // top and the skill without a marker, a link to it for Claude, and for Antigravity a copy marked with that digest. The skill of that name
- // on the platform takes their place, and they go once every topic no longer gets it.
+ // on the platform takes their place, and they go once it is no longer loaded by default.
  const old=path.join(home,'old'),link=path.join(old,'.claude/skills/bridge-schedule'),copied=path.join(old,'.agents/skills/bridge-schedule');
  fs.writeFileSync(path.join(kept,'.digest'),'f'.repeat(64)+'\n');fs.mkdirSync(path.join(kept,'bridge-schedule'));fs.writeFileSync(path.join(kept,'bridge-schedule','SKILL.md'),'old\n');
  fs.mkdirSync(path.dirname(link),{recursive:true});fs.symlinkSync(path.join(kept,'bridge-schedule'),link);
@@ -442,7 +442,7 @@ async function placeSkillsBehaves(call,m,dir){
  skills.flag('bridge-schedule',false);await place(old,'claude');await place(old,'agy');
  assert.deepEqual(fs.readdirSync(path.dirname(link)),[]);assert.deepEqual(fs.readdirSync(path.dirname(copied)),[]);
 }
-test('skill placements run one after another on a machine and at once on different machines; each asks the client of its machine to place the skills that every topic gets as they are when it runs, sent with their files and digests, and resolves or rejects with what the client answers',async()=>{
+test('skill placements run one after another on a machine and at once on different machines; each asks the client of its machine to place the skills loaded by default as they are when it runs, sent with their files and digests, and resolves or rejects with what the client answers',async()=>{
  const calls=[],running={};let most=0,both=false;
  const fake=async(m,method,params)=>{
   calls.push([m.id,method,params]);running[m.id]=(running[m.id]||0)+1;most=Math.max(most,running[m.id]);both||=Object.values(running).filter(Boolean).length>1;
@@ -460,7 +460,7 @@ test('skill placements run one after another on a machine and at once on differe
   assert.deepEqual(Object.keys(sent('alpha')[0].files),['SKILL.md','ref/notes.md']);
   assert.deepEqual(first,{store:'~/.local/share/herdr-bridge/skills',skills:sent('alpha','beta'),dir:'.claude/skills',as:'link',cwd:'~/w'});
   assert.deepEqual([second.dir,second.as,second.cwd],['.agents/skills','link','/broken']);assert.deepEqual([third.dir,third.as],['.agents/skills','copy']);
-  // What every topic gets, and its content, are those of when the placement runs.
+  // Which skills are loaded by default, and their content, are those of when the placement runs.
   f.skills.flag('beta',false);f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','changed')}));await place(two,'/w','claude');
   assert.deepEqual(on('m2')[1].skills,sent('alpha'));assert.notEqual(on('m2')[1].skills[0].digest,first.skills[0].digest);
   f.skills.flag('alpha',false);await place(two,'/w','claude');assert.deepEqual(on('m2')[2].skills,[]);
@@ -473,14 +473,14 @@ test('an agent reads skills through the client of its machine: the index, a sear
  try{
   skillSource(f.skills);f.skills.put('gamma',encoded({'SKILL.md':skillText('gamma','g','读我\n')}));
   assert.deepEqual(await f.skills.answer(m,'list',{}),{skills:f.skills.list()});assert.deepEqual(await f.skills.answer(m,'search',{query:'GAMMA'}),{skills:[f.skills.entry('gamma')]});
-  assert.deepEqual(await f.skills.answer(m,'read',{name:'gamma'}),{name:'gamma',description:'g',everywhere:false,text:skillText('gamma','g','读我\n'),files:[]});assert.deepEqual(calls,[]);
+  assert.deepEqual(await f.skills.answer(m,'read',{name:'gamma'}),{name:'gamma',description:'g',preload:false,text:skillText('gamma','g','读我\n'),files:[]});assert.deepEqual(calls,[]);
   // A skill with other files waits for the placement queued before on the machine, which shares the store.
   const placed=f.skills.place(m,'~/w','claude'),read=await f.skills.answer(m,'read',{name:'alpha'});await placed;
-  assert.deepEqual(read,{name:'alpha',description:'a',everywhere:true,text:skillText('alpha','a',"secret-marker ' \" $(id) `id`\n"),files:['ref/notes.md'],path:'/home/u/.local/share/herdr-bridge/skills/alpha'});
+  assert.deepEqual(read,{name:'alpha',description:'a',preload:true,text:skillText('alpha','a',"secret-marker ' \" $(id) `id`\n"),files:['ref/notes.md'],path:'/home/u/.local/share/herdr-bridge/skills/alpha'});
   const {digest,files}=f.skills.read('alpha');assert.deepEqual(calls.map(c=>c[1]),['placeSkills','stockSkill']);
   assert.deepEqual(calls[1][2],{store:'~/.local/share/herdr-bridge/skills',skill:{name:'alpha',digest,files}});
   // Writes and anything else are refused, as are a body that is no object, a skill that does not exist and a machine that Bridge does not use.
-  for(const op of ['import','save','put','everywhere','flag','remove','write','export','constructor'])await assert.rejects(f.skills.answer(m,op,{name:'alpha',files:{}}),new RegExp('^Error: 未知的操作：'+op+'$'),op);
+  for(const op of ['import','save','put','preload','flag','remove','write','export','constructor'])await assert.rejects(f.skills.answer(m,op,{name:'alpha',files:{}}),new RegExp('^Error: 未知的操作：'+op+'$'),op);
   for(const body of [null,[],'x'])await assert.rejects(f.skills.answer(m,'list',body),/^Error: 请求内容无效$/,JSON.stringify(body));
   await assert.rejects(f.skills.answer(m,'read',{name:'none'}),/^Error: skill 不存在：none$/);await assert.rejects(f.skills.answer(m,'search',{}),/^Error: 缺少要搜索的词$/);
   await assert.rejects(f.skills.answer({...m,enabled:false},'list',{}),/^Error: Bridge 已断开机器 cpu2 的桥接$/);
@@ -2700,26 +2700,26 @@ test('bridge-skill reads its operation and the arguments that each takes, the wo
  assert.deepEqual(parseSkill(['list','--json']),{op:'list',args:[],json:true});assert.deepEqual(parseSkill(['search','部署','CI']),{op:'search',args:['部署','CI'],json:false});
  assert.deepEqual(parseSkill(['read','alpha']),{op:'read',args:['alpha'],json:false});assert.deepEqual(parseSkill(['import','./alpha']),{op:'import',args:['./alpha'],json:false});
  assert.deepEqual(parseSkill(['export','alpha']),{op:'export',args:['alpha'],json:false});assert.deepEqual(parseSkill(['export','alpha','/tmp/x']),{op:'export',args:['alpha','/tmp/x'],json:false});
- assert.deepEqual(parseSkill(['everywhere','alpha','off']),{op:'everywhere',args:['alpha','off'],json:false});assert.deepEqual(parseSkill(['remove','alpha']),{op:'remove',args:['alpha'],json:false});
+ assert.deepEqual(parseSkill(['preload','alpha','off']),{op:'preload',args:['alpha','off'],json:false});assert.deepEqual(parseSkill(['remove','alpha']),{op:'remove',args:['alpha'],json:false});
  assert.deepEqual(parseSkill(['-h']),{args:[],json:false,help:true});
  for(const [args,error] of [[[],/^缺少操作$/],[['make'],/^未知的操作：make$/],[['list','x'],/^多余的参数：x$/],[['search'],/^缺少要搜索的词$/],[['read'],/^缺少 skill 的名称$/],[['read','a','b'],/^多余的参数：b$/],
-  [['import'],/^缺少 skill 的目录$/],[['export','a','b','c'],/^多余的参数：c$/],[['everywhere','a'],/^everywhere 要写 on 或 off$/],[['everywhere','a','yes'],/^everywhere 要写 on 或 off$/],[['remove'],/^缺少 skill 的名称$/],
+  [['import'],/^缺少 skill 的目录$/],[['export','a','b','c'],/^多余的参数：c$/],[['preload','a'],/^preload 要写 on 或 off$/],[['preload','a','yes'],/^preload 要写 on 或 off$/],[['remove'],/^缺少 skill 的名称$/],
   [['remove','a','--json'],/^--json 只用于 list、search 和 read$/],[['list','--all'],/^未知的参数：--all$/]])
   assert.throws(()=>parseSkill(args),e=>e.usage===true&&error.test(e.message),args.join(' '));
 });
 test('bridge-skill lists, searches and reads skills through the Bridge client of its machine and prints them for the agent to read, or the answer itself with --json; a skill with other files comes with the directory of this machine that holds them',async()=>{
- const index=[{name:'bridge-schedule',description:'定时任务\n第二行',everywhere:true,digest:'a'.repeat(64)},{name:'deploy-notes',description:'部署前后要检查的事项。',everywhere:false,digest:'b'.repeat(64)}];
+ const index=[{name:'bridge-schedule',description:'定时任务\n第二行',preload:true,digest:'a'.repeat(64)},{name:'deploy-notes',description:'部署前后要检查的事项。',preload:false,digest:'b'.repeat(64)}];
  const text='---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI。\n',kept='/home/u/.local/share/herdr-bridge/skills/deploy-notes';
- const answers={list:{skills:index},search:{skills:[index[1]]},read:{name:'deploy-notes',description:'部署前后要检查的事项。',everywhere:false,text,files:['references/a.md','scripts/check.sh'],path:kept}};
+ const answers={list:{skills:index},search:{skills:[index[1]]},read:{name:'deploy-notes',description:'部署前后要检查的事项。',preload:false,text,files:['references/a.md','scripts/check.sh'],path:kept}};
  const client=await fakeClient(op=>[200,answers[op]]);try{
-  assert.deepEqual(await skill(client,['list']),{code:0,out:'平台上有 2 个 skill：\nbridge-schedule · 所有项目都带\n  定时任务 第二行\ndeploy-notes\n  部署前后要检查的事项。\n',err:''});
-  assert.deepEqual(await skill(client,['search','部署','CI']),{code:0,out:'匹配「部署 CI」的 skill 有 1 个：\ndeploy-notes\n  部署前后要检查的事项。\n',err:''});
+  assert.deepEqual(await skill(client,['list']),{code:0,out:'平台上有 2 个 skill：\nbridge-schedule · 默认加载\n  定时任务 第二行\ndeploy-notes · 按需读取\n  部署前后要检查的事项。\n',err:''});
+  assert.deepEqual(await skill(client,['search','部署','CI']),{code:0,out:'匹配「部署 CI」的 skill 有 1 个：\ndeploy-notes · 按需读取\n  部署前后要检查的事项。\n',err:''});
   assert.deepEqual(await skill(client,['read','deploy-notes']),{code:0,out:`deploy-notes 带有其他文件，在这台机器的 ${kept} 里：\n  references/a.md\n  scripts/check.sh\nSKILL.md 里提到的相对路径都相对这个目录。\n\n${text}`,err:''});
   for(const [op,...args] of [['list'],['search','x'],['read','x']])assert.deepEqual(await skill(client,[op,...args,'--json']),{code:0,out:JSON.stringify(answers[op],null,2)+'\n',err:''},op);
   assert.deepEqual(client.requests.slice(0,3),[['POST','/skills/list','application/json',{}],['POST','/skills/search','application/json',{query:'部署 CI'}],['POST','/skills/read','application/json',{name:'deploy-notes'}]]);
  }finally{await client.close();}
  // No skill at all, none that matches, and a skill of SKILL.md alone, which is all there is to read.
- const empty=await fakeClient(op=>[200,op==='read'?{name:'a',description:'d',everywhere:false,text:'---\nname: a\n---',files:[]}:{skills:[]}]);try{
+ const empty=await fakeClient(op=>[200,op==='read'?{name:'a',description:'d',preload:false,text:'---\nname: a\n---',files:[]}:{skills:[]}]);try{
   assert.deepEqual(await skill(empty,['list']),{code:0,out:'平台上还没有 skill。\n',err:''});assert.deepEqual(await skill(empty,['search','x']),{code:0,out:'没有匹配「x」的 skill。\n',err:''});
   assert.deepEqual(await skill(empty,['read','a']),{code:0,out:'---\nname: a\n---\n',err:''});
  }finally{await empty.close();}
@@ -2732,7 +2732,7 @@ test('bridge-skill prints what was refused and exits 1, a usage error with the u
   const gone={socket:path.join(client.dir,'none.sock')};
   assert.deepEqual(await skill(gone,['list']),{code:1,out:'',err:`bridge-skill: 连不上本机的 Bridge 客户端（${gone.socket}）：客户端没有运行，或者没有打开这个 socket\n`});
   const needed='bridge-skill: 管理 skill 要设置 BRIDGE_URL（管理台的地址，例如 http://<控制面>:8080）和 BRIDGE_ACCESS_KEY（管理台的访问密钥）\n';
-  for(const [args,env] of [[['import','.'],{}],[['export','x'],{BRIDGE_URL:'http://127.0.0.1:9'}],[['everywhere','x','on'],{BRIDGE_ACCESS_KEY:'k'}],[['remove','x'],{}]])assert.deepEqual(await skill(client,args,{env}),{code:1,out:'',err:needed},args.join(' '));
+  for(const [args,env] of [[['import','.'],{}],[['export','x'],{BRIDGE_URL:'http://127.0.0.1:9'}],[['preload','x','on'],{BRIDGE_ACCESS_KEY:'k'}],[['remove','x'],{}]])assert.deepEqual(await skill(client,args,{env}),{code:1,out:'',err:needed},args.join(' '));
   const closed=`http://127.0.0.1:${await freePort()}`;
   assert.deepEqual(await skill(client,['remove','x'],{env:{BRIDGE_URL:closed,BRIDGE_ACCESS_KEY:'k'}}),{code:1,out:'',err:`bridge-skill: 连不上控制面 ${closed}：ECONNREFUSED\n`});
   assert.deepEqual(client.requests.map(r=>r[1]),['/skills/read']);
@@ -2740,9 +2740,11 @@ test('bridge-skill prints what was refused and exits 1, a usage error with the u
 });
 test('bridge-skill --help is complete on its own, since the entry skill that tells agents about the platform leaves the details to it: every operation with what it does and what it takes, where the files of a skill go, what the management commands need, the exit codes and what to do on each error that the agent has to handle',async()=>{
  const {code,out,err}=await skill({socket:'/nonexistent'},['--help']);assert.deepEqual([code,err],[0,'']);assert.equal(out,skillUsage);
- for(const op of ['list','search','read','import','export','everywhere','remove']){assert.ok(out.includes('  bridge-skill '+op),op);assert.match(out,new RegExp(`^  ${op} +\\S`,'m'),op);}
- for(const fact of ['--json','-h, --help','BRIDGE_URL','BRIDGE_ACCESS_KEY','access-key','所有项目都带','~/.local/share/herdr-bridge/skills/<名称>','相对路径','frontmatter','软链接','退出码',
+ for(const op of ['list','search','read','import','export','preload','remove']){assert.ok(out.includes('  bridge-skill '+op),op);assert.match(out,new RegExp(`^  ${op} +\\S`,'m'),op);}
+ for(const fact of ['--json','-h, --help','BRIDGE_URL','BRIDGE_ACCESS_KEY','access-key','默认加载','按需读取','~/.local/share/herdr-bridge/skills/<名称>','相对路径','frontmatter','软链接','退出码',
   '连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','skill 不存在'])assert.ok(out.includes(fact),fact);
+ // Bridge has no projects: the two kinds of skill are 默认加载 and 按需读取.
+ assert.doesNotMatch(out,/项目|everywhere/);
 });
 const minutes=n=>n*60000;
 function pendingFixture({bridgeUrl='http://bridge.example:8080',onBound}={}){
@@ -3056,7 +3058,7 @@ test('the server refuses to start with a BRIDGE_URL that is not an http(s) origi
   assert.notEqual(code,0);assert.match(err,/BRIDGE_URL/);assert.equal(fs.existsSync(path.join(dir,'access-key')),false);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server keeps skills for the console and the access key alone: the state lists their index without their files; it reads a skill with its files, creates and edits its SKILL.md, imports a whole directory past the limit of other requests up to that of a skill, sets whether every topic gets it and removes it',async()=>{
+test('the server keeps skills for the console and the access key alone: the state lists their index without their files; it reads a skill with its files, creates and edits its SKILL.md, imports a whole directory past the limit of other requests up to that of a skill, sets whether it is loaded by default and removes it',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  const server=await bridgeServer(state,port,{BRIDGE_URL:''});
  try{
@@ -3064,11 +3066,11 @@ test('the server keeps skills for the console and the access key alone: the stat
   const api=async(p,body,headers=admin)=>{const r=await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers,body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
   // Without the login or the access key nothing is read or written, also from the console's own origin.
   assert.deepEqual(await api('skills/read?name=alpha',undefined,{}),{status:401,body:{error:'请先登录'}});
-  for(const p of ['skills/save','skills/import','skills/everywhere','skills/remove'])assert.deepEqual(await api(p,{name:'alpha',text:skillText('alpha','a'),create:true},{origin}),{status:401,body:{error:'请先登录'}},p);
+  for(const p of ['skills/save','skills/import','skills/preload','skills/remove'])assert.deepEqual(await api(p,{name:'alpha',text:skillText('alpha','a'),create:true},{origin}),{status:401,body:{error:'请先登录'}},p);
   assert.deepEqual((await api('state')).body.skills,[]);
   const text=skillText('alpha','用来测试','secret-body\n');assert.deepEqual(await api('skills/save',{name:'alpha',text,create:true}),{status:200,body:{ok:true}});
-  let s=(await api('state')).body;assert.deepEqual(s.skills.map(x=>Object.keys(x).sort()),[['description','digest','everywhere','name']]);
-  const [entry]=s.skills;assert.deepEqual(entry,{name:'alpha',description:'用来测试',everywhere:false,digest:entry.digest});assert.ok(!JSON.stringify(s).includes('secret-body'));
+  let s=(await api('state')).body;assert.deepEqual(s.skills.map(x=>Object.keys(x).sort()),[['description','digest','name','preload']]);
+  const [entry]=s.skills;assert.deepEqual(entry,{name:'alpha',description:'用来测试',preload:false,digest:entry.digest});assert.ok(!JSON.stringify(s).includes('secret-body'));
   assert.deepEqual(await api('skills/read?name=alpha'),{status:200,body:{...entry,files:encoded({'SKILL.md':text})}});
   assert.deepEqual(await api('skills/save',{name:'alpha',text,create:true}),{status:400,body:{error:'skill 已存在：alpha'}});
   // A directory larger than other requests may be; other requests keep their limit.
@@ -3083,14 +3085,16 @@ test('the server keeps skills for the console and the access key alone: the stat
    req.on('error',reject);req.write(raw.subarray(0,cut));setTimeout(()=>req.end(raw.subarray(cut)),50);
   });
   assert.deepEqual(saved,[200,{ok:true}]);assert.deepEqual((await api('skills/read?name=alpha')).body.files,encoded({'SKILL.md':edited,'ref/big.txt':big}));
-  assert.deepEqual(await api('skills/everywhere',{name:'alpha',everywhere:true}),{status:200,body:{ok:true}});
-  s=(await api('state')).body;assert.deepEqual(s.skills.map(x=>[x.name,x.description,x.everywhere]),[['alpha','改过的描述',true]]);
-  assert.deepEqual(s.logs.filter(l=>l.kind==='skill').map(l=>l.message),['新建了 skill alpha','导入了 skill alpha','修改了 skill alpha 的 SKILL.md','skill alpha 改为所有项目都带']);
+  assert.deepEqual(await api('skills/preload',{name:'alpha',preload:true}),{status:200,body:{ok:true}});
+  s=(await api('state')).body;assert.deepEqual(s.skills.map(x=>[x.name,x.description,x.preload]),[['alpha','改过的描述',true]]);
+  assert.deepEqual(await api('skills/preload',{name:'alpha',preload:false}),{status:200,body:{ok:true}});
+  s=(await api('state')).body;assert.deepEqual(s.skills.map(x=>[x.name,x.preload]),[['alpha',false]]);
+  assert.deepEqual(s.logs.filter(l=>l.kind==='skill').map(l=>l.message),['新建了 skill alpha','导入了 skill alpha','修改了 skill alpha 的 SKILL.md','skill alpha 已设为默认加载，之后新开的话题生效','skill alpha 已设为按需读取，之后新开的话题生效']);
   assert.deepEqual(await api('skills/remove',{name:'alpha'}),{status:200,body:{ok:true}});assert.deepEqual((await api('state')).body.skills,[]);
   assert.deepEqual(await api('skills/read?name=alpha'),{status:400,body:{error:'skill 不存在：alpha'}});
  }finally{await server.stop();fs.rmSync(dir,{recursive:true});}
 });
-test('bridge-skill with a real Bridge and the real client of a machine: the access key imports a skill directory, marks it for every topic, exports it as it was imported and removes it; agents on the machine list, search and read it through the client, which puts its other files into the store of the machine; the socket of the client takes no write whatever it sends, and the management commands need the right key',async()=>{
+test('bridge-skill with a real Bridge and the real client of a machine: the access key imports a skill directory, sets it to load by default, exports it as it was imported and removes it; agents on the machine list, search and read it through the client, which puts its other files into the store of the machine; the socket of the client takes no write whatever it sends, and the management commands need the right key',async()=>{
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-cli-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  fs.mkdirSync(home);const server=await bridgeServer(state,port,{BRIDGE_URL:''});let client;
  try{
@@ -3104,17 +3108,17 @@ test('bridge-skill with a real Bridge and the real client of a machine: the acce
   const src=path.join(dir,'src','deploy-notes'),text=skillText('deploy-notes','部署前后要检查的事项。','先运行 scripts/check.sh。\n');
   fs.mkdirSync(path.join(src,'scripts'),{recursive:true});fs.writeFileSync(path.join(src,'SKILL.md'),text);fs.writeFileSync(path.join(src,'scripts','check.sh'),'echo ok\n');
   assert.deepEqual(await cli(admin,'import',src),{status:0,stdout:'已导入 skill deploy-notes，共 2 个文件。\n',stderr:''});
-  assert.deepEqual(await cli(admin,'everywhere','deploy-notes','on'),{status:0,stdout:'deploy-notes 已设为所有项目都带：之后新开的话题，Bridge 都会把它放进 Agent 的工作目录。\n',stderr:''});
+  assert.deepEqual(await cli(admin,'preload','deploy-notes','on'),{status:0,stdout:'已把 skill deploy-notes 设为默认加载，之后新开的话题生效。\n',stderr:''});
   // An agent of the machine reads it through the client, without the key.
-  const listed='deploy-notes · 所有项目都带\n  部署前后要检查的事项。\n';
+  const listed='deploy-notes · 默认加载\n  部署前后要检查的事项。\n';
   assert.deepEqual(await cli({},'list'),{status:0,stdout:'平台上有 1 个 skill：\n'+listed,stderr:''});assert.deepEqual(await cli({},'search','CHECK.SH'),{status:0,stdout:'匹配「CHECK.SH」的 skill 有 1 个：\n'+listed,stderr:''});
   const kept=path.join(home,'.local/share/herdr-bridge/skills/deploy-notes');
   assert.deepEqual(await cli({},'read','deploy-notes'),{status:0,stdout:`deploy-notes 带有其他文件，在这台机器的 ${kept} 里：\n  scripts/check.sh\nSKILL.md 里提到的相对路径都相对这个目录。\n\n${text}`,stderr:''});
   assert.equal(fs.readFileSync(path.join(kept,'scripts','check.sh'),'utf8'),'echo ok\n');
   // The socket of the client takes reads only: the control plane answers no write that comes that way, whatever it carries.
   const raw=(p,body)=>new Promise((resolve,reject)=>{const req=http.request({socketPath:socket,method:'POST',path:p,agent:false},res=>{let b='';res.on('data',d=>{b+=d;});res.on('end',()=>resolve([res.statusCode,JSON.parse(b)]));});req.on('error',reject);req.end(JSON.stringify(body));});
-  for(const op of ['import','save','everywhere','remove'])assert.deepEqual(await raw('/skills/'+op,{name:'deploy-notes',files:{},text:'x',everywhere:false,key}),[400,{error:'未知的操作：'+op}],op);
-  assert.deepEqual((await api('state')).skills.map(s=>[s.name,s.everywhere]),[['deploy-notes',true]]);
+  for(const op of ['import','save','preload','remove'])assert.deepEqual(await raw('/skills/'+op,{name:'deploy-notes',files:{},text:'x',preload:false,key}),[400,{error:'未知的操作：'+op}],op);
+  assert.deepEqual((await api('state')).skills.map(s=>[s.name,s.preload]),[['deploy-notes',true]]);
   // Export writes the skill as it was imported, into a directory of its name, and refuses a place that exists.
   const out=path.join(dir,'out');fs.mkdirSync(out);
   assert.deepEqual(await cli(admin,'export','deploy-notes',out),{status:0,stdout:`已导出到 ${path.join(out,'deploy-notes')}。\n`,stderr:''});assert.deepEqual(tree(path.join(out,'deploy-notes')),tree(src));
@@ -3124,7 +3128,7 @@ test('bridge-skill with a real Bridge and the real client of a machine: the acce
   fs.symlinkSync(path.join(src,'SKILL.md'),path.join(src,'scripts','link'));assert.deepEqual(await cli(admin,'import',src),{status:1,stdout:'',stderr:'bridge-skill: 只能导入普通文件和目录：scripts/link\n'});fs.rmSync(path.join(src,'scripts','link'));
   assert.deepEqual(await cli(admin,'import',path.join(dir,'none')),{status:1,stdout:'',stderr:`bridge-skill: 不是目录：${path.join(dir,'none')}\n`});
   const bad=path.join(dir,'src','Bad');fs.mkdirSync(bad);fs.writeFileSync(path.join(bad,'SKILL.md'),skillText('Bad','x'));assert.match((await cli(admin,'import',bad)).stderr,/^bridge-skill: skill 名称无效：Bad，/);
-  assert.deepEqual(await cli(admin,'everywhere','deploy-notes','off'),{status:0,stdout:'deploy-notes 已取消所有项目都带：之后新开话题时，Bridge 会把它从 Agent 的工作目录里移走。\n',stderr:''});
+  assert.deepEqual(await cli(admin,'preload','deploy-notes','off'),{status:0,stdout:'已把 skill deploy-notes 设为按需读取，之后新开的话题生效。\n',stderr:''});
   assert.deepEqual(await cli(admin,'remove','deploy-notes'),{status:0,stdout:'已删除 skill deploy-notes。\n',stderr:''});
   assert.deepEqual(await cli({},'read','deploy-notes'),{status:1,stdout:'',stderr:'bridge-skill: skill 不存在：deploy-notes\n'});
  }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
