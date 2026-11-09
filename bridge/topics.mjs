@@ -17,8 +17,10 @@ const workspaceLabel=b=>'飞书 · '+b.name;
 // in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
 // that server, and with the network of its workspace-write sandbox on: without it the sandbox refuses connect() on every socket, that of
 // the Bridge client too (see client.mjs), which bridge-schedule needs; the network is all or nothing, and the limits on writing files stay.
-// Antigravity (agy) gets nothing, not even the --.
-const agentArgs={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true'],agy:()=>[]};
+// Codex also skips the trust of its hooks: whenever hooks.json changes, for example after Herdr updates its integration, Codex waits on
+// a screen to review the new hooks, which a Feishu topic cannot answer; the hooks are the owner's own. Antigravity (agy) gets nothing,
+// not even the --.
+const agentArgs={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:()=>[]};
 const brief=e=>publicText(e.message).split('\n')[0].slice(0,200);
 // What a topic says when the client of its machine is offline (see Clients.call): the error names the machine, and after says what that
 // meant for the message.
