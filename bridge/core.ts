@@ -93,7 +93,11 @@ export function operations(call:Call){
   describeRepos:(m:Machine,params:ClientApi['describeRepos']['params'],options?:Options)=>call(m,'describeRepos',params,options),
  };
 }
-export function publicText(s:unknown){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}
+// The text without what must not reach a log or the console: the value of a setting that names a secret, and the password in the address of a
+// repository (https://user:password@host/...).
+export function publicText(s:unknown){
+ return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]').replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/@:]+:)[^\s/@]+@/gi,'$1[已隐藏]@');
+}
 // Bridge's state directory: BRIDGE_STATE of env, else state in the Bridge directory.
 export const stateDir=(env=process.env)=>env.BRIDGE_STATE||path.join(path.dirname(fileURLToPath(import.meta.url)),'state');
 // Persisted collections. Keys of older state files outside this list are dropped on load; a collection they lack loads empty. The file

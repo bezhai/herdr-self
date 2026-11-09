@@ -1,7 +1,7 @@
 import test from 'node:test';import strictAssert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
 import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
-import {normalizeMachine,migrateMachines,operations,Store} from './core.ts';
+import {normalizeMachine,migrateMachines,operations,Store,publicText} from './core.ts';
 import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
@@ -95,6 +95,14 @@ test('registration rejects unsafe URLs, handles missing owner and honors Lark te
 test('begin timeout ignores late callback and does not publish an expired authorization link',async()=>{
  let options!:Parameters<RegisterApp>[0],resolve!:(result:unknown)=>void;const f=registrationFixture(o=>{options=o;return new Promise(r=>resolve=r);},{timeoutMs:10});
  try{f.registrations.start({name:'test'})!;await new Promise(r=>setTimeout(r,25));ready(options);resolve({client_id:'cli_late',client_secret:'late'});await f.registrations.current!.done;assert.equal(f.registrations.status()!.status,'error');assert.equal(f.registrations.status()!.url,undefined);assert.equal(f.store.data.apps.length,0);}finally{f.close();}
+});
+test('what the logs and the errors of topics show hides the password of a repository URL, and leaves a user without one and the rest of the text as it is',()=>{
+ assert.equal(publicText('git clone https://deploy:ghp_ABC123@github.com/o/r.git 失败：fatal: unable to access https://deploy:ghp_ABC123@github.com/o/r.git/'),'git clone https://deploy:[已隐藏]@github.com/o/r.git 失败：fatal: unable to access https://deploy:[已隐藏]@github.com/o/r.git/');
+ for(const same of ['ssh://git@code.byted.org/growth/genvi.git','git@github.com:o/r.git','https://github.com:443/o/r.git','mail me@a.com: now','http://a:b'])assert.equal(publicText(same),same);
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-log-'));try{
+  const store=new Store(dir);store.log('数据迁移','项目「x」改为仓库 https://u:secrettoken@h.com/a/b.git 的项目');
+  assert.equal(store.data.logs.at(-1)!.message,'项目「x」改为仓库 https://u:[已隐藏]@h.com/a/b.git 的项目');
+ }finally{fs.rmSync(dir,{recursive:true});}
 });
 test('a machine has a name, a Herdr session, default when none is given, and whether Bridge uses it; whatever else a request sends is dropped',()=>{
  const m=normalizeMachine({name:' cpu2 ',session:'work',enabled:1,type:'ssh',host:'cpu2',port:22,binary:'~/.local/bin/herdr',tokenHash:'x'});
