@@ -70,6 +70,12 @@ test('a replaced or finished registration asks to return to the console', async 
   expect(await screen.findByText('请返回管理台重试')).toBeTruthy();
 });
 
+test('a start that answers without a registration asks to return to the console', async () => {
+  stubFetch({ '/api/apps/registration/start': null });
+  render(<ConnectPage />);
+  expect(await screen.findByText('请返回管理台重试')).toBeTruthy();
+});
+
 test('gives up after 40 polls', async () => {
   vi.useFakeTimers();
   const fetch = stubFetch({

@@ -5,7 +5,8 @@ import { replace } from '../location.ts';
 
 const feishuHosts = ['open.feishu.cn', 'open.larkoffice.com', 'open.larksuite.com'];
 
-// A registration as /apps/registration/start answers it or the state holds it, and {} while the state holds none.
+// A registration as /apps/registration/start answers it or the state holds it, and {} while the state holds none. Starting answers null when
+// the server has no registration to report.
 type Registration = Partial<NonNullable<ConsoleState['registration']>>;
 
 // This page does not use request(): a 401 goes back to the console before the body is read,
@@ -25,7 +26,7 @@ const wait = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms);
 // Starts (or joins) a registration, polls once a second up to 40 times until it has a pending
 // authorization URL, and replaces this page with it. Only https URLs on the Feishu hosts are followed.
 async function openFeishu() {
-  let registration = await call<Registration>('/apps/registration/start', {});
+  let registration = (await call<Registration | null>('/apps/registration/start', {})) ?? {};
   const { id } = registration;
   for (let i = 0; i < 40; i += 1) {
     if (registration.url && registration.status === 'pending') {
