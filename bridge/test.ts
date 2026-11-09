@@ -1289,6 +1289,16 @@ test('a reply in a topic that ended starts it again in its project, on its branc
   assert.deepEqual(f.updated.map(u=>[u[1],cardText(u[2])]),[['om_start_1','genvi · 分支 feat/add-login · cpu2 · Claude']]);
  }finally{f.close();}
 });
+test('a reply in a topic that ended in a project that was deleted since fails the start, with the branch kept, instead of starting the agent in an empty directory; the card can still start it in another project',async()=>{
+ const f=await endedTopic(),{t}=f;try{
+  f.store.data.projects=f.store.data.projects.filter(p=>p.id!=='g');
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual([t.state,t.error,t.branch,t.projectId,f.prepared,f.h.calls.filter(c=>c[1]==='start')],['failed','项目不存在','feat/add-login','g',[],[]]);
+  assert.equal(cardText(f.replies.at(-1)![3].card),'启动失败，请在 Bridge 管理台查看原因');
+  withProjects(f,promoter);f.choose(t.startCard!,'project','pr');await f.topics.answering.get(t.id+' restart');
+  assert.deepEqual([t.state,t.projectId,t.branch],['ready','pr','feat/add-login']);
+ }finally{f.close();}
+});
 test('a topic is not started again by a message that is no reply to a person: /stop and /release in a topic that ended are dropped, and so is any message in an adopted topic or one of before the projects that ended',async()=>{
  const f=await endedTopic(),{t}=f;try{
   await f.send({messageId:'om_2',rootId:'om_1',content:'/stop'});await f.send({messageId:'om_3',rootId:'om_1',content:'/release'});

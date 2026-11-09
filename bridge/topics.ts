@@ -344,11 +344,12 @@ export class Topics{
  // direct chat the same call also picks the project of all projects by the task, and a topic whose call picks none works in an empty
  // directory. A branch that the topic has already is kept (see restart), and a model that fails or names none gives a random branch; one that another topic has gets a number (see freeBranch), which is decided
  // in the same step that records it, so that topics named at once do not take the same one.
- // A topic of before the projects has a directory and is never routed.
+ // A topic of before the projects has a directory and is never routed. Fails when the project of the topic is gone.
  async route(m:Machine,b:Binding,t:Topic){
+  // Also for a topic that is routed: one that ended in a project deleted since must not start in the empty directory of a topic without one.
+  if(t.projectId&&!this.projectOf(t))throw Error('项目不存在');
   if(t.routed||t.cwd)return;
   const projects=this.store.data.projects,direct=!t.projectId;let project=this.projectOf(t);
-  if(!direct&&!project)throw Error('项目不存在');
   const asking=direct?projects.length>0:hasBranch(project)&&!t.branch;let named:Named={};
   if(asking){named=await nameTask(this.askCheapModel,m,t.task!.content,direct?projects:null);if(direct)project=named.project;}
   const branch=hasBranch(project)?t.branch??freeBranch(named.branch??randomBranch(),t,this.store.data.topics):undefined;
