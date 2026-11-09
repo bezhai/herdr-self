@@ -10,19 +10,25 @@ import {AgentSchedules} from './agent-schedules.ts';
 import {staticFile,sendStatic} from './web-assets.ts';
 import {Clients} from './clients.ts';
 import {configText} from './client.ts';
-const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Store(dir),live=new Map(),refreshes=new Map();
-const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map(),attempts=new Map();
+import type {Agent,Call} from './core.ts';
+import type {Machine} from './state.ts';
+// The Herdr status of a machine for the console (see herdrStatus): the agents and panes that a poll found, which a poll that is still
+// connecting does not have yet.
+type HerdrStatus={state:'disabled'|'offline'|'connecting'|'connected'|'error',checkedAt?:number,error?:string,agents?:Agent[],panes?:object[]};
+const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Store(dir),live=new Map<string,HerdrStatus>(),refreshes=new Map<string,Promise<void>>();
+// auth and attempts are looked up also for a request without a session cookie, or without a remote address once its socket closed.
+const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map<string|undefined,number>(),attempts=new Map<string|undefined,{at:number,n:number}>();
 migrateMachines(store);
 // What Bridge does on a machine goes through the client of the machine (see operations and Clients.call).
-const call=(...args)=>clients.call(...args),ops=operations(call),skills=new Skills(store,call);
-function machine(id){const m=store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;}
+const call:Call=(...args)=>clients.call(...args),ops=operations(call),skills=new Skills(store,call);
+function machine(id:unknown){const m=store.data.machines.find(x=>x.id===id);if(!m)throw Error('机器连接不存在');return m;}
 // The Herdr status of machine m for the console: disabled, offline while its client is not in, else what the latest poll through the client
 // found (see refresh), connecting until the first one.
-function herdrStatus(m){
+function herdrStatus(m:Machine):HerdrStatus{
  if(!m.enabled)return {state:'disabled',agents:[],panes:[]};if(!clients.online(m.id))return {state:'offline',agents:[],panes:[]};
  return live.get(m.id)||{state:'connecting',agents:[],panes:[]};
 }
-async function refresh(m){if(refreshes.has(m.id))return refreshes.get(m.id);const p=(async()=>{const previous=live.get(m.id);live.set(m.id,{...previous,state:previous?.state==='connected'?'connected':'connecting'});try{
+async function refresh(m:Machine){if(refreshes.has(m.id))return refreshes.get(m.id);const p=(async()=>{const previous=live.get(m.id);live.set(m.id,{...previous,state:previous?.state==='connected'?'connected':'connecting'});try{
  const [agentResult,paneResult]=await Promise.all([ops.herdr(m,['agent','list']),ops.herdr(m,['pane','list'])]);
  const agents=agentResult.agents||[];live.set(m.id,{state:'connected',checkedAt:Date.now(),agents,panes:paneResult.panes||[]});if(previous?.state!=='connected')store.log('机器连接',m.name+' 已连接');
  // Topic agents' new replies and requests go back to Feishu; this does not wait for them and never throws.
@@ -43,17 +49,19 @@ function state(){return {host:os.hostname(),version:'0.1.0',registration:registr
 // requests of bridge-schedule and bridge-skill on its machine (see client.ts), which are answered for the machine of its connection: the
 // schedules of its agents, and reads of the skills of the platform alone (see Skills.answer). What the agent reads of a refusal goes through
 // publicText, like the console's errors.
-const allowedHost=req=>['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(req.headers.host?.split(':')[0]);
-const refusal=e=>{throw Error(publicText(e.message).slice(0,1200));};
+const allowedHost=(req:http.IncomingMessage)=>['localhost','127.0.0.1',os.hostname(),...(process.env.BRIDGE_HOSTS||'').split(',')].includes(req.headers.host?.split(':')[0]);
+const refusal=(e:Error)=>{throw Error(publicText(e.message).slice(0,1200));};
 const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal)}});
-function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
-function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
-function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
-// The JSON body of a request of at most limit characters, read as UTF-8 also when a piece ends inside a character.
-async function body(req,limit=100000){let s='';req.setEncoding('utf8');for await(const b of req){s+=b;if(s.length>limit)throw Error('请求内容过大');}return JSON.parse(s||'{}');}
+function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
+function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
+function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
+// The JSON body of a request of at most limit characters, read as UTF-8 also when a piece ends inside a character. It is the console's,
+// as it arrives: what reads it checks what it needs.
+async function body(req:http.IncomingMessage,limit=100000):Promise<any>{let s='';req.setEncoding('utf8');for await(const b of req){s+=b;if(s.length>limit)throw Error('请求内容过大');}return JSON.parse(s||'{}');}
 const server=http.createServer(async(req,res)=>{try{
  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
- const url=new URL(req.url,'http://localhost'),p=url.pathname;if(!allowedHost(req))return json(res,403,{error:'不允许的 Host'});
+ // A request that a server received has its url.
+ const url=new URL(req.url!,'http://localhost'),p=url.pathname;if(!allowedHost(req))return json(res,403,{error:'不允许的 Host'});
  const asset=req.method==='GET'&&staticFile(p);if(asset)return sendStatic(res,asset);
  if(p==='/health')return json(res,200,{ok:true,service:'herdr-bridge'});
  if(req.method==='POST'&&!req.headers.authorization&&req.headers.origin!=='http://'+req.headers.host&&req.headers.origin!=='https://'+req.headers.host)return json(res,403,{error:'跨站请求已拒绝'});
@@ -63,7 +71,7 @@ const server=http.createServer(async(req,res)=>{try{
  if(p==='/api/apps/avatar'&&req.method==='GET'){const avatar=await platforms.avatar(url.searchParams.get('id'));if(!avatar)return json(res,404,{error:'没有头像'});res.writeHead(200,{'Content-Type':avatar.type,'Cache-Control':'private, max-age=300'});return res.end(avatar.body);}
  // A skill with its files, which the console edits and bridge-skill exports; the state has only the index of the skills.
  if(p==='/api/skills/read'&&req.method==='GET')return json(res,200,skills.read(url.searchParams.get('name')));
- if(req.method!=='POST')return json(res,404,{error:'接口不存在'});const b=await body(req,p.startsWith('/api/skills/')?requestLimit:undefined);let result={ok:true};
+ if(req.method!=='POST')return json(res,404,{error:'接口不存在'});const b=await body(req,p.startsWith('/api/skills/')?requestLimit:undefined);let result:unknown={ok:true};
  if(p==='/api/logout'){auth.delete(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1]);res.setHeader('Set-Cookie','bridge_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');}
  else if(p==='/api/machines/save'){const m=normalizeMachine(b);if(b.id){const old=machine(b.id);if(old.enabled)throw Error('请先断开机器再编辑');Object.assign(old,m);}else store.data.machines.push(m);store.save();if(m.enabled&&clients.online(m.id))await refresh(m);result={id:m.id};}
  else if(p==='/api/machines/connect'){const m=machine(b.id);m.enabled=true;store.save();if(clients.online(m.id))await refresh(m);result=herdrStatus(m);}

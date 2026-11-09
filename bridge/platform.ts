@@ -123,7 +123,7 @@ export class Platforms{
  }
  avatarFile(id:string){return path.join(this.store.dir,'avatars',id);}
  // The stored avatar of an app as {type,body}, or null.
- async avatar(id:string){const a=this.store.data.apps.find(x=>x.id===id);if(!a?.avatar)return null;try{return {type:a.avatar.type,body:await fs.promises.readFile(this.avatarFile(a.id))};}catch{return null;}}
+ async avatar(id:string|null){const a=this.store.data.apps.find(x=>x.id===id);if(!a?.avatar)return null;try{return {type:a.avatar.type,body:await fs.promises.readFile(this.avatarFile(a.id))};}catch{return null;}}
  async remove(id:string){const a=this.app(id);await this.stop(a.id);this.store.data.apps=this.store.data.apps.filter(x=>x!==a);this.store.save();fs.rmSync(this.avatarFile(a.id),{force:true});}
  async dispose(channel:LarkChannel){
   // SDK 0.7.1 disconnect() returns early before the handshake; also close that pending socket.

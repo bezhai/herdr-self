@@ -1,6 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {clientSocket,send} from './client.ts';
+import type {Output} from './client.ts';
+import type {Skills,SkillReads} from './skills.ts';
+import type {Skill} from './state.ts';
 // bridge-skill, the command line through which agents on a machine find and read the skills of the platform (see Skills), and through
 // which the owner manages them. Reads go to the Bridge client of the machine it runs on (see client.ts), which passes them on to the
 // control plane like the requests of bridge-schedule: any agent of the machine may run them, and the control plane answers nothing else
@@ -54,17 +57,21 @@ Bridge 在开话题时放进 Agent 的工作目录，Agent 启动时就能看到
   不允许的 Host：控制面只接受用它的主机名、localhost、127.0.0.1 和它的 BRIDGE_HOSTS 里的名字访问，BRIDGE_URL 换成其中一个。
   其他拒绝（skill 名称无效、SKILL.md 缺少 frontmatter 等）：按原因改正后再试。
 `;
-const reads=['list','search','read'],ops=[...reads,'import','export','preload','remove'];
-const usageError=message=>Object.assign(Error(message),{usage:true});
+type Read=keyof SkillReads;
+type Op=Read|'import'|'export'|'preload'|'remove';
+const reads:Read[]=['list','search','read'],ops:Op[]=[...reads,'import','export','preload','remove'];
+// Whether v is a read, or an operation. The command loads only its own modules and the client's, so it does without oneOf of core.ts.
+const isRead=(v:unknown):v is Read=>reads.includes(v),isOp=(v:unknown):v is Op=>ops.includes(v);
+const usageError=(message:string)=>Object.assign(Error(message),{usage:true});
 // The operation of args with the arguments it takes, and --json; anything else is a usage error.
-export function parse(args){
- const out={args:[],json:false};let op;
+export function parse(args:string[]):{op?:Op,args:string[],json:boolean,help?:boolean}{
+ const out:{args:string[],json:boolean,help?:boolean}={args:[],json:false};let op;
  for(const a of args){
   if(a==='--json')out.json=true;else if(a==='--help'||a==='-h')out.help=true;else if(/^-./.test(a))throw usageError('未知的参数：'+a);
   else if(op==null)op=a;else out.args.push(a);
  }
  if(out.help)return out;
- if(!ops.includes(op))throw usageError(op?'未知的操作：'+op:'缺少操作');
+ if(!isOp(op))throw usageError(op?'未知的操作：'+op:'缺少操作');
  const [first,second]=out.args,most={list:0,search:Infinity,read:1,import:1,export:2,preload:2,remove:1}[op];
  if(op==='search'&&first==null)throw usageError('缺少要搜索的词');
  if(op==='import'&&first==null)throw usageError('缺少 skill 的目录');
@@ -74,31 +81,31 @@ export function parse(args){
  if(out.json&&!reads.includes(op))throw usageError('--json 只用于 list、search 和 read');
  return {op,...out};
 }
-const entry=s=>[`${s.name} · ${s.preload?'默认加载':'按需读取'}`,'  '+s.description.replace(/\s+/g,' ').trim()];
-// Bridge's answer r to read op with args as text for the agent.
-export function format(op,r,args){
- switch(op){
-  case 'list':return !r.skills.length?'平台上还没有 skill。':[`平台上有 ${r.skills.length} 个 skill：`,...r.skills.flatMap(entry)].join('\n');
-  case 'search':return !r.skills.length?`没有匹配「${args.join(' ')}」的 skill。`:[`匹配「${args.join(' ')}」的 skill 有 ${r.skills.length} 个：`,...r.skills.flatMap(entry)].join('\n');
-  default:return (r.path?[`${r.name} 带有其他文件，在这台机器的 ${r.path} 里：`,...r.files.map(f=>'  '+f),'SKILL.md 里提到的相对路径都相对这个目录。','',''].join('\n'):'')+r.text;
- }
-}
+const entry=(s:Skill)=>[`${s.name} · ${s.preload?'默认加载':'按需读取'}`,'  '+s.description.replace(/\s+/g,' ').trim()];
+// Bridge's answer r to read op with args as text for the agent, by read.
+const formats:{[K in Read]:(r:SkillReads[K]['answer'],args:string[])=>string}={
+ list:r=>!r.skills.length?'平台上还没有 skill。':[`平台上有 ${r.skills.length} 个 skill：`,...r.skills.flatMap(entry)].join('\n'),
+ search:(r,args)=>!r.skills.length?`没有匹配「${args.join(' ')}」的 skill。`:[`匹配「${args.join(' ')}」的 skill 有 ${r.skills.length} 个：`,...r.skills.flatMap(entry)].join('\n'),
+ read:r=>(r.path?[`${r.name} 带有其他文件，在这台机器的 ${r.path} 里：`,...r.files.map(f=>'  '+f),'SKILL.md 里提到的相对路径都相对这个目录。','',''].join('\n'):'')+r.text,
+};
+export const format=<K extends Read>(op:K,r:SkillReads[K]['answer'],args:string[])=>formats[op](r,args);
 // The console's API at BRIDGE_URL with the access key BRIDGE_ACCESS_KEY: api(p, body) sends body to /api/<p>, or reads it without one, and
 // resolves to the answer; it rejects with what the control plane refused or when it cannot be reached.
-function consoleApi(env){
+function consoleApi(env:NodeJS.ProcessEnv){
  const url=env.BRIDGE_URL?.replace(/\/+$/,''),key=env.BRIDGE_ACCESS_KEY;
  if(!url||!key)throw Error('管理 skill 要设置 BRIDGE_URL（管理台的地址，例如 http://<控制面>:8080）和 BRIDGE_ACCESS_KEY（管理台的访问密钥）');
- return async(p,body)=>{
-  let res;try{res=await fetch(`${url}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key,...body&&{'content-type':'application/json'}},body:body&&JSON.stringify(body)});}
+ return async(p:string,body?:object)=>{
+  let res:Response;try{res=await fetch(`${url}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key,...body&&{'content-type':'application/json'}},body:body&&JSON.stringify(body)});}
   catch(e){throw Error(`连不上控制面 ${url}：${e.cause?.code||e.cause?.message||e.message}`);}
-  let r;try{r=await res.json();}catch{throw Error(`控制面的回答不是 JSON（HTTP ${res.status}）`);}
+  // The console's answer, as it arrives.
+  let r:any;try{r=await res.json();}catch{throw Error(`控制面的回答不是 JSON（HTTP ${res.status}）`);}
   if(!res.ok)throw Error(r.error||'控制面回答 '+res.status);return r;
  };
 }
 // The files under directory dir as the platform takes them, {relative path: base64}; only regular files and directories.
-async function filesOf(dir){
+async function filesOf(dir:string){
  if(!(await fs.promises.stat(dir).catch(()=>null))?.isDirectory())throw Error('不是目录：'+dir);
- const files={},walk=async rel=>{
+ const files:Record<string,string>={},walk=async(rel:string):Promise<void>=>{
   for(const e of await fs.promises.readdir(path.join(dir,rel),{withFileTypes:true})){
    const p=rel?rel+'/'+e.name:e.name;
    if(e.isDirectory())await walk(p);else if(e.isFile())files[p]=(await fs.promises.readFile(path.join(dir,p))).toString('base64');else throw Error('只能导入普通文件和目录：'+p);
@@ -107,13 +114,13 @@ async function filesOf(dir){
  await walk('');return files;
 }
 // Management op with args through the console's API (see consoleApi); resolves to what it prints.
-async function manage(op,[first,second],env){
+async function manage(op:Exclude<Op,Read>,[first,second]:string[],env:NodeJS.ProcessEnv){
  const api=consoleApi(env);
  switch(op){
   case 'import':{const name=path.basename(path.resolve(first)),files=await filesOf(first);await api('skills/import',{name,files});return `已导入 skill ${name}，共 ${Object.keys(files).length} 个文件。`;}
   case 'export':{
    // The skill is read before anything is written, and the directory of its name is created on its own, so a place that exists stays as it is.
-   const {files}=await api('skills/read?name='+encodeURIComponent(first)),target=path.join(path.resolve(second??'.'),first);
+   const {files}:ReturnType<Skills['read']>=await api('skills/read?name='+encodeURIComponent(first)),target=path.join(path.resolve(second??'.'),first);
    await fs.promises.mkdir(path.dirname(target),{recursive:true});await fs.promises.mkdir(target).catch(e=>{throw e.code==='EEXIST'?Error(target+' 已经存在'):e;});
    for(const [p,b] of Object.entries(files)){await fs.promises.mkdir(path.dirname(path.join(target,p)),{recursive:true});await fs.promises.writeFile(path.join(target,p),Buffer.from(b,'base64'));}
    return `已导出到 ${target}。`;
@@ -123,13 +130,14 @@ async function manage(op,[first,second],env){
  }
 }
 // Runs bridge-skill with argv in env, and resolves to its exit status: 0, 1 when Bridge refused or cannot be reached, 2 for a usage error.
-export async function main(argv,{env=process.env,stdout=process.stdout,stderr=process.stderr}={}){
+export async function main(argv:string[],{env=process.env,stdout=process.stdout,stderr=process.stderr}:{env?:NodeJS.ProcessEnv,stdout?:Output,stderr?:Output}={}){
  try{
   const {op,args,json,help}=parse(argv);
   if(help){stdout.write(usage);return 0;}
-  let text;
-  if(reads.includes(op)){const r=await send(clientSocket(env),'/skills/'+op,op==='list'?{}:op==='search'?{query:args.join(' ')}:{name:args[0]});text=json?JSON.stringify(r,null,2):format(op,r,args);}
-  else text=await manage(op,args,env);
+  let text:string;
+  if(isRead(op)){const r=await send(clientSocket(env),`/skills/${op}`,op==='list'?{}:op==='search'?{query:args.join(' ')}:{name:args[0]});text=json?JSON.stringify(r,null,2):format(op,r,args);}
+  // parse gives an operation unless it was asked for help.
+  else text=await manage(op!,args,env);
   stdout.write(text.endsWith('\n')?text:text+'\n');return 0;
  }catch(e){stderr.write(`bridge-skill: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
 }

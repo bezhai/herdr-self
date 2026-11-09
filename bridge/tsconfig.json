@@ -3,6 +3,8 @@
 {
   "compilerOptions": {
     "target": "es2025",
+    // Node's globals (fetch, WebSocket) come from @types/node, not from the DOM library, which does not know the headers of Node's WebSocket.
+    "lib": ["es2025"],
     "module": "nodenext",
     "moduleResolution": "nodenext",
     "types": ["node"],
@@ -21,5 +23,5 @@
   // The modules typed so far; the others follow.
   "include": ["array-includes.d.ts", "state.ts", "core.ts", "link.ts", "machine.ts", "platform.ts", "commands.ts", "cot.ts", "request-cards.ts", "message-cards.ts",
     "attachments.ts", "cron.ts", "web-assets.ts", "skills.ts", "clients.ts", "registration.ts", "pending-chats.ts",
-    "adoption.ts", "schedule-cards.ts", "worktree-branch.mjs", "worktrees.ts", "topics.ts", "schedules.ts", "agent-schedules.ts"]
+    "adoption.ts", "schedule-cards.ts", "worktree-branch.mjs", "worktrees.ts", "topics.ts", "schedules.ts", "agent-schedules.ts", "client.ts", "schedule-command.ts", "skill-command.ts", "server.ts", "bin/bridge-client.ts", "bin/bridge-schedule.ts", "bin/bridge-skill.ts"]
 }

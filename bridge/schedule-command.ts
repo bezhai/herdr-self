@@ -1,6 +1,9 @@
 import {clientSocket,send} from './client.ts';
 import {when} from './cron.ts';
 import {clip} from './request-cards.ts';
+import type {Output} from './client.ts';
+import type {ScheduleOps,ScheduleRequest} from './agent-schedules.ts';
+import type {Run} from './state.ts';
 // bridge-schedule, the command line through which the agent of a Feishu topic manages the schedules of the topic's binding (see
 // AgentSchedules). It sends each request to the Bridge client of the machine it runs on (see client.ts), which passes it on to the control
 // plane over its connection; the control plane takes the machine from that connection, so the command names none. It runs on Node alone,
@@ -58,12 +61,16 @@ export const usage=`用法：
   这个 pane 里的 Agent 不属于任何进行中的飞书话题：不是在 Bridge 的飞书话题里运行的。告诉主人。
   其他拒绝（表达式写错、时区不对、定时任务不存在等）：按原因改正后再试。
 `;
-const ops=['add','list','runs','update','pause','resume','remove'];
-const options={'--cron':'cron','--tz':'timeZone','--task':'task','--mode':'mode','--pane':'pane','--session':'session'};
-const usageError=message=>Object.assign(Error(message),{usage:true});
+type Op=keyof ScheduleOps;
+type Answer<K extends Op>=ScheduleOps[K]['answer'];
+const ops:Op[]=['add','list','runs','update','pause','resume','remove'];
+// Whether v is an operation. The command loads only its own modules and the client's, so it does without oneOf of core.ts.
+const isOp=(v:unknown):v is Op=>ops.includes(v);
+const options:{[flag:string]:Exclude<keyof ScheduleRequest,'id'>}={'--cron':'cron','--tz':'timeZone','--task':'task','--mode':'mode','--pane':'pane','--session':'session'};
+const usageError=(message:string)=>Object.assign(Error(message),{usage:true});
 // The operation, the id and the options of args: an option takes the next argument, or what follows its =, whatever it looks like.
-export function parse(args){
- const out={json:false},positional=[];
+export function parse(args:string[]):ScheduleRequest&{op?:string,json:boolean,help?:boolean}{
+ const out:ScheduleRequest&{json:boolean,help?:boolean}={json:false},positional:string[]=[];
  for(let i=0;i<args.length;i++){
   const a=args[i],eq=a.startsWith('--')?a.indexOf('='):-1,flag=eq>0?a.slice(0,eq):a;
   if(a==='--json'){out.json=true;continue;}
@@ -75,44 +82,48 @@ export function parse(args){
  if(positional.length>2)throw usageError('多余的参数：'+positional.slice(2).join(' '));
  const [op,id]=positional;return {...op!=null&&{op},...id!=null&&{id},...out};
 }
-const at=(ms,timeZone)=>when(ms,timeZone,{weekday:true});
-const short=id=>id.slice(0,8);
-const where=s=>s.mode==='new'?'每次开新话题':s.here?'发进这个话题':`发进话题「${s.topicTitle??'已删除的话题'}」`;
-const nextRun=s=>s.next==null?'不会再运行':at(s.next,s.timeZone);
-const outcomes={started:'已运行',skipped:'跳过',missed:'错过',failed:'失败'};
+// A schedule and a proposal as Bridge answers with them.
+type Entry=Answer<'list'>['schedules'][number];
+type Proposed=Answer<'add'>['proposal'];
+const at=(ms:number,timeZone:string)=>when(ms,timeZone,{weekday:true});
+const short=(id:string)=>id.slice(0,8);
+const where=(s:Entry)=>s.mode==='new'?'每次开新话题':s.here?'发进这个话题':`发进话题「${s.topicTitle??'已删除的话题'}」`;
+const nextRun=(s:Entry)=>s.next==null?'不会再运行':at(s.next,s.timeZone);
+const outcomes:{[outcome:string]:string}={started:'已运行',skipped:'跳过',missed:'错过',failed:'失败'};
 // Run r of schedule s in one line: when it was due (and the last time missed with it), what happened, which run, and when it ran late.
-function run(s,r){
+function run(s:Entry,r:Run){
  const due=at(r.due,s.timeZone)+(r.last?' 至 '+at(r.last,s.timeZone):''),n=r.n?` · 第 ${r.n} 次`:'';
  if(r.outcome==='started')return `${due} · 已运行${n}${r.at-r.due>60000?' · 补跑于 '+at(r.at,s.timeZone):''}`;
  return `${due} · ${outcomes[r.outcome]??r.outcome}：${r.reason}${n}`;
 }
-function proposed(p){
- const what=p.kind==='add'?'确认卡片':`修改定时任务 ${short(p.scheduleId)} 的确认卡片`,next=p.next.length?'下次运行 '+at(p.next[0],p.timeZone):'之后不会再运行';
+function proposed(p:Proposed){
+ // A change names its schedule.
+ const what=p.kind==='add'?'确认卡片':`修改定时任务 ${short(p.scheduleId!)} 的确认卡片`,next=p.next.length?'下次运行 '+at(p.next[0],p.timeZone):'之后不会再运行';
  return `已在这个话题里发了${what}：${p.phrase}（${p.timeZone}），${next}。主人在卡片上点「确认」后才生效；到 ${at(p.expiresAt,p.timeZone)} 还没有确认就作废。`;
 }
-// Bridge's answer r to op as text for the agent.
-export function format(op,r){
- const s=r.schedule;
- switch(op){
-  case 'list':return !r.schedules.length?`绑定「${r.binding.name}」上没有定时任务。`:[`绑定「${r.binding.name}」上有 ${r.schedules.length} 个定时任务：`,...r.schedules.flatMap(x=>[
-   `${short(x.id)} · ${where(x)} · ${x.phrase}（${x.timeZone}，cron：${x.cron}）${x.paused?' · 已暂停':''}`,...x.paused?[]:['  下次运行：'+nextRun(x)],'  任务：'+clip(x.task.replace(/\s+/g,' ').trim(),200)])].join('\n');
-  case 'runs':return !r.runs.length?`定时任务 ${short(s.id)} 还没有运行记录。`:[`定时任务 ${short(s.id)}（${s.phrase}，${s.timeZone}）最近 ${r.runs.length} 次运行：`,...r.runs.map(x=>run(s,x))].join('\n');
-  case 'pause':return `已暂停定时任务 ${short(s.id)}（${s.phrase}）。恢复之前不会运行，暂停期间的时间恢复后也不补跑。`;
-  case 'resume':return `已恢复定时任务 ${short(s.id)}，下次运行：${nextRun(s)}。`;
-  case 'remove':return `已删除定时任务 ${short(s.id)}（${s.phrase}）。它开过的话题保留。`;
-  default:return proposed(r.proposal);
- }
-}
+// Bridge's answer r to op as text for the agent, by operation.
+const formats:{[K in Op]:(r:Answer<K>)=>string}={
+ list:r=>!r.schedules.length?`绑定「${r.binding.name}」上没有定时任务。`:[`绑定「${r.binding.name}」上有 ${r.schedules.length} 个定时任务：`,...r.schedules.flatMap(x=>[
+  `${short(x.id)} · ${where(x)} · ${x.phrase}（${x.timeZone}，cron：${x.cron}）${x.paused?' · 已暂停':''}`,...x.paused?[]:['  下次运行：'+nextRun(x)],'  任务：'+clip(x.task.replace(/\s+/g,' ').trim(),200)])].join('\n'),
+ runs:({schedule:s,runs})=>!runs.length?`定时任务 ${short(s.id)} 还没有运行记录。`:[`定时任务 ${short(s.id)}（${s.phrase}，${s.timeZone}）最近 ${runs.length} 次运行：`,...runs.map(x=>run(s,x))].join('\n'),
+ pause:({schedule:s})=>`已暂停定时任务 ${short(s.id)}（${s.phrase}）。恢复之前不会运行，暂停期间的时间恢复后也不补跑。`,
+ resume:({schedule:s})=>`已恢复定时任务 ${short(s.id)}，下次运行：${nextRun(s)}。`,
+ remove:({schedule:s})=>`已删除定时任务 ${short(s.id)}（${s.phrase}）。它开过的话题保留。`,
+ add:r=>proposed(r.proposal),
+ update:r=>proposed(r.proposal),
+};
+export const format=<K extends Op>(op:K,r:Answer<K>)=>formats[op](r);
 // Runs bridge-schedule with argv in env, and resolves to its exit status: 0, 1 when Bridge refused or cannot be reached, 2 for a usage
 // error. timeZone is that of a new schedule without --tz: the machine's.
-export async function main(argv,{env=process.env,stdout=process.stdout,stderr=process.stderr,timeZone=Intl.DateTimeFormat().resolvedOptions().timeZone}={}){
+export async function main(argv:string[],{env=process.env,stdout=process.stdout,stderr=process.stderr,timeZone=Intl.DateTimeFormat().resolvedOptions().timeZone}:
+ {env?:NodeJS.ProcessEnv,stdout?:Output,stderr?:Output,timeZone?:string}={}){
  try{
   const o=parse(argv);
   if(o.help){stdout.write(usage);return 0;}
-  if(!ops.includes(o.op))throw usageError(o.op?'未知的操作：'+o.op:'缺少操作');
+  if(!isOp(o.op))throw usageError(o.op?'未知的操作：'+o.op:'缺少操作');
   const {op,json,help,...fields}=o,pane=fields.pane??env.HERDR_PANE_ID,session=fields.session??env.HERDR_SESSION;
   const body={...fields,...pane&&{pane},...session&&{session},...op==='add'&&{timeZone:fields.timeZone??timeZone}};
-  const r=await send(clientSocket(env),'/schedules/'+op,body);
+  const r=await send(clientSocket(env),`/schedules/${op}`,body);
   stdout.write((json?JSON.stringify(r,null,2):format(op,r))+'\n');return 0;
  }catch(e){stderr.write(`bridge-schedule: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
 }
