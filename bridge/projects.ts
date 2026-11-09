@@ -1,10 +1,13 @@
 import {text,uuid,oneOf} from './core.ts';
 import type {Store} from './core.ts';
+import type {AskModel} from './model.ts';
 import type {Machine,Project,State,WorkMode} from './state.ts';
 // Projects (see Project in state.ts): the repositories, skills and work mode that a topic works with, apart from the chat it comes from and
 // the agent that runs it.
 const workModes:WorkMode[]=['isolated','shared'];
 const descriptionLimit=500,repoLimit=20;
+// What the model's sentence may take of that: it is asked for 50 characters.
+const generatedLimit=200;
 // A remote repository: an http, https, ssh or git URL, or the scp form user@host:path. Nothing that git takes as an option, a helper
 // (ext::) or a local path.
 const remote=/^(?:(?:https?|ssh|git):\/\/[^\s/@]+(?:@[^\s/]+)?(?:\/[^\s]*)?|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+)$/;
@@ -57,13 +60,14 @@ export function removeProject(store:Store,id:unknown){
  if(store.data.topics.some(t=>t.projectId===project.id&&['starting','ready'].includes(t.state)))throw Error('该项目还有进行中的话题');
  store.data.projects=store.data.projects.filter(p=>p!==project);store.save();
 }
-// Fills the empty description of a project that has repositories with one sentence about them, which the cheap model writes on a machine
-// from their READMEs, describe(m,repos): the first of the online machines. It is for the background, after a save: it keeps what a person
-// wrote or changed meanwhile, and a machine that cannot answer is only logged. Never rejects.
-export async function fillDescription(store:Store,p:Project,online:()=>Machine[],describe:(m:Machine,repos:string[])=>Promise<{description:string}>){
+const describing=(readmes:{name:string,text:string}[])=>`Below are the READMEs of the git repositories of one project. Write ONE sentence in Chinese, at most 50 characters, that says what the project is for, so that a person who has to pick a project for a task can tell it from the others. Output the sentence only: no quotes, no markdown, no explanation.\n\n${readmes.map(r=>`## ${r.name}\n${r.text}`).join('\n\n')}`;
+// Fills the empty description of a project that has repositories with one sentence about them, which the model writes from their
+// READMEs, as read(m,repos) gives them from the first of the online machines. It is for the background, after a save: it keeps what a
+// person wrote or changed meanwhile, and a machine or a model that cannot answer is only logged. Never rejects.
+export async function fillDescription(store:Store,p:Project,online:()=>Machine[],read:(m:Machine,repos:string[])=>Promise<{name:string,text:string}[]>,askModel:AskModel){
  const [m]=online(),repos=[...p.repos];if(p.description||!repos.length||!m)return;
- let answer;try{answer=await describe(m,repos);}catch(e){store.log('项目',`${p.name}：未能从仓库生成描述，${e.message}`,'error');return;}
- const description=answer.description.trim().slice(0,descriptionLimit);
+ let answer;try{answer=await askModel(describing(await read(m,repos)));}catch(e){store.log('项目',`${p.name}：未能从仓库生成描述，${e.message}`,'error');return;}
+ const description=(answer.split('\n').map(l=>l.trim()).find(Boolean)??'').slice(0,generatedLimit);
  if(!description||p.description||!store.data.projects.includes(p)||p.repos.join('\n')!==repos.join('\n'))return;
  p.description=description;store.save();
 }

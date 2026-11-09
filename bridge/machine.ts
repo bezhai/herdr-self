@@ -17,7 +17,7 @@ export const attachmentFolder='.herdr-bridge';
 // without what a shell sets for itself, such as PWD, which would be wrong for a command that runs elsewhere.
 export const stripped=(env:NodeJS.ProcessEnv)=>Object.fromEntries(Object.entries(env).filter(([k])=>!k.startsWith('HERDR_')&&!['PWD','OLDPWD','SHLVL','_'].includes(k)));
 // The environment of the user's shell ($SHELL, else that of the passwd entry) as a login shell without a terminal: what its startup files set
-// up, such as the PATH where the user installed claude or herdr, which the PATH of a user service lacks. zsh reads ~/.zshenv also without
+// up, such as the PATH where the user installed git or herdr, which the PATH of a user service lacks. zsh reads ~/.zshenv also without
 // a login, which is all that sshd gave Bridge's commands before the clients, but bash reads no file at all then; as a login shell zsh adds
 // ~/.zprofile and bash reads ~/.profile. The shell runs node with a fixed argv, and node prints its environment after a NUL, so that
 // whatever the startup files print is skipped. Without the variables that stripped drops. Rejects when the shell fails or takes longer than
@@ -69,7 +69,7 @@ async function stock(kept:string,{name:n,digest,files}:SkillFiles){
 // loginEnvironment). Every request carries timeoutMs, the most that a command it runs may take (see run).
 export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<Methods<ClientApi>,'ping'>{
  const program=herdr.replace(/^~\//,os.homedir()+'/');
- const git=gitRunner(env),ask=(cwd:string,prompt:string,timeoutMs?:number)=>run('claude',['-p','--model','haiku'],{env,cwd,input:prompt,timeoutMs});
+ const git=gitRunner(env);
  return {
   // The Herdr CLI in session session with args, each a string passed as it is or {path} for a path of this machine (Herdr itself does not
   // expand ~ in --cwd).
@@ -156,7 +156,7 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   // Puts skill {name, digest, files}, which an agent of this machine reads through bridge-skill, into the store (see stock) and resolves to
   // its directory there, where its other files are for the agent to open.
   stockSkill:({store,skill})=>stock(local(store,'store'),skillsOf([skill])[0]),
-  ...workspaceMethods(git,ask),
+  ...workspaceMethods(git),
   ...launchMethods(env),
  };
 }

@@ -11,7 +11,7 @@ import type {Kind,PermissionMode,WorkMode} from './state.ts';
 // platform one by one, keeps each in the store on its own and takes away those no longer loaded by default, where a client of 3 takes
 // one bundle with one digest; the client passes the reads of bridge-skill on (skills) and puts a skill read into its store (stockSkill). 5: the
 // client prepares the workspace of a topic, launches agents and inspects directories for projects (see ClientApi), and nameBranch is
-// askCheapModel. 6: the control plane asks the model itself, so askCheapModel is gone.
+// askCheapModel. 6: the control plane asks the model itself, so askCheapModel is gone, and describeRepos returns the READMEs instead of a description.
 export const protocol=6;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
@@ -56,11 +56,12 @@ export type ClientApi={
  // trust of the main checkout of the repository that holds dir is registered, and a worktree follows its main checkout), and for Claude with
  // allowedCommands, the hook that lets only those commands through. It resolves to the extra arguments of the agent command (those after
  // the -- of `herdr agent start`) for model, permissionMode and the trust of Codex and Antigravity. Calling it again is fine.
- // describeRepos: one sentence about what the repositories hold, which the cheap model writes from their READMEs.
+ // describeRepos: the README of each repository, cloned when missing, up to 4000 characters, for the control plane to describe the project
+ // from; a repository that cannot be cloned or has no README is left out, and it fails only when none is left.
  prepareWorkspace:{params:Timed<{project:WorkspaceProject,topicId:string,branch?:string}>,result:{dir:string}},
  removeWorkspace:{params:Timed<{project:WorkspaceProject,topicId:string,branch?:string}>,result:{branchKept:boolean}},
  prepareLaunch:{params:Timed<{kind:Kind,model?:string,permissionMode?:PermissionMode,allowedCommands?:string[],dir:string}>,result:{args:string[]}},
- describeRepos:{params:Timed<{repos:string[]}>,result:{description:string}},
+ describeRepos:{params:Timed<{repos:string[]}>,result:{readmes:{name:string,text:string}[]}},
  placeSkills:{params:Timed<{store:string,skills:SkillFiles[],dir:string,as:'link'|'copy',cwd:string}>,result:string[]},
  stockSkill:{params:Timed<{store:string,skill:SkillFiles}>,result:string},
 };

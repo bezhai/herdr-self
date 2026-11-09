@@ -108,9 +108,8 @@ async function readme(dir:string){
  const names=(await fs.promises.readdir(dir)).filter(n=>/^readme(\.\w+)?$/i.test(n)).sort((a,b)=>Number(/\.md$/i.test(b))-Number(/\.md$/i.test(a)));
  return names.length?(await fs.promises.readFile(path.join(dir,names[0]),'utf8')).slice(0,readmeLimit):null;
 }
-const describing=(readmes:[string,string][])=>`Below are the READMEs of the git repositories of one project. Write ONE sentence in Chinese, at most 50 characters, that says what the project is for, so that a person who has to pick a project for a task can tell it from the others. Output the sentence only: no quotes, no markdown, no explanation.\n\n${readmes.map(([n,t])=>`## ${n}\n${t}`).join('\n\n')}`;
-// The three methods, with git (see gitRunner) and askCheapModel, which runs the cheap model with the prompt in the directory.
-export function workspaceMethods(git:Git,ask:(cwd:string,prompt:string,timeoutMs?:number)=>Promise<Ran>):Pick<Methods<ClientApi>,'prepareWorkspace'|'removeWorkspace'|'describeRepos'>{
+// The three methods, with git (see gitRunner).
+export function workspaceMethods(git:Git):Pick<Methods<ClientApi>,'prepareWorkspace'|'removeWorkspace'|'describeRepos'>{
  return {
   // See ClientApi in link.ts. The directory of an isolated topic with repositories is the worktree of its only repository, else the
   // directory of the topic with a worktree per repository.
@@ -153,16 +152,13 @@ export function workspaceMethods(git:Git,ask:(cwd:string,prompt:string,timeoutMs
   // See ClientApi in link.ts. A repository that cannot be cloned or has no README is left out, as long as another gives the model something to read.
   async describeRepos({repos,timeoutMs}){
    if(!Array.isArray(repos)||!repos.length)throw invalid('repos');
-   const found:[string,string][]=[];let failed:Error|undefined;
+   const found:{name:string,text:string}[]=[];let failed:Error|undefined;
    for(const url of repos.map(repoUrl)){
     const repo:Repo={url,clone:path.join(dataRoot(),'repos',repoKey(url).replaceAll('/','__')),name:segment(repoName(url),'repos')};
-    try{await serial(repo.clone,()=>ensureClone(git,repo,timeoutMs));const text=await readme(repo.clone);if(text)found.push([repo.name,text]);}catch(e){failed??=e;}
+    try{await serial(repo.clone,()=>ensureClone(git,repo,timeoutMs));const text=await readme(repo.clone);if(text)found.push({name:repo.name,text});}catch(e){failed??=e;}
    }
    if(!found.length)throw failed??Error('这些仓库里都没有 README');
-   await fs.promises.mkdir(dataRoot(),{recursive:true});
-   const r=await ask(dataRoot(),describing(found),timeoutMs);if(r.code!==0)throw Error(`claude 退出码 ${r.code}：${r.stderr.trim().slice(-300)}`);
-   const sentence=r.stdout.split('\n').map(l=>l.trim()).find(Boolean);if(!sentence)throw Error('模型没有返回描述');
-   return {description:sentence.slice(0,200)};
+   return {readmes:found};
   },
  };
 }

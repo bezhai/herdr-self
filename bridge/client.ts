@@ -125,7 +125,7 @@ export function run({url,token}:Pick<Config,'url'|'token'>,log:(s:string)=>void,
 function envProxy(env:NodeJS.ProcessEnv){return env.NODE_USE_ENV_PROXY==='1'?'NODE_USE_ENV_PROXY=1':[...process.execArgv,...(env.NODE_OPTIONS||'').split(/\s+/)].includes('--use-env-proxy')?'--use-env-proxy':'';}
 // The commands of the methods run with the environment of the user's shell, which the client takes once, at its start (see
 // loginEnvironment): a change of the shell's startup files reaches them once the client restarts. When the shell fails, they run with the
-// client's own environment, where Herdr is still found at its path, but programs that only the shell's PATH has, such as claude, may not be.
+// client's own environment, where Herdr is still found at its path, but programs that only the shell's PATH has, such as git, may not be.
 export async function main(env=process.env){
  const log=(s:string)=>console.error('bridge-client: '+s),proxy=envProxy(env);
  if(proxy){log(`客户端要直接连接控制面，不能经过代理：去掉 ${proxy} 再启动`);process.exitCode=1;return;}

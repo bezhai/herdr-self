@@ -96,7 +96,7 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/projects/save'){
   const x=saveProject(store,b);result={id:x.id};
   // The description is made in the background, from an online machine, and the save does not wait for it.
-  fillDescription(store,x,()=>store.data.machines.filter(m=>m.enabled&&clients.online(m.id)),(m,repos)=>ops.describeRepos(m,{repos},{timeoutMs:180000}));
+  fillDescription(store,x,()=>store.data.machines.filter(m=>m.enabled&&clients.online(m.id)),async(m,repos)=>(await ops.describeRepos(m,{repos},{timeoutMs:180000})).readmes,askModel);
  }
  else if(p==='/api/projects/remove'){removeProject(store,b.id);}
  else if(p==='/api/agent-configs/save'){result={id:saveAgentConfig(store,b).id};}

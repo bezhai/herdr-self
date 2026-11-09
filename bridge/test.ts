@@ -320,25 +320,28 @@ test('saving an agent configuration creates it or changes the one named by id; r
   const a=saveAgentConfig(f.store,{machineId:'m1',kind:'claude'}),b=saveAgentConfig(f.store,{machineId:'m1',kind:'codex'});f.store.data.lastAgentConfigId=a.id;removeAgentConfig(f.store,b.id);assert.equal(f.store.data.lastAgentConfigId,a.id);
  }finally{f.close();}
 });
-test('a project saved with repositories and no description gets one from the cheap model on an online machine in the background, unless the description or the repositories changed meanwhile; a machine that cannot answer is only logged',async()=>{
+test('a project saved with repositories and no description gets one from the model in the background, written from the READMEs that an online machine reads, unless the description or the repositories changed meanwhile; a machine or a model that cannot answer is only logged',async()=>{
  const f=managedStore();try{
-  const [m1,m2]=f.store.data.machines,asked:[string,string[]][]=[];let answer:Promise<{description:string}>|Error=Promise.resolve({description:' 增长业务的投放与创作服务。 '});
-  const describe=async(m:Machine,repos:string[])=>{asked.push([m.id,repos]);await null;if(answer instanceof Error)throw answer;return answer;};
+  const [m1,m2]=f.store.data.machines,asked:[string,string[]][]=[],prompts:string[]=[];let answer:Promise<string>|Error=Promise.resolve(' 增长业务的投放与创作服务。\n第二行 ');let readmes:{name:string,text:string}[]|Error=[{name:'genvi',text:'# genvi\nGrowth tools.'},{name:'web',text:'Web part.'}];
+  const read=async(m:Machine,repos:string[])=>{asked.push([m.id,repos]);await null;if(readmes instanceof Error)throw readmes;return readmes;};
+  const ask=async(prompt:string)=>{prompts.push(prompt);await null;if(answer instanceof Error)throw answer;return answer;};
   const project=saveProject(f.store,{name:'genvi',repos:['git@code.byted.org:growth/genvi.git']});
-  // The first online machine is asked; the description is stored and saved.
-  await fillDescription(f.store,project,()=>[m2,m1],describe);assert.deepEqual(asked,[['m2',['git@code.byted.org:growth/genvi.git']]]);
+  // The first online machine reads the READMEs; the model gets them in the prompt, and its first line is stored and saved.
+  await fillDescription(f.store,project,()=>[m2,m1],read,ask);assert.deepEqual(asked,[['m2',['git@code.byted.org:growth/genvi.git']]]);
+  assert.equal(prompts.length,1);assert.match(prompts[0],/at most 50 characters[\s\S]*## genvi\n# genvi\nGrowth tools\.\n\n## web\nWeb part\.$/);
   assert.equal(project.description,'增长业务的投放与创作服务。');assert.equal(new Store(f.dir).data.projects[0].description,'增长业务的投放与创作服务。');
   // A description is not asked for, nor a project without repositories or a machine to ask.
-  await fillDescription(f.store,project,()=>[m1],describe);const bare=saveProject(f.store,{name:'bare'});await fillDescription(f.store,bare,()=>[m1],describe);
-  const empty=saveProject(f.store,{name:'empty',repos:['https://host.example/a/b']});await fillDescription(f.store,empty,()=>[],describe);assert.equal(asked.length,1);assert.equal(empty.description,'');
-  // What changed while the machine answered is not overwritten, and an empty answer stores nothing.
-  let release!:(r:{description:string})=>void;answer=new Promise(r=>{release=r;});const pending=fillDescription(f.store,empty,()=>[m1],describe);
-  await later(10);empty.description='我写的';release({description:'生成的'});await pending;assert.equal(empty.description,'我写的');
-  empty.description='';answer=Promise.resolve({description:'  '});await fillDescription(f.store,empty,()=>[m1],describe);assert.equal(empty.description,'');
-  answer=new Promise(r=>{release=r;});const moved=fillDescription(f.store,empty,()=>[m1],describe);await later(10);empty.repos=['https://host.example/other'];release({description:'旧仓库的'});await moved;assert.equal(empty.description,'');
-  // A machine that cannot answer is logged and nothing else happens.
-  answer=Error('这些仓库里都没有 README');await fillDescription(f.store,empty,()=>[m1],describe);assert.equal(empty.description,'');
-  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['项目','error','empty：未能从仓库生成描述，这些仓库里都没有 README']]);
+  await fillDescription(f.store,project,()=>[m1],read,ask);const bare=saveProject(f.store,{name:'bare'});await fillDescription(f.store,bare,()=>[m1],read,ask);
+  const empty=saveProject(f.store,{name:'empty',repos:['https://host.example/a/b']});await fillDescription(f.store,empty,()=>[],read,ask);assert.equal(asked.length,1);assert.equal(empty.description,'');
+  // What changed while the model answered is not overwritten, and an empty answer stores nothing.
+  let release!:(r:string)=>void;answer=new Promise(r=>{release=r;});const pending=fillDescription(f.store,empty,()=>[m1],read,ask);
+  await later(10);empty.description='我写的';release('生成的');await pending;assert.equal(empty.description,'我写的');
+  empty.description='';answer=Promise.resolve('  \n');await fillDescription(f.store,empty,()=>[m1],read,ask);assert.equal(empty.description,'');
+  answer=new Promise(r=>{release=r;});const moved=fillDescription(f.store,empty,()=>[m1],read,ask);await later(10);empty.repos=['https://host.example/other'];release('旧仓库的');await moved;assert.equal(empty.description,'');
+  // A machine that cannot read and a model that cannot answer are logged, and nothing else happens.
+  readmes=Error('这些仓库里都没有 README');await fillDescription(f.store,empty,()=>[m1],read,ask);assert.equal(empty.description,'');
+  const calls=prompts.length;readmes=[{name:'x',text:'y'}];answer=Error('模型服务返回 HTTP 500：boom');await fillDescription(f.store,empty,()=>[m1],read,ask);assert.equal(empty.description,'');assert.equal(prompts.length,calls+1);
+  assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['项目','error','empty：未能从仓库生成描述，这些仓库里都没有 README'],['项目','error','empty：未能从仓库生成描述，模型服务返回 HTTP 500：boom']]);
  }finally{f.close();}
 });
 const configData=(configs:AgentConfig[]=[])=>({machines:[{id:'m',name:'cpu1'},{id:'n',name:'cpu2'}] as Machine[],agentConfigs:configs});

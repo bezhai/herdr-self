@@ -137,14 +137,11 @@ test('the params are checked: a topic id that is not a name, a branch that Git w
  await assert.rejects(prepare({id:'v3',repos:[],workMode:'both' as 'shared'},'tv'),(e:{code?:string})=>e.code==='invalid_params');
  assert.equal(fs.existsSync(path.join(data,'topics/tv')),false);
 });
-test('describing repositories asks the cheap model for one sentence from the README of each repository, cloning a repository that is not cloned yet, and fails when no repository has a README',async()=>{
- origin('notes',{'README.md':'# notes\nA tool that keeps meeting notes.\n'});origin('bare',{'LICENSE':'x'});
- const bin=path.join(root,'bin'),seen=path.join(root,'asked');fs.mkdirSync(bin);
- fs.writeFileSync(path.join(bin,'claude'),`#!/bin/sh\ncat > ${JSON.stringify(seen)}\nprintf '%s\\n' "$FAKE_ANSWER"\n`,{mode:0o755});
- const ask=methods({herdr:'unused',env:{...env,PATH:bin+':'+process.env.PATH,FAKE_ANSWER:'  保存会议记录的工具。\n'}});
- const r=await describe(ask,[url('notes'),url('bare')]);assert.deepEqual(r,{description:'保存会议记录的工具。'});
- const prompt=fs.readFileSync(seen,'utf8');assert.ok(prompt.includes('A tool that keeps meeting notes.')&&prompt.includes('notes'),prompt);assert.ok(clones().includes('example.com__team__bare'));
- await assert.rejects(describe(ask,[url('bare')]),/README/);
- await assert.rejects(describe(ask,[]),(e:{code?:string})=>e.code==='invalid_params');
- const silent=methods({herdr:'unused',env:{...env,PATH:bin+':'+process.env.PATH,FAKE_ANSWER:''}});await assert.rejects(describe(silent,[url('notes')]),/没有返回/);
+test('describing repositories reads the README of each repository, cloning a repository that is not cloned yet and leaving out one without a README, cut to what a prompt may hold; it fails when no repository has a README',async()=>{
+ origin('notes',{'README.md':'# notes\nA tool that keeps meeting notes.\n'});origin('bare',{'LICENSE':'x'});origin('long',{'readme.rst':'x'.repeat(5000)});
+ assert.deepEqual(await describe(client,[url('notes'),url('bare')]),{readmes:[{name:'notes',text:'# notes\nA tool that keeps meeting notes.\n'}]});
+ assert.ok(clones().includes('example.com__team__bare'));
+ const [long]=(await describe(client,[url('long')])).readmes;assert.deepEqual([long.name,long.text.length],['long',4000]);
+ await assert.rejects(describe(client,[url('bare')]),/README/);
+ await assert.rejects(describe(client,[]),(e:{code?:string})=>e.code==='invalid_params');
 });
