@@ -151,9 +151,9 @@ test('project form asks for the name, description, repositories one per line, th
   const onSaved = vi.fn();
   const user = userEvent.setup();
   render(<ProjectDialog skills={sampleState().skills} onClose={vi.fn()} onSaved={onSaved} />);
-  expect(captions()).toEqual(['项目名称', '描述', '仓库', '话题目录', 'Skills', 'deploy-notes']);
-  expect(optionLabels('话题目录')).toEqual(['每个话题独立', '所有话题共用']);
-  expect(screen.getByLabelText<HTMLSelectElement>('话题目录').value).toBe('isolated');
+  expect(captions()).toEqual(['项目名称', '描述', '仓库', '工作目录', 'Skills', 'deploy-notes']);
+  expect(optionLabels('工作目录')).toEqual(['每个话题独立', '所有话题共用']);
+  expect(screen.getByLabelText<HTMLSelectElement>('工作目录').value).toBe('isolated');
   expect(screen.getByLabelText<HTMLTextAreaElement>('仓库').placeholder).toBe('每行一个地址');
 
   await user.type(screen.getByLabelText('项目名称'), 'promoter');
@@ -174,11 +174,11 @@ test('project form edits a project by its id from what it holds; a skill loaded 
   expect(screen.getByLabelText<HTMLInputElement>('项目名称').value).toBe('genvi');
   expect(screen.getByLabelText<HTMLTextAreaElement>('描述').value).toBe('增长相关的服务');
   expect(screen.getByLabelText<HTMLTextAreaElement>('仓库').value).toBe('git@code.example:growth/genvi.git');
-  expect(screen.getByLabelText<HTMLSelectElement>('话题目录').value).toBe('shared');
+  expect(screen.getByLabelText<HTMLSelectElement>('工作目录').value).toBe('shared');
   expect(screen.getByLabelText<HTMLInputElement>('deploy-notes').checked).toBe(true);
   expect(screen.queryByLabelText('bridge-schedule')).toBeNull();
 
-  await user.selectOptions(screen.getByLabelText('话题目录'), 'isolated');
+  await user.selectOptions(screen.getByLabelText('工作目录'), 'isolated');
   await user.click(screen.getByLabelText('deploy-notes'));
   await user.click(screen.getByRole('button', { name: '保存' }));
   expect(await screen.findByText('已有同名的项目')).toBeTruthy();
@@ -189,7 +189,7 @@ test('project form edits a project by its id from what it holds; a skill loaded 
 
 test('project form has no skills section while the platform has no skill to pick', () => {
   render(<ProjectDialog skills={[sampleState().skills[0]]} onClose={vi.fn()} onSaved={vi.fn()} />);
-  expect(captions()).toEqual(['项目名称', '描述', '仓库', '话题目录']);
+  expect(captions()).toEqual(['项目名称', '描述', '仓库', '工作目录']);
 });
 
 test('agent configuration form names a new configuration after machine, type and model until the name is edited, and saves it', async () => {
@@ -200,7 +200,7 @@ test('agent configuration form names a new configuration after machine, type and
   expect(captions()).toEqual(['配置名称', '机器', 'Agent 类型', '模型', '权限模式', '只允许执行的命令']);
   expect(optionLabels('机器')).toEqual(['cpu2', 'gpu1', 'laptop', 'cpu3', 'gpu2']);
   expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
-  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
+  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作在飞书里发确认卡片', 'auto：由 Claude 自动决定，很少需要确认']);
   const name = () => screen.getByLabelText<HTMLInputElement>('配置名称').value;
   expect(name()).toBe('cpu2 · Claude');
 

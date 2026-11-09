@@ -19,7 +19,7 @@ function AgentRow({ agent }: { agent: Agent }) {
         <strong>{agent.name || agent.agent || 'Agent'}</strong>
         <small>{`${agent.pane_id} · ${agent.cwd || ''}`}</small>
       </span>
-      {!agent.agent_session?.value && <small className="agent-note">未识别会话</small>}
+      {!agent.agent_session?.value && <small className="agent-note">未识别 Agent 会话</small>}
       <Badge tone={statusTone(agent.agent_status)}>{agentStatusLabel(agent.agent_status)}</Badge>
     </div>
   );

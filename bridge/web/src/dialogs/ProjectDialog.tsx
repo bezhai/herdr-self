@@ -35,7 +35,7 @@ export function ProjectDialog({ project, skills, onClose, onSaved }: { project?:
       <label>项目名称<input required placeholder="例如：genvi" {...field('name')} /></label>
       <label>描述<textarea rows={3} {...field('description')} /></label>
       <label>仓库<textarea className="mono" rows={3} spellCheck="false" placeholder="每行一个地址" {...field('repos')} /></label>
-      <label>话题目录
+      <label>工作目录
         <select {...field('workMode')}>
           {workModes.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
         </select>

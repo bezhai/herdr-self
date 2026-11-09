@@ -79,5 +79,5 @@ export function settled(r:HerdrRequest,a:Answer,openId:string){
  const d=decisions[a.decision];return card(title(r),d.template,[...describe(r),by(d.done,openId)]);
 }
 // Cards of records whose request is gone; only the title is kept in the record.
-export const expired=(heading:string)=>card(heading,'grey',[plain('已失效（超时、已在终端处理或本轮已结束）')]);
+export const expired=(heading:string)=>card(heading,'grey',[plain('已失效，Agent 不再等待这个请求')]);
 export const failed=(heading:string)=>card(heading,'grey',[plain('提交失败。Agent 仍在等待时会重新发送卡片')]);

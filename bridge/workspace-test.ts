@@ -96,10 +96,10 @@ test('a shared project works in a directory of its own with its repositories clo
 test('what goes wrong in preparing a workspace is told in words of the console, which shows it: without a path of the machine or the word worktree, apart from what Git itself says',async()=>{
  origin('occupied-repo');const p=project('e1',['occupied-repo'],'isolated'),message=(run:Promise<unknown>)=>run.then(()=>{throw Error('prepared');},(e:Error)=>e.message);
  fs.mkdirSync(path.join(data,'topics/e1/occupied-repo'),{recursive:true});fs.writeFileSync(path.join(data,'topics/e1/occupied-repo/mine.txt'),'');
- const inUse=await message(prepare(p,'e1','topic/a'));assert.equal(inUse,'话题的目录已存在，里面有别的内容');
- await prepare(p,'e2','topic/b');const taken=await message(prepare(p,'e3','topic/b'));assert.match(taken,/^为分支 topic\/b 创建话题目录失败：/);assert.doesNotMatch(taken.split('：')[0],/worktree/);
+ const inUse=await message(prepare(p,'e1','topic/a'));assert.equal(inUse,'话题的工作目录已存在且不为空');
+ await prepare(p,'e2','topic/b');const taken=await message(prepare(p,'e3','topic/b'));assert.match(taken,/^为分支 topic\/b 创建话题的工作目录失败：/);assert.doesNotMatch(taken.split('：')[0],/worktree/);
  fs.mkdirSync(path.join(data,'projects/e4/occupied-repo'),{recursive:true});fs.writeFileSync(path.join(data,'projects/e4/occupied-repo/mine.txt'),'');
- const notGit=await message(prepare(project('e4',['occupied-repo'],'shared'),'e5'));assert.equal(notGit,'项目的目录里已有 occupied-repo，不是 Git 仓库，没有往里面 clone');
+ const notGit=await message(prepare(project('e4',['occupied-repo'],'shared'),'e5'));assert.equal(notGit,'项目的工作目录里已有 occupied-repo，但它不是 Git 仓库，未执行 clone');
 });
 test('a project that adopted a directory works in it as it is: checkouts there are fetched only, missing repositories are cloned into it, and removing a topic leaves it',async()=>{
  const work=origin('mall');origin('pay');

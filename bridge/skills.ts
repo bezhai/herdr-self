@@ -58,7 +58,7 @@ function checked(name:unknown,files:unknown){
  const size=entries.reduce((n,[,c])=>n+c.length,0);if(size>skillLimit)throw Error(`skill 的文件合计 ${size} 字节，超过上限 ${skillLimit} 字节`);
  const skill=entries.find(([p])=>p==='SKILL.md');if(!skill)throw Error('skill 缺少 SKILL.md');
  const f=frontmatter(skill[1].toString('utf8'));
- if(!f)throw Error('SKILL.md 开头没有 frontmatter：以 --- 开始和结束、写着 name 和 description 的几行');
+ if(!f)throw Error('SKILL.md 开头缺少 frontmatter，应以 --- 开头和结尾，并写明 name 和 description');
  if(f.name!==name)throw Error(`SKILL.md 的 frontmatter 里 name ${f.name?'是 '+f.name:'是空的'}，必须和 skill 名称 ${name} 一致`);
  if(!f.description||f.description.length>descriptionMax)throw Error(`SKILL.md 的 frontmatter 缺少 description，或者超过 ${descriptionMax} 个字符`);
  return {entries,description:f.description,digest:crypto.createHash('sha256').update(JSON.stringify(entries.map(([p,c])=>[p,c.toString('base64')]))).digest('hex')};

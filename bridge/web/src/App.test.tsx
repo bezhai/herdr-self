@@ -237,10 +237,10 @@ test('machine cards list Herdr agents with their status, mark agents without a s
   expect(within(reviewer).getByText('reviewer')).toBeTruthy();
   expect(within(reviewer).getByText('w1:p2 · /work')).toBeTruthy();
   expect(within(reviewer).getByText('运行中').classList.contains('warn')).toBe(true);
-  expect(within(reviewer).queryByText('未识别会话')).toBeNull();
+  expect(within(reviewer).queryByText('未识别 Agent 会话')).toBeNull();
   expect(within(codex).getByText('codex')).toBeTruthy();
   expect(within(codex).getByText('空闲').classList.contains('neutral')).toBe(true);
-  expect(within(codex).getByText('未识别会话')).toBeTruthy();
+  expect(within(codex).getByText('未识别 Agent 会话')).toBeTruthy();
   expect(within(blocked).getByText('等待确认')).toBeTruthy();
   expect(cpu2.querySelector('.facts')!.textContent).toBe('3个终端3个 Agentcpu2-host上的客户端');
   expect(within(cpu2).queryByRole('button', { name: '查看连接' })).toBeNull();

@@ -25,7 +25,7 @@ const taskLimit=16000;
 // What cards and logs call schedule s: the first 8 characters of its id, which bridge-schedule also takes (see AgentSchedules).
 export const short=(s:{id:string})=>s.id.slice(0,8);
 const brief=(e:Error|undefined)=>publicText(e?.message).split('\n')[0].slice(0,200);
-const busyReason='上次还没结束，跳过',endedReason='话题已结束，定时任务已暂停',unboundReason='绑定已移除，定时任务已暂停',missedReason='Bridge 停机，错过';
+const busyReason='上一次运行还没有结束',endedReason='话题当前没有运行中的 Agent 会话，定时任务已暂停',unboundReason='会话绑定已移除，定时任务已暂停',missedReason='Bridge 当时没有运行';
 // Whether an agent of an agent list works or waits for a confirmation.
 const working=(agent:{agent_status:string}|null|undefined)=>['working','blocked'].includes(agent?.agent_status);
 // The card of run n of schedule s, due at due: which schedule, which run, when, and its task.
@@ -122,7 +122,7 @@ export class Schedules{
   if(s.paused||!this.store.data.schedules.includes(s))return;
   const at=this.now();
   try{await (s.mode==='into'?this.into(s,due,at):this.open(s,due,at));}
-  catch(e){this.record(s,{due,at,outcome:'failed',reason:'运行出错，详见 Bridge 日志'});this.log(s,`定时任务 ${short(s)} 运行出错，${brief(e)}`,'error');}
+  catch(e){this.record(s,{due,at,outcome:'failed',reason:'运行出错，详见连接日志'});this.log(s,`定时任务 ${short(s)} 运行出错，${brief(e)}`,'error');}
  }
  // A run of schedule s in mode new: unless the agent of its previous run has not finished (see busy), the bot posts the run's card into the
  // chat of the binding and a topic opens under it with the task as its first message (see Topics.begin), which nobody wrote and gets no
@@ -130,7 +130,7 @@ export class Schedules{
  // was removed pauses the schedule.
  async open(s:Schedule,due:number,at:number){
   const b=this.binding(s.bindingId);
-  if(!b){s.paused=true;this.record(s,{due,at,outcome:'skipped',reason:unboundReason});this.log(s,`定时任务 ${short(s)} 的绑定已移除，已暂停`);return;}
+  if(!b){s.paused=true;this.record(s,{due,at,outcome:'skipped',reason:unboundReason});this.log(s,`定时任务 ${short(s)} 的会话绑定已移除，已暂停`);return;}
   const last=this.store.data.topics.filter(by(s)).reduce<Scheduled|null>((x,t)=>!x||t.scheduled.n>x.scheduled.n?t:x,null);
   if(await this.busy(last))return this.record(s,{due,at,outcome:'skipped',reason:busyReason});
   const a=this.app(b.appId),n=s.count+1;let root:string;
@@ -170,8 +170,8 @@ export class Schedules{
  // Schedule s in mode into whose topic t has ended, or went with its binding, skips its run and pauses: another agent in the same topic
  // would not remember the earlier runs. A topic that is still there gets a notice in its thread.
  async ended(s:Schedule,t:Topic|undefined,run:{due:number,at:number}){
-  s.paused=true;this.record(s,{...run,outcome:'skipped',reason:endedReason});this.log(s,`定时任务 ${short(s)} 的话题已结束，已暂停`);
-  if(t)await this.topics.notify(this.app(t.appId),t,`定时任务 ${short(s)} 已暂停：该话题所在的 Agent 会话已退出`);
+  s.paused=true;this.record(s,{...run,outcome:'skipped',reason:endedReason});this.log(s,`定时任务 ${short(s)} 所在的话题没有运行中的 Agent 会话，已暂停`);
+  if(t)await this.topics.notify(this.app(t.appId),t,`定时任务 ${short(s)} 已暂停：该话题当前没有运行中的 Agent 会话`);
  }
  // Ends the topics that schedule s opened before its latest 3 runs and closes the panes of their agents (see Topics.retire), except one in
  // which a person wrote within a day: they may still be talking to its agent. Each daily run would otherwise keep an agent of a few hundred
@@ -179,7 +179,7 @@ export class Schedules{
  prune(s:Schedule){
   const now=this.now(),opened=this.store.data.topics.filter(by(s)).sort((x,y)=>y.scheduled.n-x.scheduled.n);
   return Promise.all(opened.slice(kept).filter(t=>t.state==='ready'&&!(now-(t.scheduled.messageAt??-Infinity)<quiet))
-   .map(t=>this.topics.retire(t,`这个话题来自定时任务 ${short(s)}，定时任务只保留最近 ${kept} 次运行的话题，Agent 已关闭`)));
+   .map(t=>this.topics.retire(t,`定时任务 ${short(s)} 只保留最近 ${kept} 次运行的话题，这个话题的 Agent 会话已关闭`)));
  }
  // Appends run to the record of schedule s, which keeps the latest 20 runs, and returns it.
  record(s:Schedule,run:Run){s.runs=[...s.runs,run].slice(-history);this.store.save();return run;}

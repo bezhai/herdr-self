@@ -2,7 +2,7 @@ import type {OpenApi} from './platform.ts';
 // The commands a person sends to the bot (see Topics.handle): /adopt as a root message offers the running agents to adopt, /release in an
 // adopted topic lets go of its agent, and /stop in a ready topic, or as a root message, interrupts the agent's turn; each of these is a
 // whole message. Each has the description that Feishu's slash command panel shows. Feishu takes only names that match ^[a-z][a-z0-9_-]{0,31}$.
-export const commands={adopt:'接管正在运行的 Agent',release:'结束接管',stop:'停止 Agent 当前这一轮'};
+export const commands={adopt:'接管正在运行的 Agent',release:'结束接管',stop:'停止 Agent 当前的工作'};
 // The commands that earlier versions offered and Bridge no longer has, with the description it gave each. The panel is shared with the app's
 // own commands, so only a command with this name and this description counts as Bridge's to delete; the same name with another description
 // is the app's own.

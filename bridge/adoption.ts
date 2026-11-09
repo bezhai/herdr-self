@@ -55,6 +55,6 @@ export function intro(machine:Machine,x:Offered,name:string,latest:unknown){
  return [`已接管 ${machine.name} 上的 ${kind(x)} · ${name}`,`工作目录：${x.cwd?home(x.cwd):'未知'}`,
   `话题里的消息会发给这个 Agent，它的回复会转到这里。发送 ${slash.release} 结束接管，Agent 会继续在终端的 pane 里运行。`,
   // Herdr keeps the replies of the session an agent reports; a Codex attached to its background app-server reports none in this pane.
-  ...x.agent_session?[]:['这个 Agent 没有向 Herdr 上报会话（例如连着后台 app-server 的 Codex），它的回复可能无法转回飞书。'],
+  ...x.agent_session?[]:['这个 Agent 没有向 Herdr 上报 Agent 会话（例如使用后台 app-server 的 Codex），它的回复可能无法转发到飞书。'],
   ...latest?['最近一条回复：']:[]].join('\n');
 }

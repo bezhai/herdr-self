@@ -28,7 +28,7 @@ function AppCard({ app, bindings, refresh, toast, openApp }: Omit<Props, 'state'
         <StatusBadge status={app.connection} />
         <div className="card-actions">
           <ActionButton run={() => act('/apps/test', { id: app.id }, '应用凭证验证通过')} onError={toast}>验证凭证</ActionButton>
-          <ActionButton run={() => act('/apps/toggle', { id: app.id, enabled: !app.enabled }, app.enabled ? '应用已停用' : '正在建立长连接')} onError={toast}>
+          <ActionButton run={() => act('/apps/toggle', { id: app.id, enabled: !app.enabled }, app.enabled ? '应用已停用' : '应用已启用，正在连接')} onError={toast}>
             {app.enabled ? '停用' : '启用连接'}
           </ActionButton>
           {!app.enabled && <button type="button" className="secondary" onClick={() => openApp(app)}>配置</button>}
@@ -39,7 +39,7 @@ function AppCard({ app, bindings, refresh, toast, openApp }: Omit<Props, 'state'
         <span>{app.verifiedAt ? '凭证已验证' : '尚未验证凭证'}</span>
         <span className="facts">
           <span><b>{app.allowedUsers.length}</b>位授权用户</span>
-          <span><b>{bindings.filter((b) => b.appId === app.id).length}</b>个绑定</span>
+          <span><b>{bindings.filter((b) => b.appId === app.id).length}</b>个会话绑定</span>
         </span>
       </div>
       {app.error && <div className="card-error">{app.error}</div>}

@@ -78,7 +78,7 @@ export const configName = (machine: { name: string } | undefined, kind: Kind, mo
 
 // Claude permission modes a configuration starts its agent with, and what each does.
 export const permissionModes: { id: PermissionMode, note: string }[] = [
-  { id: 'default', note: '需要确认的操作发卡片到飞书' },
+  { id: 'default', note: '需要确认的操作在飞书里发确认卡片' },
   { id: 'auto', note: '由 Claude 自动决定，很少需要确认' },
 ];
 

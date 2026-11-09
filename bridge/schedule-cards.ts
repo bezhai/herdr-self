@@ -20,8 +20,8 @@ const templates:Record<Result,string>={pending:'blue',confirmed:'green',cancelle
 const heading=(v:View,result:Result)=>headings[v.kind][result]+(v.scheduleId?' · '+v.scheduleId:'');
 const time=(x:Time)=>`${x.phrase}（${x.timeZone}，cron：${x.cron}）`;
 function mode(v:View){
- if(v.mode==='new')return '每次开新话题。每次运行时机器人在群里发一条消息，在它下面开一个新话题，交给一个新的 Agent';
- return v.here?'发进这个话题。每次运行把任务发给这个话题里的 Agent，它记得之前的对话':`发进话题「${v.topicTitle??'已删除的话题'}」。每次运行把任务发给那个话题里的 Agent`;
+ if(v.mode==='new')return '每次开新话题。每次运行时新开一个话题，由新的 Agent 执行任务';
+ return v.here?'发进这个话题。每次运行把任务发给这个话题里的 Agent':`发进话题「${v.topicTitle??'已删除的话题'}」。每次运行把任务发给那个话题里的 Agent`;
 }
 // What every card says of schedule v: when, in words with the expression and the time zone, and the time it had; the next runs, when
 // given; the task; the mode; and the binding.
@@ -30,7 +30,7 @@ const about=(v:View)=>[
  ...v.next?[plain(v.next.length?`接下来 ${v.next.length} 次运行：\n${v.next.join('\n')}`:'之后不会再运行')]:[],
  plain(`任务${v.taskChanged?'（已修改）':''}：\n${v.task}`),
  plain('模式：'+mode(v)),
- plain('绑定：'+v.binding),
+ plain('会话绑定：'+v.binding),
 ];
 const button=(content:string,type:string,value:ButtonValue)=>({tag:'column',width:'auto',elements:[{tag:'button',text:{tag:'plain_text',content},type,behaviors:[{type:'callback',value}]}]});
 // The card that asks to confirm schedule v of proposal id, valid until expires (a wall time). Its buttons carry the proposal's id, which

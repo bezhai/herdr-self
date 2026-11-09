@@ -38,7 +38,7 @@ const offline=(e:Error,after:string)=>`${brief(e)}。${after}`;
 // exits, is released or changes to another agent, so a ready topic is linked to the agent of its pane for as long as the agent reports it.
 const linked=(t:Topic,agents:Agent[])=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
 const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'on':'off'];
-const endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
+const endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
 // Where the images and files of a topic go, under the working directory of its agent (see attach).
 const attachmentRoot=(cwd:string)=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;
@@ -261,15 +261,15 @@ export class Topics{
  async alive(a:App,t:Topic){
   if(t.state!=='ready')return;
   const {agents}=await this.herdr(this.target(t),['agent','list']),agent=linked(t,agents);
-  if(!agent&&t.state==='ready')await this.end(a,t,t.adopted?adoptedGone:t.routed?continuable:endedNotice);
+  if(!agent&&t.state==='ready')await this.end(a,t,t.adopted?adoptedGone:t.routed?continuable:endedNotice,'Agent 会话已退出');
   return agent;
  }
  // Ends a ready topic with a notice; its open COT shows the run failed, its reactions are removed, its cards show 已失效 and the directory of
  // its attachments is removed. A reaction still being added is removed when its message settles, unprompted.
- async end(a:App,t:Topic,text:string){
+ async end(a:App,t:Topic,text:string,reason:string){
   this.update(t,{state:'closed',endedAt:this.now()});
   await this.notify(a,t,text);
-  await this.wrapUp(a,t,'话题已结束');
+  await this.wrapUp(a,t,reason);
  }
  // What a topic leaves behind when its agent is gone, ended or replaced: its open COT shows the run failed with reason, its reactions are
  // removed, its request cards show 已失效 and the directory of its attachments is removed.
@@ -287,8 +287,8 @@ export class Topics{
   return enqueue(this.topicQueues,t.id,async()=>{
    if(t.state!=='ready')return;let a:App;
    try{a=this.app(t.appId);if(!await this.alive(a,t))return;await this.herdr(this.target(t),['pane','close',t.paneId]);}
-   catch(e){this.store.log('话题会话',`${t.agentName}：未能关闭 pane，${brief(e)}`,'error');return;}
-   this.store.log('话题会话',`${t.agentName}：已关闭 pane ${t.paneId}`);await this.end(a,t,text);
+   catch(e){this.store.log('Agent 会话',`${t.agentName}：未能关闭 pane，${brief(e)}`,'error');return;}
+   this.store.log('Agent 会话',`${t.agentName}：已关闭 pane ${t.paneId}`);await this.end(a,t,text,'Agent 会话已关闭');
   });
  }
  // Whether topic t, which ended, starts again with the next message: Bridge started it, with a workspace of its project.
@@ -326,13 +326,13 @@ export class Topics{
    // Before the topic is ready, which links it to its agent only while the setting is on.
    await this.herdr(m,remoteAnswers(t.paneId,true));
   }catch(e){
-   this.update(t,{state:'failed',error:brief(e),endedAt:this.now()});this.store.log('话题会话',`${b.name}：启动失败，${t.error}`,'error');
+   this.update(t,{state:'failed',error:brief(e),endedAt:this.now()});this.store.log('Agent 会话',`${b.name}：启动失败，${t.error}`,'error');
    // Details can hold local paths and raw Herdr errors; they stay in the topic and the log, unless the client of the machine is offline,
    // which the person can wait out.
    await this.notify(a,t,e.code==='client_offline'?offline(e,'话题没有启动，请稍后重发消息'):'启动失败，请在 Bridge 管理台查看原因');
    return false;
   }
-  this.update(t,{state:'ready'});this.store.log('话题会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}`);return true;
+  this.update(t,{state:'ready'});this.store.log('Agent 会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}`);return true;
  }
  // The agent configuration that topic t starts with.
  agentConfig(t:Topic){
@@ -354,7 +354,7 @@ export class Topics{
   const asking=direct?projects.length>0:hasBranch(project)&&!t.branch;let named:Named={};
   if(asking){named=await nameTask(this.askModel,t.task!.content,direct?projects:null);if(direct)project=named.project;}
   const branch=hasBranch(project)?t.branch??freeBranch(named.branch??randomBranch('topic'),t,this.store.data.topics):undefined;
-  if(asking&&named.reason)this.store.log('话题会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
+  if(asking&&named.reason)this.store.log('Agent 会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
   if(!branch)delete t.branch;
   this.update(t,{routed:true,...project&&{projectId:project.id},...branch&&{branch}});
  }
@@ -397,7 +397,7 @@ export class Topics{
  // machine m, which exists by then, right before the agent starts and loads them (see Skills.place). Same-name skills of others are left
  // alone and logged. Never rejects: a failure is only logged, and the agent starts without the skills.
  async place(m:Machine,b:Binding,kind:Kind,cwd:string,skills:string[]){
-  try{for(const p of await this.placeSkills(m,cwd,kind,skills))this.store.log('skill',`${b.name}：${p} 已有同名 skill，不是 Bridge 放的，没有改动`);}
+  try{for(const p of await this.placeSkills(m,cwd,kind,skills))this.store.log('skill',`${b.name}：${p} 已存在同名 skill，不是 Bridge 写入的，未改动`);}
   catch(e){this.store.log('skill',`${b.name}：未能在 ${cwd} 放置 skill，${brief(e)}`,'error');}
  }
  // The binding's workspace on machine m is created on first use and again after it was closed in Herdr; its root tab serves the topic that
@@ -477,10 +477,10 @@ export class Topics{
   const id=evt.action.option;let change:Parameters<Topics['restart']>[3],said:string;
   if(evt.action.value!.restart==='project'){
    const p=this.store.data.projects.find(x=>x.id===id);if(!p)return toast('warning','所选的项目已不存在');
-   if(p.id===t.projectId)return toast('info','话题已经在使用这个设置');change={projectId:p.id};said=`已换成项目 ${p.name}，话题重新开始。`;
+   if(p.id===t.projectId)return toast('info',`话题已在使用项目 ${p.name}`);change={projectId:p.id};said=`已换成项目 ${p.name}，话题重新开始。`;
   }else{
    const c=this.store.data.agentConfigs.find(x=>x.id===id);if(!c)return toast('warning','所选的 Agent 配置已不存在');
-   if(c.id===t.agentConfigId)return toast('info','话题已经在使用这个设置');change={agentConfigId:c.id};said=`已换成 Agent 配置 ${c.name}，话题重新开始。`;
+   if(c.id===t.agentConfigId)return toast('info',`话题已在使用 Agent 配置 ${c.name}`);change={agentConfigId:c.id};said=`已换成 Agent 配置 ${c.name}，话题重新开始。`;
   }
   const key=t.id+' restart';if(this.answering.has(key))return toast('info','正在重新开始，请稍候');
   this.answering.set(key,enqueue(this.topicQueues,t.id,()=>this.restart(a,b,t,change,said)).finally(()=>this.answering.delete(key)));
@@ -493,10 +493,10 @@ export class Topics{
   try{
    const m=this.target(t);
    if(t.state==='ready'){const {agents}=await this.herdr(m,['agent','list']);if(linked(t,agents))await this.herdr(m,['pane','close',t.paneId]);}
-  }catch(e){this.store.log('话题会话',`${t.agentName}：未能结束 Agent，${brief(e)}`,'error');return this.notify(a,t,'未能结束当前的 Agent，话题保持原样，请稍后重试');}
+  }catch(e){this.store.log('Agent 会话',`${t.agentName}：未能结束 Agent，${brief(e)}`,'error');return this.notify(a,t,'未能结束当前的 Agent，话题保持原样，请稍后重试');}
   this.update(t,{state:'starting',error:''});this.blockedSeen.delete(t.id);
   await this.wrapUp(a,t,'话题已重新开始');
-  try{await this.removeWorkspaceOf(t);}catch(e){this.store.log('话题会话',`${t.agentName}：未能删除工作目录，${brief(e)}`,'error');}
+  try{await this.removeWorkspaceOf(t);}catch(e){this.store.log('Agent 会话',`${t.agentName}：未能删除工作目录，${brief(e)}`,'error');}
   delete t.cwd;
   if('projectId' in change){delete t.routed;Object.assign(t,change);}
   else Object.assign(t,change,{machineId:this.store.data.agentConfigs.find(c=>c.id===change.agentConfigId)!.machineId});
@@ -520,11 +520,11 @@ export class Topics{
   if(evt.action?.value?.adopt)return this.choose(a,evt);
   if(evt.action?.value?.restart)return this.change(a,evt);
   const v=evt.action?.value||{},t=this.store.data.topics.find(x=>x.appId===a.id&&x.cards?.some(c=>c.messageId===evt.messageId)),c=t?.cards.find(x=>x.messageId===evt.messageId&&x.requestId===v.request);
-  if(!t||!c)return toast('info','这个请求已结束');
+  if(!t||!c)return toast('info','这个请求已失效');
   const key=t.id+' '+c.requestId;if(this.answering.has(key))return toast('info','正在提交，请稍候');
   const complete=v.decision!=null||answered(v.questions,evt.action.formValue);
   this.answering.set(key,this.settle(a,t,c,evt,complete).finally(()=>this.answering.delete(key)));
-  return t.state!=='ready'?toast('info','这个请求已结束'):complete?toast('info','正在提交'):toast('warning','请回答所有问题');
+  return t.state!=='ready'?toast('info','这个请求已失效'):complete?toast('info','正在提交'):toast('warning','请回答所有问题');
  }
  // Answers record c from a click, or draws its card again when a question is left unanswered. The request is read from Herdr first:
  // the card must still show it, and the record keeps only its title. Never rejects.
@@ -596,7 +596,7 @@ export class Topics{
    const m=this.store.data.machines.find(x=>x.id===v.machine);
    if(!m?.enabled)return await this.redraw(a,t,'所选的机器已断开，请重新选择');
    const {snapshot}=await this.herdr(m,['api','snapshot']),x=snapshot.agents.find(y=>y.pane_id===v.pane);
-   if(!x||!stillChosen(v,x))return await this.redraw(a,t,'所选的 Agent 已退出或已变化，请重新选择');
+   if(!x||!stillChosen(v,x))return await this.redraw(a,t,'所选的 Agent 已退出或已被替换，请重新选择');
    if(this.held(m.id,x.pane_id))return await this.redraw(a,t,'所选的 Agent 已被其他话题接管，请重新选择');
    const called=nameOf(this.free(m,snapshot),x);
    // Held from here until the ready topic holds it, so that another selection cannot take it while Herdr is called.
@@ -627,11 +627,11 @@ export class Topics{
  async stop(a:App,t:Topic){
   try{
    const agent=await this.alive(a,t);if(!agent)return;
-   if(!['working','blocked'].includes(agent.agent_status))return await this.notify(a,t,'Agent 当前没有在运行的一轮');
+   if(!['working','blocked'].includes(agent.agent_status))return await this.notify(a,t,'Agent 当前空闲，无需停止');
    await this.herdr(this.target(t),['agent','send-keys',t.paneId,'esc']);
   }catch(e){this.store.log('话题停止',`${t.agentName}：未能停止，${brief(e)}`,'error');return await this.notify(a,t,'未能停止 Agent，请稍后重试');}
   this.store.log('话题停止',`${t.agentName}：已发送停止`);
-  if(t.cot)await this.closeCot(t,[runFinished(run(t),'interrupted')],'error');else await this.notify(a,t,'已停止 Agent 当前这一轮');
+  if(t.cot)await this.closeCot(t,[runFinished(run(t),'interrupted')],'error');else await this.notify(a,t,'已停止 Agent 当前的工作');
  }
  // /stop as a root message of binding b, which the stop button of a COT sends in a direct chat: it stops the one ready topic of the chat
  // whose COT is open; with none or several the bot asks in the message's thread for /stop in the topic. It never opens a topic. Never rejects.
@@ -650,7 +650,7 @@ export class Topics{
    if(await this.alive(a,t).catch(()=>true))await this.notify(a,t,'未能结束接管，请稍后重试');return;
   }
   this.store.log('话题接管',`${b.name}：已结束接管 ${this.machine(t.machineId).name} 上的 ${t.agentName}`);
-  await this.end(a,t,'已结束接管。Agent 仍在终端的 pane 里运行，话题里的消息不再发给它');
+  await this.end(a,t,'已结束接管。Agent 仍在终端的 pane 里运行，话题里的消息不再发给它','已结束接管');
  }
  // Drops the topics of a removed binding. Their agents keep running; those of ready topics stop waiting for Feishu's answers, and their open
  // COT shows the run failed. The directories of their attachments are removed, also those that an ended topic failed to remove, and so are
@@ -666,8 +666,8 @@ export class Topics{
    });
    if(t.state==='ready'){
     try{await this.herdr(this.target(t),remoteAnswers(t.paneId,false));}
-    catch(e){this.store.log('话题会话',`${t.agentName}：未能关闭外部回答，${brief(e)}`,'error');}
-    if(t.cot)await this.closeCot(t,[runError('话题已结束')],'error');
+    catch(e){this.store.log('Agent 会话',`${t.agentName}：未能关闭外部回答，${brief(e)}`,'error');}
+    if(t.cot)await this.closeCot(t,[runError('会话绑定已移除')],'error');
    }
    await this.clean(t);
   }));

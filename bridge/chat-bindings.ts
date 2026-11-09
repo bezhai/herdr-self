@@ -82,7 +82,7 @@ export class ChatBindings{
   if(!known)return;
   try{
    return projectOf(await this.askModel(choosingPrompt(w.name,projects)),projects);
-  }catch(e){this.store.log('会话绑定',`${a.name}：未能猜出群的项目，${e.message}`,'error');}
+  }catch(e){this.store.log('会话绑定',`${a.name}：未能为群选出项目，${e.message}`,'error');}
  }
  // A click on 绑定 by someone on the app's allowlist. It answers at once: a binding is made here and then the rest follows (see finish).
  // Without a project (group) or a configuration the card is drawn again with the choices kept, so that the next click is not dropped as a

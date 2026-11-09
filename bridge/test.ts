@@ -378,7 +378,7 @@ test('a project has a name, a description, repositories, skills of the platform 
  const {id:bareId,...bare}=normalizeProject({name:'管家'},projectData());assert.deepEqual(bare,{name:'管家',description:'',repos:[],skills:[],workMode:'isolated'});
  for(const name of ['',' ',undefined,'a'.repeat(61)])assert.throws(()=>normalizeProject({name},projectData()),/字段为空或过长/);
  assert.throws(()=>normalizeProject({name:'a',description:'x'.repeat(501)},projectData()),/^Error: 描述过长$/);assert.throws(()=>normalizeProject({name:'a',description:5},projectData()),/^Error: 描述过长$/);
- for(const workMode of ['both','ISOLATED','',null,['shared'],5])assert.throws(()=>normalizeProject({name:'a',workMode},projectData()),/^Error: 话题目录无效$/,String(workMode));
+ for(const workMode of ['both','ISOLATED','',null,['shared'],5])assert.throws(()=>normalizeProject({name:'a',workMode},projectData()),/^Error: 工作目录选项无效$/,String(workMode));
  for(const repo of ['','-oProxyCommand=x','ext::sh -c id','/srv/repo','~/repo','file:///srv/repo','http://','git@host','a b','https://host/a b','https://host/a\nb',5,null])
   assert.throws(()=>normalizeProject({name:'a',repos:[repo]},projectData()),/^Error: 仓库地址无效$/,String(repo));
  for(const repos of ['https://host/a',{}])assert.throws(()=>normalizeProject({name:'a',repos},projectData()),/^Error: 仓库地址无效$/);
@@ -670,7 +670,7 @@ test('the console writes the SKILL.md of a skill as text: a new skill has that f
 test('a skill is refused, and nothing changes, without a SKILL.md whose frontmatter names it as its directory and describes it, with a name or a path that is not allowed, with content that is not base64, or when its files hold more than the limit together',()=>{
  const f=skillsFixture(),ok=skillText('alpha','a');try{
   for(const name of ['Alpha','../x','a b','-a','a-','a--b','a.b','','a'.repeat(65)])assert.throws(()=>f.skills.put(name,encoded({'SKILL.md':skillText(name,'a')})),/^Error: skill 名称无效/,name);
-  for(const [files,error] of [[{},/^Error: skill 缺少 SKILL\.md$/],[{'SKILL.md':'# alpha\n'},/^Error: SKILL\.md 开头没有 frontmatter/],[{'SKILL.md':'---\nname: alpha\ndescription: a\n'},/^Error: SKILL\.md 开头没有 frontmatter/],
+  for(const [files,error] of [[{},/^Error: skill 缺少 SKILL\.md$/],[{'SKILL.md':'# alpha\n'},/^Error: SKILL\.md 开头缺少 frontmatter/],[{'SKILL.md':'---\nname: alpha\ndescription: a\n'},/^Error: SKILL\.md 开头缺少 frontmatter/],
    [{'SKILL.md':skillText('beta','a')},/^Error: SKILL\.md 的 frontmatter 里 name 是 beta，必须和 skill 名称 alpha 一致$/],[{'SKILL.md':skillText('','a')},/^Error: SKILL\.md 的 frontmatter 里 name 是空的，必须和 skill 名称 alpha 一致$/],[{'SKILL.md':'---\nname: alpha\n---\n'},/^Error: SKILL\.md 的 frontmatter 缺少 description/],
    [{'SKILL.md':skillText('alpha','x'.repeat(1025))},/^Error: SKILL\.md 的 frontmatter 缺少 description，或者超过 1024 个字符$/],
    ...['../x','/abs','a//b','./a','a/../b','.herdr-bridge-skill'].map((p):[Record<string,string>,RegExp]=>[{'SKILL.md':ok,[p]:''},new RegExp('^Error: 文件路径无效：'+p.replace(/[./]/g,'\\$&')+'$')])] satisfies [Record<string,string>,RegExp][])
@@ -991,7 +991,7 @@ test('a new topic creates the binding workspace, names its root tab after the to
   assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_1',machineId:'m',projectId:'p',agentConfigId:'c',routed:true,task:{messageId:'om_1',content:' '+text+'\n'},startCard:'om_start_1',cwd:'~/work',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',title,state:'ready',error:'',messageIds:['om_1'],replySeq:0,reactions:[],cards:[],
    cot:{cotId:'c1',messageId:'om_cot_1',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false}});
   assert.deepEqual(new Store(f.dir).data.bindings[0].workspaces,{m:'w1'});assert.equal(new Store(f.dir).data.topics[0].state,'ready');
-  assert.deepEqual(f.replies,[]);assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['话题会话','info',`个人助手：已在 cpu2 启动 ${agentName}`],['消息投递','info',`bot → 个人助手：已发送到 ${agentName}`]]);
+  assert.deepEqual(f.replies,[]);assert.deepEqual(f.store.data.logs.map(l=>[l.kind,l.level,l.message]),[['Agent 会话','info',`个人助手：已在 cpu2 启动 ${agentName}`],['消息投递','info',`bot → 个人助手：已发送到 ${agentName}`]]);
  }finally{f.close();}
 });
 test('another topic opens a tab in the same workspace and turns on remote answers for its pane; replies in a topic prompt its pane without a new tab',async()=>{
@@ -1132,7 +1132,7 @@ test('when the cheap model fails, says nothing usable or the task has no text, a
   const f=topicFixture();withProjects(f,genvi);f.b.defaultProjectId='g';f.fake.model=model instanceof Error?()=>model:model;try{
    await f.send({messageId:'om_1',content,resources:[{type:'image',fileKey:'img_a'}]});
    const [t]=f.store.data.topics;assert.equal(t.state,'ready',why);assert.match(t.branch!,/^topic\/[a-z]+-[a-z]+-[0-9a-f]{4}$/);assert.equal((f.prepared[0][1] as Sent).branch,t.branch);
-   assert.deepEqual(f.store.data.logs.find(l=>l.kind==='话题会话'&&l.message.includes('起名'))?.message,`个人助手：起名失败（${why}），改用随机分支名`);
+   assert.deepEqual(f.store.data.logs.find(l=>l.kind==='Agent 会话'&&l.message.includes('起名'))?.message,`个人助手：起名失败（${why}），改用随机分支名`);
    assert.ok(cardText(f.starts[0][1]).includes('分支 '+t.branch));
   }finally{f.close();}
  }
@@ -1278,7 +1278,7 @@ test('the clicks on a first card that cannot be followed get a toast and change 
  const f=await restartable(),{t}=f;try{
   assert.deepEqual(f.choose('om_other','project','pr'),toast('info','这张卡片已失效'));
   assert.deepEqual(f.choose('om_start_1','project','gone'),toast('warning','所选的项目已不存在'));assert.deepEqual(f.choose('om_start_1','agentConfig','gone'),toast('warning','所选的 Agent 配置已不存在'));
-  assert.deepEqual(f.choose('om_start_1','project','g'),toast('info','话题已经在使用这个设置'));assert.deepEqual(f.choose('om_start_1','agentConfig','c'),toast('info','话题已经在使用这个设置'));
+  assert.deepEqual(f.choose('om_start_1','project','g'),toast('info','话题已在使用项目 genvi'));assert.deepEqual(f.choose('om_start_1','agentConfig','c'),toast('info','话题已在使用 Agent 配置 cpu2 · Claude'));
   assert.deepEqual([f.h.calls,f.dropped,f.prepared],[[],[],[]]);
   f.h.on['agent start']=async(args,run)=>{await later(20);return run(args);};
   assert.deepEqual(f.choose('om_start_1','project','pr'),toast('info','正在重新开始话题'));assert.deepEqual(f.choose('om_start_1','agentConfig','c2'),toast('info','正在重新开始，请稍候'));
@@ -1389,7 +1389,7 @@ test('a placement of skills that fails is only logged, and the topic starts and 
   assert.equal(f.store.data.topics[0].state,'ready');assert.deepEqual(f.h.calls.at(-1),['agent','prompt','w1:p1','one']);assert.deepEqual(f.replies,[]);
   f.h.placing=['/home/u/work/.claude/skills/bridge-schedule'];await f.send({messageId:'om_2',content:'two'});
   assert.equal(f.store.data.topics[1].state,'ready');
-  assert.deepEqual(skillLogs(f),[['error',`个人助手：未能在 ~/work 放置 skill，${raw}`],['info','个人助手：/home/u/work/.claude/skills/bridge-schedule 已有同名 skill，不是 Bridge 放的，没有改动']]);
+  assert.deepEqual(skillLogs(f),[['error',`个人助手：未能在 ~/work 放置 skill，${raw}`],['info','个人助手：/home/u/work/.claude/skills/bridge-schedule 已存在同名 skill，不是 Bridge 写入的，未改动']]);
  }finally{f.close();}
 });
 test('a topic whose named agent is gone is closed with one notice, and the messages that follow start it again in a new agent, which they are prompted to',async()=>{
@@ -1714,7 +1714,7 @@ test('sync forwards replies only for ready topics of its machine, bridge-opened 
   assert.deepEqual(f.replies,[['a','oc_1','om_ready',replyOf('hi')],['a','oc_1','om_adopted',replyOf('adopted hi')]]);
  }finally{f.close();}
 });
-const endedNotice=notice('该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话'),adoptedGone=notice('被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管');
+const endedNotice=notice('该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话'),adoptedGone=notice('被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管');
 test('a ready topic ends in sync with one notice once a fresh agent list confirms that its pane closed or its agent no longer has remote answers on; a stale list ends nothing',async()=>{
  const f=await readyTopic();try{
   const t=f.t,agent=f.h.agents[0];assert.equal(agent.remote_answers,true);
@@ -1833,7 +1833,7 @@ const ask:HerdrRequest={id:3,kind:'question',tool_name:'AskUserQuestion',input_p
  {question:'用哪种数据库？',header:'数据库',options:[{label:'PostgreSQL',description:'关系型'},{label:'SQLite'}],multi_select:false},
  {question:'需要哪些功能？',options:[{label:'登录'},{label:'搜索'},{label:'导出'}],multi_select:true}]};
 const cardOf=(title:string,template:string,elements:object[])=>({schema:'2.0',config:{update_multi:true},header:{title:{tag:'plain_text',content:title},template},body:{elements}});
-const expiredCard=(title:string)=>cardOf(title,'grey',[plainText('已失效（超时、已在终端处理或本轮已结束）')]);
+const expiredCard=(title:string)=>cardOf(title,'grey',[plainText('已失效，Agent 不再等待这个请求')]);
 // Every element with the tag, at any depth.
 const find=(x:any,tag:string):Record<string,any>[]=>x&&typeof x==='object'?[...x.tag===tag?[x]:[],...Object.values(x).flatMap(v=>find(v,tag))]:[];
 // A ready topic whose agent in w1:p1 waits on requests. pending(ids) is an agent list that reports those request ids; cards() the cards
@@ -2014,7 +2014,7 @@ test('a question card with a question left unanswered gets a toast, is not submi
 test('a click on a card without a record gets a toast that the request has ended; a card in a topic that is no longer ready shows 已失效',async()=>{
  const f=await requestTopic(bash);try{
   await f.topics.sync(f.m,f.pending());const [card]=f.cards();
-  const ended={toast:{type:'info',content:'这个请求已结束'}};
+  const ended={toast:{type:'info',content:'这个请求已失效'}};
   assert.deepEqual(f.click('om_other',f.value(card,'allow')),ended);assert.deepEqual(f.click('om_bot_1',{...f.value(card,'allow'),request:9}),ended);
   f.t.state='closed';assert.deepEqual(f.click('om_bot_1',f.value(card,'allow')),ended);await f.settled();
   assert.deepEqual(f.updated,[['a','om_bot_1',expiredCard('权限确认 · Bash')]]);assert.deepEqual(f.records(),[]);assert.deepEqual(f.h.calls,[['agent','requests','w1:p1']]);
@@ -2170,12 +2170,12 @@ test('a topic that ends while its COT is open shows the COT failed and completes
  const f=await readyTopic();try{
   f.h.agents.length=0;await f.topics.sync(f.m,[]);
   assert.equal(f.t.state,'closed');assert.deepEqual(f.replies.map(r=>r[3]),[endedNotice]);
-  assert.deepEqual(cotLog(f),[['update','c1',['RUN_ERROR',{message:'话题已结束'}]],['complete','c1','error']]);assert.equal(new Store(f.dir).data.topics[0].cot,undefined);
+  assert.deepEqual(cotLog(f),[['update','c1',['RUN_ERROR',{message:'Agent 会话已退出'}]],['complete','c1','error']]);assert.equal(new Store(f.dir).data.topics[0].cot,undefined);
  }finally{f.close();}
  const g=await readyTopic();try{
   const request=g.topics.request;g.topics.request=async(a,o)=>{if(o.method!=='PUT')return request(a,o);g.api.push(o as ApiRequest);throw Error('飞书未连接');};
   g.h.agents.length=0;await g.topics.sync(g.m,[]);
-  assert.deepEqual(cotLog(g),[['update','c1',['RUN_ERROR',{message:'话题已结束'}]],['complete','c1','error']]);assert.deepEqual(cotLogs(g),[['error',`${g.t.agentName}：COT 未能更新，飞书未连接`]]);
+  assert.deepEqual(cotLog(g),[['update','c1',['RUN_ERROR',{message:'Agent 会话已退出'}]],['complete','c1','error']]);assert.deepEqual(cotLogs(g),[['error',`${g.t.agentName}：COT 未能更新，飞书未连接`]]);
  }finally{g.close();}
 });
 test('an open COT is kept on disk with its topic and completed by the first sync after a restart when its turn ended meanwhile',async()=>{
@@ -2197,14 +2197,14 @@ test('/stop in a ready topic sends Esc to its working or blocked agent and shows
   assert.deepEqual(stopped(f),[['info',`${f.t.agentName}：已发送停止`]]);assert.deepEqual(f.t.messageIds,['om_1','om_2']);
   f.h.agents[0].agent_status='blocked';f.h.calls.length=0;f.api.length=0;
   await f.send({messageId:'om_3',rootId:'om_1',content:'/stop'});
-  assert.deepEqual(f.h.calls,[['agent','list'],['agent','send-keys','w1:p1','esc']]);assert.deepEqual(f.api,[]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('已停止 Agent 当前这一轮')]);
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','send-keys','w1:p1','esc']]);assert.deepEqual(f.api,[]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('已停止 Agent 当前的工作')]);
  }finally{f.close();}
 });
 test('/stop without a running turn sends no key and replies a notice; a /stop that cannot reach the agent is logged with a notice',async()=>{
  const f=await readyTopic();try{
   for(const status of ['idle','done','unknown']){f.h.agents[0].agent_status=status;await f.send({messageId:'om_'+status,rootId:'om_1',content:'/stop'});}
   assert.deepEqual(f.h.calls,[['agent','list'],['agent','list'],['agent','list']]);assert.deepEqual(f.api,[]);assert.equal(f.t.cot!.cotId,'c1');
-  assert.deepEqual(f.replies.map(r=>r[3]),Array(3).fill(notice('Agent 当前没有在运行的一轮')));
+  assert.deepEqual(f.replies.map(r=>r[3]),Array(3).fill(notice('Agent 当前空闲，无需停止')));
   f.h.agents[0].agent_status='working';f.replies.length=0;f.h.on['agent send-keys']=()=>{throw coded('agent_not_ready','agent w1:p1 is not ready');};
   await f.send({messageId:'om_4',rootId:'om_1',content:'/stop'});
   assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能停止 Agent，请稍后重试')]);assert.deepEqual(stopped(f),[['error',`${f.t.agentName}：未能停止，agent w1:p1 is not ready`]]);assert.equal(f.t.cot!.cotId,'c1');
@@ -2361,7 +2361,7 @@ test('an agent without a reported session gets a warning in the intro; an agent 
   await f.send({messageId:'om_cmd',content:'/adopt'});f.h.calls.length=0;f.replies.length=0;
   f.pick('om_bot_1',codexChoice);await f.settled();
   assert.deepEqual(f.h.calls,[['api','snapshot'],['pane','remote-answers','w2:p2','on']]);
-  assert.deepEqual(f.replies.map(r=>r[3]),[notice(['已接管 cpu2 上的 Codex · 出题','工作目录：/srv/app',...introLines,'这个 Agent 没有向 Herdr 上报会话（例如连着后台 app-server 的 Codex），它的回复可能无法转回飞书。'].join('\n'),
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice(['已接管 cpu2 上的 Codex · 出题','工作目录：/srv/app',...introLines,'这个 Agent 没有向 Herdr 上报 Agent 会话（例如使用后台 app-server 的 Codex），它的回复可能无法转发到飞书。'].join('\n'),
    '已接管 cpu2 上的 Codex · 出题 工作目录：/srv/app 话题里的消息会发给这个 Agent，它的回复会转到这里。发送 /release 结束接管，Agent 会继续在终端的 pan…')]);
   const t=f.topic('om_cmd')!;assert.deepEqual([t!.paneId,t!.agentName,t!.title,t!.replySeq,t!.adopted],['w2:p2','出题','接管 · 出题',0,{picker:'om_bot_1',kind:'codex'}]);
  }finally{f.close();}
@@ -2371,12 +2371,12 @@ test('a selection whose agent exited or changed meanwhile, whose remote answers 
   await f.send({messageId:'om_cmd',content:'/adopt'});const t=f.topic('om_cmd')!;
   f.h.agents=f.h.agents.filter(a=>a.pane_id!=='w2:p1');f.h.calls.length=0;
   assert.deepEqual(f.pick('om_bot_1',claudeChoice),{toast:{type:'info',content:'正在接管'}});await f.settled();
-  assert.deepEqual(f.updated,[['a','om_bot_1',cardOf('接管 Agent','blue',[plainText('所选的 Agent 已退出或已变化，请重新选择'),pickerForm(2,codexOption),cpu1Down])]]);
+  assert.deepEqual(f.updated,[['a','om_bot_1',cardOf('接管 Agent','blue',[plainText('所选的 Agent 已退出或已被替换，请重新选择'),pickerForm(2,codexOption),cpu1Down])]]);
   assert.equal(f.h.calls.some(c=>c[0]==='pane'),false);assert.deepEqual([t!.state,t!.paneId],['choosing','']);
   // The same pane with another session holds another agent.
   f.h.agents.push({...structuredClone(claudePane),agent_session:{...claudePane.agent_session,value:'s-other'}});f.h.calls.length=0;
   f.pick('om_bot_1',claudeChoice,2);await f.settled();
-  assert.deepEqual(f.updated.at(-1)![2].body.elements[0],plainText('所选的 Agent 已退出或已变化，请重新选择'));assert.equal(f.h.calls.some(c=>c[0]==='pane'),false);assert.equal(t!.state,'choosing');
+  assert.deepEqual(f.updated.at(-1)![2].body.elements[0],plainText('所选的 Agent 已退出或已被替换，请重新选择'));assert.equal(f.h.calls.some(c=>c[0]==='pane'),false);assert.equal(t!.state,'choosing');
   f.h.on['pane remote-answers']=()=>{throw Error('连接超时，请检查 SSH 与 Herdr 状态');};
   f.pick('om_bot_1',codexChoice,3);await f.settled();
   assert.deepEqual(f.updated.at(-1)![2].body.elements[0],plainText('接管失败，请稍后重试'));assert.deepEqual([t!.state,t!.paneId],['choosing','']);
@@ -2463,7 +2463,7 @@ test('/release in an adopted topic turns off its remote answers and ends the top
   assert.deepEqual(f.replies.map(r=>r.slice(2)),[['om_cmd',notice('已结束接管。Agent 仍在终端的 pane 里运行，话题里的消息不再发给它')]]);
   assert.equal(f.h.agents.find(a=>a.pane_id==='w2:p1')!.remote_answers,undefined);assert.deepEqual(adoptLogs(f).at(-1),['info','个人助手：已结束接管 cpu2 上的 赤尾重构']);
   // The command gets no reaction; the COT of the turn still running ends as failed with the topic.
-  assert.deepEqual(f.reacted,[]);assert.deepEqual(f.unreacted,[]);assert.deepEqual(cotLog(f),[['update','c2',['RUN_ERROR',{message:'话题已结束'}]],['complete','c2','error']]);
+  assert.deepEqual(f.reacted,[]);assert.deepEqual(f.unreacted,[]);assert.deepEqual(cotLog(f),[['update','c2',['RUN_ERROR',{message:'已结束接管'}]],['complete','c2','error']]);
   f.h.calls.length=0;await f.send({messageId:'om_4',rootId:'om_cmd',content:'还在吗'});await f.send({messageId:'om_5',rootId:'om_cmd',content:'/release'});
   assert.deepEqual(f.h.calls,[]);assert.equal(f.replies.length,1);
  }finally{f.close();}
@@ -2524,7 +2524,7 @@ test('removing a binding drops its topics, turns off remote answers for those li
   await f.topics.unbind('b');
   assert.deepEqual(f.store.data.topics,[other]);assert.deepEqual(new Store(f.dir).data.topics.map(t=>t.id),['other']);
   assert.deepEqual(callsOn(f),[['m','pane','remote-answers','w1:p1','off'],['m','pane','remote-answers','w2:p1','off']]);
-  assert.equal(cot!.cotId,'c1');assert.deepEqual(cotLog(f),[['update','c1',['RUN_ERROR',{message:'话题已结束'}]],['complete','c1','error']]);
+  assert.equal(cot!.cotId,'c1');assert.deepEqual(cotLog(f),[['update','c1',['RUN_ERROR',{message:'会话绑定已移除'}]],['complete','c1','error']]);
   f.h.on['pane remote-answers']=()=>{throw Error('连接超时，请检查 SSH 与 Herdr 状态');};await f.topics.unbind('other');
   assert.deepEqual(f.store.data.topics,[]);assert.match(f.store.data.logs.at(-1)!.message,/未能关闭.*连接超时/);
  }finally{f.close();}
@@ -2767,7 +2767,7 @@ test('a schedule in mode new skips a time while the agent of its previous run wo
   f.h.agents[0].agent_status='idle';f.at('2026-11-06T10:20:00+08:00');await f.schedules.tick();
   assert.deepEqual(f.posted.map(p=>p[2]),[runNotice(s,1,'2026-11-06 10:05'),runNotice(s,2,'2026-11-06 10:20')]);
   assert.deepEqual(f.schedules.runs(s.id).map(({due,outcome,n,reason})=>[when(due,'Asia/Shanghai'),outcome,n,reason]),
-   [['2026-11-06 10:05','started',1,undefined],['2026-11-06 10:10','skipped',undefined,'上次还没结束，跳过'],['2026-11-06 10:15','skipped',undefined,'上次还没结束，跳过'],['2026-11-06 10:20','started',2,undefined]]);
+   [['2026-11-06 10:05','started',1,undefined],['2026-11-06 10:10','skipped',undefined,'上一次运行还没有结束'],['2026-11-06 10:15','skipped',undefined,'上一次运行还没有结束'],['2026-11-06 10:20','started',2,undefined]]);
  }finally{f.close();}
 });
 test('the topics that the runs of a schedule in mode new open start the way every topic does: a group\'s project gets a worktree of its own and a branch named from the task at each run, and the first card is under the card of the run',async()=>{
@@ -2808,7 +2808,7 @@ test('at its time a schedule in mode into posts the card of the run into the thr
   assert.deepEqual(f.h.calls,[['agent','list'],['agent','list'],['agent','prompt','w1:p1','回复当前时间']]);assert.deepEqual(cotLog(f)[0],['create','om_bot_2']);assert.equal(t.cot!.origin,'om_bot_2');
   for(const [status,time] of [['working','10:15'],['blocked','10:20']]){f.h.agents[0].agent_status=status;f.at(`2026-11-06T${time}:00+08:00`);await f.schedules.tick();}
   assert.equal(f.h.calls.filter(c=>c[1]==='prompt').length,1);assert.equal(f.replies.length,1);
-  assert.deepEqual(f.schedules.runs(s.id).map(r=>[r.outcome,r.n,r.reason]),[['started',1,undefined],['started',2,undefined],['skipped',undefined,'上次还没结束，跳过'],['skipped',undefined,'上次还没结束，跳过']]);
+  assert.deepEqual(f.schedules.runs(s.id).map(r=>[r.outcome,r.n,r.reason]),[['started',1,undefined],['started',2,undefined],['skipped',undefined,'上一次运行还没有结束'],['skipped',undefined,'上一次运行还没有结束']]);
  }finally{f.close();}
 });
 test('a schedule in mode into whose topic has ended skips the time and pauses, with a notice in the thread: its agent is gone, the topic was closed before, or the topic went with its binding, which leaves no thread to tell',async()=>{
@@ -2818,25 +2818,25 @@ test('a schedule in mode into whose topic has ended skips the time and pauses, w
   const [a,b]=[gone,closed].map(t=>f.schedules.add({...daily,mode:'into',topicId:t.id,cron:'*/5 * * * *'}));
   f.h.agents=f.h.agents.filter(x=>x.pane_id!=='w1:p1');closed.state='closed';f.replies.length=0;f.h.calls.length=0;
   f.at('2026-11-06T10:05:00+08:00');await f.schedules.tick();
-  const paused=(s:{id:string})=>notice(`定时任务 ${s.id.slice(0,8)} 已暂停：该话题所在的 Agent 会话已退出`),thread=(root:string)=>f.replies.filter(r=>r[2]===root).map(r=>r[3]);
+  const paused=(s:{id:string})=>notice(`定时任务 ${s.id.slice(0,8)} 已暂停：该话题当前没有运行中的 Agent 会话`),thread=(root:string)=>f.replies.filter(r=>r[2]===root).map(r=>r[3]);
   assert.deepEqual([thread('om_1'),thread('om_2'),f.replies.length],[[notice('该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话'),paused(a)],[paused(b)],3]);
   assert.deepEqual([gone.state,closed.state],['closed','closed']);assert.deepEqual(f.h.calls,[['agent','list']]);
-  assert.deepEqual([a,b].map(s=>f.schedules.runs(s.id).map(r=>[r.outcome,r.reason])),[[['skipped','话题已结束，定时任务已暂停']],[['skipped','话题已结束，定时任务已暂停']]]);
+  assert.deepEqual([a,b].map(s=>f.schedules.runs(s.id).map(r=>[r.outcome,r.reason])),[[['skipped','话题当前没有运行中的 Agent 会话，定时任务已暂停']],[['skipped','话题当前没有运行中的 Agent 会话，定时任务已暂停']]]);
   assert.deepEqual(new Store(f.dir).data.schedules.map(s=>s.paused),[true,true]);
   // Removing the binding drops its topics; the schedule keeps its binding id and pauses at its next time, without a thread to tell.
   const c=f.schedules.add({...daily,mode:'into',topicId:unbound.id,cron:'*/5 * * * *'});await f.topics.unbind('b');f.replies.length=0;
   f.at('2026-11-06T10:10:00+08:00');await f.schedules.tick();
-  assert.deepEqual(f.replies,[]);assert.deepEqual(f.schedules.runs(c.id).map(r=>[r.outcome,r.reason]),[['skipped','话题已结束，定时任务已暂停']]);assert.equal(f.store.data.schedules[2].paused,true);
+  assert.deepEqual(f.replies,[]);assert.deepEqual(f.schedules.runs(c.id).map(r=>[r.outcome,r.reason]),[['skipped','话题当前没有运行中的 Agent 会话，定时任务已暂停']]);assert.equal(f.store.data.schedules[2].paused,true);
   // Paused schedules do not run.
   f.at('2026-11-06T10:15:00+08:00');await f.schedules.tick();assert.deepEqual(f.store.data.schedules.map(s=>f.schedules.runs(s.id).length),[1,1,1]);
-  assert.deepEqual(scheduleLogs(f).filter(l=>/暂停/.test(l[1])).map(l=>l[1].replace(/[0-9a-f]{8}/g,'<id>')),['个人助手：定时任务 <id> 的话题已结束，已暂停','个人助手：定时任务 <id> 的话题已结束，已暂停','个人助手：定时任务 <id> 的话题已结束，已暂停']);
+  assert.deepEqual(scheduleLogs(f).filter(l=>/暂停/.test(l[1])).map(l=>l[1].replace(/[0-9a-f]{8}/g,'<id>')),['个人助手：定时任务 <id> 所在的话题没有运行中的 Agent 会话，已暂停','个人助手：定时任务 <id> 所在的话题没有运行中的 Agent 会话，已暂停','个人助手：定时任务 <id> 所在的话题没有运行中的 Agent 会话，已暂停']);
  }finally{f.close();}
 });
 test('a schedule in mode new whose binding was removed skips the time and pauses',async()=>{
  const f=scheduleFixture();try{
   f.at('2026-11-06T08:00:00+08:00');const s=f.schedules.add(daily);f.store.data.bindings=[];
   f.at('2026-11-06T09:00:00+08:00');await f.schedules.tick();
-  assert.deepEqual([f.posted,f.h.calls],[[],[]]);assert.deepEqual(f.schedules.runs(s.id).map(r=>[r.outcome,r.reason]),[['skipped','绑定已移除，定时任务已暂停']]);assert.equal(f.store.data.schedules[0].paused,true);
+  assert.deepEqual([f.posted,f.h.calls],[[],[]]);assert.deepEqual(f.schedules.runs(s.id).map(r=>[r.outcome,r.reason]),[['skipped','会话绑定已移除，定时任务已暂停']]);assert.equal(f.store.data.schedules[0].paused,true);
  }finally{f.close();}
 });
 test('after Bridge was down, a schedule runs only its latest missed time, and only when that is at most 2 hours late; the earlier times are recorded as missed, once',async()=>{
@@ -2844,7 +2844,7 @@ test('after Bridge was down, a schedule runs only its latest missed time, and on
   f.at('2026-11-06T08:30:00+08:00');const hourly=f.schedules.add({...daily,cron:'0 * * * *'}),s=f.schedules.add(daily);
   // Down from 08:30 to 11:00: 09:00 and 10:00 were missed, 11:00 is on time.
   f.at('2026-11-06T11:00:00+08:00');await f.schedules.tick();
-  assert.deepEqual(f.schedules.runs(hourly.id).map(({due,last,outcome,reason})=>[when(due,'Asia/Shanghai'),last&&when(last,'Asia/Shanghai'),outcome,reason]),[['2026-11-06 09:00','2026-11-06 10:00','missed','Bridge 停机，错过'],['2026-11-06 11:00',undefined,'started',undefined]]);
+  assert.deepEqual(f.schedules.runs(hourly.id).map(({due,last,outcome,reason})=>[when(due,'Asia/Shanghai'),last&&when(last,'Asia/Shanghai'),outcome,reason]),[['2026-11-06 09:00','2026-11-06 10:00','missed','Bridge 当时没有运行'],['2026-11-06 11:00',undefined,'started',undefined]]);
   // The daily one is exactly 2 hours late, and runs.
   assert.deepEqual(f.schedules.runs(s.id).map(r=>[when(r.due,'Asia/Shanghai'),r.outcome]),[['2026-11-06 09:00','started']]);
   // Down from 11:00 to 11:30 two days later: the latest 09:00 is 2.5 hours late, and every time since is missed; ticking again records nothing.
@@ -2853,7 +2853,7 @@ test('after Bridge was down, a schedule runs only its latest missed time, and on
   assert.deepEqual(f.schedules.runs(hourly.id).slice(2).map(({due,last,outcome})=>[when(due,'Asia/Shanghai'),last&&when(last,'Asia/Shanghai'),outcome]),[['2026-11-06 12:00','2026-11-08 10:00','missed'],['2026-11-08 11:00',undefined,'started']]);
   assert.equal(f.posted.length,3);
   // One missed time alone has no last.
-  f.at('2026-11-09T11:01:00+08:00');await f.schedules.tick();assert.deepEqual(f.schedules.runs(s.id).at(-1),{due:at('2026-11-09T09:00:00+08:00'),at:at('2026-11-09T11:01:00+08:00'),outcome:'missed',reason:'Bridge 停机，错过'});
+  f.at('2026-11-09T11:01:00+08:00');await f.schedules.tick();assert.deepEqual(f.schedules.runs(s.id).at(-1),{due:at('2026-11-09T09:00:00+08:00'),at:at('2026-11-09T11:01:00+08:00'),outcome:'missed',reason:'Bridge 当时没有运行'});
  }finally{f.close();}
 });
 test('a paused schedule does not run, and resuming it counts its times from then on without making up for the pause',async()=>{
@@ -2876,7 +2876,7 @@ test('a schedule in mode new keeps the topics of its latest 3 runs: older ones e
   // Run 5: the second run's topic goes; the first stays for the person.
   f.replies.length=0;await runAt('2026-11-06T10:25:00+08:00');
   assert.deepEqual(f.h.calls.filter(c=>c[1]==='close'),[['pane','close',topic(2).paneId]]);assert.deepEqual(f.store.data.topics.map(t=>[t.scheduled!.n,t.state]),[[1,'ready'],[2,'closed'],[3,'ready'],[4,'ready'],[5,'ready']]);
-  const retired=`这个话题来自定时任务 ${s.id.slice(0,8)}，定时任务只保留最近 3 次运行的话题，Agent 已关闭`;
+  const retired=`定时任务 ${s.id.slice(0,8)} 只保留最近 3 次运行的话题，这个话题的 Agent 会话已关闭`;
   assert.deepEqual(f.replies.map(r=>r.slice(2)),[[topic(2).rootId,notice(retired)]]);
   // The agent of the third run exits; a day after the person wrote, run 6 retires the first and leaves the third, which has ended.
   f.h.agents=f.h.agents.filter(a=>a.pane_id!==topic(3).paneId);await f.topics.sync(f.m,f.h.agents);assert.equal(topic(3).state,'closed');
@@ -2953,8 +2953,8 @@ const weekdays930={cron:'30 9 * * 1-5',timeZone:'Asia/Shanghai',task:'总结昨�
 const confirmButtons=(id:string)=>({tag:'column_set',horizontal_spacing:'8px',columns:[['确认','primary','confirm'],['取消','default','cancel']].map(([content,type,choice])=>({tag:'column',width:'auto',elements:[{tag:'button',text:{tag:'plain_text',content},type,behaviors:[{type:'callback',value:{schedule:choice,proposal:id}}]}]}))});
 const nextWeekdays=['2026-11-09 周一 09:30','2026-11-10 周二 09:30','2026-11-11 周三 09:30','2026-11-12 周四 09:30','2026-11-13 周五 09:30'];
 const aboutWeekdays=(task='总结昨天的提交')=>[plainText('时间：每周一至周五 09:30（Asia/Shanghai，cron：30 9 * * 1-5）'),plainText('接下来 5 次运行：\n'+nextWeekdays.join('\n')),plainText('任务：\n'+task)];
-const newTopicMode=plainText('模式：每次开新话题。每次运行时机器人在群里发一条消息，在它下面开一个新话题，交给一个新的 Agent'),intoThisMode=plainText('模式：发进这个话题。每次运行把任务发给这个话题里的 Agent，它记得之前的对话');
-const boundTo=plainText('绑定：个人助手');
+const newTopicMode=plainText('模式：每次开新话题。每次运行时新开一个话题，由新的 Agent 执行任务'),intoThisMode=plainText('模式：发进这个话题。每次运行把任务发给这个话题里的 Agent');
+const boundTo=plainText('会话绑定：个人助手');
 test('an agent is known by the machine whose client passed its request on and by its pane: a ready topic there whose agent is still linked; any other pane, machine, Herdr session or topic is refused, and a topic whose agent is gone ends',async()=>{
  const other:Machine={id:'m2',name:'cpu1',session:'default',enabled:true};
  const f=agentFixture({machines:[other]});try{
@@ -3034,12 +3034,12 @@ test('取消 drops a submitted schedule, a mode into schedule goes into the agen
   assert.deepEqual(f.store.data.schedules.map(s=>[s.mode,s.topicId]),[['into',t!.id]]);assert.equal(f.updated.at(-1)![2].body.elements[3].text.content,intoThisMode.text.content);
   // The topic ends while its card waits: confirming adds nothing and the card says why.
   await f.call('add',{...weekdays930,mode:'into',task:'再看一次'});const late=t!.proposal;
-  await f.topics.end(allowed,t,'结束');
-  assert.deepEqual(f.click(late!.id,'confirm'),{toast:{type:'error',content:'没有生效：该话题所在的 Agent 会话已退出，不能添加发进这个话题的定时任务'}});await f.drawn();
+  await f.topics.end(allowed,t,'结束','Agent 会话已退出');
+  assert.deepEqual(f.click(late!.id,'confirm'),{toast:{type:'error',content:'没有生效：该话题当前没有运行中的 Agent 会话，不能添加发进这个话题的定时任务'}});await f.drawn();
   assert.equal(f.store.data.schedules.length,1);
-  assert.deepEqual(f.updated.at(-1),['a',late!.messageId,cardOf('定时任务没有生效','red',[aboutWeekdays()[0],plainText('任务：\n再看一次'),intoThisMode,boundTo,plainText('没有生效：该话题所在的 Agent 会话已退出，不能添加发进这个话题的定时任务')])]);
+  assert.deepEqual(f.updated.at(-1),['a',late!.messageId,cardOf('定时任务没有生效','red',[aboutWeekdays()[0],plainText('任务：\n再看一次'),intoThisMode,boundTo,plainText('没有生效：该话题当前没有运行中的 Agent 会话，不能添加发进这个话题的定时任务')])]);
   // Mode new does not need the topic.
-  const n=await f.open('om_2');await f.call('add',weekdays930,n);const later=n!.proposal;await f.topics.end(allowed,n,'结束');
+  const n=await f.open('om_2');await f.call('add',weekdays930,n);const later=n!.proposal;await f.topics.end(allowed,n,'结束','Agent 会话已退出');
   f.click(later!.id,'confirm');await f.drawn();assert.deepEqual(f.store.data.schedules.map(s=>s.mode),['into','new']);
   for(const [value,label] of [[{schedule:'confirm',proposal:'gone'},'gone'],[{schedule:'later',proposal:late!.id},'choice'],[{},'empty']] satisfies [object,string][])
    assert.deepEqual(f.agents.click(allowed,{messageId:'om_x',chatId:'oc_1',operator:{openId:'ou_user'},action:{tag:'button',value}} as Clicked),{toast:{type:'info',content:'这张卡片已失效'}},label);
@@ -3172,8 +3172,8 @@ test('bridge-schedule sends its request to the Bridge client of its machine with
  const [first]=list.schedules,runs={schedule:first,runs:[
   {due:due('2026-11-06T09:30:00+08:00'),at:due('2026-11-06T09:30:05+08:00'),outcome:'started',n:1,topicId:'t3'},
   {due:due('2026-11-09T09:30:00+08:00'),at:due('2026-11-09T10:15:00+08:00'),outcome:'started',n:2,topicId:'t4'},
-  {due:due('2026-11-10T09:30:00+08:00'),at:due('2026-11-10T09:30:00+08:00'),outcome:'skipped',reason:'上次还没结束，跳过'},
-  {due:due('2026-11-11T09:30:00+08:00'),last:due('2026-11-12T09:30:00+08:00'),at:due('2026-11-12T12:00:00+08:00'),outcome:'missed',reason:'Bridge 停机，错过'},
+  {due:due('2026-11-10T09:30:00+08:00'),at:due('2026-11-10T09:30:00+08:00'),outcome:'skipped',reason:'上一次运行还没有结束'},
+  {due:due('2026-11-11T09:30:00+08:00'),last:due('2026-11-12T09:30:00+08:00'),at:due('2026-11-12T12:00:00+08:00'),outcome:'missed',reason:'Bridge 当时没有运行'},
   {due:due('2026-11-13T09:30:00+08:00'),at:due('2026-11-13T09:30:00+08:00'),outcome:'failed',n:3,topicId:'t5',reason:'Agent 启动失败'}]};
  const proposal=(kind:string,more?:object)=>({proposal:{id:'p1',kind,...more,expiresAt:due('2026-11-06T10:30:00+08:00'),timeZone:'Asia/Shanghai',phrase:'每周一至周五 09:30',next:[due('2026-11-09T09:30:00+08:00'),due('2026-11-10T09:30:00+08:00')]}});
  const answers:Record<string,unknown>={list:list,runs,pause:{schedule:{...first,paused:true,next:null}},resume:{schedule:first},remove:{schedule:first},add:proposal('add'),update:proposal('update',{scheduleId:sid(1)})};
@@ -3184,7 +3184,7 @@ test('bridge-schedule sends its request to the Bridge client of its machine with
     `${sid(2).slice(0,8)} · 发进这个话题 · 每天 18:00（Asia/Shanghai，cron：0 18 * * *） · 已暂停`,'  任务：看一下',
     `${sid(3).slice(0,8)} · 发进话题「另一个话题」 · 每天 08:00（UTC，cron：0 8 * * *）`,'  下次运行：不会再运行',`  任务：${'x'.repeat(199)}…`],
    runs:[`定时任务 ${sid(1).slice(0,8)}（每周一至周五 09:30，Asia/Shanghai）最近 5 次运行：`,'2026-11-06 周五 09:30 · 已运行 · 第 1 次','2026-11-09 周一 09:30 · 已运行 · 第 2 次 · 补跑于 2026-11-09 周一 10:15',
-    '2026-11-10 周二 09:30 · 跳过：上次还没结束，跳过','2026-11-11 周三 09:30 至 2026-11-12 周四 09:30 · 错过：Bridge 停机，错过','2026-11-13 周五 09:30 · 失败：Agent 启动失败 · 第 3 次'],
+    '2026-11-10 周二 09:30 · 跳过：上一次运行还没有结束','2026-11-11 周三 09:30 至 2026-11-12 周四 09:30 · 错过：Bridge 当时没有运行','2026-11-13 周五 09:30 · 失败：Agent 启动失败 · 第 3 次'],
    pause:[`已暂停定时任务 ${sid(1).slice(0,8)}（每周一至周五 09:30）。恢复之前不会运行，暂停期间的时间恢复后也不补跑。`],
    resume:[`已恢复定时任务 ${sid(1).slice(0,8)}，下次运行：2026-11-09 周一 09:30。`],
    remove:[`已删除定时任务 ${sid(1).slice(0,8)}（每周一至周五 09:30）。它开过的话题保留。`],
@@ -3289,7 +3289,7 @@ test('BRIDGE_URL must be an http(s) origin; a trailing slash is dropped',()=>{
 const png=Buffer.from('89504e470d0a1a0a0000','hex');
 // The app's slash commands as Feishu lists them, by default the bridge's own with their descriptions.
 const slashPath='/open-apis/application/v7/app_slash_commands',described=(text:string)=>({default_value:text,i18n:{zh_cn:text}});
-const registered=[{command_id:'c-adopt',command:'adopt',description:described('接管正在运行的 Agent')},{command_id:'c-release',command:'release',description:described('结束接管')},{command_id:'c-stop',command:'stop',description:described('停止 Agent 当前这一轮')}];
+const registered=[{command_id:'c-adopt',command:'adopt',description:described('接管正在运行的 Agent')},{command_id:'c-release',command:'release',description:described('结束接管')},{command_id:'c-stop',command:'stop',description:described('停止 Agent 当前的工作')}];
 // The /wt that earlier versions registered, which an app may still list.
 const oldWt={command_id:'c-wt',command:'wt',description:described('在新的 Git worktree 里开一个话题')};
 // A connected channel whose bot info comes from info() and whose slash command calls are answered by commands(request); every avatar
@@ -3354,7 +3354,7 @@ test('connecting offers the commands in the slash command panel of the app: a mi
  const items=[registered[0],{...registered[1],description:described('旧的说明')},{command_id:'c-deploy',command:'deploy',description:described('部署')}];
  const f=botFixture({info:botInfo({avatar_url:''}),avatar:()=>assert.fail('no download'),commands:o=>o.method==='GET'?{code:0,data:{items}}:{code:0,data:{command_id:'c-new'}}});try{
   await f.platforms.start(f.a);
-  assert.deepEqual(f.requests.slice(1),[{method:'GET',url:slashPath},{method:'PATCH',url:slashPath+'/c-release',data:{command:'release',description:described('结束接管')}},{method:'POST',url:slashPath,data:{command:'stop',description:described('停止 Agent 当前这一轮')}}]);
+  assert.deepEqual(f.requests.slice(1),[{method:'GET',url:slashPath},{method:'PATCH',url:slashPath+'/c-release',data:{command:'release',description:described('结束接管')}},{method:'POST',url:slashPath,data:{command:'stop',description:described('停止 Agent 当前的工作')}}]);
   assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='斜杠命令').map(l=>[l.level,l.message]),[['info','飞书机器人：已注册斜杠命令 /release、/stop']]);
  }finally{f.close();}
 });

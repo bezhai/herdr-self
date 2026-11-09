@@ -42,7 +42,7 @@ function skillList(v:unknown,known:Pick<State,'skills'>['skills']){
 // directory is left on the machine as it is.
 export function normalizeProject(b:{name?:unknown,description?:unknown,repos?:unknown,skills?:unknown,workMode?:unknown,[field:string]:unknown},data:Pick<State,'projects'|'skills'>,old?:Project):Project{
  const name=text(b.name,60);if(data.projects.some(p=>p.id!==old?.id&&p.name===name))throw Error('已有同名的项目');
- const repos=repoList(b.repos),mode=b.workMode===undefined?old?.workMode??'isolated':b.workMode;if(!oneOf(workModes,mode))throw Error('话题目录无效');
+ const repos=repoList(b.repos),mode=b.workMode===undefined?old?.workMode??'isolated':b.workMode;if(!oneOf(workModes,mode))throw Error('工作目录选项无效');
  const adopted=old?.adopted&&!repos.length&&mode==='shared'?old.adopted:undefined;
  return {id:old?.id||uuid(),name,description:description(b.description),repos,skills:skillList(b.skills,data.skills),workMode:mode,...adopted&&{adopted}};
 }

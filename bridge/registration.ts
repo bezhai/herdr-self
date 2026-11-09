@@ -46,7 +46,7 @@ export class Registrations{
  async run(r:Registration){
   try{
    const result=await this.register({source:'herdr-bridge',createOnly:false,addons:structuredClone(registrationAddons),signal:r.controller.signal,
-    appPreset:{name:r.name,desc:'通过 Herdr Bridge 连接你的原生 coding agent 会话'},
+    appPreset:{name:r.name,desc:'通过 Herdr Bridge 在飞书里使用 Agent'},
     onQRCodeReady:info=>{
      if(!active(r)||r.controller.signal.aborted)return;
      const u=new URL(info.url);
@@ -57,7 +57,7 @@ export class Registrations{
      // QR generation is local; the authorization URL is never sent to another service.
      Promise.resolve().then(()=>this.qr(u.href)).then(qr=>{if(active(r))r.qr=qr;}).catch(()=>{});
     },
-    onStatusChange:info=>{if(active(r)&&info.status==='slow_down')r.message='等待飞书确认，平台已调整查询间隔。';},
+    onStatusChange:info=>{if(active(r)&&info.status==='slow_down')r.message='等待飞书确认。';},
    });
    // Ignore an SDK result arriving after cancellation/expiry or after a newer flow starts.
    if(!active(r)||r.controller.signal.aborted||this.current!==r)return;
