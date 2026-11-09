@@ -5,7 +5,8 @@ import {invalid,local,name} from './machine-tools.ts';
 import {repoKey,repoName} from './projects.ts';
 import type {Git} from './machine-tools.ts';
 import type {Ran,WorkspaceProject,ClientApi,Methods} from './link.ts';
-// The directories and repositories of projects on a machine: prepareWorkspace, removeWorkspace and describeRepos (see ClientApi in
+// The directories and repositories of projects on a machine (the errors that Bridge words itself end up in the console, so they name
+// neither a path nor a worktree): prepareWorkspace, removeWorkspace and describeRepos (see ClientApi in
 // link.ts). The control plane never names a path (except an adopted directory, which it only passes back); Bridge's own directories are
 // under ~/.local/share/herdr-bridge, where the skill store is:
 //   repos/<host>__<path>        the one clone per repository on this machine, whose worktrees the isolated topics work in
@@ -76,13 +77,13 @@ const hasRef=async(git:Git,dir:string,ref:string)=>(await git(dir,['show-ref','-
 // else a new branch from the default branch of origin, which does not track it.
 async function addWorktree(git:Git,dir:string,target:string,branch:string,timeoutMs?:number){
  await fs.promises.mkdir(path.dirname(target),{recursive:true});
- if(await exists(target)){if(!await isEmpty(target))throw Error(`目录 ${target} 已存在，不是 worktree`);await fs.promises.rmdir(target);}
+ if(await exists(target)){if(!await isEmpty(target))throw Error('话题的目录已存在，里面有别的内容');await fs.promises.rmdir(target);}
  await git(dir,['worktree','prune']);
  let args:string[];
  if(await hasRef(git,dir,'refs/heads/'+branch))args=['worktree','add',target,branch];
  else if(await hasRef(git,dir,'refs/remotes/origin/'+branch))args=['worktree','add','--track','-b',branch,target,'origin/'+branch];
  else args=['worktree','add','--no-track','-b',branch,target,await defaultBranch(git,dir,timeoutMs)];
- const r=await git(dir,args,timeoutMs);if(r.code!==0)throw failure(`git worktree add ${branch} `,r);
+ const r=await git(dir,args,timeoutMs);if(r.code!==0)throw failure(`为分支 ${branch} 创建话题目录`,r);
 }
 // The directory in which a shared project works, and the checkout of each of its repositories in it, cloned when missing and otherwise
 // fetched when it can be, never changed.
@@ -92,7 +93,7 @@ async function shared(git:Git,dir:string,repos:Repo[],timeoutMs?:number){
   for(const r of repos){
    const target=path.join(dir,r.name);
    if(await checkedOut(target))await fetch(git,target,timeoutMs).catch(()=>{});
-   else if(await exists(target)&&!await isEmpty(target))throw Error(`${target} 已存在，不是 Git 仓库，没有往里面 clone`);
+   else if(await exists(target)&&!await isEmpty(target))throw Error(`项目的目录里已有 ${r.name}，不是 Git 仓库，没有往里面 clone`);
    else{await fs.promises.rm(target,{recursive:true,force:true});await clone(git,r.url,target,timeoutMs);}
   }
  });
