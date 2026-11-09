@@ -2578,7 +2578,7 @@ const at=(iso:string)=>Date.parse(iso);
 // Upcoming run times of a cron expression in time zone tz after the ISO time from, as wall times there.
 const runsOf=(expression:string,tz:string,from:string,n:number)=>upcoming(parseCron(expression),tz,at(from),n).map(t=>when(t,tz));
 const routable_:Project[]=[{id:'p1',name:'genvi',description:'GEO 内容生成',repos:[],skills:[],workMode:'isolated'},{id:'p2',name:'promoter',description:'推广\n后台',repos:[],skills:[],workMode:'isolated'}];
-test('the model service is one chat completion call with the key as a bearer token, whose first choice is the answer; a missing configuration, a refusal, a silent server, an answer without text and an unreachable server reject without the key in the message',async()=>{
+test('the model service is one chat completion call with the key as a bearer token and minimal reasoning, whose first choice is the answer; a missing configuration, a refusal, a silent server, an answer without text and an unreachable server reject without the key in the message',async()=>{
  const seen:{url?:string,auth?:string,body?:unknown}[]=[];let respond:(res:http.ServerResponse)=>void=res=>{res.end(JSON.stringify({choices:[{message:{content:'  BRANCH=feat/x\n',reasoning_content:'thinking'}}]}));};
  const server=http.createServer((req,res)=>{let body='';req.on('data',c=>{body+=c;});req.on('end',()=>{seen.push({url:req.url,auth:req.headers.authorization,body:JSON.parse(body)});respond(res);});});
  await new Promise<void>(r=>server.listen(0,'127.0.0.1',r));const base=`http://127.0.0.1:${(server.address() as AddressInfo).port}/v1/`;
@@ -2586,7 +2586,11 @@ test('the model service is one chat completion call with the key as a bearer tok
  const failure=async(ask:ReturnType<typeof modelFrom>)=>{try{await ask('p');}catch(e){return e.message as string;}throw Error('did not reject');};
  try{
   assert.equal(await modelFrom(env())('hello'),'BRANCH=feat/x');
-  assert.deepEqual(seen,[{url:'/v1/chat/completions',auth:'Bearer '+key,body:{model:'auto',messages:[{role:'user',content:'hello'}]}}]);
+  assert.deepEqual(seen,[{url:'/v1/chat/completions',auth:'Bearer '+key,body:{model:'auto',reasoning_effort:'minimal',messages:[{role:'user',content:'hello'}]}}]);
+  // The reasoning effort is minimal unless BRIDGE_MODEL_REASONING_EFFORT names another, and left out when it is set empty, for a model
+  // that takes no such parameter.
+  await modelFrom(env({BRIDGE_MODEL_REASONING_EFFORT:'low'}))('hello');await modelFrom(env({BRIDGE_MODEL_REASONING_EFFORT:''}))('hello');
+  assert.deepEqual(seen.splice(1).map(x=>x.body),[{model:'auto',reasoning_effort:'low',messages:[{role:'user',content:'hello'}]},{model:'auto',messages:[{role:'user',content:'hello'}]}]);
   // Any one of the three settings missing, or empty, means no model.
   for(const name of ['BRIDGE_MODEL_BASE_URL','BRIDGE_MODEL_API_KEY','BRIDGE_MODEL_NAME'])assert.match(await failure(modelFrom(env({[name]:' '}))),new RegExp('没有配置模型服务.*'+name));
   assert.equal(seen.length,1);

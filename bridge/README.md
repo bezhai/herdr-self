@@ -33,8 +33,9 @@ npm start
 | `BRIDGE_MODEL_BASE_URL` | 服务的地址，到 `/chat/completions` 之前，例如 `http://127.0.0.1:18080/v1` |
 | `BRIDGE_MODEL_API_KEY` | 密钥，作为 `Authorization: Bearer` 发送 |
 | `BRIDGE_MODEL_NAME` | 请求里的 `model` |
+| `BRIDGE_MODEL_REASONING_EFFORT` | 可选，请求里的 `reasoning_effort`，不设时是 `minimal`；设成空值就不发送，给不接受这个参数的模型用 |
 
-请求是 `POST <地址>/chat/completions`，请求体 `{model, messages:[{role:'user',content:提示词}]}`，回答取 `choices[0].message.content`（`reasoning_content` 忽略），20 秒超时，用 Node.js 自带的 `fetch`。三项缺一项、请求失败、超时、返回非 2xx 或没有文字，都当作这次调用失败，调用方各自退回：分支用随机名，私聊话题在一个空目录里开始，绑定卡片不预选项目，项目描述留空；原因记在日志里，日志、错误信息、状态文件和 `/api/state` 里都没有密钥。
+请求是 `POST <地址>/chat/completions`，请求体 `{model, reasoning_effort, messages:[{role:'user',content:提示词}]}`。这些回答只有一行，先思考的模型要 10 到 20 秒，`minimal` 让它不思考（2026-11-09 用 seed-evolving-auto 实测：`minimal` 约 2 秒，`low` 约 11 秒）。回答取 `choices[0].message.content`（`reasoning_content` 忽略），20 秒超时，用 Node.js 自带的 `fetch`。三项缺一项、请求失败、超时、返回非 2xx 或没有文字，都当作这次调用失败，调用方各自退回：分支用随机名，私聊话题在一个空目录里开始，绑定卡片不预选项目，项目描述留空；原因记在日志里，日志、错误信息、状态文件和 `/api/state` 里都没有密钥。
 
 部署时把三项写进状态目录里的 `state/model.env`（权限 600，不提交到 Git），每行一项：
 
