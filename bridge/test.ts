@@ -3755,9 +3755,9 @@ test('the client, bridge-schedule and bridge-skill run on Node alone: bin/bridge
    for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b(?!\s+type\b)[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
   visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
  };
- assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','core.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','workspace.ts']);
- assert.deepEqual(imports('bridge-schedule.ts'),['bin/bridge-schedule.ts','client.ts','core.ts','cron.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','request-cards.ts','schedule-command.ts','workspace.ts']);
- assert.deepEqual(imports('bridge-skill.ts'),['bin/bridge-skill.ts','client.ts','core.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','skill-command.ts','workspace.ts']);
+ assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','core.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','workspace.ts']);
+ assert.deepEqual(imports('bridge-schedule.ts'),['bin/bridge-schedule.ts','client.ts','core.ts','cron.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','request-cards.ts','schedule-command.ts','workspace.ts']);
+ assert.deepEqual(imports('bridge-skill.ts'),['bin/bridge-skill.ts','client.ts','core.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','skill-command.ts','workspace.ts']);
 });
 // Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
 async function stopClients(f:ClientsFixture,started:ClientProcess[]){
@@ -3975,13 +3975,6 @@ test('the client creates directories, stores attachments only under a .herdr-bri
   // A topic directory under a .herdr-bridge directory that is gone, or not there yet, is removed already.
   await removeDirectory(m,'~/gone/.herdr-bridge/t1');await removeDirectory(m,'~/work/.herdr-bridge/t9');
  }finally{await f.close();fs.rmSync(dir,{recursive:true});}
-});
-test('the operation that prepares an agent\'s launch is in the contract and refuses, as not implemented yet, until a client implements it',async()=>{
- const f=await machineFixture(),{ops,m}=f;
- try{
-  const refused=(e:Thrown)=>e.code==='not_implemented'&&/^Error: 这个操作还没有实现：/.test(String(e));
-  await assert.rejects(ops.prepareLaunch(m,{kind:'claude',model:'sonnet',permissionMode:'auto',allowedCommands:['butler'],dir:'~/work'}),refused);
- }finally{await f.close();}
 });
 test('the client says whether a directory is the root of a Git repository and what its origin is: nothing for a directory that is not a root, one that is missing or a repository without origin',async()=>{
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-inspect-'))),home=path.join(dir,'home'),code=path.join(home,'code');fs.mkdirSync(code,{recursive:true});

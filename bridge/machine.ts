@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {invalid,refused,string,local,inside,name,run,gitRunner} from './machine-tools.ts';
 import {workspaceMethods} from './workspace.ts';
+import {launchMethods} from './launch.ts';
 import type {Methods,ClientApi,SkillFiles} from './link.ts';
 // What the client of a machine (see client.ts) does there for the control plane: a fixed set of methods, each of which runs a program of
 // its own choosing, if any, never one that the control plane names. The control plane decides when and why (see operations in core.ts);
@@ -12,8 +13,6 @@ import type {Methods,ClientApi,SkillFiles} from './link.ts';
 // The directories under working directories that Bridge owns: those of the attachments of topics (see Topics.attach). The client stores
 // attachments and removes directories only there.
 export const attachmentFolder='.herdr-bridge';
-// The methods that the control plane already calls but that no client does yet (see ClientApi in link.ts).
-const unfinished=(method:string)=>()=>{throw Object.assign(Error('这个操作还没有实现：'+method),{code:'not_implemented'});};
 // env without the HERDR_* variables, which would make Herdr and the hooks of agents report to the pane of whoever started the client, and
 // without what a shell sets for itself, such as PWD, which would be wrong for a command that runs elsewhere.
 export const stripped=(env:NodeJS.ProcessEnv)=>Object.fromEntries(Object.entries(env).filter(([k])=>!k.startsWith('HERDR_')&&!['PWD','OLDPWD','SHLVL','_'].includes(k)));
@@ -166,6 +165,6 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   // its directory there, where its other files are for the agent to open.
   stockSkill:({store,skill})=>stock(local(store,'store'),skillsOf([skill])[0]),
   ...workspaceMethods(git,ask),
-  prepareLaunch:unfinished('prepareLaunch'),
+  ...launchMethods(env),
  };
 }
