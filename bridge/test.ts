@@ -1172,6 +1172,91 @@ test('the topics of a binding of an older version keep the directory they starte
   assert.deepEqual([t.state,t.cwd,f.prepared,f.naming,f.starts],['ready','~/old',[],[],[]]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='create').at(-1)?.slice(4,6),['--cwd',{path:'~/old'}]);
  }finally{f.close();}
 });
+// A topic of the group of genvi on a started agent, with another project, promoter, another agent configuration on another machine, and its
+// first card om_start_1.
+async function restartable(options:TopicOptions={}){
+ const f=topicFixture({machines:[{id:'n',name:'cpu1',session:'default',enabled:true}],...options});withProjects(f,genvi,promoter);f.b.defaultProjectId='g';
+ f.store.data.agentConfigs.push({id:'c2',name:'cpu1 · Codex',machineId:'n',kind:'codex'});
+ await f.send({messageId:'om_1',content:'修复登录页'});const t=f.store.data.topics[0];
+ for(const l of [f.h.calls,f.prepared,f.naming,f.launched,f.placed,f.replies,f.reacted,f.api])l.length=0;
+ return {...f,t};
+}
+const toast=(type:string,content:string)=>({toast:{type,content}});
+test('choosing another project on the first card ends the agent, removes the workspace of the project it had, and starts the topic again with the task under the new project, on the branch it had; the card shows the new settings and the thread says so',async()=>{
+ const f=await restartable(),{t}=f,old=t.cwd!,agent=t.agentName;try{
+  assert.deepEqual(f.choose('om_start_1','project','pr'),toast('info','正在重新开始话题'));await Promise.all(f.topics.answering.values());
+  assert.deepEqual(f.h.calls.slice(0,2),[['agent','list'],['pane','close','w1:p1']]);
+  assert.deepEqual(f.dropped,[['m',{project:{id:'g',repos:genvi.repos,workMode:'isolated'},topicId:t.id,branch:'feat/add-login'},600000]]);
+  assert.deepEqual(f.prepared,[['m',{project:{id:'pr',repos:promoter.repos,workMode:'isolated'},topicId:t.id,branch:'feat/add-login'},600000]]);
+  assert.deepEqual(f.naming,[]);assert.notEqual(t.cwd,old);assert.equal(t.cwd,`/ws/pr/${t.id}`);
+  assert.deepEqual([t.state,t.projectId,t.agentConfigId,t.branch,t.routed,t.agentName,t.paneId,t.error,t.replySeq],['ready','pr','c','feat/add-login',true,agent,'w1:p2','',0]);
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='start').map(c=>c[2]),[agent]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt'),[['agent','prompt','w1:p2','修复登录页']]);
+  assert.deepEqual(f.reacted.map(r=>r[1]),['om_1']);assert.equal(t.cot!.origin,'om_1');
+  assert.deepEqual(f.updated.map(u=>[u[1],cardText(u[2])]),[['om_start_1','promoter · 分支 feat/add-login · cpu2 · Claude']]);assert.equal(f.starts.length,1);
+  assert.deepEqual(menus(f.updated[0][2]).map(m=>[m[0],m[1].map((o:string[])=>o[0])]),[['换项目',['work','genvi']],['换 Agent 配置',['cpu1 · Codex']]]);
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('已换成项目 promoter，话题重新开始。')]);
+  // The COT of the first run, the reactions and the request cards of the agent that ended are closed.
+  assert.deepEqual(cotLog(f).slice(0,3).map(c=>c[0]),['update','complete','create']);assert.equal(cotLog(f)[1][2],'error');
+  assert.equal(new Store(f.dir).data.topics[0].projectId,'pr');
+ }finally{f.close();}
+});
+test('choosing another agent configuration ends the agent on its machine and starts the topic again on the machine of the new one, in the same project and on the same branch, without asking the cheap model; the branch and the directory are those of the project\'s workspace, prepared again',async()=>{
+ const f=await restartable(),{t}=f,old=t.cwd!;try{
+  f.choose('om_start_1','agentConfig','c2');await Promise.all(f.topics.answering.values());
+  assert.deepEqual(f.dropped.map(d=>[d[0],(d[1] as Sent).project.id,(d[1] as Sent).branch]),[['m','g','feat/add-login']]);
+  assert.deepEqual(f.prepared.map(d=>[d[0],(d[1] as Sent).project.id,(d[1] as Sent).branch]),[['n','g','feat/add-login']]);assert.deepEqual(f.naming,[]);
+  assert.deepEqual([t.state,t.machineId,t.agentConfigId,t.projectId,t.branch,t.cwd===old],['ready','n','c2','g','feat/add-login',true]);
+  assert.deepEqual(f.launched.map(l=>[l[0],(l[1] as Sent).kind]),[['n','codex']]);
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='start').map(c=>c[4]),['codex']);assert.deepEqual(f.updated.map(u=>cardText(u[2])),['genvi · 分支 feat/add-login · cpu1 · Codex']);
+  assert.deepEqual(f.replies.map(r=>r[3]),[notice('已换成 Agent 配置 cpu1 · Codex，话题重新开始。')]);
+ }finally{f.close();}
+});
+test('a topic of a direct chat that found no project can be started again in a project: the cheap model then only names the branch; one that needs none is not asked',async()=>{
+ const f=await restartable({binding:direct});f.store.data.topics.length=0;f.b.defaultProjectId=undefined;f.b.chatType='p2p';f.store.data.projects=[routeProject,genvi,promoter,notes];
+ await f.send({messageId:'om_9',content:'整理一下'});const t=f.store.data.topics[0];try{
+  assert.equal(t.projectId,undefined);f.naming.length=0;f.prepared.length=0;
+  f.choose('om_start_2','project','pr');await Promise.all(f.topics.answering.values());
+  assert.deepEqual(f.naming.map(n=>n.prompt),[namingPrompt('整理一下')]);assert.deepEqual([t.projectId,t.branch,t.state],['pr','feat/add-login','ready']);
+  assert.deepEqual(f.dropped.map(d=>(d[1] as Sent).project.id),['none']);assert.equal(cardText(f.updated.at(-1)![2]),'promoter · 分支 feat/add-login · cpu2 · Claude');
+  f.naming.length=0;f.choose('om_start_2','project','n1',undefined,2);await Promise.all(f.topics.answering.values());
+  assert.deepEqual([f.naming,t.projectId,t.branch,'branch' in (f.prepared.at(-1)![1] as Sent),f.dropped.at(-1)![1] as Sent],[[],'n1',undefined,false,{project:{id:'pr',repos:promoter.repos,workMode:'isolated'},topicId:t.id,branch:'feat/add-login'}]);
+ }finally{f.close();}
+});
+test('a topic that failed to start can be started again from its first card, with another agent configuration',async()=>{
+ const f=topicFixture({machines:[{id:'n',name:'cpu1',session:'default',enabled:true}]});f.store.data.agentConfigs.push({id:'c2',name:'cpu1 · Codex',machineId:'n',kind:'codex'});try{
+  f.fake.fail.prepare=Error('clone failed');await f.send({messageId:'om_1',content:'one'});const [t]=f.store.data.topics;assert.equal(t.state,'failed');
+  delete f.fake.fail.prepare;f.h.calls.length=0;f.choose('om_start_1','agentConfig','c2');await Promise.all(f.topics.answering.values());
+  assert.deepEqual([t.state,t.machineId,t.endedAt],['ready','n',undefined]);assert.equal(f.h.calls.some(c=>c[1]==='close'),false);assert.deepEqual(f.dropped.map(d=>d[0]),['m']);
+ }finally{f.close();}
+});
+test('the clicks on a first card that cannot be followed get a toast and change nothing: a card without a topic, a project or configuration that is gone or that the topic has, and a second click while the topic starts again',async()=>{
+ const f=await restartable(),{t}=f;try{
+  assert.deepEqual(f.choose('om_other','project','pr'),toast('info','这张卡片已失效'));
+  assert.deepEqual(f.choose('om_start_1','project','gone'),toast('warning','所选的项目已不存在'));assert.deepEqual(f.choose('om_start_1','agentConfig','gone'),toast('warning','所选的 Agent 配置已不存在'));
+  assert.deepEqual(f.choose('om_start_1','project','g'),toast('info','话题已经在使用这个设置'));assert.deepEqual(f.choose('om_start_1','agentConfig','c'),toast('info','话题已经在使用这个设置'));
+  assert.deepEqual([f.h.calls,f.dropped,f.prepared],[[],[],[]]);
+  f.h.on['agent start']=async(args,run)=>{await later(20);return run(args);};
+  assert.deepEqual(f.choose('om_start_1','project','pr'),toast('info','正在重新开始话题'));assert.deepEqual(f.choose('om_start_1','agentConfig','c2'),toast('info','正在重新开始，请稍候'));
+  await Promise.all(f.topics.answering.values());assert.deepEqual([t.projectId,t.agentConfigId,f.dropped.length],['pr','c',1]);
+ }finally{f.close();}
+});
+test('only people on the allowlist of the app can use the dropdowns of the first card: anyone else gets the refusal of the app and the topic stays as it is',async()=>{
+ const f=await restartable(),p=platformFixture({channelFactory:()=>fakeChannel({on(){}}),onCardAction:(...args)=>f.topics.click(...args)});
+ const click=(openId:string)=>({messageId:'om_start_1',chatId:'oc_1',operator:{openId},action:{tag:'select_static',value:{restart:'project',render:1},option:'pr'}}) as Clicked;try{
+  assert.deepEqual(p.platforms.cardAction(allowed,click('ou_other')),toast('error','你不在这个应用的允许名单中，不能处理这个请求'));
+  assert.equal(f.topics.answering.size,0);assert.deepEqual([f.h.calls,f.dropped,f.prepared,f.t.projectId],[[],[],[],'g']);
+  assert.deepEqual(p.platforms.cardAction(allowed,click('ou_user')),toast('info','正在重新开始话题'));await Promise.all(f.topics.answering.values());assert.equal(f.t.projectId,'pr');
+ }finally{p.close();f.close();}
+});
+test('an agent that cannot be closed leaves the topic as it was with a notice; a workspace that cannot be removed is only logged and the topic starts again',async()=>{
+ const f=await restartable(),{t}=f;try{
+  f.h.on['pane close']=()=>{throw Error('连接超时');};f.choose('om_start_1','project','pr');await Promise.all(f.topics.answering.values());
+  assert.deepEqual([t.state,t.projectId,t.paneId,f.dropped,f.prepared],['ready','g','w1:p1',[],[]]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能结束当前的 Agent，话题保持原样，请稍后重试')]);
+  f.replies.length=0;f.fake.fail.remove=Error('git worktree remove 失败');f.choose('om_start_1','project','pr',undefined,2);await Promise.all(f.topics.answering.values());
+  assert.deepEqual([t.state,t.projectId,f.dropped.length,f.prepared.length],['ready','pr',1,1]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('已换成项目 promoter，话题重新开始。')]);
+  assert.ok(f.store.data.logs.some(l=>l.level==='error'&&l.message.includes('未能删除工作目录')&&l.message.includes('git worktree remove 失败')));
+ }finally{f.close();}
+});
 test('/wt is a message like any other: a root message that starts with it is the task, and nothing of Bridge still reads it',async()=>{
  const f=topicFixture();try{
   await f.send({messageId:'om_1',content:'/wt 给登录页加验证码'});await f.send({messageId:'om_2',content:'/wt'});

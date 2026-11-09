@@ -271,9 +271,14 @@ export class Topics{
  // Ends a ready topic with a notice; its open COT shows the run failed, its reactions are removed, its cards show 已失效 and the directory of
  // its attachments is removed. A reaction still being added is removed when its message settles, unprompted.
  async end(a:App,t:Topic,text:string){
-  this.update(t,{state:'closed'});
+  this.update(t,{state:'closed',endedAt:this.now()});
   await this.notify(a,t,text);
-  if(t.cot)await this.closeCot(t,[runError('话题已结束')],'error');
+  await this.wrapUp(a,t,'话题已结束');
+ }
+ // What a topic leaves behind when its agent is gone, ended or replaced: its open COT shows the run failed with reason, its reactions are
+ // removed, its request cards show 已失效 and the directory of its attachments is removed.
+ async wrapUp(a:App,t:Topic,reason:string){
+  if(t.cot)await this.closeCot(t,[runError(reason)],'error');
   for(const r of t.reactions||[])await this.dropReaction(t,r);
   for(const c of this.gone(t,[]))await this.dropCard(a,t,c);
   await this.clean(t);
@@ -335,6 +340,7 @@ export class Topics{
   if(asking){named=await nameTask(this.askCheapModel,m,t.task!.content,direct?projects:null);if(direct)project=named.project;}
   const branch=hasBranch(project)?t.branch??named.branch??randomBranch():undefined;
   if(asking&&named.reason)this.store.log('话题会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
+  if(!branch)delete t.branch;
   this.update(t,{routed:true,...project&&{projectId:project.id},...branch&&{branch}});
  }
  // Prepares the workspace of topic t on machine m and resolves to the directory its agent starts in, which the topic records. A topic of
@@ -440,11 +446,56 @@ export class Topics{
   this.update(t,{cards:(t.cards||[]).filter(x=>x!==c)});
   try{await this.updateCard(a,c.messageId,card);}catch(e){this.store.log('请求卡片',`${t.agentName}：请求 #${c.requestId} 的卡片未能更新，${brief(e)}`,'error');}
  }
+ // A choice in a dropdown of the first card of a topic by someone on the app's allowlist (see click). The topic starts again afterwards in
+ // its queue, and the thread then says so.
+ change(a:App,evt:Click){
+  const t=this.store.data.topics.find(x=>x.appId===a.id&&x.startCard===evt.messageId),b=t&&this.store.data.bindings.find(x=>x.id===t.bindingId);
+  if(!t||!b)return toast('info','这张卡片已失效');
+  const id=evt.action.option;let change:Parameters<Topics['restart']>[3],said:string;
+  if(evt.action.value!.restart==='project'){
+   const p=this.store.data.projects.find(x=>x.id===id);if(!p)return toast('warning','所选的项目已不存在');
+   if(p.id===t.projectId)return toast('info','话题已经在使用这个设置');change={projectId:p.id};said=`已换成项目 ${p.name}，话题重新开始。`;
+  }else{
+   const c=this.store.data.agentConfigs.find(x=>x.id===id);if(!c)return toast('warning','所选的 Agent 配置已不存在');
+   if(c.id===t.agentConfigId)return toast('info','话题已经在使用这个设置');change={agentConfigId:c.id};said=`已换成 Agent 配置 ${c.name}，话题重新开始。`;
+  }
+  const key=t.id+' restart';if(this.answering.has(key))return toast('info','正在重新开始，请稍候');
+  this.answering.set(key,enqueue(this.topicQueues,t.id,()=>this.restart(a,b,t,change,said)).finally(()=>this.answering.delete(key)));
+  return toast('info','正在重新开始话题');
+ }
+ // Starts topic t again under another project or agent configuration (change), in its queue: the agent ends if it still runs, the workspace
+ // of the old settings is removed (the branch stays where it has commits), and the task of the topic goes through the way a new topic starts,
+ // with the branch the topic has, so that the cheap model is not asked again. said is the notice that follows once the agent is up. An agent that cannot be closed leaves the topic as it was; a workspace that cannot be removed is only logged. Never rejects.
+ async restart(a:App,b:Binding,t:Topic,change:{projectId:string}|{agentConfigId:string},said:string){
+  try{
+   const m=this.target(t);
+   if(t.state==='ready'){const {agents}=await this.herdr(m,['agent','list']);if(linked(t,agents))await this.herdr(m,['pane','close',t.paneId]);}
+  }catch(e){this.store.log('话题会话',`${t.agentName}：未能结束 Agent，${brief(e)}`,'error');return this.notify(a,t,'未能结束当前的 Agent，话题保持原样，请稍后重试');}
+  this.update(t,{state:'starting',error:''});this.blockedSeen.delete(t.id);
+  await this.wrapUp(a,t,'话题已重新开始');
+  try{await this.removeWorkspaceOf(t);}catch(e){this.store.log('话题会话',`${t.agentName}：未能删除工作目录，${brief(e)}`,'error');}
+  delete t.cwd;
+  if('projectId' in change){delete t.routed;Object.assign(t,change);}
+  else Object.assign(t,change,{machineId:this.store.data.agentConfigs.find(c=>c.id===change.agentConfigId)!.machineId});
+  this.update(t,{workspaceId:'',tabId:'',paneId:'',replySeq:0});
+  const task=t.task!,reacted=t.scheduled?undefined:this.addReaction(a,t,task.messageId);
+  await this.promptOrNotify(a,b,t,task,reacted);
+  if(t.state==='ready')await this.notify(a,t,said);
+ }
+ // Removes the workspace that topic t was prepared, on its machine, with the branch it keeps where it has commits (see removeWorkspace in
+ // link.ts). Nothing was prepared for a topic that is not routed. Rejects when the client fails or the project is gone, which the caller logs.
+ async removeWorkspaceOf(t:Topic){
+  if(!t.routed)return;
+  const m=this.target(t),project=this.projectOf(t);
+  if(t.projectId&&!project)throw Object.assign(Error('项目已删除'),{code:'project_gone'});
+  await this.removeWorkspace(m,{project:workspaceOf(project,m.id),topicId:t.id,...t.branch&&{branch:t.branch}},{timeoutMs:workspaceTimeoutMs});
+ }
  // A click on a request card by someone on the app's allowlist (see Platforms), which waits for the returned callback response: Feishu
  // gives it a few seconds, and Herdr on another machine can take longer. The answer goes to Herdr afterwards and outside the topic queue, where a
  // message may be starting the agent for a minute; the card then shows how it ended.
  click(a:App,evt:Click){
   if(evt.action?.value?.adopt)return this.choose(a,evt);
+  if(evt.action?.value?.restart)return this.change(a,evt);
   const v=evt.action?.value||{},t=this.store.data.topics.find(x=>x.appId===a.id&&x.cards?.some(c=>c.messageId===evt.messageId)),c=t?.cards.find(x=>x.messageId===evt.messageId&&x.requestId===v.request);
   if(!t||!c)return toast('info','这个请求已结束');
   const key=t.id+' '+c.requestId;if(this.answering.has(key))return toast('info','正在提交，请稍候');
