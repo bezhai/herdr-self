@@ -41,11 +41,12 @@ test('Claude gets its permission mode, which defaults, and its model with the se
  assert.deepEqual(await launch({kind:'claude',permissionMode:'auto',dir:d}),['--permission-mode','auto']);
  assert.deepEqual(await launch({kind:'claude',permissionMode:'auto',model:'Seed-2.0',dir:d}),['--permission-mode','auto','--model','Seed-2.0','--settings','{"availableModels":["Seed-2.0"]}']);
 });
-test('Claude with commands to run is limited to Bash, Skill and Read, allowed only those commands, without MCP servers and slash commands, and a hook installed on the machine denies every other command; settings are one JSON',async()=>{
+test('Claude with commands to run is limited to Bash, Skill and Read, allowed only those commands, without MCP servers, and a hook installed on the machine denies every other command; settings are one JSON',async()=>{
  const d=dir('restricted'),args=await launch({kind:'claude',permissionMode:'default',model:'sonnet',allowedCommands:['butler'],dir:d});
  const at=(flag:string)=>args[args.indexOf(flag)+1];
  assert.deepEqual(args.slice(0,4),['--permission-mode','default','--model','sonnet']);assert.equal(at('--tools'),'Bash,Skill,Read');assert.equal(at('--allowedTools'),'Bash(butler *)');
- assert.ok(args.includes('--strict-mcp-config')&&args.includes('--disable-slash-commands'));assert.equal(args.filter(a=>a==='--settings').length,1);
+ // --disable-slash-commands would take the Skill tool and every skill away (checked with claude 2.1.311: tools Bash,Read and no skills), and with them the skill the restricted agent is started for.
+ assert.ok(args.includes('--strict-mcp-config'));assert.ok(!args.includes('--disable-slash-commands'));assert.equal(args.filter(a=>a==='--settings').length,1);
  const settings=JSON.parse(at('--settings'));assert.deepEqual(settings.availableModels,['sonnet']);
  const [entry]=settings.hooks.PreToolUse;assert.equal(entry.matcher,'Bash');assert.equal(entry.hooks.length,1);assert.equal(entry.hooks[0].type,'command');
  // The program of the hook is installed and is the one in the source; running its command as Claude does decides.

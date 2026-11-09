@@ -73,9 +73,10 @@ export function launchMethods(env:NodeJS.ProcessEnv):Pick<Methods<ClientApi>,'pr
     if(main!==null)return trusted(projects,main)?null:main;
     for(let d=real;;d=path.dirname(d)){if(trusted(projects,d))return null;if(d===path.dirname(d))return real;}
    });
+   // No --disable-slash-commands: it takes the Skill tool and every skill with it, and the skill is what a restricted agent is started for.
    const settings={...model&&{availableModels:[model]},...commands.length&&{hooks:{PreToolUse:[{matcher:'Bash',hooks:[{type:'command',command:await installGuard(commands)}]}]}}};
    return {args:['--permission-mode',permissionMode??'default',...model?['--model',model]:[],
-    ...commands.length?['--tools','Bash,Skill,Read','--allowedTools',commands.map(c=>`Bash(${c} *)`).join(','),'--strict-mcp-config','--disable-slash-commands']:[],
+    ...commands.length?['--tools','Bash,Skill,Read','--allowedTools',commands.map(c=>`Bash(${c} *)`).join(','),'--strict-mcp-config']:[],
     ...Object.keys(settings).length?['--settings',JSON.stringify(settings)]:[]]};
   },
  };
