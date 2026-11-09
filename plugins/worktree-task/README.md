@@ -13,7 +13,7 @@ herdr plugin link /path/to/herdr/plugins/worktree-task
 herdr plugin action list --plugin bezhai.worktree-task
 ```
 
-`plugin link` 只登记目录、不复制文件，修改插件后不用重新 link。起名提示词、分支名校验、随机备用名、worktree 路径和仓库检查这些逻辑在仓库的 `bridge/worktree-branch.mjs` 里，和 Herdr Bridge 的 `/wt` 话题共用，插件从 `../../bridge/worktree-branch.mjs` 导入它，所以要从完整的仓库 checkout 里 link 插件，不能只复制 `plugins/worktree-task` 这一个目录。这个文件只用 Node 自带的模块，不需要在 `bridge/` 里 `npm install`。
+`plugin link` 只登记目录、不复制文件，修改插件后不用重新 link。起名提示词、分支名校验、随机备用名、worktree 路径和仓库检查这些逻辑在仓库的 `bridge/worktree-branch.mjs` 里，其中的起名规则也由 Herdr Bridge 在开话题时起分支名用，插件从 `../../bridge/worktree-branch.mjs` 导入它，所以要从完整的仓库 checkout 里 link 插件，不能只复制 `plugins/worktree-task` 这一个目录。这个文件只用 Node 自带的模块，不需要在 `bridge/` 里 `npm install`。
 
 ## 快捷键
 
