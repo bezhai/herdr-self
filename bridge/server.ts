@@ -10,11 +10,9 @@ import {AgentSchedules} from './agent-schedules.ts';
 import {staticFile,sendStatic} from './web-assets.ts';
 import {Clients} from './clients.ts';
 import {configText} from './client.ts';
-import type {Agent,Call} from './core.ts';
+import type {Call} from './core.ts';
 import type {Machine} from './state.ts';
-// The Herdr status of a machine for the console (see herdrStatus): the agents and panes that a poll found, which a poll that is still
-// connecting does not have yet.
-type HerdrStatus={state:'disabled'|'offline'|'connecting'|'connected'|'error',checkedAt?:number,error?:string,agents?:Agent[],panes?:object[]};
+import type {HerdrStatus,ConsoleState} from './console-state.ts';
 const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Store(dir),live=new Map<string,HerdrStatus>(),refreshes=new Map<string,Promise<void>>();
 // auth and attempts are looked up also for a request without a session cookie, or without a remote address once its socket closed.
 const keyfile=path.join(dir,'access-key');if(!fs.existsSync(keyfile))fs.writeFileSync(keyfile,crypto.randomBytes(24).toString('base64url'),{mode:0o600});const key=fs.readFileSync(keyfile,'utf8').trim(),auth=new Map<string|undefined,number>(),attempts=new Map<string|undefined,{at:number,n:number}>();
@@ -44,7 +42,7 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
-function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),skills:skills.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
+function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),skills:skills.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
 // requests of bridge-schedule and bridge-skill on its machine (see client.ts), which are answered for the machine of its connection: the
 // schedules of its agents, and reads of the skills of the platform alone (see Skills.answer). What the agent reads of a refusal goes through
