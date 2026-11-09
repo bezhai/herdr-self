@@ -8,11 +8,20 @@ import {slash} from './commands.ts';
 import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,steps} from './cot.ts';
 import {wtRequest,usage,notRetried,createWorktree,worktreeIntro,failedText,removeWorktree,dirtyText,removalFailed,removalCard} from './worktrees.ts';
 import {attachmentFolder} from './machine.ts';
+import type {NormalizedMessage,ResourceDescriptor} from '@larksuite/channel';
+import type {Store,Agent,Snapshot,Herdr,Operations} from './core.ts';
+import type {App,Binding,Machine,Topic,Reaction,RequestCard,Kind} from './state.ts';
+import type {Platforms} from './platform.ts';
+import type {Click,HerdrRequest,Answer} from './request-cards.ts';
+import type {Choice,Offered,Group} from './adoption.ts';
+import type {Reply} from './message-cards.ts';
+import type {Event} from './cot.ts';
+import type {WtRequest,Removal,Worktree} from './worktrees.ts';
 // One Feishu topic = one Herdr agent session: one that the topic starts in its own tab of the binding's workspace, one that a /wt topic
 // starts in a new Git worktree (see worktrees.ts), or one that already runs in any pane of any machine and that the topic adopted
 // (/adopt). Everything goes through the Herdr CLI, besides what worktrees, attachments and Bridge's skills need on the machine; all of it
 // through the client of the machine (see operations in core.ts).
-const workspaceLabel=b=>'飞书 · '+b.name;
+const workspaceLabel=(b:Binding)=>'飞书 · '+b.name;
 // Arguments that Herdr passes on to the agent it starts, after --, per binding kind. Claude gets the binding's permission mode. Codex runs
 // in the topic pane instead of attaching to its shared background server, whose hooks carry the Herdr variables of the pane that started
 // that server, and with the network of its workspace-write sandbox on: without it the sandbox refuses connect() on every socket, that of
@@ -20,38 +29,52 @@ const workspaceLabel=b=>'飞书 · '+b.name;
 // Codex also skips the trust of its hooks: whenever hooks.json changes, for example after Herdr updates its integration, Codex waits on
 // a screen to review the new hooks, which a Feishu topic cannot answer; the hooks are the owner's own. Antigravity (agy) gets nothing,
 // not even the --.
-const agentArgs={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:()=>[]};
-const brief=e=>publicText(e.message).split('\n')[0].slice(0,200);
+const agentArgs:Record<Kind,(b:Binding)=>string[]>={claude:b=>['--','--permission-mode',permissionMode(b)],codex:()=>['--','--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust'],agy:()=>[]};
+const brief=(e:Error)=>publicText(e.message).split('\n')[0].slice(0,200);
 // What a topic says when the client of its machine is offline (see Clients.call): the error names the machine, and after says what that
 // meant for the message.
-const offline=(e,after)=>`${brief(e)}。${after}`;
+const offline=(e:Error,after:string)=>`${brief(e)}。${after}`;
 // While Herdr's remote answers setting is on for the agent of a pane, the permission and question hooks of Claude and Codex wait for an
 // answer from Feishu (see cards); Antigravity has no such hooks, its approvals and questions get the blocked notice (see blocked). Bridge
 // turns the setting on before a topic is ready and off when it lets go of an agent that keeps running. Herdr clears it when the agent
 // exits, is released or changes to another agent, so a ready topic is linked to the agent of its pane for as long as the agent reports it.
-const linked=(t,agents)=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
-const remoteAnswers=(pane,on)=>['pane','remote-answers',pane,on?'on':'off'];
+const linked=(t:Topic,agents:Agent[])=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
+const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'on':'off'];
 const endedNotice='该话题的会话已结束，请发起新话题',adoptedGone='被接管的 Agent 已退出、已更换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
 // Where the images and files of a topic go, under the working directory of its agent (see attach).
-const attachmentRoot=cwd=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;
+const attachmentRoot=(cwd:string)=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;
 // Marks a message from the moment a topic accepts it until the agent's turn for it ends, unless a COT takes its place (see openCot).
 const reaction='OneSecond';
 // Whether the turn that a prompt with state_change_seq seq started has ended: the agent is idle or done and has changed state since.
-const turnEnded=(seq,agent)=>['idle','done'].includes(agent?.agent_status)&&seq!=null&&agent.state_change_seq>seq;
+const turnEnded=(seq:number|null|undefined,agent:Agent)=>['idle','done'].includes(agent?.agent_status)&&seq!=null&&agent.state_change_seq>seq;
 // Reactions of prompted messages whose turn has ended.
-const ended=(t,agent)=>(t.reactions||[]).filter(r=>turnEnded(r.stateSeq,agent));
+const ended=(t:Topic,agent:Agent)=>(t.reactions||[]).filter(r=>turnEnded(r.stateSeq,agent));
 // Ids of the requests an agent of the list waits on (missing in Herdr versions without requests).
-const requestIds=agent=>agent?.request_ids||[];
+const requestIds=(agent:Agent|undefined)=>agent?.request_ids||[];
 // Whether agent waits for a confirmation: on a request card, or blocked on something that gets the blocked notice (see blocked).
-const waits=agent=>agent.agent_status==='blocked'||requestIds(agent).length>0;
+const waits=(agent:Agent)=>agent.agent_status==='blocked'||requestIds(agent).length>0;
 // Whether the open COT of topic t has news in agent of a list: tool calls after the seq it shows (tool_call_seq is missing in Herdr versions
 // without tool call records), a change between running and waiting for a confirmation, or the end of its turn.
-const news=(t,agent)=>Boolean(t.cot)&&(agent.tool_call_seq!=null&&agent.tool_call_seq!==(t.cot.toolSeq||0)||waits(agent)!==Boolean(t.cot.waiting)||turnEnded(t.cot.stateSeq,agent));
+const news=(t:Topic,agent:Agent)=>!!t.cot&&(agent.tool_call_seq!=null&&agent.tool_call_seq!==(t.cot.toolSeq||0)||waits(agent)!==Boolean(t.cot.waiting)||turnEnded(t.cot.stateSeq,agent));
 // The AG-UI run of the open COT of topic t.
-const run=t=>({threadId:t.rootId,runId:t.cot.origin});
-const toast=(type,content)=>({toast:{type,content}});
+const run=(t:Topic)=>({threadId:t.rootId,runId:t.cot!.origin});
+const toast=(type:string,content:string)=>({toast:{type,content}});
+// A message that the agent of a topic gets: a person's (see Platforms.receive) or the task of a schedule's run (see schedules.ts).
+export type Message=Pick<NormalizedMessage,'messageId'|'content'>&{resources?:ResourceDescriptor[]};
+// A message of a person in a bound chat, as Topics reads it; a missing mention or root counts as none.
+export type Inbound=Message&Pick<NormalizedMessage,'rawContentType'>&Partial<Pick<NormalizedMessage,'rootId'|'mentionedBot'>>;
+// The worktree of a /wt topic once createWorktree knows it (see open): a topic offers removing it only then, and a click on that card
+// finds the card in it.
+type Known=Worktree&NonNullable<Topic['worktree']>;
+type Deps=Pick<Operations,'makeDirectory'|'storeFile'|'removeDirectory'|'git'|'exists'|'nameBranch'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
+ herdr:Herdr,placeSkills:(m:Machine,cwd:string,kind:Kind)=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number};
 export class Topics{
+ declare store:Store;declare herdr:Herdr;declare makeDirectory:Deps['makeDirectory'];declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
+ declare updateCard:Deps['updateCard'];declare react:Deps['react'];declare unreact:Deps['unreact'];declare request:Deps['request'];declare download:Deps['download'];
+ declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare git:Deps['git'];declare exists:Deps['exists'];declare nameBranch:Deps['nameBranch'];
+ declare placeSkills:Deps['placeSkills'];declare now:()=>number;declare topicQueues:Map<string,Promise<unknown>>;declare workspaceQueues:Map<string,Promise<unknown>>;
+ declare answering:Map<string,Promise<unknown>>;declare blockedSeen:Map<string,number>;declare renders:number;declare claims:Set<string>;
  // On machine m, through its client (see operations in core.ts): herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path)
  // creates a directory and its parents; storeFile(m,root,dir,name,body) writes a file and resolves to its absolute path, and
  // removeDirectory(m,dir) removes such a directory; git(m,cwd,args,{timeoutMs}), exists(m,path) and nameBranch(m,cwd,prompt,{timeoutMs})
@@ -62,7 +85,7 @@ export class Topics{
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes. now() is the clock.
- constructor(store,{herdr,makeDirectory,storeFile,removeDirectory,git,exists,nameBranch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}){
+ constructor(store:Store,{herdr,makeDirectory,storeFile,removeDirectory,git,exists,nameBranch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}:Deps){
   this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
   this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.git=git;this.exists=exists;this.nameBranch=nameBranch;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>', '<topic id> adopt' or '<topic id> worktree' → the promise of their handling; per topic the
@@ -75,7 +98,7 @@ export class Topics{
   if(interrupted.length)store.save();
  }
  // A routed message. Never rejects: failures end up as topic states, notices in the thread or error logs.
- async handle(a,b,msg){
+ async handle(a:App,b:Binding,msg:Inbound){
   // A binding that requires the mention drops every message without it, in a topic thread and its commands too, as if it never came.
   if(b.requireMention&&!msg.mentionedBot)return;
   if(!supported(msg))return this.unsupported(a,b,msg);
@@ -89,7 +112,7 @@ export class Topics{
    const request=msg.rootId?null:wtRequest(text);
    if(request?.usage)return this.answerRoot(a,b,msg,usage);
    // The /wt message prompts its task, without the command.
-   return this.begin(a,b,rootId,{title:request?titleOf({...msg,content:request.description})||request.branch:titleOf(msg),msg:request?{...msg,content:request.prompt}:msg,reaction:msg.messageId,request}).delivered;
+   return this.begin(a,b,rootId,{title:request?titleOf({...msg,content:request.description})||request.branch!:titleOf(msg),msg:request?{...msg,content:request.prompt}:msg,reaction:msg.messageId,request}).delivered;
   }
   // At most once: the id is on disk before Herdr is called, and a message seen before is dropped. A topic that a schedule opened keeps the
   // time of the latest message of a person, who may still be talking to its agent (see schedules.ts).
@@ -103,8 +126,8 @@ export class Topics{
  // meanwhile join this topic instead of opening another tab; it holds the id of msg, which is not handled again, and fields, such as the
  // schedule run that opened it. A /wt topic has request (see wtRequest) and is marked by worktree, which gets the branch and the path of its
  // worktree once they are known (see createWorktree). Returns {topic, delivered}: the record, and what deliver resolves to.
- begin(a,b,rootId,{title,msg,reaction,request,fields}){
-  const id=uuid(),t={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:b.machineId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
+ begin(a:App,b:Binding,rootId:string,{title,msg,reaction,request,fields}:{title:string,msg:Message,reaction?:string,request?:WtRequest|null,fields?:Pick<Topic,'scheduled'>}){
+  const id=uuid(),t:Topic={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:b.machineId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
    title,state:'starting',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],...request&&{worktree:{}},...fields,createdAt:this.now()};
   this.store.data.topics.push(t);this.store.save();
   return {topic:t,delivered:this.deliver(a,b,t,msg,{reaction,request})};
@@ -113,7 +136,7 @@ export class Topics{
  // message of a person that marks it, added right away: not behind the queue, where an earlier message may be starting the agent for a
  // minute. A message that did not reach the agent since the client of its machine is offline gets a notice that says so. Resolves to the
  // prompted agent, or to nothing. Never rejects.
- deliver(a,b,t,msg,{reaction,request}={}){
+ deliver(a:App,b:Binding,t:Topic,msg:Message,{reaction,request}:{reaction?:string,request?:WtRequest|null}={}){
   const reacted=reaction&&this.addReaction(a,t,reaction);
   return enqueue(this.topicQueues,t.id,()=>this.prompt(a,b,t,msg,{reacted,request})).catch(async e=>{
    this.store.log('消息投递',`${a.name} → ${b.name}：${brief(e)}`,'error');
@@ -121,12 +144,12 @@ export class Topics{
   });
  }
  // Runs task in the queue of topic t, after what is queued there, and resolves or rejects like it.
- queue(t,task){return enqueue(this.topicQueues,t.id,task);}
+ queue<T>(t:Topic,task:()=>T|Promise<T>){return enqueue(this.topicQueues,t.id,task);}
  // In the queue of topic t: sends message msg to its agent (see forward), opening the topic first when it is new or failed, and opens the
  // COT of the turn under msg. A message with reacted, the promise of its reaction record (see addReaction), keeps its reaction until its turn
  // ends (see sync) or its COT takes its place, when it was prompted; any other message loses it now. Resolves to the prompted agent, or to
  // nothing; rejects when Herdr fails.
- async prompt(a,b,t,msg,{reacted,request}={}){
+ async prompt(a:App,b:Binding,t:Topic,msg:Message,{reacted,request}:{reacted?:Promise<Reaction|null>|'',request?:WtRequest|null}={}){
   let agent;
   // Settled in the queue, so a later message that closes the topic finds this record.
   try{agent=await this.forward(a,b,t,msg,request);}
@@ -138,21 +161,21 @@ export class Topics{
  // holds the COT, the message it answers, the prompt's state_change_seq that tells when the turn ends (see turnEnded), the seq of the latest
  // tool call it shows, from those after the prompt, and whether it shows the agent waiting for a confirmation. The COT takes the place of
  // the message's reaction; one that cannot be created leaves the reaction. Never rejects.
- async openCot(a,t,origin,agent){
+ async openCot(a:App,t:Topic,origin:string,agent:Agent){
   if(t.cot||t.state!=='ready')return;
   let cot;try{cot=await createCot(o=>this.request(a,o),t.chatId,origin);}
   catch(e){this.store.log('执行过程',`${t.agentName}：未能创建 COT，${brief(e)}`,'error');return;}
   this.update(t,{cot:{...cot,origin,stateSeq:agent.state_change_seq,toolSeq:agent.tool_call_seq??0,waiting:false}});
   const r=t.reactions?.find(x=>x.messageId===origin);if(r)await this.dropReaction(t,r);
-  await this.showCot(t,t.cot,[runStarted(run(t))]);
+  await this.showCot(t,t.cot!,[runStarted(run(t))]);
  }
  // Brings the open COT of topic t in line with agent of the list of machine m: once the agent runs again after waiting for a confirmation,
  // a line that says so; its new tool calls as steps; once it waits, a line that says so after the steps that led there; and once its turn
  // has ended, RUN_FINISHED and completion. Tool calls after the stored seq are fetched like replies (see pull), and one that cannot be
  // fetched is fetched again with the next list; the seq is on disk before the update, which is not repeated. Never rejects.
- async advance(m,t,agent){
+ async advance(m:Machine,t:Topic,agent:Agent){
   const cot=t.cot;if(t.state!=='ready'||!cot)return;
-  let walked=[];
+  let walked:Event[]=[];
   try{
    const seq=agent.tool_call_seq,last=cot.toolSeq||0;
    if(seq!=null&&seq!==last){
@@ -169,22 +192,22 @@ export class Topics{
   if(events.length)await this.showCot(t,cot,events);
  }
  // Sends events to COT cot of topic t. Never rejects: a failure is only logged.
- async showCot(t,cot,events){
+ async showCot(t:Topic,cot:NonNullable<Topic['cot']>,events:Event[]){
   try{await updateCot(o=>this.request(this.app(t.appId),o),cot,events);}catch(e){this.store.log('执行过程',`${t.agentName}：COT 未能更新，${brief(e)}`,'error');}
  }
  // Ends the open COT of topic t with its last events and reason done or error; it is completed even when the events fail. At most once: the
  // record is dropped before Feishu is called, and failures are only logged. Never rejects.
- async closeCot(t,events,reason){
+ async closeCot(t:Topic,events:Event[],reason:'done'|'error'){
   const cot=t.cot;if(!cot)return;delete t.cot;this.store.save();
   await this.showCot(t,cot,events);
   try{await completeCot(o=>this.request(this.app(t.appId),o),cot,reason);}catch(e){this.store.log('执行过程',`${t.agentName}：COT 未能完成，${brief(e)}`,'error');}
  }
  // A message of a kind that Bridge cannot forward gets a notice in its thread, which opens no topic. Never rejects.
- async unsupported(a,b,msg){
+ async unsupported(a:App,b:Binding,msg:Inbound){
   try{await this.reply(a,b.chatId,msg.rootId||msg.messageId,{card:notice(unsupportedNotice)});}catch(e){this.store.log('话题通知',`${b.name}：${brief(e)}`,'error');}
  }
  // Answers root message msg of binding b with text in its thread, which opens no topic. Never rejects.
- async answerRoot(a,b,msg,text){
+ async answerRoot(a:App,b:Binding,msg:Inbound,text:string){
   try{await this.reply(a,b.chatId,msg.messageId,{card:notice(text)});}catch(e){this.store.log('话题通知',`${b.name}：${brief(e)}`,'error');}
  }
  // Sends message msg to the topic's agent, opening the topic first when it is new or failed, a new /wt topic with its request (see
@@ -193,14 +216,15 @@ export class Topics{
  // directory first (see attach): the binding's for a topic that Bridge opened in a tab, the worktree for a /wt topic, and for an adopted one
  // what Herdr reports for the agent, where the agent runs before where its shell is. Resolves to the prompted agent, or to nothing when the
  // message was not prompted.
- async forward(a,b,t,msg,request){
+ async forward(a:App,b:Binding,t:Topic,msg:Message,request?:WtRequest|null){
   if(t.state==='closed')return;
   if(t.state==='choosing'){await this.notify(a,t,'请先在上面的卡片中选择要接管的 Agent');return;}
   if(t.worktree&&t.state==='failed'){await this.notify(a,t,notRetried);return;}
   let agent;
   if(t.state==='ready'){agent=await this.alive(a,t);if(!agent)return;}
   else if(!await this.open(a,b,t,request))return;
-  const text=await this.attach(a,t,msg,t.adopted?agent.foreground_cwd||agent.cwd:t.worktree?.path||b.cwd);
+  // An adopted topic that gets here is ready, with its agent.
+  const text=await this.attach(a,t,msg,t.adopted?agent!.foreground_cwd||agent!.cwd:t.worktree?.path||b.cwd);
   let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,text]);}
   catch(e){if(e.code!=='agent_blocked')throw e;await this.notify(a,t,'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息');return this.noticed(t);}
   this.store.log('消息投递',`${a.name} → ${b.name}：已发送到 ${t.agentName}`);return r.agent;
@@ -209,7 +233,7 @@ export class Topics{
  // <cwd>/.herdr-bridge/<topic id>/<file name> on the topic's machine, and the prompt names it by its absolute path (see promptOf). The topic
  // records the directory for its clean-up (see clean). One that cannot be downloaded or written is named as failed, and the topic gets one
  // notice that lists them; the details are only logged. Never rejects.
- async attach(a,t,msg,cwd){
+ async attach(a:App,t:Topic,msg:Message,cwd:string|undefined){
   const list=attachmentsOf(msg);
   for(const x of list){
    let stage='下载';
@@ -226,20 +250,20 @@ export class Topics{
  }
  // Removes the directory of topic t's attachments on its machine. Never rejects: a failure is only logged, and the record stays for another
  // try when the binding is removed.
- async clean(t){
+ async clean(t:Topic){
   const dir=t.attachmentDir;if(!dir)return;
   try{await this.removeDirectory(this.target(t),dir);if(t.attachmentDir===dir){delete t.attachmentDir;this.store.save();}}
   catch(e){this.store.log('附件',`${t.agentName}：未能删除附件目录，${brief(e)}`,'error');}
  }
  // The notice of a prompt that met a blocked agent covers the blocked episode the agent is in, so sync does not post its own for it.
  // The prompt error carries no state_change_seq; it is read from a new list.
- async noticed(t){
+ async noticed(t:Topic){
   try{const {agents}=await this.herdr(this.target(t),['agent','list']),agent=linked(t,agents);if(agent?.agent_status==='blocked')this.update(t,{blockedSeq:agent.state_change_seq});}
   catch(e){this.store.log('话题通知',`${t.agentName}：${brief(e)}`,'error');}
  }
  // Reads the agent list of the topic's machine and ends a ready topic whose agent is no longer linked to it. Resolves to the linked agent,
  // or to nothing when the topic ended or was no longer ready.
- async alive(a,t){
+ async alive(a:App,t:Topic){
   if(t.state!=='ready')return;
   const {agents}=await this.herdr(this.target(t),['agent','list']),agent=linked(t,agents);
   if(!agent&&t.state==='ready')await this.end(a,t,t.adopted?adoptedGone:endedNotice);
@@ -248,7 +272,7 @@ export class Topics{
  // Ends a ready topic with a notice, which for a /wt topic is the card that offers removing its worktree, which stays; its open COT shows
  // the run failed, its reactions are removed, its cards show 已失效 and the directory of its attachments is removed. A reaction still being
  // added is removed when its message settles, unprompted.
- async end(a,t,text){
+ async end(a:App,t:Topic,text:string){
   this.update(t,{state:'closed'});
   if(t.worktree)await this.offerRemoval(a,t,{heading:'话题已结束',text});else await this.notify(a,t,text);
   if(t.cot)await this.closeCot(t,[runError('话题已结束')],'error');
@@ -260,9 +284,9 @@ export class Topics{
  // workspace when that is its last tab. The pane is closed only while the agent is linked to the topic: once the agent is gone Herdr may
  // have given its pane id to another pane, which is not Bridge's to close, and the topic just ends (see alive). A pane that cannot be closed
  // leaves the topic as it was, for another try. In the topic's queue. Never rejects.
- retire(t,text){
+ retire(t:Topic,text:string){
   return enqueue(this.topicQueues,t.id,async()=>{
-   if(t.state!=='ready')return;let a;
+   if(t.state!=='ready')return;let a:App;
    try{a=this.app(t.appId);if(!await this.alive(a,t))return;await this.herdr(this.target(t),['pane','close',t.paneId]);}
    catch(e){this.store.log('话题会话',`${t.agentName}：未能关闭 pane，${brief(e)}`,'error');return;}
    this.store.log('话题会话',`${t.agentName}：已关闭 pane ${t.paneId}`);await this.end(a,t,text);
@@ -270,12 +294,13 @@ export class Topics{
  }
  // Opens a tab for the topic, or for a /wt topic the worktree of request with its first reply (see createWorktree), places Bridge's skills
  // there (see place) and starts its agent there. Returns false when that failed; the topic is then failed and notified.
- async open(a,b,t,request){
-  this.update(t,{state:'starting',error:''});let m,made,started=false;
+ async open(a:App,b:Binding,t:Topic,request?:WtRequest|null){
+  this.update(t,{state:'starting',error:''});let m:Machine,made:Awaited<ReturnType<typeof createWorktree>>|undefined,started=false;
   try{
    m=this.target(t);
    if(t.worktree){
-    made=await createWorktree(m,b.cwd,request,{git:this.git,exists:this.exists,nameBranch:this.nameBranch,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
+    // A /wt topic opens once, with the request of its first message.
+    made=await createWorktree(m,b.cwd,request!,{git:this.git,exists:this.exists,nameBranch:this.nameBranch,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
     this.update(t,{workspaceId:made.workspaceId,tabId:made.tabId,paneId:made.paneId});await this.notify(a,t,worktreeIntro(m,made));
    }else{Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();}
    await this.place(m,b,t.worktree?.path||b.cwd);
@@ -301,19 +326,19 @@ export class Topics{
  // Places the skills loaded by default for the agent of binding b in its working directory cwd on machine m, which exists by then, right
  // before the agent starts and loads them (see Skills.place). Same-name skills of others are left alone and logged. Never rejects: a failure is only logged, and
  // the agent starts without the skills.
- async place(m,b,cwd){
+ async place(m:Machine,b:Binding,cwd:string){
   try{for(const p of await this.placeSkills(m,cwd,b.kind))this.store.log('skill',`${b.name}：${p} 已有同名 skill，不是 Bridge 放的，没有改动`);}
   catch(e){this.store.log('skill',`${b.name}：未能在 ${cwd} 放置 skill，${brief(e)}`,'error');}
  }
  // The binding's workspace is created on first use and again after it was closed in Herdr; its root tab serves the topic that created it.
  // Herdr reuses workspace ids after a server restart, so the stored id counts only while the workspace still carries the binding's label.
  // Runs in the binding's queue so that topics opened together create the workspace once.
- async openTab(m,b,t){
+ async openTab(m:Machine,b:Binding,t:Topic){
   // Herdr falls back to the home directory for a --cwd that does not exist. Created for every tab: it may have been removed since the workspace was.
   await this.makeDirectory(m,b.cwd);
   const {workspaces}=await this.herdr(m,['workspace','list']);
   if(workspaces.some(w=>w.workspace_id===b.workspaceId&&w.label===workspaceLabel(b))){
-   const r=await this.herdr(m,['tab','create','--workspace',b.workspaceId,'--cwd',{path:b.cwd},'--label',t.title,'--no-focus']);
+   const r=await this.herdr(m,['tab','create','--workspace',b.workspaceId!,'--cwd',{path:b.cwd},'--label',t.title,'--no-focus']);
    return {workspaceId:b.workspaceId,tabId:r.tab.tab_id,paneId:r.root_pane.pane_id};
   }
   const r=await this.herdr(m,['workspace','create','--cwd',{path:b.cwd},'--label',workspaceLabel(b),'--no-focus']);
@@ -327,7 +352,7 @@ export class Topics{
  // last, so that it never holds back any of these, the open COT follows the agent (see advance). A topic without its linked agent in the
  // list waits on no request, and ends when a list read in its queue confirms that the agent is gone: this list may have been read before
  // the topic turned remote answers on. Never rejects; resolves when the work it queued is done.
- sync(m,agents){
+ sync(m:Machine,agents:Agent[]){
   return Promise.all(this.store.data.topics.filter(t=>t.machineId===m.id&&t.state==='ready').map(t=>{
    const agent=linked(t,agents),seq=agent?.reply_seq,fetch=seq!=null&&seq!==(t.replySeq||0);
    const ids=requestIds(agent),cards=this.gone(t,ids).length>0||this.fresh(t,ids).length>0,blocked=this.blocked(t,agent,ids),cot=agent&&news(t,agent);
@@ -345,18 +370,18 @@ export class Topics{
  // A blocked agent without requests waits on something that Feishu cannot answer, such as a Codex question, any Antigravity approval or
  // question, or a trust prompt. Resolves to the state_change_seq of such a blocked episode once two lists in a row report it and no
  // notice covers it yet, else to nothing.
- blocked(t,agent,ids){
+ blocked(t:Topic,agent:Agent|undefined,ids:number[]){
   const seq=agent?.agent_status==='blocked'&&!ids.length?agent.state_change_seq:undefined,previous=this.blockedSeen.get(t.id);
   if(seq==null){this.blockedSeen.delete(t.id);return;}
   this.blockedSeen.set(t.id,seq);return previous===seq&&t.blockedSeq!==seq?seq:undefined;
  }
  // Records of requests that are no longer in ids, except those being answered from Feishu (see click); and ids without a record.
- gone(t,ids){return (t.cards||[]).filter(c=>!ids.includes(c.requestId)&&!this.answering.has(t.id+' '+c.requestId));}
- fresh(t,ids){return ids.filter(id=>!(t.cards||[]).some(c=>c.requestId===id));}
+ gone(t:Topic,ids:number[]){return (t.cards||[]).filter(c=>!ids.includes(c.requestId)&&!this.answering.has(t.id+' '+c.requestId));}
+ fresh(t:Topic,ids:number[]){return ids.filter(id=>!(t.cards||[]).some(c=>c.requestId===id));}
  // Brings the cards of topic t in line with ids, the requests its agent waits on in the list: the card of a request that is gone shows
  // 已失效, and a new request gets a card in the thread. Only requests of the list get one: an older list that is queued after this one then
  // cannot find a card of a request it has not seen. Never rejects.
- async cards(m,t,ids){
+ async cards(m:Machine,t:Topic,ids:number[]){
   try{
    if(t.state!=='ready')return;
    const a=this.app(t.appId);for(const c of this.gone(t,ids))await this.dropCard(a,t,c);
@@ -372,31 +397,31 @@ export class Topics{
  }
  // Drops record c and shows its last card: 已失效 unless given another. At most once, like reactions: the record is dropped before
  // Feishu is called, and a failed update is only logged.
- async dropCard(a,t,c,card=expired(c.title)){
+ async dropCard(a:App,t:Topic,c:RequestCard,card:object=expired(c.title)){
   this.update(t,{cards:(t.cards||[]).filter(x=>x!==c)});
   try{await this.updateCard(a,c.messageId,card);}catch(e){this.store.log('请求卡片',`${t.agentName}：请求 #${c.requestId} 的卡片未能更新，${brief(e)}`,'error');}
  }
  // Posts the card that offers removing the worktree of /wt topic t, which has no agent any more, saying says ({heading, text}), and records
  // it as the worktree's card with what it says, to draw it again after a click (see removalCard). Never rejects: a card that cannot be
  // sent is logged.
- async offerRemoval(a,t,says){
-  try{const messageId=await this.reply(a,t.chatId,t.rootId,{card:removalCard(says,t.worktree,++this.renders)});this.update(t,{worktree:{...t.worktree,card:{messageId,...says}}});}
+ async offerRemoval(a:App,t:Topic,says:{heading:string,text:string}){
+  try{const messageId=await this.reply(a,t.chatId,t.rootId,{card:removalCard(says,t.worktree as Known,++this.renders)});this.update(t,{worktree:{...t.worktree,card:{messageId,...says}}});}
   catch(e){this.store.log('worktree',`${t.agentName}：删除 worktree 的卡片未发出，${brief(e)}`,'error');}
  }
  // A click on the 删除 worktree button of a topic's card by someone on the app's allowlist (see click). The worktree is removed afterwards
  // in the topic's queue, and the card then shows how it went.
- removal(a,evt){
+ removal(a:App,evt:Click){
   const t=this.store.data.topics.find(x=>x.appId===a.id&&x.worktree?.card?.messageId===evt.messageId);
   if(!t)return toast('info','这张卡片已失效');
-  if(t.worktree.removed)return toast('info','worktree 已删除');
+  if(t.worktree!.removed)return toast('info','worktree 已删除');
   const key=t.id+' worktree';if(this.answering.has(key))return toast('info','正在删除，请稍候');
   this.answering.set(key,enqueue(this.topicQueues,t.id,()=>this.removeWorktreeOf(a,t,evt.operator)).finally(()=>this.answering.delete(key)));
   return toast('info','正在删除 worktree');
  }
  // Removes the worktree of topic t, which the person operator asked for, unless it has changes that are not committed (see
  // removeWorktree), and draws its card again with the outcome. A removed worktree is marked removed. Never rejects.
- async removeWorktreeOf(a,t,operator){
-  const w=t.worktree;let outcome;
+ async removeWorktreeOf(a:App,t:Topic,operator:Click['operator']){
+  const w=t.worktree as Known&Pick<Required<Known>,'card'>;let outcome:Removal;
   try{
    const r=await removeWorktree(this.target(t),w,{git:this.git,exists:this.exists,herdr:this.herdr});
    if(r.dirty){outcome={text:dirtyText(r.dirty)};this.store.log('worktree',`${t.agentName}：${w.path} 有未提交的改动，没有删除`);}
@@ -410,11 +435,11 @@ export class Topics{
  // A click on a request card by someone on the app's allowlist (see Platforms), which waits for the returned callback response: Feishu
  // gives it a few seconds, and Herdr on another machine can take longer. The answer goes to Herdr afterwards and outside the topic queue, where a
  // message may be starting the agent for a minute; the card then shows how it ended.
- click(a,evt){
+ click(a:App,evt:Click){
   if(evt.action?.value?.adopt)return this.choose(a,evt);
   if(evt.action?.value?.worktree)return this.removal(a,evt);
   const v=evt.action?.value||{},t=this.store.data.topics.find(x=>x.appId===a.id&&x.cards?.some(c=>c.messageId===evt.messageId)),c=t?.cards.find(x=>x.messageId===evt.messageId&&x.requestId===v.request);
-  if(!c)return toast('info','这个请求已结束');
+  if(!t||!c)return toast('info','这个请求已结束');
   const key=t.id+' '+c.requestId;if(this.answering.has(key))return toast('info','正在提交，请稍候');
   const complete=v.decision!=null||answered(v.questions,evt.action.formValue);
   this.answering.set(key,this.settle(a,t,c,evt,complete).finally(()=>this.answering.delete(key)));
@@ -422,11 +447,11 @@ export class Topics{
  }
  // Answers record c from a click, or draws its card again when a question is left unanswered. The request is read from Herdr first:
  // the card must still show it, and the record keeps only its title. Never rejects.
- async settle(a,t,c,{operator,action},complete){
+ async settle(a:App,t:Topic,c:RequestCard,{operator,action}:Click,complete:boolean){
   try{
    if(t.state!=='ready')return await this.dropCard(a,t,c);
    const m=this.target(t),{requests}=await this.herdr(m,['agent','requests',t.paneId]),r=requests.find(x=>x.id===c.requestId);
-   if(!r||check(r)!==action.value.check)return await this.dropCard(a,t,c);
+   if(!r||check(r)!==action.value!.check)return await this.dropCard(a,t,c);
    const answer=complete&&answerOf(r,action);
    if(!answer)return await this.updateCard(a,c.messageId,pending(r,++this.renders,action.formValue));
    try{await this.herdr(m,['agent','answer',t.paneId,String(r.id),...answerArgs(answer)]);}
@@ -441,8 +466,8 @@ export class Topics{
  // /adopt: the command message opens a topic that waits for an agent to adopt (state choosing), and the bot answers in its thread with the
  // picker of the agents on every connected machine that no topic holds. adopted marks such a topic: it holds the picker's message id, and
  // once an agent is adopted also the agent's kind and its session where the agent reports one. Never rejects.
- offer(a,b,msg){
-  const t={id:uuid(),bindingId:b.id,appId:a.id,chatId:b.chatId,rootId:msg.messageId,machineId:'',workspaceId:'',tabId:'',paneId:'',agentName:'',title:'接管 Agent',
+ offer(a:App,b:Binding,msg:Inbound){
+  const t:Topic={id:uuid(),bindingId:b.id,appId:a.id,chatId:b.chatId,rootId:msg.messageId,machineId:'',workspaceId:'',tabId:'',paneId:'',agentName:'',title:'接管 Agent',
    state:'choosing',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],adopted:{},createdAt:this.now()};
   this.store.data.topics.push(t);this.store.save();
   return enqueue(this.topicQueues,t.id,async()=>{
@@ -455,7 +480,7 @@ export class Topics{
  // The agents a topic can adopt, per connected machine in store order: {machine, failed, agents:[{agent, name}]}, where name is what
  // the person calls the agent (see nameOf). One snapshot per machine carries the agents together with the pane, tab and workspace labels
  // that name them. A machine whose snapshot fails is failed. Never rejects.
- candidates(){
+ candidates():Promise<Group[]>{
   return Promise.all(this.store.data.machines.filter(m=>m.enabled).map(async machine=>{
    let snapshot;try{({snapshot}=await this.herdr(machine,['api','snapshot']));}
    catch(e){this.store.log('话题接管',`${machine.name}：${brief(e)}`,'error');return {machine,failed:true,agents:[]};}
@@ -463,14 +488,14 @@ export class Topics{
   }));
  }
  // Snapshot s of machine m with only the agents that a topic can adopt: those with an agent kind, in a pane that no topic holds.
- free(m,s){return {...s,agents:s.agents.filter(x=>x.agent&&!this.held(m.id,x.pane_id))};}
+ free(m:Machine,s:Snapshot){return {...s,agents:s.agents.filter((x):x is Offered=>Boolean(x.agent)&&!this.held(m.id,x.pane_id))};}
  // The latest reply of agent x from the list of machine m, or null.
- async latest(m,x){if(x.reply_seq==null)return null;const {replies}=await this.herdr(m,['agent','replies',x.pane_id,'--after',String(x.reply_seq-1)]);return replies.at(-1)||null;}
+ async latest(m:Machine,x:Agent){if(x.reply_seq==null)return null;const {replies}=await this.herdr(m,['agent','replies',x.pane_id,'--after',String(x.reply_seq-1)]);return replies.at(-1)||null;}
  // Whether a topic holds pane p of machine m: a topic starting or ready in it, or a selection that is adopting it.
- held(m,p){return this.claims.has(m+' '+p)||this.store.data.topics.some(t=>['starting','ready'].includes(t.state)&&t.machineId===m&&t.paneId===p);}
+ held(m:string,p:string){return this.claims.has(m+' '+p)||this.store.data.topics.some(t=>['starting','ready'].includes(t.state)&&t.machineId===m&&t.paneId===p);}
  // A submission of a picker by someone on the app's allowlist (see click). The chosen agent is adopted afterwards in the topic's queue;
  // a submission without a choice draws the picker again, so that the next one is not dropped as a repeat.
- choose(a,evt){
+ choose(a:App,evt:Click){
   const t=this.store.data.topics.find(x=>x.appId===a.id&&x.adopted?.picker===evt.messageId);
   if(!t)return toast('info',`这张卡片已失效，请重新发送 ${slash.adopt}`);
   if(t.state!=='choosing')return toast('info','这个话题已接管 Agent，不能再选择');
@@ -482,7 +507,7 @@ export class Topics{
  // Adopts agent v that the person operator chose on a picker when its pane still runs that agent and no topic holds it: remote answers
  // are turned on, then the topic is linked and ready under the agent's name, and the intro with the agent's latest reply goes into the
  // thread. The pane stays where it is. Otherwise, also without a choice, the picker is drawn again with the reason. Never rejects.
- async adopt(a,t,v,operator){
+ async adopt(a:App,t:Topic,v:Choice|null,operator:Click['operator']){
   const b=this.store.data.bindings.find(x=>x.id===t.bindingId),name=b?.name||a.name;let claim;
   try{
    if(t.state!=='choosing')return;
@@ -499,25 +524,26 @@ export class Topics{
    let latest=null;try{latest=await this.latest(m,x);}catch(e){this.store.log('话题接管',`${name}：未能读取最近一条回复，${brief(e)}`,'error');}
    // The reply shown in the intro is not forwarded again.
    this.update(t,{machineId:m.id,workspaceId:x.workspace_id||'',tabId:x.tab_id||'',paneId:x.pane_id,agentName:called,title:'接管 · '+called,state:'ready',
-    replySeq:latest?.seq??x.reply_seq??0,adopted:{picker:t.adopted.picker,kind:x.agent,...x.agent_session&&{session:x.agent_session.value}}});
+    replySeq:latest?.seq??x.reply_seq??0,adopted:{picker:t.adopted!.picker,kind:x.agent,...x.agent_session&&{session:x.agent_session.value}}});
    this.store.log('话题接管',`${name}：已接管 ${m.name} 上的 ${t.agentName}`);
    await this.notify(a,t,intro(m,x,called,latest));
    if(latest)try{await this.post(a,t,latest);}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}
-   try{await this.updateCard(a,t.adopted.picker,adoptedPicker(m,x,called,operator.openId));}catch(e){this.store.log('话题接管',`${name}：接管卡片未能更新，${brief(e)}`,'error');}
+   try{await this.updateCard(a,t.adopted!.picker!,adoptedPicker(m,x,called,operator.openId));}catch(e){this.store.log('话题接管',`${name}：接管卡片未能更新，${brief(e)}`,'error');}
   }catch(e){
    this.store.log('话题接管',`${name}：接管失败，${brief(e)}`,'error');
    if(t.state==='choosing')await this.redraw(a,t,'接管失败，请稍后重试');
   }finally{if(claim)this.claims.delete(claim);}
  }
  // Draws the picker of topic t again, led by notice. Never rejects.
- async redraw(a,t,notice){
-  try{await this.updateCard(a,t.adopted.picker,picker(await this.candidates(),++this.renders,notice));}
+ async redraw(a:App,t:Topic,notice:string){
+  // The picker was posted: a click on it got here.
+  try{await this.updateCard(a,t.adopted!.picker!,picker(await this.candidates(),++this.renders,notice));}
   catch(e){this.store.log('话题接管',`${a.name}：接管卡片未能更新，${brief(e)}`,'error');}
  }
  // /stop in ready topic t: Esc to its agent, which interrupts the turn of Claude, Codex and Antigravity like pressing it in the terminal, and
  // the open COT shows the run interrupted; without one a notice says that the turn stops. Esc goes only to an agent that works or waits for
  // a confirmation: at an idle prompt it can open a menu of the agent (Claude's rewind). Never rejects.
- async stop(a,t){
+ async stop(a:App,t:Topic){
   try{
    const agent=await this.alive(a,t);if(!agent)return;
    if(!['working','blocked'].includes(agent.agent_status))return await this.notify(a,t,'Agent 当前没有在运行的一轮');
@@ -528,14 +554,14 @@ export class Topics{
  }
  // /stop as a root message of binding b, which the stop button of a COT sends in a direct chat: it stops the one ready topic of the chat
  // whose COT is open; with none or several the bot asks in the message's thread for /stop in the topic. It never opens a topic. Never rejects.
- async stopChat(a,b,msg){
+ async stopChat(a:App,b:Binding,msg:Inbound){
   const open=this.store.data.topics.filter(t=>t.bindingId===b.id&&t.state==='ready'&&t.cot);
   if(open.length===1)return enqueue(this.topicQueues,open[0].id,()=>this.stop(a,open[0]));
   try{await this.reply(a,b.chatId,msg.messageId,{card:notice(`请在要停止的话题里发送 ${slash.stop}`)});}catch(e){this.store.log('话题停止',`${b.name}：${brief(e)}`,'error');}
  }
  // /release in an adopted topic: remote answers are turned off and the topic ends; the agent keeps running in its pane. When they cannot
  // be turned off, the topic stays linked unless its agent turns out to be gone already.
- async release(a,b,t){
+ async release(a:App,b:Binding,t:Topic){
   if(t.state!=='ready')return;
   try{await this.herdr(this.target(t),remoteAnswers(t.paneId,false));}
   catch(e){
@@ -548,7 +574,7 @@ export class Topics{
  // Drops the topics of a removed binding. Their agents keep running; those of ready topics stop waiting for Feishu's answers, and their open
  // COT shows the run failed. The directories of their attachments are removed, also those that an ended topic failed to remove. Never
  // rejects; resolves once Herdr and Feishu were told.
- unbind(bindingId){
+ unbind(bindingId:string){
   const dropped=this.store.data.topics.filter(t=>t.bindingId===bindingId);
   this.store.data.topics=this.store.data.topics.filter(t=>t.bindingId!==bindingId);this.store.save();
   return Promise.all(dropped.map(async t=>{
@@ -561,7 +587,7 @@ export class Topics{
   }));
  }
  // Sends the agent's replies after t.replySeq, up to seq from the agent list, into the thread.
- async pull(m,t,seq){
+ async pull(m:Machine,t:Topic,seq:number){
   const last=t.replySeq||0,b=this.store.data.bindings.find(x=>x.id===t.bindingId);
   // Checked again in the queue: an earlier sync of the same list may have sent them, a message may have closed the topic or the binding is gone.
   if(!b||t.state!=='ready'||seq===last)return;
@@ -577,21 +603,21 @@ export class Topics{
  // Posts reply r of the agent into the thread as its cards, in order. The first card that fails ends the reply: the cards after it are
  // dropped rather than posted after a gap, and most failures (Feishu not connected) would meet them too. Rejects with the error of that
  // card, its sent property counting the cards that went out before it.
- async post(a,t,r){
+ async post(a:App,t:Topic,r:Reply){
   const cards=replyCards(r);
   for(const [i,card] of cards.entries())try{await this.reply(a,t.chatId,t.rootId,{card});}catch(e){throw Object.assign(e,{sent:i});}
  }
  // Resolves to the record kept in t.reactions, or to null when Feishu refused the reaction; delivery goes on either way.
- async addReaction(a,t,messageId){
-  try{const r={messageId,reactionId:await this.react(a,messageId,reaction),stateSeq:null};this.update(t,{reactions:[...t.reactions||[],r]});return r;}
+ async addReaction(a:App,t:Topic,messageId:string){
+  try{const r:Reaction={messageId,reactionId:await this.react(a,messageId,reaction),stateSeq:null};this.update(t,{reactions:[...t.reactions||[],r]});return r;}
   catch(e){this.store.log('消息表情',`${t.agentName}：未能贴上表情，${brief(e)}`,'error');return null;}
  }
  // At most once: the record is dropped before Feishu is called, and a failed removal is only logged.
- async dropReaction(t,r){
-  if(!t.reactions?.includes(r))return;this.update(t,{reactions:t.reactions.filter(x=>x!==r)});
+ async dropReaction(t:Topic,r?:Reaction|null|''){
+  if(!r||!t.reactions?.includes(r))return;this.update(t,{reactions:t.reactions.filter(x=>x!==r)});
   try{await this.unreact(this.app(t.appId),r.messageId,r.reactionId);}catch(e){this.store.log('消息表情',`${t.agentName}：未能取消表情，${brief(e)}`,'error');}
  }
- target(t){const m=this.machine(t.machineId);if(!m.enabled)throw Error('机器连接已停用');return m;}
- update(t,fields){Object.assign(t,fields);this.store.save();}
- async notify(a,t,text){try{await this.reply(a,t.chatId,t.rootId,{card:notice(text)});}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}}
+ target(t:Topic){const m=this.machine(t.machineId);if(!m.enabled)throw Error('机器连接已停用');return m;}
+ update(t:Topic,fields:Partial<Topic>){Object.assign(t,fields);this.store.save();}
+ async notify(a:App,t:Topic,text:string){try{await this.reply(a,t.chatId,t.rootId,{card:notice(text)});}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}}
 }

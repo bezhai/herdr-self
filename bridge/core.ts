@@ -43,7 +43,7 @@ function failure(text:string){
 }
 // What Herdr prints for the commands whose result Bridge reads: an agent of `herdr agent list`, which `herdr api snapshot` lists too, with
 // the panes, tabs and workspaces that name them. Herdr versions without replies, requests or tool call records leave out their seq and ids.
-export type Agent={pane_id:string,workspace_id?:string,tab_id?:string,agent?:string,display_agent?:string,name?:string,agent_session?:{value:string},agent_status:string,
+export type Agent={pane_id:string,workspace_id:string,tab_id:string,agent?:string,display_agent?:string,name?:string,agent_session?:{value:string},agent_status:string,
  state_change_seq:number,reply_seq?:number,request_ids?:number[],tool_call_seq?:number,remote_answers?:boolean,cwd?:string,foreground_cwd?:string};
 export type Snapshot={agents:Agent[],panes:{pane_id:string,label?:string}[],tabs:{tab_id:string,label?:string}[],workspaces:{workspace_id:string,label?:string}[]};
 type Opened={workspace:{workspace_id:string},tab:{tab_id:string},root_pane:{pane_id:string}};
@@ -77,6 +77,7 @@ export type HerdrResult<A>=
 type Options={timeoutMs?:number};
 export type Call=<K extends keyof ClientApi>(m:Machine,method:K,params:ClientApi[K]['params'],options?:Options)=>Promise<ClientApi[K]['result']>;
 export type Herdr=<const A extends readonly HerdrArg[]>(m:Machine,args:A,options?:Options)=>Promise<HerdrResult<A>>;
+export type Operations=ReturnType<typeof operations>;
 export function operations(call:Call){
  return {
   async herdr<const A extends readonly HerdrArg[]>(m:Machine,args:A,options?:Options):Promise<HerdrResult<A>>{

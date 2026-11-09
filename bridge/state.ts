@@ -1,4 +1,5 @@
 import type {Cot} from './cot.ts';
+import type {Worktree} from './worktrees.ts';
 // What Bridge keeps in its state file, collection by collection (see Store in core.ts). Types only: every module that reads or writes a
 // collection takes its shape from here.
 
@@ -21,7 +22,7 @@ export type Binding={id:string,name:string,appId:string,machineId:string,chatId:
 // proposal until the card is clicked or expires (see AgentSchedules).
 export type Topic={id:string,bindingId:string,appId:string,chatId:string,rootId:string,machineId:string,workspaceId:string,tabId:string,paneId:string,agentName:string,title:string,
  state:'starting'|'ready'|'failed'|'closed'|'choosing',error:string,messageIds:string[],replySeq:number,reactions:Reaction[],cards:RequestCard[],createdAt:number,
- worktree?:{branch?:string,path?:string,root?:string,card?:{messageId:string,heading:string,text:string},removed?:boolean},
+ worktree?:Partial<Worktree>&{card?:{messageId:string,heading:string,text:string},removed?:boolean},
  adopted?:{picker?:string,kind?:string,session?:string},scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number};
 // A message of a person that the topic marked, with the state_change_seq of the prompt once it was prompted (see Topics.addReaction).
 export type Reaction={messageId:string,reactionId:string,stateSeq:number|null};
@@ -29,8 +30,11 @@ export type Reaction={messageId:string,reactionId:string,stateSeq:number|null};
 export type RequestCard={requestId:number,messageId:string,title:string};
 // The open COT of a topic, with what it shows (see Topics.openCot).
 export type TopicCot=Cot&{origin:string,stateSeq:number,toolSeq:number,waiting:boolean};
-// A schedule that the agent of a topic submitted, or a change to one, waiting for its card to be clicked (see AgentSchedules.propose).
-export type Proposal={id:string,kind:'add'|'update',scheduleId?:string,before?:{cron:string,timeZone:string,task:string},fields:ScheduleFields,messageId:string,expiresAt:number};
+// A schedule that the agent of a topic submitted, or a change to schedule scheduleId, which had the time and the task of before, waiting for
+// its card to be clicked (see AgentSchedules.propose).
+export type Proposal={id:string,messageId:string,expiresAt:number}&Submission;
+export type Submission={kind:'add',fields:ScheduleFields,scheduleId?:undefined,before?:undefined}
+ |{kind:'update',scheduleId:string,before:{cron:string,timeZone:string,task:string},fields:ScheduleFields};
 export type ScheduleFields={mode:Mode,topicId?:string,cron:string,timeZone:string,task:string};
 // The modes of a schedule (see schedules.ts).
 export type Mode='new'|'into';
