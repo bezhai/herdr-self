@@ -7,7 +7,7 @@ import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranc
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
 import {PendingChats,consoleUrl} from './pending-chats.ts';
-import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
+import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules,isMode} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
 import {Registrations} from './registration.ts';import {staticFile,sendStatic} from './web-assets.ts';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
@@ -2554,6 +2554,10 @@ function scheduleFixture(options:TopicOptions={}){
 const runNotice=(s:Schedule,n:number,time:string)=>{const text=`定时任务 ${s.id.slice(0,8)} · 第 ${n} 次运行 · ${time}\n${s.task}`;return notice(text,text.replace(/\s+/g,' '));};
 const daily={bindingId:'b',mode:'new',cron:'0 9 * * *',timeZone:'Asia/Shanghai',task:'总结昨天的提交'};
 const scheduleLogs=(f:{store:Store})=>f.store.data.logs.filter(l=>l.kind==='定时任务').map(l=>[l.level,l.message]);
+test('only the two names of the modes of a schedule, as strings, are modes: not a list that prints as one, nor a name that every object has',()=>{
+ for(const mode of ['new','into'])assert.equal(isMode(mode),true,mode);
+ for(const mode of [['new'],['into'],[['new']],{toString:()=>'new'},'constructor','toString','__proto__','NEW','',' new',null,undefined,1])assert.equal(isMode(mode),false,String(mode));
+});
 test('a schedule is added on a binding with a cron expression, a time zone and a task, to open a new topic at each run or to prompt one topic of the binding; what is invalid is refused, and list, runs, update, pause, resume and remove work on the stored schedules',async()=>{
  const f=scheduleFixture();try{
   await f.send({messageId:'om_1',content:'one'});const t=f.store.data.topics[0];f.at('2026-11-06T10:00:00+08:00');const now=at('2026-11-06T10:00:00+08:00');

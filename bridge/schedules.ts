@@ -12,8 +12,8 @@ import type {Platforms} from './platform.ts';
 // the topic opens under it, see Topics.begin) or gives its task to the agent of one topic of the binding, as a person's message in its
 // thread would (mode into). Bridge only decides when and where; what the task means is the agent's.
 export const modes:Record<Mode,string>={new:'每次开新话题',into:'发进话题'};
-// Whether v names a mode, as the name of a property of modes: any value whose string is that name does.
-export const isMode=(v:unknown):v is Mode=>Object.hasOwn(modes,String(v??''));
+// Whether v names a mode: a string that is the name of a property of modes. Not a value that merely prints as one, such as a list.
+export const isMode=(v:unknown):v is Mode=>typeof v==='string'&&Object.hasOwn(modes,v);
 // The latest time due runs only when it is at most this late; the times before it, which only a Bridge that was down leaves, are missed.
 const grace=2*3600000;
 // Mode new keeps the topics of its latest runs, and of the older runs those in which a person wrote within the quiet time (see prune).
