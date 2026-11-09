@@ -2,7 +2,7 @@ import test from 'node:test';import strictAssert from 'node:assert/strict';impor
 import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
 import {normalizeMachine,migrateMachines,operations,Store} from './core.ts';
-import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';
+import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
@@ -3922,7 +3922,7 @@ test('the client does only what its fixed set of methods names, none of which ru
   for(const method of ['exec','run','spawn','shell','constructor','__proto__'])await assert.rejects(call(f.m,method,{argv:['id']}),(e:Thrown)=>e.code==='unknown_method',method);
   const skill={name:'a',digest:'d',files:{'SKILL.md':''}},skills={store:'~/s',skills:[skill],dir:'.claude/skills',as:'link',cwd:'~/w'};
   for(const [method,params] of [['herdr',{session:'default',args:'agent list'}],['herdr',{session:'default',args:[{cwd:'x'}]}],['herdr',{session:'default',args:[{path:'relative'}]}],['herdr',{args:[]}],
-   ['mkdir',{path:'relative/dir'}],['mkdir',{}],['git',{cwd:'~/x',args:[1]}],['git',{cwd:'x',args:[]}],['exists',{}],['askCheapModel',{cwd:'~/x'}],['inspectDirectory',{}],['inspectDirectory',{path:'relative'}],
+   ['askCheapModel',{cwd:'~/x'}],['inspectDirectory',{}],['inspectDirectory',{path:'relative'}],
    ['storeFile',{root:'~/w/.herdr-bridge',dir:'..',name:'a',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a/b',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a',body:1}],
    ['placeSkills',{...skills,as:'move'}],['placeSkills',{...skills,dir:'/abs'}],['placeSkills',{...skills,skills:{a:skill}}],['placeSkills',{...skills,skills:[{...skill,name:'../a'}]}],['placeSkills',{...skills,skills:[{...skill,name:'a/b'}]}],
    ['placeSkills',{...skills,skills:[{...skill,digest:''}]}],['placeSkills',{...skills,skills:[{...skill,files:null}]}],['placeSkills',{...skills,skills:[{...skill,files:{'../x':''}}]}],['placeSkills',{...skills,skills:[{...skill,files:{'/x':''}}]}],
@@ -3930,13 +3930,10 @@ test('the client does only what its fixed set of methods names, none of which ru
    await assert.rejects(call(f.m,method,params),(e:Thrown)=>e.code==='invalid_params',method+' '+JSON.stringify(params));
  }finally{await f.close();}
 });
-test('the client creates directories, stores attachments only under a .herdr-bridge directory and removes only a directory directly under one, as the control plane asks: files 0600 in directories 0700, a .gitignore of * and the clean-up of directories of other topics unchanged for 7 days',async()=>{
+test('the client stores attachments only under a .herdr-bridge directory and removes only a directory directly under one, as the control plane asks: files 0600 in directories 0700, a .gitignore of * and the clean-up of directories of other topics unchanged for 7 days',async()=>{
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-files-'))),home=path.join(dir,'home');fs.mkdirSync(home);
- const f=await machineFixture({env:{HOME:home}}),{makeDirectory,storeFile,removeDirectory}=f.ops,m=f.m;
+ const f=await machineFixture({env:{HOME:home}}),{storeFile,removeDirectory}=f.ops,m=f.m;
  try{
-  const target=path.join(home,'a','b','c');
-  await makeDirectory(m,'~/a/b/c');assert.ok(fs.statSync(target).isDirectory());await makeDirectory(m,target);
-  fs.writeFileSync(path.join(home,'plain'),'');await assert.rejects(makeDirectory(m,'~/plain/x'),/mkdir/);
   await storeFileBehaves(f.ops,m,home);
   // A root that is not a .herdr-bridge directory, also once its links are resolved, gets nothing, and nothing of its own is cleaned up.
   const keep=['work/.herdr-bridge/t2/sub','victim/t3','work/.herdr-bridge/file'];
@@ -3997,9 +3994,9 @@ test('the client runs commands with the environment that the user\'s shell sets 
  const f=await machineFixture({env});
  try{
   assert.deepEqual(await f.ops.herdr(f.m,['agent','list']),{args:'--session default agent list',shell:'1',pane:'',path:`${bin}:/usr/bin:/bin`});
-  assert.deepEqual(await f.ops.git(f.m,'~/repo',['status','--porcelain']),{code:0,stdout:`-C ${repo} status --porcelain|0|C|`,stderr:''});
+  // The git of the client never asks for credentials and speaks English, whatever the environment it runs with.
+  assert.deepEqual(await gitRunner({PATH:`${bin}:/usr/bin:/bin`})(repo,['status','--porcelain']),{code:0,stdout:`-C ${repo} status --porcelain|0|C|`,stderr:''});
   assert.deepEqual(await f.ops.askCheapModel(f.m,'~/repo','给登录页加验证码\n'),{code:0,stdout:`BRANCH=feat/from-shell -p --model haiku\n${repo}\n给登录页加验证码\n`,stderr:''});
-  assert.equal(await f.ops.exists(f.m,'~/repo'),true);assert.equal(await f.ops.exists(f.m,'~/none'),false);
  }finally{await f.close();}
  // A shell that fails: the client logs why and runs Herdr with its own environment, still without the HERDR_* variables, where claude is not found.
  fs.writeFileSync(shell,'#!/bin/sh\necho broken >&2\nexit 3\n',{mode:0o700});

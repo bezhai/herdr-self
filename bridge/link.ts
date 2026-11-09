@@ -34,11 +34,8 @@ type Timed<P>=P&{timeoutMs?:number};
 export type ClientApi={
  ping:{params:{},result:{}},
  herdr:{params:Timed<{session:string,args:readonly HerdrArg[]}>,result:Ran},
- mkdir:{params:Timed<{path:string}>,result:{}},
  storeFile:{params:Timed<{root:string,dir:string,name:string,body:string}>,result:string},
  removeDirectory:{params:Timed<{path:string}>,result:{}},
- git:{params:Timed<{cwd:string,args:string[]}>,result:Ran},
- exists:{params:Timed<{path:string}>,result:boolean},
  askCheapModel:{params:Timed<{cwd:string,prompt:string}>,result:Ran},
  inspectDirectory:{params:Timed<{path:string}>,result:{origin:string|null}},
  // inspectDirectory: the origin URL of the repository whose root path is, null when path is no root or the repository has no origin.

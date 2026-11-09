@@ -78,8 +78,6 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
    const argv=args.map(a=>typeof a==='string'?a:local(a?.path,'路径参数'));
    return run(program,['--session',string(session,'session'),...argv],{env,timeoutMs});
   },
-  // Creates directory path and its missing parents; one that exists is fine.
-  async mkdir({path:dir}){await fs.promises.mkdir(local(dir,'path'),{recursive:true});return {};},
   // Writes body (base64) as <root>/<dir>/<name> and resolves to the absolute path of the file. root is a .herdr-bridge directory: it gets a
   // .gitignore of * unless it has one, and its directories other than dir that have not changed for 7 days are removed along the way.
   // Directories are created 0700 and the file 0600.
@@ -102,9 +100,6 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
    const target=path.join(parent,path.basename(p)),s=await lstat(target);if(!s)return {};if(!s.isDirectory())throw denied();
    await fs.promises.rm(target,{recursive:true,force:true});return {};
   },
-  git:({cwd,args,timeoutMs})=>{if(!Array.isArray(args)||!args.every(a=>typeof a==='string'))throw invalid('args');return git(local(cwd,'cwd'),args,timeoutMs);},
-  // Whether path exists, following links.
-  exists:({path:p})=>fs.promises.stat(local(p,'path')).then(()=>true,()=>false),
   // Asks the cheap model (Claude haiku, through claude) in directory cwd, with prompt on stdin. What it is asked for, such as a branch name, is
   // the control plane's business.
   askCheapModel:({cwd,prompt,timeoutMs})=>ask(local(cwd,'cwd'),string(prompt,'prompt'),timeoutMs),
