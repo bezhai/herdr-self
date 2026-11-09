@@ -62,7 +62,7 @@ export function publicText(s){return String(s||'').replace(/((?:api[_-]?key|toke
 // Bridge's state directory: BRIDGE_STATE of env, else state in the Bridge directory.
 export const stateDir=(env=process.env)=>env.BRIDGE_STATE||path.join(path.dirname(fileURLToPath(import.meta.url)),'state');
 // Persisted collections. Keys of older state files outside this list are dropped on load; a collection they lack loads empty.
-const collections=['machines','apps','bindings','topics','schedules','logs'];
+const collections=['machines','apps','bindings','topics','schedules','skills','logs'];
 export class Store{
  constructor(dir){this.dir=dir;fs.mkdirSync(dir,{recursive:true,mode:0o700});this.file=path.join(dir,'state.json');const saved=fs.existsSync(this.file)?JSON.parse(fs.readFileSync(this.file)):{};this.data=Object.fromEntries(collections.map(k=>[k,saved[k]||[]]));}
  save(){fs.writeFileSync(this.file+'.tmp',JSON.stringify(this.data),{mode:0o600});fs.renameSync(this.file+'.tmp',this.file);}

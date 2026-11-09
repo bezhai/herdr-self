@@ -24,6 +24,10 @@ export function Sidebar({ state, page, online, open, onNavigate, onLogout }) {
         <NavButton page="machines" count={state.machines.length} {...nav} />
         <NavButton page="bindings" count={state.bindings.length} {...nav} />
       </nav>
+      <p className="nav-label">Agent 配置</p>
+      <nav>
+        <NavButton page="skills" count={state.skills.length} {...nav} />
+      </nav>
       <p className="nav-label">运行情况</p>
       <nav>
         <NavButton page="logs" {...nav} />

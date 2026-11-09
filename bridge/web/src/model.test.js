@@ -1,9 +1,9 @@
 import { expect, test } from 'vitest';
 import {
   agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, minutesLeft, onlineMachines, permissionModeOf, registrationView, statusLabel,
-  statusTone, topicStatus,
+  skillText, statusTone, topicStatus,
 } from './model.js';
-import { sampleState } from './test/fixtures.js';
+import { base64, sampleState } from './test/fixtures.js';
 
 test('status tones group connection and Herdr agent states', () => {
   expect(['error', 'failed'].map(statusTone)).toEqual(['error', 'error']);
@@ -132,4 +132,9 @@ test('registration view: while opening, the previous finished registration is ig
   expect(view({ ...previous, status: 'pending', url: 'https://open.feishu.cn/x' }, { opening: true, previousId: 'r0' })).toMatchObject({ opening: false, link: 'https://open.feishu.cn/x' });
   expect(view({ id: 'r1', status: 'error' }, { opening: true, previousId: 'r0' })).toMatchObject({ opening: false, retry: true });
   expect(view(null, { opening: true, previousId: undefined })).toMatchObject({ opening: true, spinner: true });
+});
+
+test('the SKILL.md of a skill read with its files is its UTF-8 text', () => {
+  const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI 🚦\n';
+  expect(skillText({ files: { 'SKILL.md': base64(text), 'scripts/run.sh': base64('echo\n') } })).toBe(text);
 });

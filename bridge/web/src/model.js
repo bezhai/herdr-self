@@ -58,6 +58,9 @@ export const permissionModes = [
   { id: 'auto', note: '由 Claude 自动决定，很少需要确认' },
 ];
 
+// The SKILL.md of a skill as /api/skills/read returns it, with its files in base64, as text.
+export const skillText = (skill) => new TextDecoder().decode(Uint8Array.from(atob(skill.files['SKILL.md'] || ''), (c) => c.charCodeAt(0)));
+
 // Permission mode of a Claude binding: one saved before bindings had a mode has none and uses default.
 export const permissionModeOf = (binding) => binding.permissionMode || 'default';
 

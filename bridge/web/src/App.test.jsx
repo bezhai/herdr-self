@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, expect, test, vi } from 'vitest';
 import { App } from './App.jsx';
 import { assign } from './location.js';
-import { bodyOf, callsTo, deferred, reply, sampleState, stubFetch } from './test/fixtures.js';
+import { base64, bodyOf, callsTo, deferred, reply, sampleState, stubFetch } from './test/fixtures.js';
 
 // Navigation is replaced; reading and clearing the query string run against jsdom's real history.
 vi.mock('./location.js', async (importOriginal) => ({ ...(await importOriginal()), assign: vi.fn(), replace: vi.fn(), reload: vi.fn() }));
@@ -123,6 +123,11 @@ test('navigation switches the title, breadcrumb and page action, and closes the 
   expect(pageTitle()).toBe('会话绑定');
   expect(screen.getByRole('button', { name: '+ 新建绑定' })).toBeTruthy();
 
+  await user.click(nav('Skills'));
+  expect(pageTitle()).toBe('Skills');
+  expect(nav('Skills').querySelector('b').textContent).toBe('2');
+  expect(screen.getByRole('button', { name: '+ 新建 skill' })).toBeTruthy();
+
   await user.click(nav('连接日志'));
   expect(pageTitle()).toBe('连接日志');
   expect(document.querySelector('.heading button')).toBeNull();
@@ -152,12 +157,14 @@ test('page and section headings hold only their titles and the page action', asy
   expect(headings()).toEqual(['机器连接+ 添加机器', 'Herdr 实例']);
   await user.click(nav('会话绑定'));
   expect(headings()).toEqual(['会话绑定+ 新建绑定', '消息路由']);
+  await user.click(nav('Skills'));
+  expect(headings()).toEqual(['Skills+ 新建 skill', 'Agent 的 skill']);
   await user.click(nav('连接日志'));
   expect(headings()).toEqual(['连接日志', '连接与消息事件']);
 });
 
 test('empty pages show only a short status', async () => {
-  const state = { ...sampleState(), apps: [], machines: [], bindings: [], topics: [], logs: [] };
+  const state = { ...sampleState(), apps: [], machines: [], bindings: [], topics: [], skills: [], logs: [] };
   stubFetch({ '/api/state': state });
   const user = userEvent.setup();
   render(<App />);
@@ -167,6 +174,8 @@ test('empty pages show only a short status', async () => {
   expect(document.querySelector('.empty-state').textContent).toBe('暂无机器');
   await user.click(nav('会话绑定'));
   expect(document.querySelector('.table-empty').textContent).toBe('暂无会话绑定');
+  await user.click(nav('Skills'));
+  expect(document.querySelector('.empty-state').textContent).toBe('暂无 skill');
   await user.click(nav('连接日志'));
   expect(document.querySelector('.stream-empty').textContent).toBe('暂无事件');
 });
@@ -405,6 +414,75 @@ test('each binding lists its topics newest first with state, pane and creation t
   expect(within(ready).getByText('cpu2 · w1:p5')).toBeTruthy();
   expect(ready.querySelector('time').getAttribute('datetime')).toBe('2026-09-28T01:02:00.000Z');
   expect(ready.querySelector('.topic-error')).toBeNull();
+});
+
+test('skill cards show the name, the description and whether every topic gets the skill; that is set and unset on the card, only a skill that not every topic gets can be removed, and editing reads the skill before its form opens', async () => {
+  const state = sampleState();
+  const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI。\n';
+  const fetch = stubFetch({
+    '/api/state': () => state,
+    '/api/skills/everywhere': ({ name, everywhere }) => {
+      state.skills = state.skills.map((s) => (s.name === name ? { ...s, everywhere } : s));
+      return { ok: true };
+    },
+    '/api/skills/remove': ({ name }) => {
+      state.skills = state.skills.filter((s) => s.name !== name);
+      return { ok: true };
+    },
+    '/api/skills/read?name=deploy-notes': { ...state.skills[1], files: { 'SKILL.md': base64(text), 'scripts/check.sh': base64('echo\n') } },
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^Skills/ }));
+  const toast = () => screen.getByRole('status').textContent;
+
+  const schedule = card('bridge-schedule');
+  expect(schedule.querySelector('.card-icon use').getAttribute('href')).toBe('#i-skill');
+  expect(within(schedule).getByText('在飞书话题里用定时任务做事时使用。')).toBeTruthy();
+  expect(within(schedule).getByText('所有项目都带').className).toBe('badge');
+  expect(within(schedule).queryByRole('button', { name: '删除' })).toBeNull();
+  const notes = card('deploy-notes');
+  expect(within(notes).getByText('按需读取').classList.contains('neutral')).toBe(true);
+  expect(within(notes).getByRole('button', { name: '删除' })).toBeTruthy();
+
+  await user.click(within(notes).getByRole('button', { name: '设为所有项目都带' }));
+  expect(bodyOf(fetch, '/api/skills/everywhere')).toEqual({ name: 'deploy-notes', everywhere: true });
+  await waitFor(() => expect(within(card('deploy-notes')).getByText('所有项目都带')).toBeTruthy());
+  expect(toast()).toBe('deploy-notes 已设为所有项目都带');
+  await user.click(within(card('bridge-schedule')).getByRole('button', { name: '取消所有项目都带' }));
+  expect(bodyOf(fetch, '/api/skills/everywhere')).toEqual({ name: 'bridge-schedule', everywhere: false });
+  await waitFor(() => expect(toast()).toBe('bridge-schedule 已取消所有项目都带'));
+  await user.click(await within(card('bridge-schedule')).findByRole('button', { name: '删除' }));
+  expect(bodyOf(fetch, '/api/skills/remove')).toEqual({ name: 'bridge-schedule' });
+  await waitFor(() => expect(screen.queryByText('bridge-schedule')).toBeNull());
+
+  await user.click(within(card('deploy-notes')).getByRole('button', { name: '编辑' }));
+  expect(await screen.findByRole('heading', { name: '编辑 deploy-notes' })).toBeTruthy();
+  expect(screen.getByLabelText('SKILL.md').value).toBe(text);
+  expect(within(dialog()).getByText('scripts/check.sh')).toBeTruthy();
+});
+
+test('adding a skill saves it as a new one, closes the form and fetches the skills again', async () => {
+  const state = sampleState();
+  const fetch = stubFetch({
+    '/api/state': () => state,
+    '/api/skills/save': ({ name }) => {
+      state.skills = [...state.skills, { name, description: '新的', everywhere: false, digest: 'c'.repeat(64) }];
+      return { ok: true };
+    },
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(await screen.findByRole('button', { name: /^Skills/ }));
+  await user.click(screen.getByRole('button', { name: '+ 新建 skill' }));
+  expect(within(dialog()).getByRole('heading', { name: '新建 skill' })).toBeTruthy();
+  await user.type(screen.getByLabelText('名称'), 'release-check');
+  const before = callsTo(fetch, '/api/state');
+  await user.click(within(dialog()).getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(dialog()).toBeNull());
+  expect(bodyOf(fetch, '/api/skills/save')).toEqual({ name: 'release-check', text: '---\nname: \ndescription: \n---\n', create: true });
+  await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
+  expect(within(card('release-check')).getByText('新的')).toBeTruthy();
 });
 
 test('only disabled apps and machines offer configure/edit and remove', async () => {

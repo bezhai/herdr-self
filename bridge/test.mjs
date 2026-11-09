@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';import fs f
 import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 'node:net';import http from 'node:http';
 import {Readable} from 'node:stream';
 import {normalizeMachine,migrateMachines,operations,Store} from './core.mjs';
-import {skillPlacer,bundledSkills} from './skills.mjs';
+import {skillPlacer,bundledSkills,Skills,frontmatter,skillLimit} from './skills.mjs';
 import {namingPrompt,parseBranch,validBranch,branchOf,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,setPermissionMode,routable,supported,forwardable,Platforms,channelCache} from './platform.mjs';import {Topics} from './topics.mjs';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
@@ -179,11 +179,12 @@ test('a chat without a binding asks for one on any direct message and on any gro
   assert.deepEqual(f.unbound.map(([,msg])=>msg.messageId),['om_1-empty','om_1-image','om_1-sticker','om_2-empty','om_2-image','om_2-sticker']);assert.deepEqual(f.messages,[]);
  }finally{f.close();}
 });
-test('a state file with legacy message queues loads only machines, apps, bindings, topics, schedules and logs; one from before schedules loads none',()=>{
+test('a state file with legacy message queues loads only machines, apps, bindings, topics, schedules, skills and logs; one from before schedules and skills loads none',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-store-'));try{
   fs.writeFileSync(path.join(dir,'state.json'),JSON.stringify({machines:[{id:'m'}],apps:[{id:'a'}],bindings:[{id:'b'}],inbox:[{text:'old prompt'}],outbox:[{key:'k'}],logs:[{kind:'x'}]}));
-  const store=new Store(dir);assert.deepEqual(store.data,{machines:[{id:'m'}],apps:[{id:'a'}],bindings:[{id:'b'}],topics:[],schedules:[],logs:[{kind:'x'}]});
-  store.data.schedules.push({id:'s'});store.save();assert.deepEqual(new Store(dir).data.schedules,[{id:'s'}]);store.save();assert.ok(!fs.readFileSync(path.join(dir,'state.json'),'utf8').includes('old prompt'));
+  const store=new Store(dir);assert.deepEqual(store.data,{machines:[{id:'m'}],apps:[{id:'a'}],bindings:[{id:'b'}],topics:[],schedules:[],skills:[],logs:[{kind:'x'}]});
+  store.data.schedules.push({id:'s'});store.data.skills.push({name:'k'});store.save();assert.deepEqual(new Store(dir).data.schedules,[{id:'s'}]);assert.deepEqual(new Store(dir).data.skills,[{name:'k'}]);
+  store.save();assert.ok(!fs.readFileSync(path.join(dir,'state.json'),'utf8').includes('old prompt'));
  }finally{fs.rmSync(dir,{recursive:true});}
 });
 test('platform channels listen for messages, card clicks and connection events only, take clicks in their own queue and never retry a send',()=>{
@@ -285,6 +286,80 @@ async function storeFileBehaves({storeFile,removeDirectory},m,home){
  await removeDirectory(m,'~/work/.herdr-bridge/recent');assert.deepEqual(fs.readdirSync(root),['.gitignore']);
  return body;
 }
+
+// Skills on the control plane (skills.mjs). The files of a skill as the console and bridge-skill send them, {relative path: base64}; a
+// SKILL.md with a frontmatter of name and description.
+const encoded=files=>Object.fromEntries(Object.entries(files).map(([p,text])=>[p,Buffer.from(text).toString('base64')]));
+const skillText=(name,description,body='')=>`---\nname: ${name}\ndescription: ${description}\n---\n${body}`;
+function skillsFixture(){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-store-')),store=new Store(dir);return {dir,store,skills:new Skills(store),close(){fs.rmSync(dir,{recursive:true});}};}
+test('the platform keeps a skill as a directory of files under the state directory and only its index in the state file: the name, the description of its frontmatter, whether every topic gets it and the digest of its files',()=>{
+ const f=skillsFixture();try{
+  const files=encoded({'SKILL.md':skillText('alpha','用来测试','secret-body\n'),'ref/notes.md':'notes\n'}),entry=f.skills.put('alpha',files);
+  assert.deepEqual(entry,{name:'alpha',description:'用来测试',everywhere:false,digest:entry.digest});assert.match(entry.digest,/^[0-9a-f]{64}$/);
+  assert.deepEqual(f.store.data.skills,[entry]);assert.deepEqual(new Store(f.dir).data.skills,[entry]);
+  assert.ok(!fs.readFileSync(path.join(f.dir,'state.json'),'utf8').includes('secret-body'));
+  assert.deepEqual(tree(path.join(f.dir,'skills','alpha')),{'SKILL.md':skillText('alpha','用来测试','secret-body\n'),'ref/notes.md':'notes\n'});
+  assert.deepEqual(f.skills.read('alpha'),{...entry,files});
+  // The flag stays when the files are replaced; files that the new ones lack are gone, and the digest follows the content.
+  f.skills.flag('alpha',true);const changed=f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','改过')}));
+  assert.deepEqual(changed,{name:'alpha',description:'改过',everywhere:true,digest:changed.digest});assert.notEqual(changed.digest,entry.digest);
+  assert.deepEqual(tree(path.join(f.dir,'skills','alpha')),{'SKILL.md':skillText('alpha','改过')});assert.deepEqual(fs.readdirSync(path.join(f.dir,'skills')),['alpha']);
+  // The index is in the order of the names; a skill goes with its files.
+  f.skills.put('beta',encoded({'SKILL.md':skillText('beta','b')}));f.skills.put('a1',encoded({'SKILL.md':skillText('a1','a')}));
+  assert.deepEqual(f.skills.list().map(s=>s.name),['a1','alpha','beta']);
+  f.skills.flag('alpha',false);assert.equal(f.skills.list()[1].everywhere,false);
+  f.skills.remove('alpha');assert.deepEqual(f.store.data.skills.map(s=>s.name),['a1','beta']);assert.deepEqual(fs.readdirSync(path.join(f.dir,'skills')).sort(),['a1','beta']);
+  for(const run of [()=>f.skills.read('alpha'),()=>f.skills.remove('alpha'),()=>f.skills.flag('alpha',true)])assert.throws(run,/^Error: skill 不存在：alpha$/);
+ }finally{f.close();}
+});
+test('the console writes the SKILL.md of a skill as text: a new skill has that file alone and refuses a name in use; an edit keeps the other files and refuses a skill that does not exist',()=>{
+ const f=skillsFixture();try{
+  const entry=f.skills.save('gamma',skillText('gamma','g','正文\n'),{create:true});
+  assert.deepEqual(entry,{name:'gamma',description:'g',everywhere:false,digest:entry.digest});assert.deepEqual(tree(path.join(f.dir,'skills','gamma')),{'SKILL.md':skillText('gamma','g','正文\n')});
+  assert.throws(()=>f.skills.save('gamma',skillText('gamma','g'),{create:true}),/^Error: skill 已存在：gamma$/);
+  f.skills.put('delta',encoded({'SKILL.md':skillText('delta','d'),'scripts/run.sh':'echo\n'}));f.skills.save('delta',skillText('delta','改过'));
+  assert.deepEqual(tree(path.join(f.dir,'skills','delta')),{'SKILL.md':skillText('delta','改过'),'scripts/run.sh':'echo\n'});
+  assert.throws(()=>f.skills.save('none',skillText('none','n')),/^Error: skill 不存在：none$/);assert.deepEqual(f.skills.list().map(s=>s.name),['delta','gamma']);
+ }finally{f.close();}
+});
+test('a skill is refused, and nothing changes, without a SKILL.md whose frontmatter names it as its directory and describes it, with a name or a path that is not allowed, with content that is not base64, or when its files hold more than the limit together',()=>{
+ const f=skillsFixture(),ok=skillText('alpha','a');try{
+  for(const name of ['Alpha','../x','a b','-a','a-','a--b','a.b','','a'.repeat(65)])assert.throws(()=>f.skills.put(name,encoded({'SKILL.md':skillText(name,'a')})),/^Error: skill 名称无效/,name);
+  for(const [files,error] of [[{},/^Error: skill 缺少 SKILL\.md$/],[{'SKILL.md':'# alpha\n'},/^Error: SKILL\.md 开头没有 frontmatter/],[{'SKILL.md':'---\nname: alpha\ndescription: a\n'},/^Error: SKILL\.md 开头没有 frontmatter/],
+   [{'SKILL.md':skillText('beta','a')},/^Error: SKILL\.md 的 frontmatter 里 name 是 beta，必须和目录名 alpha 一致$/],[{'SKILL.md':'---\nname: alpha\n---\n'},/^Error: SKILL\.md 的 frontmatter 缺少 description/],
+   [{'SKILL.md':skillText('alpha','x'.repeat(1025))},/^Error: SKILL\.md 的 frontmatter 缺少 description，或者超过 1024 个字符$/],
+   ...['../x','/abs','a//b','./a','a/../b','.herdr-bridge-skill'].map(p=>[{'SKILL.md':ok,[p]:''},new RegExp('^Error: 文件路径无效：'+p.replace(/[./]/g,'\\$&')+'$')])])
+   assert.throws(()=>f.skills.put('alpha',encoded(files)),error,JSON.stringify(files).slice(0,80));
+  assert.throws(()=>f.skills.put('alpha',{...encoded({'SKILL.md':ok}),'x.bin':'not base64!'}),/^Error: 文件内容不是 base64：x\.bin$/);
+  for(const files of [null,[],'x',{'SKILL.md':1}])assert.throws(()=>f.skills.put('alpha',files),/^Error: skill 的文件无效$/,JSON.stringify(files));
+  const over=skillLimit-Buffer.byteLength(ok)+1;
+  assert.throws(()=>f.skills.put('alpha',encoded({'SKILL.md':ok,big:'x'.repeat(over)})),new RegExp(`^Error: skill 的文件合计 ${skillLimit+1} 字节，超过上限 ${skillLimit} 字节$`));
+  assert.deepEqual(f.store.data.skills,[]);assert.deepEqual(fs.existsSync(path.join(f.dir,'skills'))?fs.readdirSync(path.join(f.dir,'skills')):[],[]);
+  // Right at the limit is fine.
+  assert.equal(f.skills.put('alpha',encoded({'SKILL.md':ok,big:'x'.repeat(over-1)})).name,'alpha');
+ }finally{f.close();}
+});
+test('the frontmatter of SKILL.md is read as far as skills write YAML there: plain, quoted and block values, values that go on in indented lines, and nested maps skipped',()=>{
+ const fields=text=>{const r=frontmatter(text);return r&&{name:r.name,description:r.description};};
+ assert.deepEqual(fields('---\nname: a\ndescription: 一段 描述：带冒号\n---\nbody'),{name:'a',description:'一段 描述：带冒号'});
+ assert.deepEqual(fields('---\nname: "a"\ndescription: "say \\"hi\\": now"\n---\n'),{name:'a',description:'say "hi": now'});
+ assert.deepEqual(fields("---\nname: 'a'\ndescription: 'it''s'\n---\n"),{name:'a',description:"it's"});
+ assert.deepEqual(fields('---\nname: a\ndescription: >\n  line one\n  line two\nmetadata:\n  requires:\n    bins: ["x"]\n  description: inner\n---\n'),{name:'a',description:'line one line two'});
+ assert.deepEqual(fields('---\nname: a\ndescription: |-\n  first\n  second\n---\n'),{name:'a',description:'first\nsecond'});
+ assert.deepEqual(fields('---\nname: a\ndescription: starts here\n  and goes on\n---\n'),{name:'a',description:'starts here and goes on'});
+ assert.deepEqual(fields('---\r\nname: a\r\ndescription: b\r\n---\r\nbody'),{name:'a',description:'b'});
+ for(const text of ['no frontmatter','---\nname: a\n','\n---\nname: a\n---\n'])assert.equal(frontmatter(text),null,text);
+});
+test('a search finds the skills whose name, description or SKILL.md hold every word in any case, those with the words in the name or the description first',()=>{
+ const f=skillsFixture();try{
+  f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','Deploy the service','uses kubectl\n')}));f.skills.put('beta',encoded({'SKILL.md':skillText('beta','部署文档','Deploy notes\n')}));
+  f.skills.put('gamma',encoded({'SKILL.md':skillText('gamma','other')}));f.skills.put('deploy-check',encoded({'SKILL.md':skillText('deploy-check','检查')}));
+  const names=query=>f.skills.search(query).map(s=>s.name);
+  assert.deepEqual(names('deploy'),['alpha','deploy-check','beta']);assert.deepEqual(names(' DEPLOY   kubectl '),['alpha']);assert.deepEqual(names('部署'),['beta']);assert.deepEqual(names('none'),[]);
+  assert.deepEqual(f.skills.search('deploy')[0],f.skills.list()[0]);
+  for(const query of ['',' ',undefined,1])assert.throws(()=>f.skills.search(query),/^Error: 缺少要搜索的词$/,String(query));
+ }finally{f.close();}
+});
 
 // Skills for the placement tests in directory src: alpha, with a file in a subdirectory and text that a shell would change, and beta.
 function skillSource(src){
@@ -2787,7 +2862,7 @@ test('the server lists pending chats, saves bindings only through a link token, 
   let [m]=(await api('state')).body.machines;assert.deepEqual(m,{id:machineId,name:'fake',session:'default',enabled:true,hasToken:false,client:{state:'offline'},...offline});
   const input={token:'forged',name:'route',appId:'app-plain',machineId,chatId:'oc_1',cwd:'~/work',kind:'claude',requireMention:true};
   assert.deepEqual(await api('bindings/save',input),{status:400,body:{error:'绑定链接已失效，请在飞书里重新发消息'}});
-  const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','topics','version']);
+  const s=(await api('state')).body;assert.deepEqual(Object.keys(s).sort(),['apps','bindings','host','logs','machines','pendingChats','registration','skills','topics','version']);
   assert.deepEqual(s.pendingChats,[]);assert.deepEqual(s.bindings.map(b=>b.id),['b-old','b-claude','b-codex','b-agy']);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
   const {messageIds,reactions,cards,cot,proposal,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成'};assert.deepEqual(s.topics[0],listed);for(const key of ['messageIds','reactions','cards','cot','proposal'])assert.equal(key in s.topics[1],false,key);
   assert.deepEqual(s.topics[1].worktree,worktree);
@@ -2872,6 +2947,40 @@ test('the server refuses to start with a BRIDGE_URL that is not an http(s) origi
   let err='';server.stderr.on('data',d=>{err+=d;});const timer=setTimeout(()=>server.kill(),5000);const code=await new Promise(r=>server.once('exit',r));clearTimeout(timer);
   assert.notEqual(code,0);assert.match(err,/BRIDGE_URL/);assert.equal(fs.existsSync(path.join(dir,'access-key')),false);
  }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('the server keeps skills for the console and the access key alone: the state lists their index without their files; it reads a skill with its files, creates and edits its SKILL.md, imports a whole directory past the limit of other requests up to that of a skill, sets whether every topic gets it and removes it',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ const server=await bridgeServer(state,port,{BRIDGE_URL:''});
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),admin={authorization:'Bearer '+key};
+  const api=async(p,body,headers=admin)=>{const r=await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers,body:body&&JSON.stringify(body)});return {status:r.status,body:await r.json()};};
+  // Without the login or the access key nothing is read or written, also from the console's own origin.
+  assert.deepEqual(await api('skills/read?name=alpha',undefined,{}),{status:401,body:{error:'请先登录'}});
+  for(const p of ['skills/save','skills/import','skills/everywhere','skills/remove'])assert.deepEqual(await api(p,{name:'alpha',text:skillText('alpha','a'),create:true},{origin}),{status:401,body:{error:'请先登录'}},p);
+  assert.deepEqual((await api('state')).body.skills,[]);
+  const text=skillText('alpha','用来测试','secret-body\n');assert.deepEqual(await api('skills/save',{name:'alpha',text,create:true}),{status:200,body:{ok:true}});
+  let s=(await api('state')).body;assert.deepEqual(s.skills.map(x=>Object.keys(x).sort()),[['description','digest','everywhere','name']]);
+  const [entry]=s.skills;assert.deepEqual(entry,{name:'alpha',description:'用来测试',everywhere:false,digest:entry.digest});assert.ok(!JSON.stringify(s).includes('secret-body'));
+  assert.deepEqual(await api('skills/read?name=alpha'),{status:200,body:{...entry,files:encoded({'SKILL.md':text})}});
+  assert.deepEqual(await api('skills/save',{name:'alpha',text,create:true}),{status:400,body:{error:'skill 已存在：alpha'}});
+  // A directory larger than other requests may be; other requests keep their limit.
+  const big='x'.repeat(200000);
+  assert.deepEqual(await api('skills/import',{name:'alpha',files:encoded({'SKILL.md':text,'ref/big.txt':big})}),{status:200,body:{ok:true}});
+  assert.deepEqual(await api('bindings/permission-mode',{id:'x',pad:big}),{status:400,body:{error:'请求内容过大'}});
+  assert.deepEqual(await api('skills/import',{name:'alpha',files:encoded({'SKILL.md':text,big:'x'.repeat(skillLimit)})}),{status:400,body:{error:`skill 的文件合计 ${skillLimit+Buffer.byteLength(text)} 字节，超过上限 ${skillLimit} 字节`}});
+  // An edit of SKILL.md keeps the other files; a body that arrives in pieces, one of them ending inside a character, is read as the text it is.
+  const edited=skillText('alpha','改过的描述',`${'中文'.repeat(40000)}\n`),raw=Buffer.from(JSON.stringify({name:'alpha',text:edited})),cut=raw.indexOf(Buffer.from('中'))+1;
+  const saved=await new Promise((resolve,reject)=>{
+   const req=http.request(`${origin}/api/skills/save`,{method:'POST',headers:{...admin,'content-length':raw.length}},res=>{let b='';res.on('data',d=>{b+=d;});res.on('end',()=>resolve([res.statusCode,JSON.parse(b)]));});
+   req.on('error',reject);req.write(raw.subarray(0,cut));setTimeout(()=>req.end(raw.subarray(cut)),50);
+  });
+  assert.deepEqual(saved,[200,{ok:true}]);assert.deepEqual((await api('skills/read?name=alpha')).body.files,encoded({'SKILL.md':edited,'ref/big.txt':big}));
+  assert.deepEqual(await api('skills/everywhere',{name:'alpha',everywhere:true}),{status:200,body:{ok:true}});
+  s=(await api('state')).body;assert.deepEqual(s.skills.map(x=>[x.name,x.description,x.everywhere]),[['alpha','改过的描述',true]]);
+  assert.deepEqual(s.logs.filter(l=>l.kind==='skill').map(l=>l.message),['新建了 skill alpha','导入了 skill alpha','修改了 skill alpha 的 SKILL.md','skill alpha 改为所有项目都带']);
+  assert.deepEqual(await api('skills/remove',{name:'alpha'}),{status:200,body:{ok:true}});assert.deepEqual((await api('state')).body.skills,[]);
+  assert.deepEqual(await api('skills/read?name=alpha'),{status:400,body:{error:'skill 不存在：alpha'}});
+ }finally{await server.stop();fs.rmSync(dir,{recursive:true});}
 });
 
 // The client of a machine and its connection to the control plane (link.mjs, clients.mjs, client.mjs).

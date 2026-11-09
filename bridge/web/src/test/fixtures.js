@@ -35,6 +35,9 @@ export function bodyOf(fetch, url) {
 
 export const callsTo = (fetch, url) => fetch.mock.calls.filter(([called]) => called === url).length;
 
+// Text as base64 of its UTF-8 bytes, like the files of a skill that /api/skills/read returns.
+export const base64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+
 export function sampleState() {
   const now = Date.now();
   return {
@@ -90,6 +93,11 @@ export function sampleState() {
         paneId: '', agentName: 'feishu-t2', title: '升级依赖', state: 'failed', error: 'agent target pane w1:p6 is not an available shell',
         createdAt: Date.UTC(2026, 8, 29, 3, 4),
       },
+    ],
+    // The index of the skills, without their files.
+    skills: [
+      { name: 'bridge-schedule', description: '在飞书话题里用定时任务做事时使用。', everywhere: true, digest: 'a'.repeat(64) },
+      { name: 'deploy-notes', description: '部署前后要检查的事项。', everywhere: false, digest: 'b'.repeat(64) },
     ],
     logs: [{ at: 1, kind: '机器连接', message: 'cpu2 已连接', level: 'info' }],
   };

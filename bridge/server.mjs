@@ -4,7 +4,7 @@ import {Platforms,normalizeApp,setPermissionMode} from './platform.mjs';
 import {PendingChats,consoleUrl} from './pending-chats.mjs';
 import {Registrations} from './registration.mjs';
 import {Topics} from './topics.mjs';
-import {skillPlacer} from './skills.mjs';
+import {skillPlacer,Skills,requestLimit} from './skills.mjs';
 import {Schedules} from './schedules.mjs';
 import {AgentSchedules} from './agent-schedules.mjs';
 import {staticFile,sendStatic} from './web-assets.mjs';
@@ -37,8 +37,8 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 }});
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
-const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
-function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
+const skills=new Skills(store),agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
+function state(){return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),bindings:store.data.bindings,pendingChats:pending.list(),skills:skills.list(),topics:store.data.topics.map(({messageIds,reactions,cards,cot,proposal,...t})=>t.worktree?{...t,worktree:(({card,...w})=>w)(t.worktree)}:t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
 // requests of bridge-schedule on its machine (see client.mjs), which are answered for the machine of its connection; what the agent reads
 // of a refusal goes through publicText, like the console's errors.
@@ -47,7 +47,8 @@ const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);
 function equal(a,b){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res,code,data){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
-async function body(req){let s='';for await(const b of req){s+=b;if(s.length>100000)throw Error('请求内容过大');}return JSON.parse(s||'{}');}
+// The JSON body of a request of at most limit characters, read as UTF-8 also when a piece ends inside a character.
+async function body(req,limit=100000){let s='';req.setEncoding('utf8');for await(const b of req){s+=b;if(s.length>limit)throw Error('请求内容过大');}return JSON.parse(s||'{}');}
 const server=http.createServer(async(req,res)=>{try{
  res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Frame-Options','DENY');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'");
  const url=new URL(req.url,'http://localhost'),p=url.pathname;if(!allowedHost(req))return json(res,403,{error:'不允许的 Host'});
@@ -58,7 +59,9 @@ const server=http.createServer(async(req,res)=>{try{
  if(!authorized(req))return json(res,401,{error:'请先登录'});
  if(p==='/api/state'&&req.method==='GET')return json(res,200,state());
  if(p==='/api/apps/avatar'&&req.method==='GET'){const avatar=await platforms.avatar(url.searchParams.get('id'));if(!avatar)return json(res,404,{error:'没有头像'});res.writeHead(200,{'Content-Type':avatar.type,'Cache-Control':'private, max-age=300'});return res.end(avatar.body);}
- if(req.method!=='POST')return json(res,404,{error:'接口不存在'});const b=await body(req);let result={ok:true};
+ // A skill with its files, which the console edits; the state has only the index of the skills.
+ if(p==='/api/skills/read'&&req.method==='GET')return json(res,200,skills.read(url.searchParams.get('name')));
+ if(req.method!=='POST')return json(res,404,{error:'接口不存在'});const b=await body(req,p.startsWith('/api/skills/')?requestLimit:undefined);let result={ok:true};
  if(p==='/api/logout'){auth.delete(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1]);res.setHeader('Set-Cookie','bridge_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');}
  else if(p==='/api/machines/save'){const m=normalizeMachine(b);if(b.id){const old=machine(b.id);if(old.enabled)throw Error('请先断开机器再编辑');Object.assign(old,m);}else store.data.machines.push(m);store.save();if(m.enabled&&clients.online(m.id))await refresh(m);result={id:m.id};}
  else if(p==='/api/machines/connect'){const m=machine(b.id);m.enabled=true;store.save();if(clients.online(m.id))await refresh(m);result=herdrStatus(m);}
@@ -75,6 +78,12 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/bindings/save'){result={id:pending.bind(b).id};}
  else if(p==='/api/bindings/permission-mode'){const x=store.data.bindings.find(y=>y.id===b.id);if(!x)throw Error('会话绑定不存在');setPermissionMode(x,b.permissionMode);store.save();store.log('会话绑定',`${x.name}：权限模式改为 ${x.permissionMode}，之后新开的话题生效`);}
  else if(p==='/api/bindings/remove'){store.data.bindings=store.data.bindings.filter(x=>x.id!==b.id);store.save();topics.unbind(b.id);}
+ // Writes to skills come only from the console and the access key, never from an agent: a skill goes into every later topic, and an
+ // agent can be talked into anything by what it reads.
+ else if(p==='/api/skills/save'){skills.save(b.name,b.text,{create:Boolean(b.create)});}
+ else if(p==='/api/skills/import'){skills.put(b.name,b.files);}
+ else if(p==='/api/skills/everywhere'){skills.flag(b.name,b.everywhere);}
+ else if(p==='/api/skills/remove'){skills.remove(b.name);}
  else return json(res,404,{error:'接口不存在'});
  return json(res,200,result);
  }catch(e){json(res,400,{error:publicText(e.message).slice(0,1200)});}});

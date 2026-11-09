@@ -3,5 +3,6 @@ export const pageInfo = {
   platforms: { icon: 'chat', title: '平台连接', action: '+ 添加飞书' },
   machines: { icon: 'server', title: '机器连接', action: '+ 添加机器' },
   bindings: { icon: 'route', title: '会话绑定', action: '+ 新建绑定' },
+  skills: { icon: 'skill', title: 'Skills', action: '+ 新建 skill' },
   logs: { icon: 'log', title: '连接日志', action: '' },
 };

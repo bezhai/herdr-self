@@ -12,6 +12,7 @@ import { MachineDialog } from './dialogs/MachineDialog.jsx';
 import { PendingChatsDialog } from './dialogs/PendingChatsDialog.jsx';
 import { PermissionModeDialog } from './dialogs/PermissionModeDialog.jsx';
 import { RegistrationDialog } from './dialogs/RegistrationDialog.jsx';
+import { SkillDialog } from './dialogs/SkillDialog.jsx';
 import { assign, clearQuery, query, reload } from './location.js';
 import { BindingsPage } from './pages/BindingsPage.jsx';
 import { LoginPage } from './pages/LoginPage.jsx';
@@ -19,6 +20,7 @@ import { LogsPage } from './pages/LogsPage.jsx';
 import { MachinesPage } from './pages/MachinesPage.jsx';
 import { pageInfo } from './pages/pageInfo.js';
 import { PlatformsPage } from './pages/PlatformsPage.jsx';
+import { SkillsPage } from './pages/SkillsPage.jsx';
 import { useBridge } from './useBridge.js';
 
 // Login vs. console, the current page, the one open dialog and the toast.
@@ -92,7 +94,7 @@ export function App() {
   if (!authed) return <LoginPage onLogin={refresh} />;
 
   const info = pageInfo[page];
-  const pageActions = { platforms: openRegistration, machines: () => openDialog('machine'), bindings: () => openDialog('pending') };
+  const pageActions = { platforms: openRegistration, machines: () => openDialog('machine'), bindings: () => openDialog('pending'), skills: () => openDialog('skill') };
   const pageProps = { state, refresh, toast: showToast };
   return (
     <>
@@ -113,6 +115,7 @@ export function App() {
                 />
               )}
               {page === 'bindings' && <BindingsPage {...pageProps} openPermissionMode={(binding) => openDialog('permission-mode', { binding })} />}
+              {page === 'skills' && <SkillsPage {...pageProps} openSkill={(skill) => openDialog('skill', { skill })} />}
               {page === 'logs' && <LogsPage state={state} />}
             </div>
           </div>
@@ -128,6 +131,7 @@ export function App() {
       {dialog?.kind === 'permission-mode' && (
         <PermissionModeDialog key={dialog.key} binding={dialog.binding} onClose={closeDialog} onSaved={saved} />
       )}
+      {dialog?.kind === 'skill' && <SkillDialog key={dialog.key} skill={dialog.skill} onClose={closeDialog} onSaved={saved} />}
       {dialog?.kind === 'registration' && (
         <RegistrationDialog
           key={dialog.key}

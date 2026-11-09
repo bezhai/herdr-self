@@ -62,7 +62,8 @@ async function sweep(root,keep){
   const p=path.join(root,e.name);if((await fs.promises.stat(p)).mtimeMs<before)await fs.promises.rm(p,{recursive:true,force:true});
  }
 }
-const mark='.herdr-bridge-skill';
+// The file that marks a skill directory as Bridge's on a machine (see placeSkills); no file of a skill takes this name (see skills.mjs).
+export const skillMark='.herdr-bridge-skill';
 const read=p=>fs.promises.readFile(p,'utf8').catch(e=>{if(e.code==='ENOENT'||e.code==='ENOTDIR'||e.code==='EISDIR')return null;throw e;});
 const lstat=p=>fs.promises.lstat(p).catch(e=>{if(e.code==='ENOENT')return null;throw e;});
 // The methods of a client whose Herdr is the program at herdr (a leading ~/ is the home directory) and whose commands run with env (see
@@ -129,7 +130,7 @@ export function methods({herdr,env}){
     }catch(e){await fs.promises.rm(fresh,{recursive:true,force:true});throw e;}
    }
    // The marker comes first and gets the digest last: a copy that fails half way is Bridge's, and is written again next time.
-   const copy=async(p,n)=>{await fs.promises.rm(p,{recursive:true,force:true});await fs.promises.mkdir(p);await fs.promises.writeFile(path.join(p,mark),'');await fs.promises.cp(path.join(kept,n),p,{recursive:true});await fs.promises.writeFile(path.join(p,mark),digest+'\n');};
+   const copy=async(p,n)=>{await fs.promises.rm(p,{recursive:true,force:true});await fs.promises.mkdir(p);await fs.promises.writeFile(path.join(p,skillMark),'');await fs.promises.cp(path.join(kept,n),p,{recursive:true});await fs.promises.writeFile(path.join(p,skillMark),digest+'\n');};
    await fs.promises.mkdir(dir,{recursive:true});const real=await fs.promises.realpath(dir);
    // Outside a repository, or without git, there is nothing to exclude.
    const ask=args=>git(real,args,timeoutMs).then(r=>r.code===0?r.stdout.trim():null,()=>null),root=await ask(['rev-parse','--show-toplevel']),at=root&&await ask(['rev-parse','--git-path','info/exclude']);
@@ -138,7 +139,7 @@ export function methods({herdr,env}){
    for(const n of names){
     const p=path.join(dir,n),s=await lstat(p);
     if(s?.isSymbolicLink()){if(await fs.promises.readlink(p)!==path.join(kept,n)){theirs.push(p);continue;}if(as==='copy'){await fs.promises.rm(p);await copy(p,n);}}
-    else if(s){const m=await read(path.join(p,mark));if(m==null){theirs.push(p);continue;}if(m.trim()!==digest)await copy(p,n);}
+    else if(s){const m=await read(path.join(p,skillMark));if(m==null){theirs.push(p);continue;}if(m.trim()!==digest)await copy(p,n);}
     else if(as==='link')await fs.promises.symlink(path.join(kept,n),p);
     else await copy(p,n);
     if(!exclude)continue;

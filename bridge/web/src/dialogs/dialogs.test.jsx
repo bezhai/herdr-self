@@ -7,7 +7,8 @@ import { ClientTokenDialog } from './ClientTokenDialog.jsx';
 import { MachineDialog } from './MachineDialog.jsx';
 import { PermissionModeDialog } from './PermissionModeDialog.jsx';
 import { RegistrationDialog } from './RegistrationDialog.jsx';
-import { bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.js';
+import { SkillDialog } from './SkillDialog.jsx';
+import { base64, bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.js';
 
 const optionLabels = (label) => [...screen.getByLabelText(label).options].map((option) => option.textContent);
 // Paragraphs in the open dialog other than the error line: forms carry no captions or explanations.
@@ -20,6 +21,8 @@ test('form dialogs head with their title next to the close button and hold no ex
     [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加机器'],
     [<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '连接聊天与会话'],
     [<PermissionModeDialog binding={state.bindings[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '修改权限模式'],
+    [<SkillDialog onClose={vi.fn()} onSaved={vi.fn()} />, '新建 skill'],
+    [<SkillDialog skill={{ ...state.skills[1], files: { 'SKILL.md': base64('---\n'), 'run.sh': base64('') } }} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑 deploy-notes'],
   ];
   for (const [element, title] of forms) {
     const view = render(element);
@@ -249,6 +252,58 @@ test('the source of a chat whose app has no avatar shows the Feishu icon', () =>
   expect(within(source).getByText('备用应用')).toBeTruthy();
   expect(source.querySelector('img')).toBeNull();
   expect(source.querySelector('use').getAttribute('href')).toBe('#i-feishu');
+});
+
+// Replaces the text of a field with text, which may hold characters that user.type would read as keys.
+async function replaceText(user, field, text) {
+  await user.clear(field);
+  await user.click(field);
+  await user.paste(text);
+}
+
+test('skill form for a new skill asks for its name and its SKILL.md, which starts from the frontmatter that a skill needs, and saves it as a new skill; a refusal stays in the dialog', async () => {
+  const save = deferred();
+  const fetch = stubFetch({ '/api/skills/save': () => save.promise });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  render(<SkillDialog onClose={vi.fn()} onSaved={onSaved} />);
+  expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(2);
+  expect(screen.getByLabelText('名称').value).toBe('');
+  expect(screen.getByLabelText('SKILL.md').value).toBe('---\nname: \ndescription: \n---\n');
+  expect(document.querySelector('.skill-files')).toBeNull();
+
+  const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n\n先看 CI。\n';
+  await user.type(screen.getByLabelText('名称'), 'deploy-notes');
+  await replaceText(user, screen.getByLabelText('SKILL.md'), text);
+  const submit = screen.getByRole('button', { name: '保存' });
+  await user.click(submit);
+  expect(submit.disabled).toBe(true);
+  expect(bodyOf(fetch, '/api/skills/save')).toEqual({ name: 'deploy-notes', text, create: true });
+
+  save.resolve(reply({ error: 'skill 已存在：deploy-notes' }, 400));
+  expect(await screen.findByText('skill 已存在：deploy-notes')).toBeTruthy();
+  expect(submit.disabled).toBe(false);
+  expect(onSaved).not.toHaveBeenCalled();
+});
+
+test('skill form for an existing skill edits its SKILL.md alone: the title names the skill, the other files are listed, and saving sends the text to the skill', async () => {
+  const fetch = stubFetch({ '/api/skills/save': { ok: true } });
+  const onSaved = vi.fn();
+  const user = userEvent.setup();
+  const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI。\n';
+  const skill = { ...sampleState().skills[1], files: { 'SKILL.md': base64(text), 'references/checklist.md': base64('- CI\n'), 'scripts/check.sh': base64('echo\n') } };
+  render(<SkillDialog skill={skill} onClose={vi.fn()} onSaved={onSaved} />);
+  expect(screen.queryByLabelText('名称')).toBeNull();
+  expect(screen.getByLabelText('SKILL.md').value).toBe(text);
+  const files = screen.getByRole('group', { name: '其他文件' });
+  expect([...files.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['references/checklist.md', 'scripts/check.sh']);
+  expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(1);
+
+  const changed = text.replace('先看 CI。', '先看 CI，再看告警。');
+  await replaceText(user, screen.getByLabelText('SKILL.md'), changed);
+  await user.click(screen.getByRole('button', { name: '保存' }));
+  await waitFor(() => expect(onSaved).toHaveBeenCalled());
+  expect(bodyOf(fetch, '/api/skills/save')).toEqual({ name: 'deploy-notes', text: changed, create: false });
 });
 
 const registrationProps = () => ({ apps: sampleState().apps, previousId: 'r0', onRetry: vi.fn(), onDone: vi.fn(), onConfigure: vi.fn(), onManual: vi.fn(), onClose: vi.fn() });

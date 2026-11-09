@@ -338,6 +338,9 @@ dialog > form { padding: 18px 24px 0; }
 dialog h2 { margin: 0; font-size: 19px; font-weight: 600; line-height: 1.35; }
 .dialog-empty { margin: 16px 0 0; font-size: 13.5px; color: var(--muted); }
 .dialog-note { margin: 14px 0 0; font-size: 13px; line-height: 1.6; color: var(--muted); }
+/* a skill: SKILL.md needs the width of its lines; its other files are only listed */
+.skill-dialog { width: min(760px, calc(100vw - 24px)); }
+.skill-files { margin: 10px 0 0; padding: 0; list-style: none; font: 12.5px/1.7 var(--mono); color: var(--muted); overflow-wrap: anywhere; }
 
 /* a Feishu chat: bot avatar, app name, chat id */
 .chat-source, .pending-chat { display: flex; align-items: center; gap: 12px; }

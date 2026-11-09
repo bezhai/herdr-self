@@ -14,8 +14,8 @@ export function useFields(initial) {
 }
 
 // Dialog with a form. The primary button is disabled while onSubmit runs; a failure is shown inside the dialog.
-// onSubmit resolves after the owner has handled success (usually: close and refresh).
-export function FormDialog({ title, submitLabel, onSubmit, onClose, children }) {
+// onSubmit resolves after the owner has handled success (usually: close and refresh). className goes to the dialog, for its width.
+export function FormDialog({ title, submitLabel, onSubmit, onClose, className, children }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
@@ -32,7 +32,7 @@ export function FormDialog({ title, submitLabel, onSubmit, onClose, children }) 
   }
 
   return (
-    <Dialog open onClose={onClose}>
+    <Dialog open className={className} onClose={onClose}>
       <form onSubmit={submit}>
         <div className="dialog-head"><h2>{title}</h2><CloseButton onClick={onClose} /></div>
         {children}
