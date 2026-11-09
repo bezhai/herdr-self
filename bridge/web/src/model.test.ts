@@ -62,6 +62,13 @@ test('metrics count online machines, connected platforms, bindings and the agent
   expect(metrics(state).agents).toBe(4);
 });
 
+test('metrics count an online machine whose first poll is still connecting, which has no agents yet', () => {
+  const state = sampleState();
+  // as: what a machine looked like before the server sent empty lists for it.
+  delete (state.machines[1] as Partial<typeof state.machines[1]>).agents;
+  expect(metrics(state)).toMatchObject({ machinesOnline: 3, agents: 3 });
+});
+
 test('a binding is usable while its platform app is connected and the machine of its default agent configuration is online', () => {
   const state = sampleState();
   const binding = state.bindings[0];

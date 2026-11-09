@@ -53,7 +53,8 @@ export function metrics(state: BridgeState) {
     platformsConnected: state.apps.filter((a) => a.connection === 'connected').length,
     platforms: state.apps.length,
     bindings: state.bindings.length,
-    agents: online.reduce((n, m) => n + m.agents.length, 0),
+    // A machine that is still connecting may not have its lists yet.
+    agents: online.reduce((n, m) => n + (m.agents?.length ?? 0), 0),
   };
 }
 
