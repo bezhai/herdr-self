@@ -133,6 +133,16 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   // Asks the cheap model (Claude haiku, through claude) in directory cwd, with prompt on stdin. What it is asked for, such as a branch name, is
   // the control plane's business.
   askCheapModel:({cwd,prompt,timeoutMs})=>run('claude',['-p','--model','haiku'],{env,cwd:local(cwd,'cwd'),input:string(prompt,'prompt'),timeoutMs}),
+  // The origin URL as the repository configures it when path is the root of a Git repository or of a linked worktree, which is the top level
+  // of its checkout once links are resolved; null for anything else: a directory inside a repository, a directory that only holds clones,
+  // a missing one, a repository without origin.
+  async inspectDirectory({path:dir,timeoutMs}){
+   const real=await fs.promises.realpath(local(dir,'path')).catch(()=>null);if(!real)return {origin:null};
+   const top=await git(real,['rev-parse','--show-toplevel'],timeoutMs);
+   if(top.code!==0||await fs.promises.realpath(top.stdout.trim()).catch(()=>null)!==real)return {origin:null};
+   const origin=await git(real,['config','--get','remote.origin.url'],timeoutMs);
+   return {origin:origin.code===0&&origin.stdout.trim()||null};
+  },
   // Places skills ([{name, digest, files}], files as {relative path: base64}) where an agent reads project skills, directory dir under
   // working directory cwd, and takes away the skills that Bridge placed there before and that skills no longer has. The store, a directory
   // of this machine that no agent reads as a global skill directory, holds each skill as the control plane has it (see stock). A skill of

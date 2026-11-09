@@ -73,7 +73,8 @@ export type HerdrResult<A>=
 // changed for 7 days are removed along the way. Directories are created 0700 and the file 0600. The caller removes dir later with
 // removeDirectory(m,dir), which removes only such a directory, with what it holds; one that is gone already is fine.
 // git(m,cwd,args,{timeoutMs}) runs git in cwd, and askCheapModel(m,cwd,prompt,{timeoutMs}) asks the cheap model there: each resolves to
-// {code, stdout, stderr} whatever the exit status. exists(m,path) resolves to whether path exists.
+// {code, stdout, stderr} whatever the exit status. exists(m,path) resolves to whether path exists. inspectDirectory(m,path) resolves to {origin}, the
+// URL of the origin remote when path is the root of a Git repository (or of a linked worktree) that has one, else null.
 type Options={timeoutMs?:number};
 export type Call=<K extends keyof ClientApi>(m:Machine,method:K,params:ClientApi[K]['params'],options?:Options)=>Promise<ClientApi[K]['result']>;
 export type Herdr=<const A extends readonly HerdrArg[]>(m:Machine,args:A,options?:Options)=>Promise<HerdrResult<A>>;
@@ -90,6 +91,7 @@ export function operations(call:Call){
   git:(m:Machine,cwd:string,args:string[],options?:Options)=>call(m,'git',{cwd,args},options),
   exists:(m:Machine,p:string)=>call(m,'exists',{path:p}),
   askCheapModel:(m:Machine,cwd:string,prompt:string,options?:Options)=>call(m,'askCheapModel',{cwd,prompt},options),
+  inspectDirectory:(m:Machine,p:string,options?:Options)=>call(m,'inspectDirectory',{path:p},options),
  };
 }
 export function publicText(s:unknown){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}

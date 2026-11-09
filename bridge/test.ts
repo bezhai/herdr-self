@@ -3546,7 +3546,7 @@ test('the client does only what its fixed set of methods names, none of which ru
   for(const method of ['exec','run','spawn','shell','constructor','__proto__'])await assert.rejects(call(f.m,method,{argv:['id']}),(e:Thrown)=>e.code==='unknown_method',method);
   const skill={name:'a',digest:'d',files:{'SKILL.md':''}},skills={store:'~/s',skills:[skill],dir:'.claude/skills',as:'link',cwd:'~/w'};
   for(const [method,params] of [['herdr',{session:'default',args:'agent list'}],['herdr',{session:'default',args:[{cwd:'x'}]}],['herdr',{session:'default',args:[{path:'relative'}]}],['herdr',{args:[]}],
-   ['mkdir',{path:'relative/dir'}],['mkdir',{}],['git',{cwd:'~/x',args:[1]}],['git',{cwd:'x',args:[]}],['exists',{}],['askCheapModel',{cwd:'~/x'}],
+   ['mkdir',{path:'relative/dir'}],['mkdir',{}],['git',{cwd:'~/x',args:[1]}],['git',{cwd:'x',args:[]}],['exists',{}],['askCheapModel',{cwd:'~/x'}],['inspectDirectory',{}],['inspectDirectory',{path:'relative'}],
    ['storeFile',{root:'~/w/.herdr-bridge',dir:'..',name:'a',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a/b',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a',body:1}],
    ['placeSkills',{...skills,as:'move'}],['placeSkills',{...skills,dir:'/abs'}],['placeSkills',{...skills,skills:{a:skill}}],['placeSkills',{...skills,skills:[{...skill,name:'../a'}]}],['placeSkills',{...skills,skills:[{...skill,name:'a/b'}]}],
    ['placeSkills',{...skills,skills:[{...skill,digest:''}]}],['placeSkills',{...skills,skills:[{...skill,files:null}]}],['placeSkills',{...skills,skills:[{...skill,files:{'../x':''}}]}],['placeSkills',{...skills,skills:[{...skill,files:{'/x':''}}]}],
@@ -3574,6 +3574,23 @@ test('the client creates directories, stores attachments only under a .herdr-bri
   for(const p of [...keep,'victim','work/.herdr-bridge'])assert.ok(fs.existsSync(path.join(home,p)),p);
   // A topic directory under a .herdr-bridge directory that is gone, or not there yet, is removed already.
   await removeDirectory(m,'~/gone/.herdr-bridge/t1');await removeDirectory(m,'~/work/.herdr-bridge/t9');
+ }finally{await f.close();fs.rmSync(dir,{recursive:true});}
+});
+test('the client says whether a directory is the root of a Git repository and what its origin is: nothing for a directory that is not a root, one that is missing or a repository without origin',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-inspect-'))),home=path.join(dir,'home'),code=path.join(home,'code');fs.mkdirSync(code,{recursive:true});
+ const f=await machineFixture({env:{HOME:home}}),inspect=(p:string)=>f.ops.inspectDirectory(f.m,p);
+ try{
+  const repo=(name:string,origin?:string)=>{const p=path.join(code,name);fs.mkdirSync(p);git(p,'init','-q');if(origin)git(p,'remote','add','origin',origin);return p;};
+  repo('app','git@example.com:team/app.git');repo('bare');repo('web','https://example.com/team/web.git');
+  assert.deepEqual(await inspect('~/code/app'),{origin:'git@example.com:team/app.git'});assert.deepEqual(await inspect(path.join(code,'web')),{origin:'https://example.com/team/web.git'});
+  assert.deepEqual(await inspect('~/code/bare'),{origin:null});
+  // A directory inside a repository, one that holds clones without being a repository, and one that is not there are no repository roots.
+  fs.mkdirSync(path.join(code,'app','src'));fs.mkdirSync(path.join(code,'projects'));fs.cpSync(path.join(code,'app'),path.join(code,'projects','app'),{recursive:true});
+  for(const p of ['~/code/app/src','~/code/projects','~/code/none','~/none/at/all'])assert.deepEqual(await inspect(p),{origin:null},p);
+  // A link to a root is that root, and the root of a linked worktree is the root of its checkout.
+  fs.symlinkSync(path.join(code,'app'),path.join(code,'alias'));assert.deepEqual(await inspect('~/code/alias'),{origin:'git@example.com:team/app.git'});
+  git(path.join(code,'app'),'commit','-q','--allow-empty','-m','x');git(path.join(code,'app'),'worktree','add','-q','-b','topic',path.join(code,'topic'));
+  assert.deepEqual(await inspect('~/code/topic'),{origin:'git@example.com:team/app.git'});
  }finally{await f.close();fs.rmSync(dir,{recursive:true});}
 });
 test('placing skills through the client links Claude\'s and Codex\'s skills to the store of the machine and copies them for Antigravity, writes only changed content, leaves skills that are not Bridge\'s alone and records the placed paths once in the info/exclude of a Git repository',async()=>{

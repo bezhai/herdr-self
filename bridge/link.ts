@@ -8,8 +8,10 @@
 // client passes the requests of bridge-schedule on (schedules), which a client of 1 has no socket for. 3: the control plane does everything
 // it does on a machine through its client (see machine.ts), whose methods a client of 2 lacks. 4: placeSkills takes the skills of the
 // platform one by one, keeps each in the store on its own and takes away those no longer loaded by default, where a client of 3 takes
-// one bundle with one digest; the client passes the reads of bridge-skill on (skills) and puts a skill read into its store (stockSkill).
-export const protocol=4;
+// one bundle with one digest; the client passes the reads of bridge-skill on (skills) and puts a skill read into its store (stockSkill). 5: the
+// client prepares the workspace of a topic, launches agents and inspects directories for projects (see ClientApi), and nameBranch is
+// askCheapModel.
+export const protocol=5;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 // What one side may ask of the other: the params of each method and what it resolves to. A side's methods (see link) are async functions
@@ -34,6 +36,7 @@ export type ClientApi={
  git:{params:Timed<{cwd:string,args:string[]}>,result:Ran},
  exists:{params:Timed<{path:string}>,result:boolean},
  askCheapModel:{params:Timed<{cwd:string,prompt:string}>,result:Ran},
+ inspectDirectory:{params:Timed<{path:string}>,result:{origin:string|null}},
  placeSkills:{params:Timed<{store:string,skills:SkillFiles[],dir:string,as:'link'|'copy',cwd:string}>,result:string[]},
  stockSkill:{params:Timed<{store:string,skill:SkillFiles}>,result:string},
 };
