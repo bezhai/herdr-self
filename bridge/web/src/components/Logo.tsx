@@ -1,4 +1,4 @@
-export function Logo({ tiny = false }) {
+export function Logo({ tiny = false }: { tiny?: boolean }) {
   return <span className={tiny ? 'logo tiny' : 'logo'}><svg><use href="#i-herdr" /></svg></span>;
 }
 

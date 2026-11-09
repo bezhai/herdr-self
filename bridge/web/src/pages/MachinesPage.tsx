@@ -1,12 +1,17 @@
+import type { ConsoleMachine, HerdrStatus } from '../../../console-state.ts';
+import type { Agent } from '../../../core.ts';
 import { request } from '../api.ts';
 import { ActionButton } from '../components/ActionButton.tsx';
 import { Badge, StatusBadge } from '../components/Badge.tsx';
 import { EmptyState } from '../components/EmptyState.tsx';
 import { Icon } from '../components/Icon.tsx';
 import { agentStatusLabel, clientStatus, statusTone } from '../model.ts';
+import type { PageProps } from './pageInfo.ts';
+
+type Props = PageProps & { openMachine: (machine: ConsoleMachine) => void, openToken: (machine: ConsoleMachine) => void };
 
 // An agent as Herdr reports it. Without a session identity Herdr cannot tell which conversation runs in the pane.
-function AgentRow({ agent }) {
+function AgentRow({ agent }: { agent: Agent }) {
   return (
     <div className="agent-row">
       <i className="agent-dot" />
@@ -21,18 +26,18 @@ function AgentRow({ agent }) {
 }
 
 // Toast after connecting or refreshing a machine, by the Herdr status it reached; any other status is a failed poll.
-const connectMessages = { connected: '机器已连接', offline: '机器已启用，等待客户端连接' };
+const connectMessages: { [state: string]: string } = { connected: '机器已连接', offline: '机器已启用，等待客户端连接' };
 
 // Bridge reaches a machine only through its client, which connects with the machine's token (shown once when generated).
 // The card shows that connection and the Herdr status Bridge polls through it: offline while the client is not connected.
-function MachineCard({ machine: m, refresh, toast, openMachine, openToken }) {
+function MachineCard({ machine: m, refresh, toast, openMachine, openToken }: Omit<Props, 'state'> & { machine: ConsoleMachine }) {
   const client = clientStatus(m.client);
   async function connect() {
-    const result = await request('/machines/connect', { id: m.id });
+    const result = await request<HerdrStatus>('/machines/connect', { id: m.id });
     toast(connectMessages[result.state] || '连接未成功，查看错误信息');
     await refresh();
   }
-  async function act(path, message) {
+  async function act(path: string, message?: string) {
     await request(path, { id: m.id });
     if (message) toast(message);
     await refresh();
@@ -64,16 +69,17 @@ function MachineCard({ machine: m, refresh, toast, openMachine, openToken }) {
       </div>
       {m.error && m.enabled && <div className="card-error">{m.error}</div>}
       {m.client?.state === 'refused' && <div className="card-error">{m.client.error}</div>}
-      {m.agents?.length > 0 && (
+      {/* The server leaves agents out while the first poll connects: undefined > 0 is false then, but TypeScript wants the two ! here. */}
+      {m.agents?.length! > 0 && (
         <div className="agents">
-          {m.agents.map((agent) => <AgentRow key={agent.pane_id} agent={agent} />)}
+          {m.agents!.map((agent) => <AgentRow key={agent.pane_id} agent={agent} />)}
         </div>
       )}
     </article>
   );
 }
 
-export function MachinesPage({ state, refresh, toast, openMachine, openToken }) {
+export function MachinesPage({ state, refresh, toast, openMachine, openToken }: Props) {
   return (
     <section className="page">
       <div className="section-heading"><h2>Herdr 实例</h2></div>

@@ -6,7 +6,7 @@ import { expect, test } from 'vitest';
 const css = readFileSync(join(import.meta.dirname, 'styles.css'), 'utf8');
 
 // Declarations of the first rule with exactly this selector, as { property: value }.
-function rule(selector) {
+function rule(selector: string) {
   const start = css.indexOf(`${selector} {`);
   const body = css.slice(css.indexOf('{', start) + 1, css.indexOf('}', start));
   return Object.fromEntries(body.split(';').map((d) => d.trim()).filter(Boolean).map((d) => {

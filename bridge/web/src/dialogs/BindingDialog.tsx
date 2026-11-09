@@ -1,6 +1,8 @@
 import { request } from '../api.ts';
 import { AppAvatar } from '../components/AppAvatar.tsx';
 import { chatTypeLabel, onlineMachines } from '../model.ts';
+import type { PendingChat } from '../model.ts';
+import type { BridgeState } from '../useBridge.ts';
 import { FormDialog, useFields } from './FormDialog.tsx';
 import { PermissionModeField } from './PermissionModeDialog.tsx';
 
@@ -8,12 +10,12 @@ import { PermissionModeField } from './PermissionModeDialog.tsx';
 const kinds = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' }, { id: 'agy', name: 'Antigravity' }];
 
 // A select's effective value: the chosen option while it still exists, otherwise the first option.
-const selected = (options, value) => (options.some((o) => o.id === value) ? value : options[0]?.id || '');
+const selected = (options: { id: string }[], value: string) => (options.some((o) => o.id === value) ? value : options[0]?.id || '');
 
 // Route the pending chat that asked for a binding to a machine: each topic of the chat will start an agent of the chosen kind
 // in the working directory. The chat is fixed by its link token; only enabled machines with their client online can be targets.
 // Mentions matter only in groups: a direct chat always triggers. Only Claude bindings have a permission mode.
-export function BindingDialog({ state, chat, onClose, onSaved }) {
+export function BindingDialog({ state, chat, onClose, onSaved }: { state: BridgeState, chat: PendingChat, onClose: () => void, onSaved: () => void }) {
   const group = chat.chatType === 'group';
   const { values, field, checkbox } = useFields({
     name: `飞书${chatTypeLabel(chat.chatType)}`, machineId: '', cwd: '', kind: 'claude', permissionMode: 'default', requireMention: true,

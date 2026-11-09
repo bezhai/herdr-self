@@ -1,6 +1,11 @@
 import { useState } from 'react';
 import { Icon } from './Icon.tsx';
 
+declare global {
+  // Set by public/theme.js: current() is light, dark or system, and choose(theme) applies and stores one.
+  interface Window { bridgeTheme: { current(): string, choose(theme: string): void } }
+}
+
 // In the order the button cycles through them.
 const themes = [
   { id: 'system', label: '跟随系统', icon: 'auto' },

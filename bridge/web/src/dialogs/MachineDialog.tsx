@@ -1,13 +1,15 @@
+import type { Machine } from '../../../state.ts';
 import { request } from '../api.ts';
 import { FormDialog, useFields } from './FormDialog.tsx';
 
 // Add or edit (machine given) a machine: its name and the Herdr session its client works in. Saving always enables it.
 // onSaved gets the saved machine ({ id, name, session }), so adding can go on to the token of its client.
-export function MachineDialog({ machine, onClose, onSaved }) {
+export type SavedMachine = Pick<Machine, 'id' | 'name' | 'session'>;
+export function MachineDialog({ machine, onClose, onSaved }: { machine?: SavedMachine, onClose: () => void, onSaved: (machine: SavedMachine) => void }) {
   const { values, field } = useFields({ name: machine?.name || '', session: machine?.session || 'default' });
 
   async function save() {
-    const { id } = await request('/machines/save', { id: machine?.id, ...values, enabled: true });
+    const { id } = await request<Pick<Machine, 'id'>>('/machines/save', { id: machine?.id, ...values, enabled: true });
     onSaved({ id, ...values });
   }
 

@@ -1,0 +1,22 @@
+// The console: React in the browser, bundled by Vite and tested by Vitest in jsdom. tsc only checks it; npm test runs it after the
+// check of the server. It reads /api/state with the types of console-state.ts, so the server modules that those name are checked here too,
+// with Node's types beside the DOM's.
+{
+  "compilerOptions": {
+    "target": "es2025",
+    "lib": ["es2025", "dom", "dom.iterable"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["node", "vite/client"],
+    "strict": true,
+    "useUnknownInCatchVariables": false,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "allowJs": true,
+    "skipLibCheck": true
+  },
+  "include": ["src", "../array-includes.d.ts"]
+}

@@ -1,16 +1,19 @@
 import { useState } from 'react';
+import type { ConsoleMachine } from '../../../console-state.ts';
 import { request } from '../api.ts';
 import { CloseButton, Dialog } from '../components/Dialog.tsx';
 import { FormDialog } from './FormDialog.tsx';
+import type { SavedMachine } from './MachineDialog.tsx';
 
 // Generate the token of a machine's client, which replaces any token it had and drops the client using that one. Bridge keeps only a
-// hash, so the config with the token is shown once, right after; onIssued refreshes the machines.
-export function ClientTokenDialog({ machine, onClose, onIssued }) {
+// hash, so the config with the token is shown once, right after; onIssued refreshes the machines. A machine just added has no token yet.
+type ClientTokenDialogProps = { machine: SavedMachine & Partial<Pick<ConsoleMachine, 'hasToken'>>, onClose: () => void, onIssued: () => void };
+export function ClientTokenDialog({ machine, onClose, onIssued }: ClientTokenDialogProps) {
   const [config, setConfig] = useState('');
   const again = machine.hasToken;
 
   async function issue() {
-    const result = await request('/machines/token', { id: machine.id });
+    const result = await request<{ config: string }>('/machines/token', { id: machine.id });
     setConfig(result.config);
     onIssued();
   }

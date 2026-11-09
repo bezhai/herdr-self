@@ -1,8 +1,9 @@
 import { request } from '../api.ts';
+import type { ConsoleApp } from '../model.ts';
 import { FormDialog, useFields } from './FormDialog.tsx';
 
 // Add or edit (app given) a Feishu app manually. An empty secret keeps the saved one for the same app.
-export function AppDialog({ app, onClose, onSaved }) {
+export function AppDialog({ app, onClose, onSaved }: { app?: ConsoleApp, onClose: () => void, onSaved: () => void }) {
   const { values, field, set } = useFields({
     name: app?.name || '',
     appId: app?.appId || '',
@@ -34,7 +35,7 @@ export function AppDialog({ app, onClose, onSaved }) {
         </label>
       </div>
       <label>App Secret<input className="mono" type="password" autoComplete="new-password" placeholder="填写新密钥；编辑时留空保留" {...field('appSecret')} /></label>
-      <label>允许操作的用户 open_id<textarea className="mono" rows="3" placeholder="ou_…，每行一个" {...field('allowedUsers')} /></label>
+      <label>允许操作的用户 open_id<textarea className="mono" rows={3} placeholder="ou_…，每行一个" {...field('allowedUsers')} /></label>
     </FormDialog>
   );
 }

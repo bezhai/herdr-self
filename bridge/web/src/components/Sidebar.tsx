@@ -1,8 +1,10 @@
 import { pageInfo } from '../pages/pageInfo.ts';
+import type { Page } from '../pages/pageInfo.ts';
+import type { BridgeState } from '../useBridge.ts';
 import { Icon } from './Icon.tsx';
 import { Brand } from './Logo.tsx';
 
-function NavButton({ page, current, count, onNavigate }) {
+function NavButton({ page, current, count, onNavigate }: { page: Page, current: Page, count?: number, onNavigate: (page: Page) => void }) {
   const info = pageInfo[page];
   return (
     <button type="button" className={page === current ? 'nav-button active' : 'nav-button'} onClick={() => onNavigate(page)}>
@@ -12,7 +14,8 @@ function NavButton({ page, current, count, onNavigate }) {
 }
 
 // online: null before the first refresh, then whether the last refresh succeeded.
-export function Sidebar({ state, page, online, open, onNavigate, onLogout }) {
+type SidebarProps = { state: BridgeState, page: Page, online: boolean | null, open: boolean, onNavigate: (page: Page) => void, onLogout: () => void };
+export function Sidebar({ state, page, online, open, onNavigate, onLogout }: SidebarProps) {
   const nav = { current: page, onNavigate };
   return (
     <aside className={open ? 'sidebar open' : 'sidebar'}>

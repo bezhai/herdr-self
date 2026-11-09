@@ -3,4 +3,4 @@ import { ConnectPage } from './pages/ConnectPage.tsx';
 import './styles.css';
 
 // Renders into <main id="root">; the stylesheet targets `.connect-redirect main`.
-createRoot(document.getElementById('root')).render(<ConnectPage />);
+createRoot(document.getElementById('root')!).render(<ConnectPage />);

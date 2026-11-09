@@ -1,6 +1,9 @@
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { UserEvent } from '@testing-library/user-event';
+import type { ReactElement } from 'react';
 import { expect, test, vi } from 'vitest';
+import type { ConsoleState } from '../../../console-state.ts';
 import { AppDialog } from './AppDialog.tsx';
 import { BindingDialog } from './BindingDialog.tsx';
 import { ClientTokenDialog } from './ClientTokenDialog.tsx';
@@ -10,13 +13,15 @@ import { RegistrationDialog } from './RegistrationDialog.tsx';
 import { SkillDialog } from './SkillDialog.tsx';
 import { base64, bodyOf, deferred, reply, sampleState, stubFetch } from '../test/fixtures.ts';
 
-const optionLabels = (label) => [...screen.getByLabelText(label).options].map((option) => option.textContent);
+// In these tests, ! after a DOM query marks an element that the test has just rendered.
+
+const optionLabels = (label: string) => [...screen.getByLabelText<HTMLSelectElement>(label).options].map((option) => option.textContent);
 // Paragraphs in the open dialog other than the error line: forms carry no captions or explanations.
 const prose = () => [...document.querySelectorAll('dialog p')].filter((p) => p.getAttribute('role') !== 'alert').map((p) => p.textContent);
 
 test('form dialogs head with their title next to the close button and hold no explanatory text', () => {
   const state = sampleState();
-  const forms = [
+  const forms: [ReactElement, string][] = [
     [<AppDialog onClose={vi.fn()} onSaved={vi.fn()} />, '应用配置'],
     [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加机器'],
     [<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={vi.fn()} />, '连接聊天与会话'],
@@ -26,7 +31,7 @@ test('form dialogs head with their title next to the close button and hold no ex
   ];
   for (const [element, title] of forms) {
     const view = render(element);
-    const head = document.querySelector('.dialog-head');
+    const head = document.querySelector<HTMLElement>('.dialog-head')!;
     expect(head.textContent).toBe(title);
     expect(within(head).getByRole('heading', { name: title })).toBeTruthy();
     expect(within(head).getByRole('button', { name: '关闭' })).toBeTruthy();
@@ -44,10 +49,10 @@ test('machine form asks only for the name and the Herdr session, starts from ses
   expect(screen.getByRole('heading', { name: '添加机器' })).toBeTruthy();
   expect([...document.querySelectorAll('dialog label')].map((label) => label.textContent)).toEqual(['机器名称', 'Herdr Session']);
   expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(2);
-  expect(screen.getByLabelText('Herdr Session').value).toBe('default');
+  expect(screen.getByLabelText<HTMLInputElement>('Herdr Session').value).toBe('default');
 
   await user.type(screen.getByLabelText('机器名称'), 'cpu9');
-  const submit = screen.getByRole('button', { name: '下一步' });
+  const submit = screen.getByRole<HTMLButtonElement>('button', { name: '下一步' });
   await user.click(submit);
   expect(submit.disabled).toBe(true);
   expect(bodyOf(fetch, '/api/machines/save')).toEqual({ name: 'cpu9', session: 'default', enabled: true });
@@ -64,8 +69,8 @@ test('machine form edits a machine by its id and hands the saved machine to the 
   const user = userEvent.setup();
   render(<MachineDialog machine={sampleState().machines[2]} onClose={vi.fn()} onSaved={onSaved} />);
   expect(screen.getByRole('heading', { name: '编辑机器' })).toBeTruthy();
-  expect(screen.getByLabelText('机器名称').value).toBe('laptop');
-  expect(screen.getByLabelText('Herdr Session').value).toBe('default');
+  expect(screen.getByLabelText<HTMLInputElement>('机器名称').value).toBe('laptop');
+  expect(screen.getByLabelText<HTMLInputElement>('Herdr Session').value).toBe('default');
   await user.clear(screen.getByLabelText('Herdr Session'));
   await user.type(screen.getByLabelText('Herdr Session'), 'work');
   await user.click(screen.getByRole('button', { name: '保存并连接' }));
@@ -79,26 +84,26 @@ test('the client token dialog warns that a new token replaces the old one, then 
   const onIssued = vi.fn();
   const user = userEvent.setup();
   const view = render(<ClientTokenDialog machine={sampleState().machines[0]} onClose={vi.fn()} onIssued={onIssued} />);
-  expect(document.querySelector('.dialog-head').textContent).toBe('重新生成客户端 token');
+  expect(document.querySelector('.dialog-head')!.textContent).toBe('重新生成客户端 token');
   expect(prose()).toEqual(['旧 token 立即失效，正在用它连接的客户端会断开。']);
-  const submit = screen.getByRole('button', { name: '重新生成' });
+  const submit = screen.getByRole<HTMLButtonElement>('button', { name: '重新生成' });
   await user.click(submit);
   expect(submit.disabled).toBe(true);
   expect(bodyOf(fetch, '/api/machines/token')).toEqual({ id: 'm-1' });
 
   const config = '{\n  "url": "ws://bridge-host:8080/api/client",\n  "token": "secret"\n}\n';
   issue.resolve(reply({ config }));
-  const field = await screen.findByLabelText('客户端配置');
+  const field = await screen.findByLabelText<HTMLTextAreaElement>('客户端配置');
   expect(field.value).toBe(config);
   expect(field.readOnly).toBe(true);
-  expect(document.querySelector('.dialog-head').textContent).toBe('cpu2 的客户端配置');
+  expect(document.querySelector('.dialog-head')!.textContent).toBe('cpu2 的客户端配置');
   expect(prose()).toEqual(['只显示这一次。保存为那台机器上的 ~/.config/herdr-bridge/client.json，权限 600。']);
   expect(onIssued).toHaveBeenCalledTimes(1);
   view.unmount();
 
   stubFetch({ '/api/machines/token': reply({ error: '机器连接不存在' }, 400) });
   render(<ClientTokenDialog machine={sampleState().machines[2]} onClose={vi.fn()} onIssued={onIssued} />);
-  expect(document.querySelector('.dialog-head').textContent).toBe('生成客户端 token');
+  expect(document.querySelector('.dialog-head')!.textContent).toBe('生成客户端 token');
   expect(prose()).toEqual([]);
   await user.click(screen.getByRole('button', { name: '生成' }));
   expect(await screen.findByText('机器连接不存在')).toBeTruthy();
@@ -110,20 +115,20 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
   const fetch = stubFetch({ '/api/apps/save': reply({ error: '该应用已添加' }, 400) });
   const user = userEvent.setup();
   const { unmount } = render(<AppDialog onClose={vi.fn()} onSaved={vi.fn()} />);
-  expect(screen.getByLabelText('API 环境').value).toBe('feishu');
+  expect(screen.getByLabelText<HTMLSelectElement>('API 环境').value).toBe('feishu');
   unmount();
 
   render(<AppDialog app={sampleState().apps[1]} onClose={vi.fn()} onSaved={vi.fn()} />);
-  expect(screen.getByLabelText('应用名称').value).toBe('备用应用');
+  expect(screen.getByLabelText<HTMLInputElement>('应用名称').value).toBe('备用应用');
   expect(prose()).toEqual([]);
-  expect(screen.getByLabelText('App ID').value).toBe('cli_spare');
-  expect(screen.getByLabelText('API 环境').value).toBe('lark');
+  expect(screen.getByLabelText<HTMLInputElement>('App ID').value).toBe('cli_spare');
+  expect(screen.getByLabelText<HTMLSelectElement>('API 环境').value).toBe('lark');
   await user.type(screen.getByLabelText('App Secret'), 'new-secret');
   await user.type(screen.getByLabelText('允许操作的用户 open_id'), 'ou_a, ou_b{Enter}ou_c');
   await user.click(screen.getByRole('button', { name: '保存应用' }));
   expect(await screen.findByText('该应用已添加')).toBeTruthy();
   expect(bodyOf(fetch, '/api/apps/save')).toEqual({ id: 'app-2', name: '备用应用', appId: 'cli_spare', appSecret: 'new-secret', domain: 'lark', allowedUsers: ['ou_a', 'ou_b', 'ou_c'] });
-  expect(screen.getByLabelText('App Secret').value).toBe('');
+  expect(screen.getByLabelText<HTMLInputElement>('App Secret').value).toBe('');
 });
 
 test('binding form shows its chat read-only, lists only enabled machines with their client online and saves a group route with the link token', async () => {
@@ -138,17 +143,17 @@ test('binding form shows its chat read-only, lists only enabled machines with th
   expect(within(source).getByText('工作助手')).toBeTruthy();
   expect(within(source).getByText('群聊')).toBeTruthy();
   expect(within(source).getByText('oc_group')).toBeTruthy();
-  expect(source.querySelector('img').getAttribute('src')).toBe('/api/apps/avatar?id=app-1&v=1700000000000');
+  expect(source.querySelector('img')!.getAttribute('src')).toBe('/api/apps/avatar?id=app-1&v=1700000000000');
   expect(source.querySelectorAll('input, select')).toHaveLength(0);
   expect(screen.queryByLabelText('飞书应用')).toBeNull();
   expect(screen.queryByLabelText('Chat ID')).toBeNull();
-  expect(screen.getByLabelText('绑定名称').value).toBe('飞书群聊');
+  expect(screen.getByLabelText<HTMLInputElement>('绑定名称').value).toBe('飞书群聊');
   expect(optionLabels('机器 / Herdr 实例')).toEqual(['cpu2 / default', 'gpu1 / work', 'gpu2 / default']);
   expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
-  expect([...screen.getByLabelText('Agent 类型').options].map((option) => option.value)).toEqual(['claude', 'codex', 'agy']);
-  expect(screen.getByLabelText('Agent 类型').value).toBe('claude');
+  expect([...screen.getByLabelText<HTMLSelectElement>('Agent 类型').options].map((option) => option.value)).toEqual(['claude', 'codex', 'agy']);
+  expect(screen.getByLabelText<HTMLSelectElement>('Agent 类型').value).toBe('claude');
   expect(document.querySelectorAll('select')).toHaveLength(3);
-  expect(screen.getByLabelText('仅 @机器人时触发').checked).toBe(true);
+  expect(screen.getByLabelText<HTMLInputElement>('仅 @机器人时触发').checked).toBe(true);
   expect(screen.queryByText(/私聊请取消/)).toBeNull();
   expect(prose()).toEqual([]);
 
@@ -171,7 +176,7 @@ test('binding form for a direct chat has no mention option and never requires on
   const state = sampleState();
   render(<BindingDialog state={state} chat={state.pendingChats[1]} onClose={vi.fn()} onSaved={onSaved} />);
   expect(within(screen.getByRole('group', { name: '来源 · 飞书' })).getByText('私聊')).toBeTruthy();
-  expect(screen.getByLabelText('绑定名称').value).toBe('飞书私聊');
+  expect(screen.getByLabelText<HTMLInputElement>('绑定名称').value).toBe('飞书私聊');
   expect(screen.queryByLabelText('仅 @机器人时触发')).toBeNull();
   expect(document.querySelector('input[type="checkbox"]')).toBeNull();
 
@@ -189,13 +194,13 @@ test('binding form offers the permission mode only for Claude, explains both mod
   const state = sampleState();
   render(<BindingDialog state={state} chat={state.pendingChats[1]} onClose={vi.fn()} onSaved={onSaved} />);
   expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
-  expect(screen.getByLabelText('权限模式').value).toBe('default');
+  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('default');
 
   await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
   await user.selectOptions(screen.getByLabelText('Agent 类型'), 'codex');
   expect(screen.queryByLabelText('权限模式')).toBeNull();
   await user.selectOptions(screen.getByLabelText('Agent 类型'), 'claude');
-  expect(screen.getByLabelText('权限模式').value).toBe('auto');
+  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('auto');
 
   await user.type(screen.getByLabelText('工作目录'), '~/work');
   await user.click(screen.getByRole('button', { name: '保存绑定' }));
@@ -211,7 +216,7 @@ test('binding form for Antigravity hides the permission mode and saves kind agy 
   render(<BindingDialog state={state} chat={state.pendingChats[0]} onClose={vi.fn()} onSaved={onSaved} />);
   await user.selectOptions(screen.getByLabelText('权限模式'), 'auto');
   await user.selectOptions(screen.getByLabelText('Agent 类型'), 'agy');
-  expect(screen.getByLabelText('Agent 类型').value).toBe('agy');
+  expect(screen.getByLabelText<HTMLSelectElement>('Agent 类型').value).toBe('agy');
   expect(screen.queryByLabelText('权限模式')).toBeNull();
   expect(document.querySelectorAll('select')).toHaveLength(2);
 
@@ -228,12 +233,12 @@ test('permission mode form starts from the mode of the binding, default without 
   const user = userEvent.setup();
   const binding = sampleState().bindings[0];
   const { unmount } = render(<PermissionModeDialog binding={{ ...binding, permissionMode: 'auto' }} onClose={vi.fn()} onSaved={vi.fn()} />);
-  expect(screen.getByLabelText('权限模式').value).toBe('auto');
+  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('auto');
   unmount();
 
   render(<PermissionModeDialog binding={binding} onClose={vi.fn()} onSaved={onSaved} />);
   expect(screen.getByRole('heading', { name: '修改权限模式' })).toBeTruthy();
-  expect(screen.getByLabelText('权限模式').value).toBe('default');
+  expect(screen.getByLabelText<HTMLSelectElement>('权限模式').value).toBe('default');
   expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作发卡片到飞书', 'auto：由 Claude 自动决定，很少需要确认']);
   expect(prose()).toEqual([]);
 
@@ -251,11 +256,11 @@ test('the source of a chat whose app has no avatar shows the Feishu icon', () =>
   const source = screen.getByRole('group', { name: '来源 · 飞书' });
   expect(within(source).getByText('备用应用')).toBeTruthy();
   expect(source.querySelector('img')).toBeNull();
-  expect(source.querySelector('use').getAttribute('href')).toBe('#i-feishu');
+  expect(source.querySelector('use')!.getAttribute('href')).toBe('#i-feishu');
 });
 
 // Replaces the text of a field with text, which may hold characters that user.type would read as keys.
-async function replaceText(user, field, text) {
+async function replaceText(user: UserEvent, field: HTMLElement, text: string) {
   await user.clear(field);
   await user.click(field);
   await user.paste(text);
@@ -268,14 +273,14 @@ test('skill form for a new skill asks for its name and its SKILL.md, which start
   const user = userEvent.setup();
   render(<SkillDialog onClose={vi.fn()} onSaved={onSaved} />);
   expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(2);
-  expect(screen.getByLabelText('skill 名称').value).toBe('');
-  expect(screen.getByLabelText('SKILL.md').value).toBe('---\nname: \ndescription: \n---\n');
+  expect(screen.getByLabelText<HTMLInputElement>('skill 名称').value).toBe('');
+  expect(screen.getByLabelText<HTMLTextAreaElement>('SKILL.md').value).toBe('---\nname: \ndescription: \n---\n');
   expect(document.querySelector('.skill-files')).toBeNull();
 
   const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n\n先看 CI。\n';
   await user.type(screen.getByLabelText('skill 名称'), 'deploy-notes');
   await replaceText(user, screen.getByLabelText('SKILL.md'), text);
-  const submit = screen.getByRole('button', { name: '保存' });
+  const submit = screen.getByRole<HTMLButtonElement>('button', { name: '保存' });
   await user.click(submit);
   expect(submit.disabled).toBe(true);
   expect(bodyOf(fetch, '/api/skills/save')).toEqual({ name: 'deploy-notes', text, create: true });
@@ -294,7 +299,7 @@ test('skill form for an existing skill edits its SKILL.md alone: the title names
   const skill = { ...sampleState().skills[1], files: { 'SKILL.md': base64(text), 'references/checklist.md': base64('- CI\n'), 'scripts/check.sh': base64('echo\n') } };
   render(<SkillDialog skill={skill} onClose={vi.fn()} onSaved={onSaved} />);
   expect(screen.queryByLabelText('skill 名称')).toBeNull();
-  expect(screen.getByLabelText('SKILL.md').value).toBe(text);
+  expect(screen.getByLabelText<HTMLTextAreaElement>('SKILL.md').value).toBe(text);
   const files = screen.getByRole('group', { name: '其他文件' });
   expect([...files.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['references/checklist.md', 'scripts/check.sh']);
   expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(1);
@@ -306,12 +311,14 @@ test('skill form for an existing skill edits its SKILL.md alone: the title names
   expect(bodyOf(fetch, '/api/skills/save')).toEqual({ name: 'deploy-notes', text: changed, create: false });
 });
 
+// as: the registrations below hold only what the dialog reads.
+type Registration = NonNullable<ConsoleState['registration']>;
 const registrationProps = () => ({ apps: sampleState().apps, previousId: 'r0', onRetry: vi.fn(), onDone: vi.fn(), onConfigure: vi.fn(), onManual: vi.fn(), onClose: vi.fn() });
 
 test('registration dialog shows 完成 once the flow completes', async () => {
   const props = registrationProps();
   const user = userEvent.setup();
-  render(<RegistrationDialog registration={{ id: 'r1', status: 'completed', appId: 'app-1' }} {...props} />);
+  render(<RegistrationDialog registration={{ id: 'r1', status: 'completed', appId: 'app-1' } as Registration} {...props} />);
   expect(screen.getByRole('heading', { name: '飞书已连接' })).toBeTruthy();
   expect(screen.getByText('工作助手')).toBeTruthy();
   expect(screen.queryByRole('button', { name: '手动接入' })).toBeNull();
@@ -322,7 +329,7 @@ test('registration dialog shows 完成 once the flow completes', async () => {
 test('registration dialog links to Feishu and switches to the QR code for phones', async () => {
   const props = registrationProps();
   const user = userEvent.setup();
-  const registration = { id: 'r1', status: 'pending', url: 'https://open.feishu.cn/page/x', qr: 'data:image/png;base64,qr' };
+  const registration = { id: 'r1', status: 'pending', url: 'https://open.feishu.cn/page/x', qr: 'data:image/png;base64,qr' } as Registration;
   render(<RegistrationDialog registration={registration} {...props} />);
   expect(prose()).toEqual(['等待飞书确认']);
   const link = screen.getByRole('link', { name: '前往飞书 ↗' });

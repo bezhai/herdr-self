@@ -1,21 +1,24 @@
 import { vi } from 'vitest';
+import type { ConsoleState } from '../../../console-state.ts';
 import themeScript from '../../public/theme.js?raw';
 
 // Runs public/theme.js the way the pages' <head> does: as a classic script, before the app renders.
 export const runThemeScript = () => new Function(themeScript)();
 
 // Like a real response, every json() call yields a freshly parsed object.
-export function reply(body, status = 200) {
+export function reply(body: unknown, status = 200) {
   return { status, ok: status >= 200 && status < 300, json: async () => structuredClone(body) };
 }
 
 // Replaces global fetch. Each route is a response body, a reply(), or a function of the parsed request body.
-export function stubFetch(routes) {
-  const fetch = vi.fn(async (url, init = {}) => {
+// callApi always passes an init, with the JSON body of a POST.
+export function stubFetch(routes: { [url: string]: unknown }) {
+  const fetch = vi.fn<(url: string, init: { body?: string }) => Promise<unknown>>(async (url, init = {}) => {
     const route = routes[url];
     if (route === undefined) return reply({ error: '接口不存在' }, 404);
-    const body = init.body === undefined ? undefined : JSON.parse(init.body);
-    const result = typeof route === 'function' ? await route(body) : route;
+    const body: unknown = init.body === undefined ? undefined : JSON.parse(init.body);
+    // as: each test writes what its routes read of the body and what they answer, a body or something with json() like a reply().
+    const result = (typeof route === 'function' ? await route(body) : route) as { json?: unknown } | null | undefined;
     return typeof result?.json === 'function' ? result : reply(result);
   });
   vi.stubGlobal('fetch', fetch);
@@ -23,21 +26,23 @@ export function stubFetch(routes) {
 }
 
 export function deferred() {
-  let resolve;
+  let resolve!: (value: unknown) => void; // !: the executor below runs before the promise is returned.
   const promise = new Promise((done) => { resolve = done; });
   return { promise, resolve };
 }
 
-export function bodyOf(fetch, url) {
+export function bodyOf(fetch: ReturnType<typeof stubFetch>, url: string): unknown {
   const call = fetch.mock.calls.findLast(([called]) => called === url);
-  return call && JSON.parse(call[1].body);
+  return call && JSON.parse(call[1].body!); // !: the url was posted, with a body.
 }
 
-export const callsTo = (fetch, url) => fetch.mock.calls.filter(([called]) => called === url).length;
+export const callsTo = (fetch: ReturnType<typeof stubFetch>, url: string) => fetch.mock.calls.filter(([called]) => called === url).length;
 
 // Text as base64 of its UTF-8 bytes, like the files of a skill that /api/skills/read returns.
-export const base64 = (text) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+export const base64 = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
 
+// as: partial where the console reads nothing. The apps have no hasSecret (nor the appSecret: undefined that JSON drops), the agents no
+// workspace_id, tab_id or state_change_seq, and the topics no replySeq.
 export function sampleState() {
   const now = Date.now();
   return {
@@ -100,5 +105,5 @@ export function sampleState() {
       { name: 'deploy-notes', description: '部署前后要检查的事项。', preload: false, digest: 'b'.repeat(64) },
     ],
     logs: [{ at: 1, kind: '机器连接', message: 'cpu2 已连接', level: 'info' }],
-  };
+  } as ConsoleState;
 }

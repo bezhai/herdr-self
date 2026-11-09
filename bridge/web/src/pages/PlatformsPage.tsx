@@ -1,13 +1,18 @@
+import type { Binding } from '../../../state.ts';
 import { request } from '../api.ts';
 import { ActionButton } from '../components/ActionButton.tsx';
 import { AppAvatar } from '../components/AppAvatar.tsx';
 import { StatusBadge } from '../components/Badge.tsx';
 import { EmptyState } from '../components/EmptyState.tsx';
+import type { ConsoleApp } from '../model.ts';
+import type { PageProps } from './pageInfo.ts';
 
-const domainNames = { bytedance: '字节内部', lark: 'Lark 国际版' };
+type Props = PageProps & { openApp: (app: ConsoleApp) => void };
 
-function AppCard({ app, bindings, refresh, toast, openApp }) {
-  async function act(path, body, message) {
+const domainNames: { [domain: string]: string } = { bytedance: '字节内部', lark: 'Lark 国际版' };
+
+function AppCard({ app, bindings, refresh, toast, openApp }: Omit<Props, 'state'> & { app: ConsoleApp, bindings: Binding[] }) {
+  async function act(path: string, body: unknown, message?: string) {
     await request(path, body);
     if (message) toast(message);
     await refresh();
@@ -42,7 +47,7 @@ function AppCard({ app, bindings, refresh, toast, openApp }) {
   );
 }
 
-export function PlatformsPage({ state, refresh, toast, openApp }) {
+export function PlatformsPage({ state, refresh, toast, openApp }: Props) {
   return (
     <section className="page">
       <div className="section-heading"><h2>平台应用</h2></div>

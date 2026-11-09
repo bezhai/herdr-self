@@ -1,12 +1,16 @@
 import { useEffect, useState } from 'react';
+import type { ConsoleState } from '../../../console-state.ts';
 import { callApi } from '../api.ts';
 import { replace } from '../location.ts';
 
 const feishuHosts = ['open.feishu.cn', 'open.larkoffice.com', 'open.larksuite.com'];
 
+// A registration as /apps/registration/start answers it or the state holds it, and {} while the state holds none.
+type Registration = Partial<NonNullable<ConsoleState['registration']>>;
+
 // This page does not use request(): a 401 goes back to the console before the body is read,
-// and every other failure shows one generic message.
-async function call(path, body) {
+// and every other failure shows one generic message. T: what the caller reads of the answer, which is not checked.
+async function call<T>(path: string, body?: unknown): Promise<T> {
   const response = await callApi(path, body);
   if (response.status === 401) {
     replace('/');
@@ -16,12 +20,12 @@ async function call(path, body) {
   return response.json();
 }
 
-const wait = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+const wait = (ms: number) => new Promise((resolve) => { setTimeout(resolve, ms); });
 
 // Starts (or joins) a registration, polls once a second up to 40 times until it has a pending
 // authorization URL, and replaces this page with it. Only https URLs on the Feishu hosts are followed.
 async function openFeishu() {
-  let registration = await call('/apps/registration/start', {});
+  let registration = await call<Registration>('/apps/registration/start', {});
   const { id } = registration;
   for (let i = 0; i < 40; i += 1) {
     if (registration.url && registration.status === 'pending') {
@@ -32,14 +36,14 @@ async function openFeishu() {
     }
     if (registration.id !== id || !['starting', 'pending'].includes(registration.status)) throw new Error('请返回管理台重试');
     await wait(1000);
-    registration = (await call('/state')).registration || {};
+    registration = (await call<ConsoleState>('/state')).registration || {};
   }
   throw new Error('连接超时，请重试');
 }
 
 export function ConnectPage() {
   const [attempt, setAttempt] = useState(0);
-  const [error, setError] = useState(null);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let current = true;

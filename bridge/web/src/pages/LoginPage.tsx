@@ -1,14 +1,15 @@
 import { useState } from 'react';
+import type { SubmitEvent } from 'react';
 import { request } from '../api.ts';
 import { Icon } from '../components/Icon.tsx';
 import { Brand, Logo } from '../components/Logo.tsx';
 
 // onLogin: called after the session cookie is set; refreshes state, which opens the console.
-export function LoginPage({ onLogin }) {
+export function LoginPage({ onLogin }: { onLogin: () => Promise<void> }) {
   const [key, setKey] = useState('');
   const [error, setError] = useState('');
 
-  async function submit(event) {
+  async function submit(event: SubmitEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
       await request('/login', { key });

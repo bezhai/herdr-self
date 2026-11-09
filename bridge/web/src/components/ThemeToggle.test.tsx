@@ -7,8 +7,8 @@ import { ThemeToggle } from './ThemeToggle.tsx';
 const key = 'herdr-bridge-theme';
 const root = document.documentElement;
 const toggle = () => screen.getByRole('button', { name: /^主题：/ });
-// The button's accessible name, title and icon.
-const shown = () => [toggle().getAttribute('aria-label'), toggle().title, toggle().querySelector('use').getAttribute('href')];
+// The button's accessible name, title and icon (!: the button holds an icon).
+const shown = () => [toggle().getAttribute('aria-label'), toggle().title, toggle().querySelector('use')!.getAttribute('href')];
 
 // Like a browser that blocks site data: reading window.localStorage throws.
 const blockStorage = () => vi.spyOn(window, 'localStorage', 'get').mockImplementation(() => {

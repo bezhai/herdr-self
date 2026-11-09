@@ -1,8 +1,12 @@
 import { expect, test } from 'vitest';
+import type { ClientStatus } from '../../clients.ts';
+import type { ConsoleState } from '../../console-state.ts';
+import type { Agent } from '../../core.ts';
 import {
   agentStatusLabel, avatarUrl, bindingStatus, chatTypeLabel, clientStatus, metrics, minutesLeft, onlineMachines, permissionModeOf, registrationView, statusLabel,
   skillText, statusTone, topicStatus,
 } from './model.ts';
+import type { ConsoleApp } from './model.ts';
 import { base64, sampleState } from './test/fixtures.ts';
 
 test('status tones group connection and Herdr agent states', () => {
@@ -33,7 +37,8 @@ test('topic states have a label and a tone', () => {
 });
 
 test('the client connection of a machine is online, refused or offline, which is also what a machine without one shows', () => {
-  expect([{ state: 'online', host: 'h', since: 1 }, { state: 'refused', error: 'x' }, { state: 'offline' }, undefined].map(clientStatus)).toEqual([
+  // as: undefined is a machine without a client, which the server never sends.
+  expect(([{ state: 'online', host: 'h', since: 1 }, { state: 'refused', error: 'x' }, { state: 'offline' }, undefined] as ClientStatus[]).map(clientStatus)).toEqual([
     { tone: 'ok', label: '客户端在线' }, { tone: 'error', label: '客户端被拒绝' }, { tone: 'neutral', label: '客户端离线' }, { tone: 'neutral', label: '客户端离线' },
   ]);
 });
@@ -49,10 +54,11 @@ test('online machines are the enabled ones whose client is connected, whatever t
 test('metrics count online machines, connected platforms, bindings and the agents Herdr reports on online machines', () => {
   const state = sampleState();
   expect(metrics(state)).toEqual({ machinesOnline: 3, machines: 5, platformsConnected: 1, platforms: 2, bindings: 1, agents: 3 });
-  state.machines[2].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
-  state.machines[3].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
+  // as: these agents hold only what metrics reads.
+  state.machines[2].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }] as Agent[];
+  state.machines[3].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }] as Agent[];
   expect(metrics(state).agents).toBe(3);
-  state.machines[1].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }];
+  state.machines[1].agents = [{ pane_id: 'w1:p1', agent_status: 'idle' }] as Agent[];
   expect(metrics(state).agents).toBe(4);
 });
 
@@ -90,11 +96,13 @@ test('an app avatar is served by the console API and versioned by its update tim
   expect(avatarUrl(undefined)).toBeNull();
 });
 
+// as: these apps hold only what registrationView reads, and so do the registrations that view() takes.
 const apps = [
   { id: 'app-1', name: '工作助手', enabled: true, connection: 'connected' },
   { id: 'app-2', name: '新应用', enabled: false, connection: 'disabled' },
-];
-const view = (registration, local = {}) => registrationView(registration, apps, { opening: false, previousId: null, scanning: false, ...local });
+] as ConsoleApp[];
+type Registration = Partial<NonNullable<ConsoleState['registration']>>;
+const view = (registration: Registration | null, local: Partial<Parameters<typeof registrationView>[2]> = {}) => registrationView(registration as ConsoleState['registration'], apps, { opening: false, previousId: null, scanning: false, ...local });
 
 test('registration view: starting shows the spinner and the manual entry', () => {
   expect(view(null)).toEqual({
@@ -105,7 +113,7 @@ test('registration view: starting shows the spinner and the manual entry', () =>
 });
 
 test('registration view: pending links to Feishu and toggles the QR code', () => {
-  const pending = { id: 'r1', status: 'pending', url: 'https://open.feishu.cn/page/x', qr: 'data:image/png;base64,qr' };
+  const pending: Registration = { id: 'r1', status: 'pending', url: 'https://open.feishu.cn/page/x', qr: 'data:image/png;base64,qr' };
   expect(view(pending)).toMatchObject({ spinner: true, qr: null, message: '等待飞书确认', link: pending.url, scan: true, scanLabel: '手机扫码' });
   expect(view(pending, { scanning: true })).toMatchObject({ spinner: false, qr: pending.qr, scan: true, scanLabel: '收起二维码' });
   expect(view({ ...pending, qr: undefined })).toMatchObject({ scan: false, link: pending.url });
@@ -119,7 +127,7 @@ test('registration view: completed, or an already connected app, shows the app n
 });
 
 test('registration view: failures offer retry; connection_error and needs_owner offer the app settings', () => {
-  for (const [status, message] of [['error', '暂时无法连接飞书'], ['expired', '二维码已过期'], ['denied', '未完成授权'], ['cancelled', '请重新添加']]) {
+  for (const [status, message] of [['error', '暂时无法连接飞书'], ['expired', '二维码已过期'], ['denied', '未完成授权'], ['cancelled', '请重新添加']] as const) {
     expect(view({ id: 'r1', status })).toMatchObject({ spinner: false, result: 'problem', message, retry: true, configure: false, done: false, manual: true });
   }
   expect(view({ id: 'r1', status: 'connection_error', appId: 'app-2' })).toMatchObject({ spinner: false, result: 'problem', message: '应用已添加，连接未成功', configure: true, retry: false });
@@ -127,7 +135,7 @@ test('registration view: failures offer retry; connection_error and needs_owner 
 });
 
 test('registration view: while opening, the previous finished registration is ignored until a new flow appears', () => {
-  const previous = { id: 'r0', status: 'completed', appId: 'app-1' };
+  const previous: Registration = { id: 'r0', status: 'completed', appId: 'app-1' };
   expect(view(previous, { opening: true, previousId: 'r0' })).toMatchObject({ opening: true, spinner: true, done: false, message: '正在打开飞书…' });
   expect(view({ ...previous, status: 'pending', url: 'https://open.feishu.cn/x' }, { opening: true, previousId: 'r0' })).toMatchObject({ opening: false, link: 'https://open.feishu.cn/x' });
   expect(view({ id: 'r1', status: 'error' }, { opening: true, previousId: 'r0' })).toMatchObject({ opening: false, retry: true });

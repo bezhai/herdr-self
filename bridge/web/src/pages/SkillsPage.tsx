@@ -1,23 +1,28 @@
+import type { Skill } from '../../../state.ts';
 import { request } from '../api.ts';
 import { ActionButton } from '../components/ActionButton.tsx';
 import { Badge } from '../components/Badge.tsx';
 import { EmptyState } from '../components/EmptyState.tsx';
 import { Icon } from '../components/Icon.tsx';
+import type { SkillWithFiles } from '../model.ts';
+import type { PageProps } from './pageInfo.ts';
+
+type Props = PageProps & { openSkill: (skill: SkillWithFiles) => void };
 
 // How a skill reaches agents, as the card names it.
-const loading = (preload) => (preload ? '默认加载' : '按需读取');
+const loading = (preload: boolean) => (preload ? '默认加载' : '按需读取');
 
 // A skill of the platform, loaded by default (preload) or read on demand. One loaded by default is placed in the working directory of each
 // topic's agent before it starts; agents read the others when they need them. Only a skill read on demand can be removed, so that a click
 // cannot take one away from every topic. Editing reads the skill with its files first (see SkillDialog).
-function SkillCard({ skill: s, refresh, toast, openSkill }) {
-  async function act(path, body, message) {
+function SkillCard({ skill: s, refresh, toast, openSkill }: Omit<Props, 'state'> & { skill: Skill }) {
+  async function act(path: string, body: unknown, message?: string) {
     await request(path, body);
     if (message) toast(message);
     await refresh();
   }
   async function edit() {
-    openSkill(await request(`/skills/read?name=${encodeURIComponent(s.name)}`));
+    openSkill(await request<SkillWithFiles>(`/skills/read?name=${encodeURIComponent(s.name)}`));
   }
   const other = loading(!s.preload);
   return (
@@ -37,7 +42,7 @@ function SkillCard({ skill: s, refresh, toast, openSkill }) {
   );
 }
 
-export function SkillsPage({ state, refresh, toast, openSkill }) {
+export function SkillsPage({ state, refresh, toast, openSkill }: Props) {
   return (
     <section className="page">
       <div className="section-heading"><h2>Agent 的 skill</h2></div>

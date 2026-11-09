@@ -1,6 +1,7 @@
 import { Stream, StreamRow } from '../components/Stream.tsx';
+import type { BridgeState } from '../useBridge.ts';
 
-export function LogsPage({ state }) {
+export function LogsPage({ state }: { state: BridgeState }) {
   const logs = state.logs.slice().reverse();
   return (
     <section className="page">

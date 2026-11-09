@@ -1,12 +1,18 @@
 import { Fragment } from 'react';
+import type { ConsoleTopic } from '../../../console-state.ts';
+import type { Binding } from '../../../state.ts';
 import { request } from '../api.ts';
 import { ActionButton } from '../components/ActionButton.tsx';
 import { AppAvatar } from '../components/AppAvatar.tsx';
 import { Badge } from '../components/Badge.tsx';
 import { bindingStatus, formatDateTime, permissionModeOf, topicStatus } from '../model.ts';
+import type { BridgeState } from '../useBridge.ts';
+import type { PageProps } from './pageInfo.ts';
+
+type Props = PageProps & { openPermissionMode: (binding: Binding) => void };
 
 // The topics of one binding, newest first: each is an agent session in its own Herdr tab, or one it adopted from any pane (/adopt).
-function TopicsRow({ topics, state }) {
+function TopicsRow({ topics, state }: { topics: ConsoleTopic[], state: BridgeState }) {
   return (
     <tr className="topics-row">
       <td colSpan={5}>
@@ -31,7 +37,7 @@ function TopicsRow({ topics, state }) {
 }
 
 // A Claude binding shows its permission mode, which openPermissionMode(binding) changes.
-function BindingRow({ binding: b, state, refresh, toast, openPermissionMode }) {
+function BindingRow({ binding: b, state, refresh, toast, openPermissionMode }: Props & { binding: Binding }) {
   const claude = b.kind === 'claude';
   const machine = state.machines.find((m) => m.id === b.machineId);
   const app = state.apps.find((a) => a.id === b.appId);
@@ -66,7 +72,7 @@ function BindingRow({ binding: b, state, refresh, toast, openPermissionMode }) {
   );
 }
 
-export function BindingsPage({ state, refresh, toast, openPermissionMode }) {
+export function BindingsPage({ state, refresh, toast, openPermissionMode }: Props) {
   return (
     <section className="page">
       <div className="section-heading"><h2>消息路由</h2></div>

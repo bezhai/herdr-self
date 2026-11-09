@@ -1,9 +1,11 @@
 import { AppAvatar } from '../components/AppAvatar.tsx';
 import { CloseButton, Dialog } from '../components/Dialog.tsx';
 import { chatTypeLabel, minutesLeft } from '../model.ts';
+import type { PendingChat } from '../model.ts';
+import type { BridgeState } from '../useBridge.ts';
 
 // Chats that wrote to a bot before they had a binding, each waiting until its link expires. onPick(chat) opens the binding form.
-export function PendingChatsDialog({ state, onPick, onClose }) {
+export function PendingChatsDialog({ state, onPick, onClose }: { state: BridgeState, onPick: (chat: PendingChat) => void, onClose: () => void }) {
   const now = Date.now();
   return (
     <Dialog open onClose={onClose}>

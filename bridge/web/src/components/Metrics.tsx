@@ -1,6 +1,7 @@
 import { metrics } from '../model.ts';
+import type { BridgeState } from '../useBridge.ts';
 
-export function Metrics({ state }) {
+export function Metrics({ state }: { state: BridgeState }) {
   const m = metrics(state);
   return (
     <section className="metrics">

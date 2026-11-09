@@ -1,11 +1,17 @@
 import { useEffect, useState } from 'react';
+import type { ConsoleState } from '../../../console-state.ts';
 import { CloseButton, Dialog } from '../components/Dialog.tsx';
 import { registrationView } from '../model.ts';
+import type { ConsoleApp } from '../model.ts';
 
 // Progress of the "add Feishu" flow running in the /connect window. Mounted on every open;
 // previousId is the registration that existed before this open and is ignored until a new flow shows up.
 // onRetry must open /connect synchronously in the click handler (popup blocking).
-export function RegistrationDialog({ registration, apps, previousId, onRetry, onDone, onConfigure, onManual, onClose }) {
+type RegistrationDialogProps = {
+  registration: ConsoleState['registration'], apps: ConsoleApp[], previousId?: string,
+  onRetry: () => void, onDone: () => void, onConfigure: () => void, onManual: () => void, onClose: () => void,
+};
+export function RegistrationDialog({ registration, apps, previousId, onRetry, onDone, onConfigure, onManual, onClose }: RegistrationDialogProps) {
   const [opening, setOpening] = useState(true);
   const [scanning, setScanning] = useState(false);
   const view = registrationView(registration, apps, { opening, previousId, scanning });
