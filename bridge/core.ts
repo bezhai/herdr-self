@@ -72,7 +72,7 @@ export type HerdrResult<A>=
 // Bridge owns, a .herdr-bridge directory: it gets a .gitignore of * unless it has one, and its directories other than dir that have not
 // changed for 7 days are removed along the way. Directories are created 0700 and the file 0600. The caller removes dir later with
 // removeDirectory(m,dir), which removes only such a directory, with what it holds; one that is gone already is fine.
-// git(m,cwd,args,{timeoutMs}) runs git in cwd, and nameBranch(m,cwd,prompt,{timeoutMs}) asks claude there for a branch name: each resolves to
+// git(m,cwd,args,{timeoutMs}) runs git in cwd, and askCheapModel(m,cwd,prompt,{timeoutMs}) asks the cheap model there: each resolves to
 // {code, stdout, stderr} whatever the exit status. exists(m,path) resolves to whether path exists.
 type Options={timeoutMs?:number};
 export type Call=<K extends keyof ClientApi>(m:Machine,method:K,params:ClientApi[K]['params'],options?:Options)=>Promise<ClientApi[K]['result']>;
@@ -89,7 +89,7 @@ export function operations(call:Call){
   removeDirectory:async(m:Machine,dir:string)=>{await call(m,'removeDirectory',{path:dir});},
   git:(m:Machine,cwd:string,args:string[],options?:Options)=>call(m,'git',{cwd,args},options),
   exists:(m:Machine,p:string)=>call(m,'exists',{path:p}),
-  nameBranch:(m:Machine,cwd:string,prompt:string,options?:Options)=>call(m,'nameBranch',{cwd,prompt},options),
+  askCheapModel:(m:Machine,cwd:string,prompt:string,options?:Options)=>call(m,'askCheapModel',{cwd,prompt},options),
  };
 }
 export function publicText(s:unknown){return String(s||'').replace(/((?:api[_-]?key|token|secret|password|authorization)\s*[:=]\s*)[^\s,;]+/gi,'$1[已隐藏]');}

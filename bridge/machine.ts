@@ -130,8 +130,9 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   git:({cwd,args,timeoutMs})=>{if(!Array.isArray(args)||!args.every(a=>typeof a==='string'))throw invalid('args');return git(local(cwd,'cwd'),args,timeoutMs);},
   // Whether path exists, following links.
   exists:({path:p})=>fs.promises.stat(local(p,'path')).then(()=>true,()=>false),
-  // Asks claude (Claude haiku) in directory cwd for a branch name, with prompt on stdin.
-  nameBranch:({cwd,prompt,timeoutMs})=>run('claude',['-p','--model','haiku'],{env,cwd:local(cwd,'cwd'),input:string(prompt,'prompt'),timeoutMs}),
+  // Asks the cheap model (Claude haiku, through claude) in directory cwd, with prompt on stdin. What it is asked for, such as a branch name, is
+  // the control plane's business.
+  askCheapModel:({cwd,prompt,timeoutMs})=>run('claude',['-p','--model','haiku'],{env,cwd:local(cwd,'cwd'),input:string(prompt,'prompt'),timeoutMs}),
   // Places skills ([{name, digest, files}], files as {relative path: base64}) where an agent reads project skills, directory dir under
   // working directory cwd, and takes away the skills that Bridge placed there before and that skills no longer has. The store, a directory
   // of this machine that no agent reads as a global skill directory, holds each skill as the control plane has it (see stock). A skill of

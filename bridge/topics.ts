@@ -67,17 +67,17 @@ export type Inbound=Message&Pick<NormalizedMessage,'rawContentType'>&Partial<Pic
 // The worktree of a /wt topic once createWorktree knows it (see open): a topic offers removing it only then, and a click on that card
 // finds the card in it.
 type Known=Worktree&NonNullable<Topic['worktree']>;
-type Deps=Pick<Operations,'makeDirectory'|'storeFile'|'removeDirectory'|'git'|'exists'|'nameBranch'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
+type Deps=Pick<Operations,'makeDirectory'|'storeFile'|'removeDirectory'|'git'|'exists'|'askCheapModel'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
  herdr:Herdr,placeSkills:(m:Machine,cwd:string,kind:Kind)=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number};
 export class Topics{
  declare store:Store;declare herdr:Herdr;declare makeDirectory:Deps['makeDirectory'];declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
  declare updateCard:Deps['updateCard'];declare react:Deps['react'];declare unreact:Deps['unreact'];declare request:Deps['request'];declare download:Deps['download'];
- declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare git:Deps['git'];declare exists:Deps['exists'];declare nameBranch:Deps['nameBranch'];
+ declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare git:Deps['git'];declare exists:Deps['exists'];declare askCheapModel:Deps['askCheapModel'];
  declare placeSkills:Deps['placeSkills'];declare now:()=>number;declare topicQueues:Map<string,Promise<unknown>>;declare workspaceQueues:Map<string,Promise<unknown>>;
  declare answering:Map<string,Promise<unknown>>;declare blockedSeen:Map<string,number>;declare renders:number;declare claims:Set<string>;
  // On machine m, through its client (see operations in core.ts): herdr(m,args,{timeoutMs}) runs a Herdr CLI command; makeDirectory(m,path)
  // creates a directory and its parents; storeFile(m,root,dir,name,body) writes a file and resolves to its absolute path, and
- // removeDirectory(m,dir) removes such a directory; git(m,cwd,args,{timeoutMs}), exists(m,path) and nameBranch(m,cwd,prompt,{timeoutMs})
+ // removeDirectory(m,dir) removes such a directory; git(m,cwd,args,{timeoutMs}), exists(m,path) and askCheapModel(m,cwd,prompt,{timeoutMs})
  // serve /wt topics (see worktrees.ts). Each rejects with the code client_offline while the client of m is offline. placeSkills(m,cwd,kind)
  // places the skills loaded by default where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
  // that Bridge placed there before and that are no longer loaded by default, and resolves to the paths of same-name skills of others (see Skills.place). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
@@ -85,9 +85,9 @@ export class Topics{
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes. now() is the clock.
- constructor(store:Store,{herdr,makeDirectory,storeFile,removeDirectory,git,exists,nameBranch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}:Deps){
+ constructor(store:Store,{herdr,makeDirectory,storeFile,removeDirectory,git,exists,askCheapModel,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now}:Deps){
   this.store=store;this.herdr=herdr;this.makeDirectory=makeDirectory;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
-  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.git=git;this.exists=exists;this.nameBranch=nameBranch;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
+  this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.git=git;this.exists=exists;this.askCheapModel=askCheapModel;this.placeSkills=placeSkills;this.now=now;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>', '<topic id> adopt' or '<topic id> worktree' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings; and the panes being
   // adopted as '<machine id> <pane id>' (see held).
@@ -300,7 +300,7 @@ export class Topics{
    m=this.target(t);
    if(t.worktree){
     // A /wt topic opens once, with the request of its first message.
-    made=await createWorktree(m,b.cwd,request!,{git:this.git,exists:this.exists,nameBranch:this.nameBranch,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
+    made=await createWorktree(m,b.cwd,request!,{git:this.git,exists:this.exists,askCheapModel:this.askCheapModel,herdr:this.herdr,save:worktree=>this.update(t,{worktree})});
     this.update(t,{workspaceId:made.workspaceId,tabId:made.tabId,paneId:made.paneId});await this.notify(a,t,worktreeIntro(m,made));
    }else{Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t)));this.store.save();}
    await this.place(m,b,t.worktree?.path||b.cwd);

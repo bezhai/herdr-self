@@ -33,7 +33,7 @@ export type ClientApi={
  removeDirectory:{params:Timed<{path:string}>,result:{}},
  git:{params:Timed<{cwd:string,args:string[]}>,result:Ran},
  exists:{params:Timed<{path:string}>,result:boolean},
- nameBranch:{params:Timed<{cwd:string,prompt:string}>,result:Ran},
+ askCheapModel:{params:Timed<{cwd:string,prompt:string}>,result:Ran},
  placeSkills:{params:Timed<{store:string,skills:SkillFiles[],dir:string,as:'link'|'copy',cwd:string}>,result:string[]},
  stockSkill:{params:Timed<{store:string,skill:SkillFiles}>,result:string},
 };

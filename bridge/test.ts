@@ -622,7 +622,7 @@ const cotPath='/open-apis/im/v1/message_cot';
 // answers it, an error by throwing it, else the body is 'data:<file key>' of type image/png. f.stored records every file written as
 // [machine id, root, dir, name, body as text], which resolves to its path with ~/ as /home/u/; f.removed every directory removed as
 // [machine id, dir]. f.execs records the other operations on a machine (see operations in core.ts) as [machine id, 'git', cwd, ...args],
-// [machine id, 'exists', path] and [machine id, 'nameBranch', cwd]: git and exists run here for real (see gitEnv), and the naming answers
+// [machine id, 'exists', path] and [machine id, 'askCheapModel', cwd]: git and exists run here for real (see gitEnv), and the naming answers
 // from f.h.claude, by default with BRANCH=feat/add-login, as {code, stdout, stderr} or an Error to reject with; f.naming records each naming
 // as {cwd, prompt, timeoutMs}. f.placed records every placement
 // of Bridge's skills as [machine id, directory, agent kind, number of Herdr calls made before it]; it resolves to f.h.placing, by default
@@ -647,8 +647,8 @@ function topicFixture({binding,machine,machines=[],cot=true,now}:TopicOptions={}
   placeSkills:async(m,cwd,kind)=>{placed.push([m.id,cwd,kind,h.calls.length]);await null;if(h.placing instanceof Error)throw h.placing;return h.placing||[];},
   git:async(m,cwd,args)=>{execs.push([m.id,'git',cwd,...args]);await null;const r=gitIn(cwd,...args);return {code:r.status,stdout:r.stdout,stderr:r.stderr};},
   exists:async(m,p)=>{execs.push([m.id,'exists',p]);await null;return fs.existsSync(p);},
-  nameBranch:async(m,cwd,prompt,{timeoutMs}={})=>{
-   execs.push([m.id,'nameBranch',cwd]);naming.push({cwd,prompt,timeoutMs});await null;
+  askCheapModel:async(m,cwd,prompt,{timeoutMs}={})=>{
+   execs.push([m.id,'askCheapModel',cwd]);naming.push({cwd,prompt,timeoutMs});await null;
    if(h.claude instanceof Error)throw h.claude;return {code:0,stdout:'BRANCH=feat/add-login\n',stderr:'',...h.claude};
   },
   reply:async(a,chatId,rootId,content)=>{replies.push([a.id,chatId,rootId,content as {card:Card}]);return 'om_bot_'+ ++sent;},
@@ -1975,7 +1975,7 @@ test('/wt with a description names the branch with Claude haiku on the binding m
   await f.send({messageId:'om_1',content:'/wt 给登录页加验证码\n第二行'});
   const t=f.store.data.topics[0],target=f.repo.target('feat/add-login');
   assert.deepEqual(f.naming,[{cwd:f.repo.main,prompt:namingPrompt('给登录页加验证码\n第二行'),timeoutMs:30000}]);
-  assert.deepEqual(f.execs,[['m',...gitArgs(f.repo.main,'rev-parse','--path-format=absolute','--git-dir','--git-common-dir')],['m','nameBranch',f.repo.main],['m','exists',target],
+  assert.deepEqual(f.execs,[['m',...gitArgs(f.repo.main,'rev-parse','--path-format=absolute','--git-dir','--git-common-dir')],['m','askCheapModel',f.repo.main],['m','exists',target],
    ['m',...gitArgs(f.repo.main,'show-ref','--verify','--quiet','refs/heads/feat/add-login')],['m',...gitArgs(f.repo.main,'fetch','--quiet','origin','+refs/heads/feat/add-login:refs/remotes/origin/feat/add-login')],
    ['m',...gitArgs(f.repo.main,'show-ref','--verify','--quiet','refs/remotes/origin/feat/add-login')]]);
   assert.deepEqual(f.h.calls,[['worktree','create','--cwd',f.repo.main,'--branch','feat/add-login','--path',target,'--no-focus'],['agent','start',t.agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],
@@ -3546,7 +3546,7 @@ test('the client does only what its fixed set of methods names, none of which ru
   for(const method of ['exec','run','spawn','shell','constructor','__proto__'])await assert.rejects(call(f.m,method,{argv:['id']}),(e:Thrown)=>e.code==='unknown_method',method);
   const skill={name:'a',digest:'d',files:{'SKILL.md':''}},skills={store:'~/s',skills:[skill],dir:'.claude/skills',as:'link',cwd:'~/w'};
   for(const [method,params] of [['herdr',{session:'default',args:'agent list'}],['herdr',{session:'default',args:[{cwd:'x'}]}],['herdr',{session:'default',args:[{path:'relative'}]}],['herdr',{args:[]}],
-   ['mkdir',{path:'relative/dir'}],['mkdir',{}],['git',{cwd:'~/x',args:[1]}],['git',{cwd:'x',args:[]}],['exists',{}],['nameBranch',{cwd:'~/x'}],
+   ['mkdir',{path:'relative/dir'}],['mkdir',{}],['git',{cwd:'~/x',args:[1]}],['git',{cwd:'x',args:[]}],['exists',{}],['askCheapModel',{cwd:'~/x'}],
    ['storeFile',{root:'~/w/.herdr-bridge',dir:'..',name:'a',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a/b',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a',body:1}],
    ['placeSkills',{...skills,as:'move'}],['placeSkills',{...skills,dir:'/abs'}],['placeSkills',{...skills,skills:{a:skill}}],['placeSkills',{...skills,skills:[{...skill,name:'../a'}]}],['placeSkills',{...skills,skills:[{...skill,name:'a/b'}]}],
    ['placeSkills',{...skills,skills:[{...skill,digest:''}]}],['placeSkills',{...skills,skills:[{...skill,files:null}]}],['placeSkills',{...skills,skills:[{...skill,files:{'../x':''}}]}],['placeSkills',{...skills,skills:[{...skill,files:{'/x':''}}]}],
@@ -3605,7 +3605,7 @@ test('the client runs commands with the environment that the user\'s shell sets 
  try{
   assert.deepEqual(await f.ops.herdr(f.m,['agent','list']),{args:'--session default agent list',shell:'1',pane:'',path:`${bin}:/usr/bin:/bin`});
   assert.deepEqual(await f.ops.git(f.m,'~/repo',['status','--porcelain']),{code:0,stdout:`-C ${repo} status --porcelain|0|C|`,stderr:''});
-  assert.deepEqual(await f.ops.nameBranch(f.m,'~/repo','给登录页加验证码\n'),{code:0,stdout:`BRANCH=feat/from-shell -p --model haiku\n${repo}\n给登录页加验证码\n`,stderr:''});
+  assert.deepEqual(await f.ops.askCheapModel(f.m,'~/repo','给登录页加验证码\n'),{code:0,stdout:`BRANCH=feat/from-shell -p --model haiku\n${repo}\n给登录页加验证码\n`,stderr:''});
   assert.equal(await f.ops.exists(f.m,'~/repo'),true);assert.equal(await f.ops.exists(f.m,'~/none'),false);
  }finally{await f.close();}
  // A shell that fails: the client logs why and runs Herdr with its own environment, still without the HERDR_* variables, where claude is not found.
@@ -3614,7 +3614,7 @@ test('the client runs commands with the environment that the user\'s shell sets 
  try{
   assert.deepEqual(await g.ops.herdr(g.m,['agent','list']),{args:'--session default agent list',shell:'',pane:'',path:'/usr/bin:/bin'});
   assert.match(g.client.log,/没能取得登录 shell 的环境，命令按客户端自己的环境运行：.*退出码 3：broken/);
-  await assert.rejects(g.ops.nameBranch(g.m,'~/repo','x'),/ENOENT/);
+  await assert.rejects(g.ops.askCheapModel(g.m,'~/repo','x'),/ENOENT/);
  }finally{await g.close();fs.rmSync(dir,{recursive:true});}
 });
 

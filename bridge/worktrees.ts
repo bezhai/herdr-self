@@ -37,11 +37,11 @@ type Failed=Error&{code?:unknown};
 const failure=(what:string,e:Failed)=>Error(e.code?`${what}（${e.code}：${e.message}）`:`${what}：${e.message}`);
 const reasonOf=(e:Failed)=>publicText(typeof e.code==='string'?`${e.message}（${e.code}）`:e.message).slice(0,1000);
 // Asks Claude haiku on machine m, in the main checkout root, for a branch name for description, with the prompt of the wt plugin, through
-// nameBranch (see core.ts): the client finds claude where the user's shell does and runs it without the HERDR_* variables, since its Herdr
+// askCheapModel (see core.ts): the client finds claude where the user's shell does and runs it without the HERDR_* variables, since its Herdr
 // hook would report to the pane in HERDR_PANE_ID (see machine.ts). Resolves to {branch} or {reason}.
-async function suggestBranch(nameBranch:Operations['nameBranch'],m:Machine,root:string,description:string){
+async function suggestBranch(askCheapModel:Operations['askCheapModel'],m:Machine,root:string,description:string){
  const text=withoutAttachments(description).trim();if(!text)return {reason:'任务描述里没有文字'};
- let r;try{r=await nameBranch(m,root,namingPrompt(text),{timeoutMs:namingTimeoutMs});}
+ let r;try{r=await askCheapModel(m,root,namingPrompt(text),{timeoutMs:namingTimeoutMs});}
  catch(e){return {reason:e.timedOut?`${namingTimeoutMs/1000} 秒内没有返回`:`无法运行 claude：${e.message}`};}
  return branchOf(r);
 }
@@ -52,15 +52,15 @@ async function suggestBranch(nameBranch:Operations['nameBranch'],m:Machine,root:
 // notes, created}: notes for the first reply, such as why the branch is random, and created what exists now. A failure rejects with an
 // Error whose created lists what exists by then, which stays in place, and whose kept tells that the worktree exists.
 export type Worktree={branch:string,path:string,root:string};
-type OnMachine={git:Operations['git'],exists:Operations['exists'],nameBranch:Operations['nameBranch'],herdr:Herdr};
-export async function createWorktree(m:Machine,cwd:string,{branch:given,description}:Omit<WtRequest,'prompt'>,{git:gitOf,exists,nameBranch,herdr,save}:OnMachine&{save:(worktree:Worktree)=>void}){
+type OnMachine={git:Operations['git'],exists:Operations['exists'],askCheapModel:Operations['askCheapModel'],herdr:Herdr};
+export async function createWorktree(m:Machine,cwd:string,{branch:given,description}:Omit<WtRequest,'prompt'>,{git:gitOf,exists,askCheapModel,herdr,save}:OnMachine&{save:(worktree:Worktree)=>void}){
  const created:string[]=[],notes:string[]=[],git=gitOn(gitOf,m);let kept=false;
  try{
   const repo=await repoOf(git,cwd);
   if(repo.linked)notes.push(`绑定目录在 linked worktree 里，新分支基于它的 HEAD ${repo.base.slice(0,12)}`);
   let branch:string;
   if(given){if(!await validRefName(git,repo.mainRoot,given))throw Error(`分支名无效：${given}`);branch=given;}
-  else{const named=await suggestBranch(nameBranch,m,repo.mainRoot,description);branch=named.branch??randomBranch();if(!named.branch)notes.push(`起名失败（${named.reason}），改用随机分支名`);}
+  else{const named=await suggestBranch(askCheapModel,m,repo.mainRoot,description);branch=named.branch??randomBranch();if(!named.branch)notes.push(`起名失败（${named.reason}），改用随机分支名`);}
   const target=worktreePath(repo.mainRoot,branch);
   if(await exists(m,target))throw Error(`目录已存在：${target}，不会覆盖它；换一个分支，或者先处理这个目录`);
   const local=await localBranch(git,repo.mainRoot,branch);
@@ -85,7 +85,7 @@ export const failedText=(e:Failed,created:string[])=>`启动失败：${reasonOf(
 // Resolves to {gone} when it is not there any more, which counts as removed, to {dirty}, the lines of git status, when it refuses, and to
 // {removed}. Herdr removes a worktree that it has open, which also closes its workspace; git removes any other. Herdr reuses workspace
 // ids, so the workspace is the one that Herdr lists for the path now, not the one the topic recorded.
-export async function removeWorktree(m:Machine,w:Omit<Worktree,'branch'>,{git:gitOf,exists,herdr}:Omit<OnMachine,'nameBranch'>){
+export async function removeWorktree(m:Machine,w:Omit<Worktree,'branch'>,{git:gitOf,exists,herdr}:Omit<OnMachine,'askCheapModel'>){
  if(!await exists(m,w.path))return {gone:true};
  const git=gitOn(gitOf,m),status=await git(w.path,['-c','core.quotePath=false','status','--porcelain','--untracked-files=all']);
  if(status.code!==0)throw Error(`git status 失败：${(status.stderr||status.stdout).trim()}`);
