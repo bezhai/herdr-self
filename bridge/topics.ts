@@ -353,7 +353,7 @@ export class Topics{
   const projects=this.store.data.projects,direct=!t.projectId;let project=this.projectOf(t);
   const asking=direct?projects.length>0:hasBranch(project)&&!t.branch;let named:Named={};
   if(asking){named=await nameTask(this.askCheapModel,m,t.task!.content,direct?projects:null);if(direct)project=named.project;}
-  const branch=hasBranch(project)?t.branch??freeBranch(named.branch??randomBranch(),t,this.store.data.topics):undefined;
+  const branch=hasBranch(project)?t.branch??freeBranch(named.branch??randomBranch('topic'),t,this.store.data.topics):undefined;
   if(asking&&named.reason)this.store.log('话题会话',`${b.name}：${direct&&!project?'没有选出项目':'起名失败'}（${named.reason}），${branch&&!named.branch?'改用随机分支名':'没有用上模型的结果'}`);
   if(!branch)delete t.branch;
   this.update(t,{routed:true,...project&&{projectId:project.id},...branch&&{branch}});

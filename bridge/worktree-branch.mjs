@@ -37,9 +37,11 @@ export function branchOf(r){
  return branch&&validBranch(branch)?{branch}:{reason:`输出里没有可用的 BRANCH= 行：${r.stdout.trim().slice(0,300)}`};
 }
 // The fallback when naming fails, in the form of the names Herdr generates itself (generated_branch_slug in src/worktree.rs), which a
-// worktree beside the repository cannot use: its path has to be known before Herdr picks the name.
+// worktree beside the repository cannot use: its path has to be known before Herdr picks the name. The prefix is worktree/, as Herdr's
+// names have, for the plugin; Bridge's topics say topic/, since the branch is on the first card of a topic, where worktree means nothing.
 const adjectives=['brave','calm','clear','green','lucky','quiet','rapid','silver'],nouns=['river','cloud','field','forest','harbor','meadow','stone','valley'];
-export const randomBranch=()=>`worktree/${adjectives[crypto.randomInt(8)]}-${nouns[crypto.randomInt(8)]}-${crypto.randomBytes(2).toString('hex')}`;
+/** @param {string} [prefix] */
+export const randomBranch=(prefix='worktree')=>`${prefix}/${adjectives[crypto.randomInt(8)]}-${nouns[crypto.randomInt(8)]}-${crypto.randomBytes(2).toString('hex')}`;
 // What the agent of an existing branch gets when the task names no description.
 /** @param {string} branch */
 export const continueBranch=branch=>`Continue work on branch ${branch}`;

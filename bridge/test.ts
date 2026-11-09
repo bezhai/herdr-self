@@ -1113,7 +1113,7 @@ test('when the cheap model fails, says nothing usable or the task has no text, a
  for(const [model,content,why] of [[Error('spawn claude ENOENT'),'做点事','无法运行 claude：spawn claude ENOENT'],[()=>({code:1,stderr:'Not logged in'}),'做点事','claude 退出码 1：Not logged in'],[()=>({stdout:'好的'}),'做点事','输出里没有可用的 BRANCH= 行：好的'],[()=>({stdout:'BRANCH=feat/x'}),' ![image](img_a)','任务描述里没有文字']] as [Error|(()=>Partial<Ran>),string,string][]){
   const f=topicFixture();withProjects(f,genvi);f.b.defaultProjectId='g';f.fake.model=model instanceof Error?()=>model:model;try{
    await f.send({messageId:'om_1',content,resources:[{type:'image',fileKey:'img_a'}]});
-   const [t]=f.store.data.topics;assert.equal(t.state,'ready',why);assert.match(t.branch!,/^worktree\/[a-z]+-[a-z]+-[0-9a-f]{4}$/);assert.equal((f.prepared[0][1] as Sent).branch,t.branch);
+   const [t]=f.store.data.topics;assert.equal(t.state,'ready',why);assert.match(t.branch!,/^topic\/[a-z]+-[a-z]+-[0-9a-f]{4}$/);assert.equal((f.prepared[0][1] as Sent).branch,t.branch);
    assert.deepEqual(f.store.data.logs.find(l=>l.kind==='话题会话'&&l.message.includes('起名'))?.message,`个人助手：起名失败（${why}），改用随机分支名`);
    assert.ok(cardText(f.starts[0][1]).includes('分支 '+t.branch));
   }finally{f.close();}
@@ -2538,7 +2538,7 @@ test('worktree branches: haiku\'s answer names a branch only with a clean exit a
  assert.deepEqual(branchOf({code:0,stdout:'Sure.\nBRANCH=feat/add-login\n',stderr:''}),{branch:'feat/add-login'});
  assert.deepEqual(branchOf({code:1,stdout:'',stderr:' Not logged in \n'}),{reason:'claude 退出码 1：Not logged in'});
  assert.deepEqual(branchOf({code:0,stdout:'BRANCH=Feature/X\n',stderr:''}),{reason:'输出里没有可用的 BRANCH= 行：BRANCH=Feature/X'});
- for(let i=0;i<20;i++)assert.match(randomBranch(),/^worktree\/[a-z]+-[a-z]+-[0-9a-f]{4}$/);
+ for(let i=0;i<20;i++)assert.match(randomBranch(),/^worktree\/[a-z]+-[a-z]+-[0-9a-f]{4}$/);for(let i=0;i<20;i++)assert.match(randomBranch('topic'),/^topic\/[a-z]+-[a-z]+-[0-9a-f]{4}$/);
  assert.equal(worktreePath('/src/genvi','feat/a/b'),'/src/genvi-worktrees/feat-a-b');assert.equal(continueBranch('fix/x'),'Continue work on branch fix/x');
  assert.match(namingPrompt('加验证码'),/^You are a git branch naming tool[\s\S]*BRANCH=type\/short-kebab-name[\s\S]*Requirement:\n加验证码$/);
 });
