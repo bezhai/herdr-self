@@ -1,6 +1,6 @@
-// The branch and the directory of a task that starts in a new Git worktree, for Bridge's /wt topics (see worktrees.mjs) and the
-// worktree-task plugin of this repository (plugins/worktree-task), which imports this file from the checkout. Only Node built-ins: the
-// plugin has no dependencies, and Bridge is deployed as a directory of its own.
+// The branch and the directory of a task that starts in a new Git worktree, for the worktree-task plugin of this repository
+// (plugins/worktree-task), which imports this file from the checkout, and the naming of the branches of Bridge's topics (see routing.ts).
+// Only Node built-ins: the plugin has no dependencies, and Bridge is deployed as a directory of its own.
 // @ts-check
 import crypto from 'node:crypto';import path from 'node:path';
 /** @import {Ran} from './link.ts' */
