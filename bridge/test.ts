@@ -3657,7 +3657,7 @@ test('bridge-skill with a real Bridge and the real client of a machine: the acce
   // A skill directory with a file in a subdirectory.
   const src=path.join(dir,'src','deploy-notes'),text=skillText('deploy-notes','部署前后要检查的事项。','先运行 scripts/check.sh。\n');
   fs.mkdirSync(path.join(src,'scripts'),{recursive:true});fs.writeFileSync(path.join(src,'SKILL.md'),text);fs.writeFileSync(path.join(src,'scripts','check.sh'),'echo ok\n');
-  assert.deepEqual(await cli(admin,'import',src),{status:0,stdout:'已导入 skill deploy-notes，共 2 个文件。\n',stderr:''});
+  assert.deepEqual(await cli(admin,'import',src),{status:0,stdout:'已导入 deploy-notes\n',stderr:''});
   assert.deepEqual(await cli(admin,'preload','deploy-notes','on'),{status:0,stdout:'已把 skill deploy-notes 设为默认加载，之后新开的话题生效。\n',stderr:''});
   // An agent of the machine reads it through the client, without the key.
   const listed='deploy-notes · 默认加载\n  部署前后要检查的事项。\n';
@@ -3681,6 +3681,52 @@ test('bridge-skill with a real Bridge and the real client of a machine: the acce
   assert.deepEqual(await cli(admin,'preload','deploy-notes','off'),{status:0,stdout:'已把 skill deploy-notes 设为按需读取，之后新开的话题生效。\n',stderr:''});
   assert.deepEqual(await cli(admin,'remove','deploy-notes'),{status:0,stdout:'已删除 skill deploy-notes。\n',stderr:''});
   assert.deepEqual(await cli({},'read','deploy-notes'),{status:1,stdout:'',stderr:'bridge-skill: skill 不存在：deploy-notes\n'});
+ }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
+});
+
+test('bridge-skill import leaves out the environments and caches of the machine it reads from, at any depth, and names those it left out; nothing is named when there were none',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-skip-'))),state=path.join(dir,'state'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ const server=await bridgeServer(state,port,{BRIDGE_URL:''});
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),env={BRIDGE_URL:origin,BRIDGE_ACCESS_KEY:key};
+  const cli=(...args:string[])=>spawned(process.execPath,[path.join(bridgeDir,'bin','bridge-skill.ts'),...args],clientEnv(env));
+  const files=async(name:string)=>Object.keys(((await (await fetch(`${origin}/api/skills/read?name=${name}`,{headers:{authorization:'Bearer '+key}})).json()) as Json).files);
+  const src=path.join(dir,'src','tool'),put=(p:string,text='x')=>{fs.mkdirSync(path.dirname(path.join(src,p)),{recursive:true});fs.writeFileSync(path.join(src,p),text);};
+  put('SKILL.md',skillText('tool','t'));put('scripts/run.py');put('scripts/__pycache__/run.pyc');put('scripts/node_modules/b/index.js');put('node_modules/a/index.js');put('ref/.pytest_cache/v');put('.mypy_cache/m');put('.ruff_cache/r');
+  put('.DS_Store');put('ref/._notes.md');put('.venv/lib/x.py');fs.symlinkSync('/usr/bin/env',path.join(src,'.venv','python'));
+  // A file that only starts or ends like one of the names stays.
+  put('ref/node_modules.md');put('ref/venv/y');put('ref/.DS_Store.txt');put('ref/_x');
+  assert.deepEqual(await cli('import',src),{status:0,stdout:'已导入 tool（略过本机的运行环境和缓存：.venv、node_modules、__pycache__、.pytest_cache、.mypy_cache、.ruff_cache、.DS_Store、._*）\n',stderr:''});
+  assert.deepEqual(await files('tool'),['SKILL.md','ref/.DS_Store.txt','ref/_x','ref/node_modules.md','ref/venv/y','scripts/run.py']);
+  // Only the names that were left out this time are named, and a link outside them is still refused.
+  const light=path.join(dir,'src','light');fs.mkdirSync(path.join(light,'.venv'),{recursive:true});fs.writeFileSync(path.join(light,'SKILL.md'),skillText('light','l'));fs.writeFileSync(path.join(light,'.venv','x'),'');
+  assert.deepEqual(await cli('import',light),{status:0,stdout:'已导入 light（略过本机的运行环境和缓存：.venv）\n',stderr:''});
+  const clean=path.join(dir,'src','clean');fs.mkdirSync(clean);fs.writeFileSync(path.join(clean,'SKILL.md'),skillText('clean','c'));
+  assert.deepEqual(await cli('import',clean),{status:0,stdout:'已导入 clean\n',stderr:''});
+  fs.symlinkSync('/usr/bin/env',path.join(clean,'link'));assert.deepEqual(await cli('import',clean),{status:1,stdout:'',stderr:'bridge-skill: 只能导入普通文件和目录：link\n'});
+  assert.match((await cli('--help')).stdout,/目录里的 \.venv、node_modules 和缓存目录不会导入，依赖由使用的机器自己安装。/);
+ }finally{await server.stop();fs.rmSync(dir,{recursive:true});}
+});
+test('a skill of almost 32 MiB goes into the platform over HTTP and is read on the real client of a machine, whose store gets all of it; one byte over the limit is refused',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-big-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ fs.mkdirSync(home);const server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
+ try{
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),admin={BRIDGE_URL:origin,BRIDGE_ACCESS_KEY:key};
+  const api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
+  const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});
+  client=bridgeClient(configFile(dir,'client.json',config),{HOME:home,BRIDGE_CLIENT_SOCKET:socket});
+  await until(async()=>fs.existsSync(socket)&&(await api('state')).machines[0].client.state==='online','the client is online');
+  const cli=(env:Record<string,string>,...args:string[])=>spawned(process.execPath,[path.join(bridgeDir,'bin','bridge-skill.ts'),...args],clientEnv({BRIDGE_CLIENT_SOCKET:socket,...env}));
+  // Two files that together are as big as a skill may be, with the SKILL.md.
+  assert.equal(skillLimit,32*1024*1024);
+  const src=path.join(dir,'src','big-docs'),text=skillText('big-docs','很大的参考文档。'),data=Buffer.alloc(skillLimit-Buffer.byteLength(text),7);
+  fs.mkdirSync(src,{recursive:true});fs.writeFileSync(path.join(src,'SKILL.md'),text);fs.writeFileSync(path.join(src,'data.bin'),data);
+  assert.deepEqual(await cli(admin,'import',src),{status:0,stdout:'已导入 big-docs\n',stderr:''});
+  const kept=path.join(home,'.local/share/herdr-bridge/skills/big-docs'),read=await cli({},'read','big-docs');
+  assert.equal(read.status,0,read.stderr);assert.ok(read.stdout.startsWith(`big-docs 带有其他文件，在这台机器的 ${kept} 里：\n  data.bin\n`));
+  assert.ok(fs.readFileSync(path.join(kept,'data.bin')).equals(data));
+  fs.writeFileSync(path.join(src,'data.bin'),Buffer.alloc(data.length+1,7));
+  assert.deepEqual(await cli(admin,'import',src),{status:1,stdout:'',stderr:`bridge-skill: skill 的文件合计 ${skillLimit+1} 字节，超过上限 ${skillLimit} 字节\n`});
  }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
 });
 

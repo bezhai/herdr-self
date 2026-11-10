@@ -24,8 +24,12 @@ const places:Record<Kind,{dir:string,as:'link'|'copy'}>={claude:{dir:'.claude/sk
 // directory; its description at most 1024 characters.
 const validName=(n:unknown):n is string=>typeof n==='string'&&n.length<=64&&/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(n),descriptionMax=1024;
 // The most that the files of a skill hold together, in bytes, and the most that a request writing one carries: their base64 in JSON, with
-// room for the rest. Skills come with scripts and references, and the 100,000 characters of other requests are too few for them.
-export const skillLimit=1<<20,requestLimit=Math.ceil(skillLimit/3)*4+65536;
+// room for the rest. Skills come with scripts, references, fonts and the like, and the 100,000 characters of other requests are too few for
+// them. A skill of 32 MiB is ~43 MB as base64 in JSON, under the 128 MiB that Node's WebSocket takes per message on the client (the ws
+// package of the control plane takes 100 MiB, and only small messages come that way); the client's socket for bridge-skill takes small
+// requests only, since a skill goes to the machine from the control plane. A message carries one skill (see sync), but placeSkills
+// carries all that a topic loads, so a few skills near the limit loaded by default together would not fit one.
+export const skillLimit=32<<20,requestLimit=Math.ceil(skillLimit/3)*4+65536;
 // The top-level fields of the YAML frontmatter that opens text, between two --- lines, or null without one. It reads YAML as far as skills
 // write it there: `key: value` lines whose value is plain, single- or double-quoted, and may go on in more indented lines, or is a block (|
 // or >) of those lines; a nested map is read as the value of its key and not looked into.

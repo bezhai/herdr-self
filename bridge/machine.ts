@@ -42,6 +42,9 @@ async function sweep(root:string,keep:string){
 }
 // The file that marks a skill directory as Bridge's on a machine (see placeSkills); no file of a skill takes this name (see skills.ts).
 export const skillMark='.herdr-bridge-skill';
+// The directories that a machine builds for a skill and Bridge does not hold: the runtime environments, which depend on the machine's
+// system and architecture. The import leaves them out (see skill-command.ts), and stock keeps those of the skill it replaces.
+export const environments=['.venv','node_modules'];
 const read=(p:string)=>fs.promises.readFile(p,'utf8').catch(e=>{if(e.code==='ENOENT'||e.code==='ENOTDIR'||e.code==='EISDIR')return null;throw e;});
 const lstat=(p:string)=>fs.promises.lstat(p).catch(e=>{if(e.code==='ENOENT')return null;throw e;});
 // The skills of a request, [{name, digest, files}] with files as {relative path: base64}, once checked.

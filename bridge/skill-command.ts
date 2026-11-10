@@ -4,6 +4,7 @@ import {clientSocket,send} from './client.ts';
 import type {Output} from './client.ts';
 import type {Skills,SkillReads} from './skills.ts';
 import type {Skill} from './state.ts';
+import {environments} from './machine.ts';
 // bridge-skill, the command line through which agents on a machine find and read the skills of the platform (see Skills), and through
 // which the owner manages them. Reads go to the Bridge client of the machine it runs on (see client.ts), which passes them on to the
 // control plane like the requests of bridge-schedule: any agent of the machine may run them, and the control plane answers nothing else
@@ -36,8 +37,8 @@ Bridge 在开话题时放进 Agent 的工作目录，Agent 启动时就能看到
               ~/.local/share/herdr-bridge/skills/<名称> 目录，命令在正文前写出这个目录和文件列表；SKILL.md 里提到的相对路径都相对
               这个目录。
   import      把一个目录导入为 skill，名称取目录名。目录里要有 SKILL.md，开头是 frontmatter：以 --- 开始和结束，写着 name（和目录名
-              一致，只用小写字母、数字和单个连字符）和 description（什么时候该用它）。目录里只能有普通文件和子目录，软链接会被拒绝；
-              文件合计超过上限时 Bridge 拒绝。已有同名 skill 时整个替换它的文件，是否默认加载不变。
+              一致，只用小写字母、数字和单个连字符）和 description（什么时候该用它）。目录里只能有普通文件和子目录，软链接会被拒绝。
+              目录里的 .venv、node_modules 和缓存目录不会导入，依赖由使用的机器自己安装。文件合计超过上限（32 MiB）时 Bridge 拒绝。已有同名 skill 时整个替换它的文件，是否默认加载不变。
   export      把一个 skill 的文件写到 <目录>/<名称>，不给目录时写到当前目录；<目录>/<名称> 已经存在时拒绝，不覆盖。
   preload     on：设为默认加载，之后新开的话题，Bridge 都会把它放进 Agent 的工作目录；off：设为按需读取，之后新开话题时 Bridge
               把它从工作目录里移走。已经开着的话题不受影响。
@@ -102,22 +103,34 @@ function consoleApi(env:NodeJS.ProcessEnv){
   if(!res.ok)throw Error(r.error||'控制面回答 '+res.status);return r;
  };
 }
-// The files under directory dir as the platform takes them, {relative path: base64}; only regular files and directories.
+// What an import leaves out at any depth: the environments that machines keep for a skill (see environments in machine.ts) and the caches
+// that tools write next to its files. They belong to the machine it was read on and are rebuilt there: a .venv can hold 150 MB for one
+// skill and does not run on another system. The names are the ones that Python, Node and macOS tools use, fixed on purpose: a list of
+// the owner's own would be one more thing to keep in step with the machines. AppleDouble files (._*) are the copies of the metadata that
+// macOS makes of a file on a filesystem without it.
+const caches=['__pycache__','.pytest_cache','.mypy_cache','.ruff_cache','.DS_Store'],table=[...environments,...caches,'._*'];
+const leftOut=(name:string)=>[...environments,...caches].includes(name)?name:name.startsWith('._')?'._*':null;
+// The files under directory dir as the platform takes them, {relative path: base64}; only regular files and directories, but for what an
+// import leaves out. skipped lists the entries of the table that something was left out for, in the order of the table.
 async function filesOf(dir:string){
  if(!(await fs.promises.stat(dir).catch(()=>null))?.isDirectory())throw Error('不是目录：'+dir);
- const files:Record<string,string>={},walk=async(rel:string):Promise<void>=>{
+ const files:Record<string,string>={},left=new Set<string>(),walk=async(rel:string):Promise<void>=>{
   for(const e of await fs.promises.readdir(path.join(dir,rel),{withFileTypes:true})){
-   const p=rel?rel+'/'+e.name:e.name;
+   const p=rel?rel+'/'+e.name:e.name,skip=leftOut(e.name);
+   if(skip){left.add(skip);continue;}
    if(e.isDirectory())await walk(p);else if(e.isFile())files[p]=(await fs.promises.readFile(path.join(dir,p))).toString('base64');else throw Error('只能导入普通文件和目录：'+p);
   }
  };
- await walk('');return files;
+ await walk('');return {files,skipped:table.filter(n=>left.has(n))};
 }
 // Management op with args through the console's API (see consoleApi); resolves to what it prints.
 async function manage(op:Exclude<Op,Read>,[first,second]:string[],env:NodeJS.ProcessEnv){
  const api=consoleApi(env);
  switch(op){
-  case 'import':{const name=path.basename(path.resolve(first)),files=await filesOf(first);await api('skills/import',{name,files});return `已导入 skill ${name}，共 ${Object.keys(files).length} 个文件。`;}
+  case 'import':{
+   const name=path.basename(path.resolve(first)),{files,skipped}=await filesOf(first);await api('skills/import',{name,files});
+   return `已导入 ${name}${skipped.length?`（略过本机的运行环境和缓存：${skipped.join('、')}）`:''}`;
+  }
   case 'export':{
    // The skill is read before anything is written, and the directory of its name is created on its own, so a place that exists stays as it is.
    const {files}:ReturnType<Skills['read']>=await api('skills/read?name='+encodeURIComponent(first)),target=path.join(path.resolve(second??'.'),first);
