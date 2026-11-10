@@ -56,7 +56,7 @@ const allowedHost=(req:http.IncomingMessage)=>['localhost','127.0.0.1',os.hostna
 const refusal=(e:Error)=>{throw Error(publicText(e.message).slice(0,1200));};
 // Once the client of a machine is in, the projects that adopted a directory there are asked about it (see convertAdopted), one machine after the other.
 const conversions=new Map<string,Promise<unknown>>();
-const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal)}});
+const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal)}});
 function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
@@ -82,7 +82,7 @@ const server=http.createServer(async(req,res)=>{try{
  if(req.method!=='POST')return json(res,404,{error:'接口不存在'});const b=await body(req,p.startsWith('/api/skills/')?requestLimit:undefined);let result:unknown={ok:true};
  if(p==='/api/logout'){auth.delete(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1]);res.setHeader('Set-Cookie','bridge_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');}
  else if(p==='/api/machines/save'){const m=normalizeMachine(b);if(b.id){const old=machine(b.id);if(old.enabled)throw Error('请先断开机器再编辑');Object.assign(old,m);}else store.data.machines.push(m);store.save();if(m.enabled&&clients.online(m.id))await refresh(m);result={id:m.id};}
- else if(p==='/api/machines/connect'){const m=machine(b.id);m.enabled=true;store.save();if(clients.online(m.id))await refresh(m);result=herdrStatus(m);}
+ else if(p==='/api/machines/connect'){const m=machine(b.id);m.enabled=true;store.save();void skills.align(m);if(clients.online(m.id))await refresh(m);result=herdrStatus(m);}
  else if(p==='/api/machines/disconnect'){const m=machine(b.id);m.enabled=false;store.save();store.log('机器连接',m.name+' 已断开连接，机器上的 Agent 会话继续运行');}
  else if(p==='/api/machines/remove'){if(store.data.agentConfigs.some(x=>x.machineId===b.id))throw Error('请先移除该机器上的 Agent 配置');if(store.data.projects.some(x=>x.adopted?.machineId===b.id))throw Error('请先移除该机器上的项目');machine(b.id);store.data.machines=store.data.machines.filter(x=>x.id!==b.id);live.delete(b.id);clients.remove(b.id);store.save();}
  // The config of the machine's client with a new token, shown once: for the control plane at BRIDGE_URL, else where the browser reached it.

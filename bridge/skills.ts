@@ -18,6 +18,8 @@ import type {SkillFiles} from './link.ts';
 const machineStore='~/.local/share/herdr-bridge/skills';
 // Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
 // which Claude and Codex follow, or as a copy, since Antigravity follows no link.
+// How long the client of a machine gets for one step of a sync: a skill of 32 MiB is written there as one request.
+const syncMs=120000;
 const places:Record<Kind,{dir:string,as:'link'|'copy'}>={claude:{dir:'.claude/skills',as:'link'},codex:{dir:'.agents/skills',as:'link'},agy:{dir:'.agents/skills',as:'copy'}};
 
 // A name of the Agent Skills format: lowercase letters and digits with single hyphens between them, at most 64 characters, like its
@@ -107,11 +109,11 @@ export class Skills{
    fs.rmSync(target,{recursive:true,force:true});fs.renameSync(fresh,target);
   }catch(e){fs.rmSync(fresh,{recursive:true,force:true});throw e;}
   const old=this.store.data.skills.find(x=>x.name===name),s={name,description,preload:old?.preload??false,digest};
-  this.store.data.skills=[...this.store.data.skills.filter(x=>x!==old),s].sort((a,b)=>a.name<b.name?-1:1);this.store.save();return s;
+  this.store.data.skills=[...this.store.data.skills.filter(x=>x!==old),s].sort((a,b)=>a.name<b.name?-1:1);this.store.save();this.push();return s;
  }
  remove(name:string){
   this.entry(name);fs.rmSync(path.join(this.dir,name),{recursive:true,force:true});
-  this.store.data.skills=this.store.data.skills.filter(x=>x.name!==name);this.store.save();this.store.log('skill','删除了 skill '+name);
+  this.store.data.skills=this.store.data.skills.filter(x=>x.name!==name);this.store.save();this.store.log('skill','删除了 skill '+name);this.push();
  }
  // Sets whether skill name is loaded by default (see place).
  flag(name:string,preload:unknown){
@@ -136,6 +138,34 @@ export class Skills{
   const skills=():SkillFiles[]=>this.list().filter(s=>s.preload||extra.includes(s.name)).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
   return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:skills(),...places[kind],cwd}));
  }
+ // Brings the store of machine m in line with the platform: sends the client the list of the skills with their digests, which names those
+ // it lacks or holds in another version (compareSkills), sends it those one at a time (stockSkill), then lets it take away the skills of
+ // Bridge's that are not on the list (pruneSkills). Only what changed travels: the whole platform is tens of MB and one edit touches one
+ // skill. It runs in the queue of m, after the placements and syncs queued before, since they share the store; the list and each skill are
+ // read when their turn comes, and a skill that went from the platform meanwhile is skipped (the sync of its removal follows). Resolves to
+ // how many skills it updated and took away, and rejects with what failed.
+ sync(m:Machine){
+  return enqueue(this.queues,m.id,async()=>{
+   const list=this.list().map(({name,digest})=>({name,digest})),options={timeoutMs:syncMs};
+   const {stale}=await this.call(m,'compareSkills',{store:machineStore,skills:list},options);let updated=0;
+   for(const name of stale){
+    if(!this.list().some(s=>s.name===name))continue;
+    const {digest,files}=this.read(name);await this.call(m,'stockSkill',{store:machineStore,skill:{name,digest,files}},options);updated++;
+   }
+   const {removed}=await this.call(m,'pruneSkills',{store:machineStore,names:list.map(s=>s.name)},options);
+   return {updated,removed:removed.length};
+  });
+ }
+ // sync for the log, for a machine in use: what it did is one line unless nothing changed, and what failed is an error with its reason. It
+ // never rejects: the client that joins and the change that is pushed go on, and the next alignment makes up for a failed one. A machine
+ // whose client is offline is skipped without a word, since it is aligned when its client joins.
+ async align(m:Machine){
+  if(!m.enabled)return;
+  try{const {updated,removed}=await this.sync(m);if(updated||removed)this.store.log('skill',`${m.name}：skill 副本已和平台一致，更新 ${updated} 个，删除 ${removed} 个`);}
+  catch(e){if(e.code!=='client_offline')this.store.log('skill',`${m.name}：未能更新 skill 副本，${e.message}`,'error');}
+ }
+ // Aligns every machine after a change of the platform (see write and remove); the changes of the flag alone do not need it. It does not wait.
+ push(){for(const m of this.store.data.machines)void this.align(m);}
  // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
  // the entries that match body.query; read, skill body.name with the text of its SKILL.md and the paths of its other files, which the
  // client of m puts into its store first, after the placements queued there, so that the answer also has their directory there, path. The

@@ -12,7 +12,9 @@ import type {Kind,PermissionMode,WorkMode} from './state.ts';
 // one bundle with one digest; the client passes the reads of bridge-skill on (skills) and puts a skill read into its store (stockSkill). 5: the
 // client prepares the workspace of a topic, launches agents and inspects directories for projects (see ClientApi), and nameBranch is
 // askCheapModel. 6: the control plane asks the model itself, so askCheapModel is gone, and describeRepos returns the READMEs instead of a description.
-export const protocol=6;
+// 7: the control plane keeps the store of skills of every machine in line with the platform (compareSkills, stockSkill, pruneSkills), which a
+// client of 6 cannot answer.
+export const protocol=7;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 // What one side may ask of the other: the params of each method and what it resolves to. A side's methods (see link) are async functions
@@ -25,6 +27,8 @@ export type Ran={code:number|null,stdout:string,stderr:string};
 export type HerdrArg=string|{path:string};
 // A skill as it goes to a machine: its name, the digest of its files and the files, {relative path: base64}.
 export type SkillFiles={name:string,digest:string,files:Record<string,string>};
+// A skill as the control plane lists it to a machine to compare: its name and the digest of its files.
+export type SkillDigest={name:string,digest:string};
 // A project as the client needs it to prepare or remove the workspace of a topic: its id, the URLs of its repositories (none for a project
 // without any), how its topics share their directory, and the directory that the project adopted on this machine, if it did.
 export type WorkspaceProject={id:string,repos:string[],workMode:WorkMode,adoptedDir?:string};
@@ -64,6 +68,11 @@ export type ClientApi={
  describeRepos:{params:Timed<{repos:string[]}>,result:{readmes:{name:string,text:string}[]}},
  placeSkills:{params:Timed<{store:string,skills:SkillFiles[],dir:string,as:'link'|'copy',cwd:string}>,result:string[]},
  stockSkill:{params:Timed<{store:string,skill:SkillFiles}>,result:string},
+ // compareSkills: the names of those of skills that the store lacks or holds with another digest, from which the control plane sends those
+ // with stockSkill, one at a time. pruneSkills: takes away the skills of the store that Bridge put there (those with its marker) and that
+ // are not in names; it resolves to the names it took away. Together they keep the store in line with the platform (see Skills.sync).
+ compareSkills:{params:Timed<{store:string,skills:SkillDigest[]}>,result:{stale:string[]}},
+ pruneSkills:{params:Timed<{store:string,names:string[]}>,result:{removed:string[]}},
 };
 // What the client of a machine asks of the control plane (see Clients): the hello with which its connection gets in, and the requests of
 // bridge-schedule and bridge-skill, which the client passes on without looking into them (see serve in client.ts).

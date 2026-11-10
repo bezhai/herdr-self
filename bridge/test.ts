@@ -835,6 +835,72 @@ test('an agent reads skills through the client of its machine: the index, a sear
  }finally{f.close();}
 });
 
+// A fake client for the sync tests: the store of each machine as {name: digest}, which answers compareSkills, stockSkill and pruneSkills the
+// way the real client does; down names the machines that are offline, broken the method that fails for all.
+function syncFixture(){
+ const stores:Record<string,Record<string,string>>={m1:{},m2:{},m3:{}},calls:[string,string,Sent,number|undefined][]=[],running:Record<string,number>={},down=new Set<string>(),state={broken:''};let most=0;
+ const call=fakeCall(async(m,method,params,options)=>{
+  calls.push([m.id,method,params,options?.timeoutMs]);running[m.id]=(running[m.id]||0)+1;most=Math.max(most,running[m.id]);
+  try{
+   await later(5);if(down.has(m.id))throw coded('client_offline','机器 '+m.name+' 离线');if(method===state.broken)throw Error('磁盘已满');
+   const kept=stores[m.id];
+   if(method==='compareSkills')return {stale:params.skills.filter((x:Sent)=>kept[x.name]!==x.digest).map((x:Sent)=>x.name)};
+   if(method==='stockSkill'){kept[params.skill.name]=params.skill.digest;return '/kept/'+params.skill.name;}
+   if(method==='pruneSkills'){const removed=Object.keys(kept).filter(n=>!params.names.includes(n));for(const n of removed)delete kept[n];return {removed};}
+   return [];
+  }finally{running[m.id]--;}
+ });
+ const f=skillsFixture(call);
+ // The machines are in the state once join says so, since a change of the platform pushes to those that are.
+ const join=()=>f.store.data.machines.push({id:'m1',name:'cpu1',session:'default',enabled:true},{id:'m2',name:'cpu2',session:'default',enabled:true},{id:'m3',name:'cpu3',session:'default',enabled:false});
+ const logs=()=>f.store.data.logs.filter(l=>l.kind==='skill'&&l.message.includes('skill 副本')).map(l=>(l.level==='error'?'error: ':'')+l.message),methods=(id:string)=>calls.filter(c=>c[0]===id).map(c=>c[1]+(c[1]==='stockSkill'?' '+c[2].skill.name:''));
+ return {...f,stores,calls,down,state,logs,methods,join,most:()=>most};
+}
+test('a machine is brought in line with the platform by its digests: the client says which skills it lacks or has in another version, only those are sent, one at a time, and the skills of the platform that are gone are taken away; the log says how many, and nothing when nothing changed',async()=>{
+ const f=syncFixture();try{
+  skillSource(f.skills);f.join();const [m1]=f.store.data.machines,digests=f.skills.list().map(({name,digest})=>({name,digest}));
+  f.stores.m1.old='x';await f.skills.align(m1);
+  assert.deepEqual(f.methods('m1'),['compareSkills','stockSkill alpha','stockSkill beta','pruneSkills']);
+  assert.deepEqual(f.calls[0][2],{store:'~/.local/share/herdr-bridge/skills',skills:digests});assert.deepEqual(f.calls[3][2].names,['alpha','beta']);
+  const {digest,files}=f.skills.read('alpha');assert.deepEqual(f.calls[1][2],{store:'~/.local/share/herdr-bridge/skills',skill:{name:'alpha',digest,files}});
+  assert.ok(f.calls.every(c=>c[3]===120000));assert.deepEqual(f.stores.m1,Object.fromEntries(digests.map(d=>[d.name,d.digest])));
+  assert.deepEqual(f.logs().slice(-1),['cpu1：skill 副本已和平台一致，更新 2 个，删除 1 个']);
+  // Aligned already: the lists and nothing else go, and nothing is logged.
+  f.calls.length=0;await f.skills.align(m1);assert.deepEqual(f.methods('m1'),['compareSkills','pruneSkills']);assert.equal(f.logs().length,1);
+  // One skill in another version: that skill only; a skill that went from the platform meanwhile is not sent.
+  f.stores.m1.beta='other';f.calls.length=0;await f.skills.align(m1);assert.deepEqual(f.methods('m1'),['compareSkills','stockSkill beta','pruneSkills']);
+  assert.deepEqual(f.logs().slice(1),['cpu1：skill 副本已和平台一致，更新 1 个，删除 0 个']);
+ }finally{f.close();}
+});
+test('a change of the platform goes to every machine that is online and in use: a new or changed skill alone, a removed one by taking it away, none for the default-load flag; a machine that is offline gets it all when it is aligned',async()=>{
+ const f=syncFixture();try{
+  f.join();const settle=async()=>{await later(150);},[,m2]=f.store.data.machines,sent=()=>Object.fromEntries(['m1','m2','m3'].map(id=>[id,f.methods(id).filter(m=>m!=='compareSkills'&&m!=='pruneSkills')]));
+  f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','a')}));await settle();
+  assert.deepEqual(sent(),{m1:['stockSkill alpha'],m2:['stockSkill alpha'],m3:[]});assert.deepEqual(f.logs(),['cpu1：skill 副本已和平台一致，更新 1 个，删除 0 个','cpu2：skill 副本已和平台一致，更新 1 个，删除 0 个']);
+  f.calls.length=0;f.skills.save('alpha',skillText('alpha','改过'));await settle();assert.deepEqual(sent(),{m1:['stockSkill alpha'],m2:['stockSkill alpha'],m3:[]});
+  f.calls.length=0;f.skills.flag('alpha',true);await settle();assert.deepEqual(f.calls,[]);
+  // Offline machines are skipped without a word, and aligned when their client is in again.
+  f.down.add('m2');f.skills.put('beta',encoded({'SKILL.md':skillText('beta','b')}));await settle();
+  assert.deepEqual(f.stores,{m1:{alpha:f.skills.entry('alpha').digest,beta:f.skills.entry('beta').digest},m2:{alpha:f.stores.m2.alpha},m3:{}});assert.ok(f.logs().every(l=>!l.startsWith('error')));
+  f.down.delete('m2');await f.skills.align(m2);assert.deepEqual(f.stores.m2,f.stores.m1);
+  f.calls.length=0;f.skills.remove('alpha');await settle();assert.deepEqual(f.stores,{m1:{beta:f.skills.entry('beta').digest},m2:{beta:f.skills.entry('beta').digest},m3:{}});
+  assert.deepEqual(f.logs().slice(-2),['cpu1：skill 副本已和平台一致，更新 0 个，删除 1 个','cpu2：skill 副本已和平台一致，更新 0 个，删除 1 个']);
+  // A machine that Bridge does not use is left out also when it joins.
+  f.calls.length=0;await f.skills.align(f.store.data.machines[2]);assert.deepEqual(f.calls,[]);
+ }finally{f.close();}
+});
+test('a push or an alignment that fails is only logged as an error with its reason, never thrown at the change that caused it, and the next one carries on; syncs and placements on one machine never run at once',async()=>{
+ const f=syncFixture();try{
+  f.join();const [m1]=f.store.data.machines;f.state.broken='stockSkill';
+  const entry=f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','a')}));assert.equal(entry.name,'alpha');await later(60);
+  assert.deepEqual(f.logs().filter(l=>l.startsWith('error')),['error: cpu1：未能更新 skill 副本，磁盘已满','error: cpu2：未能更新 skill 副本，磁盘已满']);
+  assert.equal(f.store.data.logs.find(l=>l.level==='error')!.kind,'skill');
+  f.state.broken='';await f.skills.align(m1);assert.deepEqual(f.stores.m1,{alpha:entry.digest});
+  // Syncs and placements share the queue of the machine.
+  skillSource(f.skills);await Promise.all([f.skills.align(m1),f.skills.place(m1,'~/w','claude'),f.skills.align(m1),f.skills.place(m1,'~/w','agy')]);await later(60);
+  assert.equal(f.most(),1);
+ }finally{f.close();}
+});
 const coded=(code:unknown,message:string)=>Object.assign(Error(message),{code});
 // Git for the throwaway repositories of the tests: without the user's or the system's configuration and the HERDR_* variables, in English.
 const gitEnv={...Object.fromEntries(Object.entries(process.env).filter(([k])=>!k.startsWith('HERDR_'))),GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1',
@@ -3730,6 +3796,38 @@ test('a skill of almost 32 MiB goes into the platform over HTTP and is read on t
  }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
 });
 
+test('with a real Bridge and the real client of a machine, its store of skills follows the platform: it is aligned when the client joins, a new, changed or removed skill reaches it at once and keeps what the machine built in it, and a client that was away gets what it missed when it is back',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-sync-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
+ fs.mkdirSync(home);const kept=path.join(home,'.local/share/herdr-bridge/skills'),server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
+ try{
+  assert.equal(protocol,7);
+  const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
+  const logs=async()=>((await api('state')).logs as Log[]).filter(l=>l.kind==='skill').map(l=>l.message);
+  const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});
+  const start=()=>{client=bridgeClient(configFile(dir,'client.json',config),{HOME:home,BRIDGE_CLIENT_SOCKET:socket});};
+  // The platform has two skills before the client joins; the store has a leftover of Bridge's, one of someone else's and one skill that differs.
+  await api('skills/import',{name:'alpha',files:encoded({'SKILL.md':skillText('alpha','a'),'ref/a.md':'a\n'})});await api('skills/import',{name:'beta',files:encoded({'SKILL.md':skillText('beta','b')})});
+  for(const [n,text,marked] of [['gone','x\n','d0'],['mine','theirs\n',''],['beta','stale\n','d0']])
+   {fs.mkdirSync(path.join(kept,n),{recursive:true});fs.writeFileSync(path.join(kept,n,'SKILL.md'),text);if(marked)fs.writeFileSync(path.join(kept,n,'.herdr-bridge-skill'),marked+'\n');}
+  start();
+  await until(async()=>(await logs()).includes('cpu2：skill 副本已和平台一致，更新 2 个，删除 1 个'),'the store is aligned');
+  assert.deepEqual(fs.readdirSync(kept).sort(),['alpha','beta','mine']);assert.equal(fs.readFileSync(path.join(kept,'alpha','ref','a.md'),'utf8'),'a\n');assert.equal(fs.readFileSync(path.join(kept,'beta','SKILL.md'),'utf8'),skillText('beta','b'));
+  assert.equal(fs.readFileSync(path.join(kept,'mine','SKILL.md'),'utf8'),'theirs\n');
+  // A change reaches the store at once, and the environment that the machine built in the skill stays.
+  fs.mkdirSync(path.join(kept,'alpha','.venv'));fs.writeFileSync(path.join(kept,'alpha','.venv','pyvenv.cfg'),'cfg');
+  await api('skills/save',{name:'alpha',text:skillText('alpha','改过')});
+  await until(()=>fs.readFileSync(path.join(kept,'alpha','SKILL.md'),'utf8')===skillText('alpha','改过'),'the change arrives');assert.equal(fs.readFileSync(path.join(kept,'alpha','.venv','pyvenv.cfg'),'utf8'),'cfg');
+  await api('skills/import',{name:'gamma',files:encoded({'SKILL.md':skillText('gamma','g')})});await until(()=>fs.existsSync(path.join(kept,'gamma','SKILL.md')),'the new skill arrives');
+  await api('skills/remove',{name:'beta'});await until(()=>!fs.existsSync(path.join(kept,'beta')),'the removed skill goes');assert.ok(fs.existsSync(path.join(kept,'mine')));
+  // A client that is away misses changes, and gets them when it joins again.
+  client!.kill();await client!.exited;await until(async()=>(await api('state')).machines[0].client.state==='offline','the client is away');
+  await api('skills/import',{name:'delta',files:encoded({'SKILL.md':skillText('delta','d')})});await api('skills/remove',{name:'gamma'});await later(300);
+  assert.ok(!fs.existsSync(path.join(kept,'delta')));assert.ok(!(await logs()).some(l=>l.includes('未能更新')));
+  start();await until(()=>fs.existsSync(path.join(kept,'delta','SKILL.md'))&&!fs.existsSync(path.join(kept,'gamma')),'the client catches up');
+  assert.deepEqual(fs.readdirSync(kept).sort(),['alpha','delta','mine']);
+ }finally{client?.kill();await server.stop();fs.rmSync(dir,{recursive:true});}
+});
+
 // The client of a machine and its connection to the control plane (link.ts, clients.ts, client.ts).
 const bridgeDir=path.dirname(fileURLToPath(import.meta.url));
 // A port that nothing listens on (the address of a server listening on TCP).
@@ -4082,7 +4180,9 @@ test('the client does only what its fixed set of methods names, none of which ru
    ['storeFile',{root:'~/w/.herdr-bridge',dir:'..',name:'a',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a/b',body:''}],['storeFile',{root:'~/w/.herdr-bridge',dir:'t',name:'a',body:1}],
    ['placeSkills',{...skills,as:'move'}],['placeSkills',{...skills,dir:'/abs'}],['placeSkills',{...skills,skills:{a:skill}}],['placeSkills',{...skills,skills:[{...skill,name:'../a'}]}],['placeSkills',{...skills,skills:[{...skill,name:'a/b'}]}],
    ['placeSkills',{...skills,skills:[{...skill,digest:''}]}],['placeSkills',{...skills,skills:[{...skill,files:null}]}],['placeSkills',{...skills,skills:[{...skill,files:{'../x':''}}]}],['placeSkills',{...skills,skills:[{...skill,files:{'/x':''}}]}],
-   ['placeSkills',{...skills,skills:[{...skill,files:{x:1}}]}],['stockSkill',{store:'~/s'}],['stockSkill',{store:'relative',skill}],['stockSkill',{store:'~/s',skill:{...skill,name:'a/b'}}],['stockSkill',{store:'~/s',skill:{...skill,files:{'../x':''}}}]] satisfies [string,object][])
+   ['placeSkills',{...skills,skills:[{...skill,files:{x:1}}]}],['stockSkill',{store:'~/s'}],['stockSkill',{store:'relative',skill}],['stockSkill',{store:'~/s',skill:{...skill,name:'a/b'}}],['stockSkill',{store:'~/s',skill:{...skill,files:{'../x':''}}}],
+   ['compareSkills',{store:'~/s'}],['compareSkills',{store:'~/s',skills:'a'}],['compareSkills',{store:'~/s',skills:[{name:'../a',digest:'d'}]}],['compareSkills',{store:'~/s',skills:[{name:'a'}]}],['compareSkills',{store:'relative',skills:[]}],
+   ['pruneSkills',{store:'~/s'}],['pruneSkills',{store:'~/s',names:'a'}],['pruneSkills',{store:'~/s',names:['a/b']}],['pruneSkills',{store:'relative',names:[]}]] satisfies [string,object][])
    await assert.rejects(call(f.m,method,params),(e:Thrown)=>e.code==='invalid_params',method+' '+JSON.stringify(params));
  }finally{await f.close();}
 });
@@ -4136,6 +4236,31 @@ test('the client puts a skill that an agent reads into the store of its machine,
   fs.writeFileSync(path.join(kept,'alpha','extra'),'');await f.call(f.m,'stockSkill',{store,skill});assert.ok(fs.existsSync(path.join(kept,'alpha','extra')));
   await f.call(f.m,'stockSkill',{store,skill:{...skill,digest:'d2',files:encoded({'SKILL.md':'y\n'})}});
   assert.deepEqual(tree(path.join(kept,'alpha')),{'.herdr-bridge-skill':'d2\n','SKILL.md':'y\n'});assert.deepEqual(fs.readdirSync(kept),['alpha']);
+ }finally{await f.close();fs.rmSync(dir,{recursive:true});}
+});
+test('the client keeps the .venv and node_modules of a skill when it puts a new version in its place, at any depth and only what the new version does not bring itself; it compares digests with the store and takes away the skills of Bridge that are no longer wanted, and nothing else',async()=>{
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-stock-env-'))),home=path.join(dir,'home');fs.mkdirSync(home);
+ const f=await machineFixture({env:{HOME:home}}),kept=path.join(home,'.local/share/herdr-bridge/skills'),store='~/.local/share/herdr-bridge/skills';
+ try{
+  const stock=(name:string,digest:string,files:Record<string,string>)=>f.call(f.m,'stockSkill',{store,skill:{name,digest,files:encoded(files)}});
+  await stock('alpha','d1',{'SKILL.md':'x\n','old.md':'o\n','scripts/run.py':'1\n'});
+  const alpha=path.join(kept,'alpha'),put=(p:string,text:string)=>{fs.mkdirSync(path.dirname(path.join(alpha,p)),{recursive:true});fs.writeFileSync(path.join(alpha,p),text);};
+  put('.venv/bin/python','py');put('node_modules/left-pad/index.js','lp');put('scripts/node_modules/z/index.js','z');put('scripts/__pycache__/run.pyc','cache');fs.symlinkSync('python',path.join(alpha,'.venv/bin/python3'));
+  await stock('alpha','d2',{'SKILL.md':'y\n','scripts/run.py':'2\n','ref/a.md':'a\n'});
+  assert.deepEqual(tree(alpha),{'.herdr-bridge-skill':'d2\n','SKILL.md':'y\n','scripts/run.py':'2\n','ref/a.md':'a\n','.venv/bin/python':'py','node_modules/left-pad/index.js':'lp','scripts/node_modules/z/index.js':'z'});
+  assert.equal(fs.readlinkSync(path.join(alpha,'.venv/bin/python3')),'python');
+  // A directory that the new version brings itself is the new version's; the old one goes. The same digest touches nothing.
+  await stock('alpha','d3',{'SKILL.md':'z\n','node_modules/own.js':'own'});
+  assert.deepEqual(tree(alpha),{'.herdr-bridge-skill':'d3\n','SKILL.md':'z\n','node_modules/own.js':'own','.venv/bin/python':'py','scripts/node_modules/z/index.js':'z'});
+  // What the store holds against the list of the control plane: the skills that lack or differ from it are named; unknown skills are no problem.
+  await stock('beta','b1',{'SKILL.md':'b\n'});fs.mkdirSync(path.join(kept,'mine'));fs.writeFileSync(path.join(kept,'mine','SKILL.md'),'theirs\n');fs.writeFileSync(path.join(kept,'.digest'),'f\n');fs.symlinkSync(alpha,path.join(kept,'link'));
+  assert.deepEqual(await f.call(f.m,'compareSkills',{store,skills:[{name:'alpha',digest:'d3'},{name:'beta',digest:'b2'},{name:'gamma',digest:'g1'},{name:'mine',digest:'m'}]}),{stale:['beta','gamma','mine']});
+  // Only the directories with Bridge's marker go: not those of others, files, links or the leftovers of earlier versions.
+  fs.mkdirSync(path.join(kept,'.tmp-x'));assert.deepEqual(await f.call(f.m,'pruneSkills',{store,names:['alpha']}),{removed:['beta']});
+  assert.deepEqual(fs.readdirSync(kept).sort(),['.digest','.tmp-x','alpha','link','mine']);assert.deepEqual(await f.call(f.m,'pruneSkills',{store,names:[]}),{removed:['alpha']});
+  assert.deepEqual(fs.readdirSync(kept).sort(),['.digest','.tmp-x','link','mine']);
+  // A store that is not there yet has nothing to take away, and everything to get.
+  assert.deepEqual(await f.call(f.m,'pruneSkills',{store:'~/none/skills',names:[]}),{removed:[]});assert.deepEqual(await f.call(f.m,'compareSkills',{store:'~/none/skills',skills:[{name:'a',digest:'d'}]}),{stale:['a']});
  }finally{await f.close();fs.rmSync(dir,{recursive:true});}
 });
 test('the client runs commands with the environment that the user\'s shell sets up as a login shell without a terminal, captured once at its start and without the HERDR_* variables: they find programs on the PATH of the shell\'s startup files, which the client\'s own PATH lacks, whatever those files print; git never prompts and speaks English, and Herdr is ~/.local/bin/herdr unless the config says otherwise; a shell that fails leaves the client its own environment',async()=>{

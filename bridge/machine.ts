@@ -4,7 +4,7 @@ import path from 'node:path';
 import {invalid,refused,string,local,inside,name,run,gitRunner} from './machine-tools.ts';
 import {workspaceMethods} from './workspace.ts';
 import {launchMethods} from './launch.ts';
-import type {Methods,ClientApi,SkillFiles} from './link.ts';
+import type {Methods,ClientApi,SkillFiles,SkillDigest} from './link.ts';
 // What the client of a machine (see client.ts) does there for the control plane: a fixed set of methods, each of which runs a program of
 // its own choosing, if any, never one that the control plane names. The control plane decides when and why (see operations in core.ts);
 // a method only does its part and returns the raw result, such as {code, stdout, stderr} of a command whatever its exit status, which the
@@ -43,7 +43,7 @@ async function sweep(root:string,keep:string){
 // The file that marks a skill directory as Bridge's on a machine (see placeSkills); no file of a skill takes this name (see skills.ts).
 export const skillMark='.herdr-bridge-skill';
 // The directories that a machine builds for a skill and Bridge does not hold: the runtime environments, which depend on the machine's
-// system and architecture. The import leaves them out (see skill-command.ts), and stock keeps those of the skill it replaces.
+// system and architecture. The import leaves them out (see skill-command.ts), and stock keeps those of the skill it replaces (see carry).
 export const environments=['.venv','node_modules'];
 const read=(p:string)=>fs.promises.readFile(p,'utf8').catch(e=>{if(e.code==='ENOENT'||e.code==='ENOTDIR'||e.code==='EISDIR')return null;throw e;});
 const lstat=(p:string)=>fs.promises.lstat(p).catch(e=>{if(e.code==='ENOENT')return null;throw e;});
@@ -56,15 +56,33 @@ function skillsOf(v:unknown):SkillFiles[]{
  }
  return v;
 }
+// Moves the environments in directory old (see environments), found at any depth, to the same paths in fresh, the new version of the
+// skill, except those whose path the new version has itself. The agent that ran the skill built them on this machine; losing them would
+// mean installing again after each edit of a word. One that cannot be moved is lost and the update goes on: it is built again when needed.
+async function carry(old:string,fresh:string,rel=''):Promise<void>{
+ const entries=await fs.promises.readdir(path.join(old,rel),{withFileTypes:true}).catch(e=>{if(e.code==='ENOENT')return [];throw e;});
+ for(const e of entries.filter(x=>x.isDirectory())){
+  const p=path.join(rel,e.name);if(!environments.includes(e.name)){await carry(old,fresh,p);continue;}
+  if(await lstat(path.join(fresh,p)))continue;
+  await fs.promises.mkdir(path.dirname(path.join(fresh,p)),{recursive:true}).then(()=>fs.promises.rename(path.join(old,p),path.join(fresh,p))).catch(()=>{});
+ }
+}
+// The skills {name, digest} of a request to compare, and the names of one to prune with, once checked.
+function digestsOf(v:unknown):SkillDigest[]{
+ if(!Array.isArray(v))throw invalid('skills');
+ for(const s of v){name(s?.name,'skills');string(s.digest,'digest');}
+ return v;
+}
+function namesOf(v:unknown):string[]{if(!Array.isArray(v))throw invalid('names');for(const n of v)name(n,'names');return v;}
 // Puts skill {name, digest, files} into kept, the store of this machine, as the directory <kept>/<name> with Bridge's marker, which holds the
 // digest, unless that directory has the digest already. The files go into a directory beside it first, which then takes its place, so that
-// the links to it never show half a skill. Resolves to its path.
+// the links to it never show half a skill; the environments of the old version move into the new one first (see carry). Resolves to its path.
 async function stock(kept:string,{name:n,digest,files}:SkillFiles){
  const target=path.join(kept,n);if((await read(path.join(target,skillMark)))?.trim()===digest)return target;
  await fs.promises.mkdir(kept,{recursive:true});const fresh=await fs.promises.mkdtemp(path.join(kept,'.'+n+'-'));
  try{
   for(const [p,b] of Object.entries(files)){await fs.promises.mkdir(path.dirname(path.join(fresh,p)),{recursive:true});await fs.promises.writeFile(path.join(fresh,p),Buffer.from(b,'base64'));}
-  await fs.promises.writeFile(path.join(fresh,skillMark),digest+'\n');await fs.promises.rm(target,{recursive:true,force:true});await fs.promises.rename(fresh,target);
+  await fs.promises.writeFile(path.join(fresh,skillMark),digest+'\n');await carry(target,fresh);await fs.promises.rm(target,{recursive:true,force:true});await fs.promises.rename(fresh,target);
  }catch(e){await fs.promises.rm(fresh,{recursive:true,force:true});throw e;}
  return target;
 }
@@ -159,6 +177,20 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   // Puts skill {name, digest, files}, which an agent of this machine reads through bridge-skill, into the store (see stock) and resolves to
   // its directory there, where its other files are for the agent to open.
   stockSkill:({store,skill})=>stock(local(store,'store'),skillsOf([skill])[0]),
+  // The names of skills that the store lacks or holds with another digest than the one listed (the marker of a skill holds its digest).
+  async compareSkills({store,skills}){
+   const kept=local(store,'store'),stale=[];
+   for(const {name:n,digest} of digestsOf(skills))if((await read(path.join(kept,n,skillMark)))?.trim()!==digest)stale.push(n);
+   return {stale};
+  },
+  // Takes away the skills of the store that carry Bridge's marker and are not in names, and resolves to their names. A directory without
+  // the marker, a file or a link is someone else's or an earlier version's, and stays.
+  async pruneSkills({store,names}){
+   const kept=local(store,'store'),wanted=namesOf(names),removed:string[]=[];
+   const entries=await fs.promises.readdir(kept,{withFileTypes:true}).catch(e=>{if(e.code==='ENOENT')return [];throw e;});
+   for(const e of entries)if(e.isDirectory()&&!wanted.includes(e.name)&&await read(path.join(kept,e.name,skillMark))!=null){await fs.promises.rm(path.join(kept,e.name),{recursive:true,force:true});removed.push(e.name);}
+   return {removed};
+  },
   ...workspaceMethods(git),
   ...launchMethods(env),
  };
