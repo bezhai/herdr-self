@@ -16,10 +16,10 @@ import type {SkillFiles} from './link.ts';
 // Where each machine keeps the skills that it got, one directory per skill (see placeSkills in machine.ts). No agent reads it as a global
 // skill directory, unlike ~/.agents/skills, which Codex reads.
 const machineStore='~/.local/share/herdr-bridge/skills';
-// Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
-// which Claude and Codex follow, or as a copy, since Antigravity follows no link.
 // How long the client of a machine gets for one step of a sync: a skill of 32 MiB is written there as one request.
 const syncMs=120000;
+// Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
+// which Claude and Codex follow, or as a copy, since Antigravity follows no link.
 const places:Record<Kind,{dir:string,as:'link'|'copy'}>={claude:{dir:'.claude/skills',as:'link'},codex:{dir:'.agents/skills',as:'link'},agy:{dir:'.agents/skills',as:'copy'}};
 
 // A name of the Agent Skills format: lowercase letters and digits with single hyphens between them, at most 64 characters, like its
