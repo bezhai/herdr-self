@@ -6,15 +6,18 @@ import type {OwnerMessage} from './link.ts';
 // Feishu cards (JSON 2.0) of the owner's channel in the thread of a topic (see Messages), which the bot posts without a header like the other
 // status cards of Bridge (see message-cards.ts): the card of a message that the agent brought in, and the card of a message that it drafted
 // to send as the owner. They name people and chats by their names only, never 他 or 她. A time shows as HH:mm on the day of now, else as
-// M月D日 HH:mm, in the time zone of the process. Text from Feishu or the agent is shown as plain text, never as markdown. bridge-message
-// imports this module too (see sourceLine), so it loads only Node's built-in modules and the modules above.
+// M月D日 HH:mm, in the time zone of the process. Message bodies from Feishu or the agent are shown as plain text, never as markdown; a draft
+// title uses the card's markdown only for bold, with its chat name escaped. bridge-message imports this module too (see sourceLine), so it loads
+// only Node's built-in modules and the modules above.
 
-// A plain-text block with a documented JSON 2.0 text style, for grey notes and bold heading-sized lines without interpreting any markdown.
+// A plain-text block with a documented JSON 2.0 text style, used here for grey notes.
 const styled=(content:string,style:object)=>({tag:'div',text:{tag:'plain_text',content,...style}});
 // Secondary text is small and grey.
 const grey=(content:string)=>styled(content,{text_size:'notation',text_color:'grey'});
-// A draft's destination is its bold title line, not the card's header.
-const heading=(content:string)=>styled(content,{text_size:'heading-4'});
+// Markdown punctuation in a chat name stays literal inside the fixed bold markers of a title.
+const escapeMarkdown=(content:string)=>content.replace(/[\\`*_{}\[\]()#+\-.!|<>~]/g,'\\$&');
+// A draft's destination is a bold title line, not the card's header.
+const heading=(content:string)=>({tag:'markdown',content:`**${escapeMarkdown(content)}**`});
 // A draft body keeps its exact text inside a quote container.
 const quote=(content:string)=>({tag:'quote_container',elements:[plain(content)]});
 // A button that reports its action and this drawing's render number.
@@ -33,7 +36,7 @@ export function sourceLine(s:Pick<Source,'sender'|'chatName'|'chatType'|'at'>,no
 // The card of message m that an agent brought into its topic: sourceLine in grey, what m says, and 查看原消息 linking to m.link when there is one.
 export function sourceCard(m:OwnerMessage,now:number):object{
  const line=sourceLine(m,now);
- return untitled(line,[grey(line),plain(m.text),...m.link?[{tag:'button',text:{tag:'plain_text',content:'查看原消息'},type:'default',behaviors:[{type:'open_url',default_url:m.link}]}]:[]]);
+ return untitled(line,[grey(line),plain(m.text),...m.link?[{tag:'button',text:{tag:'plain_text',content:'查看原消息'},type:'default',behaviors:[{type:'open_url',default_url:m.link}]}]:[]],m.link?{update_multi:true}:undefined);
 }
 // How the card of a draft shows it: as its state has it (pending, sent, dropped), or editing while the owner changes its text.
 export type DraftView=Draft['state']|'editing';

@@ -16,7 +16,9 @@ const groupDraft:Draft={chatId:groupSource.chatId,chatName:groupSource.chatName,
 // Expected card building blocks, kept independent of the implementation's helpers.
 const plain=(content:string,style:object={})=>({tag:'div',text:{tag:'plain_text',content,...style}});
 const grey=(content:string)=>plain(content,{text_size:'notation',text_color:'grey'});
-const heading=(content:string)=>plain(content,{text_size:'heading-4'});
+// Bold titles use the card's markdown, with every dynamic character kept literal.
+const escapeMarkdown=(content:string)=>content.replace(/[\\`*_{}\[\]()#+\-.!|<>~]/g,'\\$&');
+const heading=(content:string)=>({tag:'markdown',content:`**${escapeMarkdown(content)}**`});
 const quote=(content:string)=>({tag:'quote_container',elements:[plain(content)]});
 const untitled=(summary:string,elements:object[],updateMulti=false)=>({schema:'2.0',config:{...updateMulti&&{update_multi:true},summary:{content:summary}},body:{elements}});
 const callbackButton=(content:string,type:string,value:object)=>({tag:'column',width:'auto',elements:[{tag:'button',text:{tag:'plain_text',content},type,behaviors:[{type:'callback',value}]}]});
@@ -39,7 +41,7 @@ test('a source card is an untitled grey source line and the untouched plain mess
  assert.deepEqual(sourceCard(message,now),untitled(line,[
   grey(line),plain(message.text),
   {tag:'button',text:{tag:'plain_text',content:'查看原消息'},type:'default',behaviors:[{type:'open_url',default_url:message.link}]},
- ]));
+ ],true));
  const groupMessage:OwnerMessage={...groupSource,text:'群里的原文'};
  const groupLine='陈帆 · GEO 小分队 · 1月2日 10:49';
  assert.deepEqual(sourceCard(groupMessage,now),untitled(groupLine,[grey(groupLine),plain(groupMessage.text)]));
@@ -50,6 +52,12 @@ test('a pending private draft has its destination, identity, quoted plain text a
  assert.deepEqual(draftCard(privateDraft,'pending',{render:7,now}),untitled(title,[
   heading(title),grey(about),quote(privateDraft.text),actions(privateDraft,7),
  ],true));
+});
+
+test('a bold draft title escapes markdown punctuation in the chat name',()=>{
+ const d:Draft={...privateDraft,chatType:'group',chatName:'*重点* [入口](x)'};
+ const card=draftCard(d,'pending',{render:8,now}) as any;
+ assert.deepEqual(card.body.elements[0],{tag:'markdown',content:String.raw`**发到 \*重点\* \[入口\]\(x\)**`});
 });
 
 test('a pending group draft adds a failure above its text and describes the quoted source with a non-today time',()=>{
@@ -93,7 +101,7 @@ test('all fixed wording avoids 他 and 她, and message and draft bodies stay in
   if(Array.isArray(value)){for(const item of value)visit(item);return;}
   if(!value||typeof value!=='object')return;
   const item=value as Record<string,unknown>;
-  assert.notEqual(item.tag,'markdown');assert.notEqual(item.tag,'lark_md');
+  if(item.tag==='markdown')assert.match(String(item.content),/^\*\*(?:回复|发到) /);
   if(item.tag==='plain_text'){const content=String(item.content);assert.doesNotMatch(content,/[他她]/);texts.push(content);}
   for(const nested of Object.values(item))visit(nested);
  };
