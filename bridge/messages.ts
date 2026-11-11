@@ -28,7 +28,7 @@ export type MessageOps={[K in Op]:{request:MessageRequest,answer:Answers[K]}};
 // or null when none is set or it is gone; call reaches the client of a machine (see Clients.call); reply(app,chatId,rootId,{card}) posts a
 // card into the thread of a topic and resolves to its message id, and updateCard(app,messageId,card) replaces it; now() is the clock.
 type Deps={topics:Pick<Topics,'caller'|'queue'>,app:(id:string)=>App,owner:()=>Machine|null,call:Call,reply:Platforms['reply'],updateCard:Platforms['updateCard'],now?:()=>number};
-// A short, safe error explanation for a refusal or a card-update log. Sending itself uses only the mapped reasons below.
+// A short, safe error explanation for an unexpected failure or a card-update log. An open-lark refusal keeps its full public explanation below.
 const brief=(e:Error|undefined)=>publicText(e?.message).split('\n')[0].slice(0,200);
 const toast=(type:string,content:string)=>({toast:{type,content}});
 // The deps stay in deps: reply and call are also names of ops and of the method that dispatches them.
@@ -137,7 +137,7 @@ export class Messages{
   if(e?.code==='client_offline')return `${owner.name} 的 Bridge 客户端不在线`;
   if(e?.code==='channel_unconfigured')return `${owner.name} 的 Bridge 客户端没有配置 open-lark`;
   if(e?.code==='channel_unreachable'||e?.timedOut)return 'open-lark 没有响应';
-  if(e?.code==='channel_refused')return 'open-lark 拒绝了这次发送：'+brief(e);
+  if(e?.code==='channel_refused')return 'open-lark 拒绝了这次发送：'+publicText(e?.message);
   return brief(e)||'未知错误';
  }
 }

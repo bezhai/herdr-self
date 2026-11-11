@@ -155,6 +155,13 @@ test('send failures name their cause on a pending card, log an error and can be 
   assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'sent',{render:3,now}));
  });
 });
+test('a refused send keeps the full multiline open-lark explanation on the card and in the log',async t=>{
+ const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ const explanation='第一行说明\n'+'后'.repeat(250)+'\n最后一行',error=Object.assign(Error('REFUSED：'+explanation),{code:'channel_refused'}),reason='open-lark 拒绝了这次发送：REFUSED：'+explanation;
+ f.respond(method=>{if(method==='openLarkSend')throw error;return sent;});f.messages.click(app,click(draft,'send'));await settled();
+ assert.equal(draft.failure,reason);assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'pending',{render:2,now}));
+ assert.equal(f.store.data.logs.at(-1)!.message,'未能发到 产品讨论：'+reason);assert.equal(f.store.data.logs.at(-1)!.level,'error');
+});
 test('a send click without an owner fails on the card and can be retried after configuration',async t=>{
  const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});f.setOwner(null);
  f.messages.click(app,click(draft,'send'));await settled();assert.equal(draft.failure,'没有配置 open-lark 所在的机器');assert.equal(draft.state,'pending');
