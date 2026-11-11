@@ -4,7 +4,9 @@ import path from 'node:path';
 import {invalid,refused,string,local,inside,name,run,gitRunner} from './machine-tools.ts';
 import {workspaceMethods} from './workspace.ts';
 import {launchMethods} from './launch.ts';
+import {openLarkMethods} from './open-lark.ts';
 import type {Methods,ClientApi,SkillFiles,SkillDigest} from './link.ts';
+import type {OpenLark} from './open-lark.ts';
 // What the client of a machine (see client.ts) does there for the control plane: a fixed set of methods, each of which runs a program of
 // its own choosing, if any, never one that the control plane names. The control plane decides when and why (see operations in core.ts);
 // a method only does its part and returns the raw result, such as {code, stdout, stderr} of a command whatever its exit status, which the
@@ -86,9 +88,10 @@ async function stock(kept:string,{name:n,digest,files}:SkillFiles){
  }catch(e){await fs.promises.rm(fresh,{recursive:true,force:true});throw e;}
  return target;
 }
-// The methods of a client whose Herdr is the program at herdr (a leading ~/ is the home directory) and whose commands run with env (see
-// loginEnvironment). Every request carries timeoutMs, the most that a command it runs may take (see run).
-export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<Methods<ClientApi>,'ping'>{
+// The methods of a client whose Herdr is the program at herdr (a leading ~/ is the home directory), whose commands run with env (see
+// loginEnvironment), and which reaches open-lark at openLark, on the machine that runs it (see open-lark.ts). Every request carries
+// timeoutMs, the most that a command it runs may take (see run).
+export function methods({herdr,env,openLark}:{herdr:string,env:NodeJS.ProcessEnv,openLark?:OpenLark}):Omit<Methods<ClientApi>,'ping'>{
  const program=herdr.replace(/^~\//,os.homedir()+'/');
  const git=gitRunner(env);
  return {
@@ -193,5 +196,6 @@ export function methods({herdr,env}:{herdr:string,env:NodeJS.ProcessEnv}):Omit<M
   },
   ...workspaceMethods(git),
   ...launchMethods(env),
+  ...openLarkMethods(openLark),
  };
 }

@@ -38,8 +38,7 @@ export type ScheduleOps={[K in keyof Answers]:{request:ScheduleRequest,answer:An
 // A request as it arrives, every field still to be checked.
 type Received={[K in keyof ScheduleRequest]?:unknown};
 const ops:(keyof Answers)[]=['add','list','runs','update','pause','resume','remove'];
-const notTopic='这个 pane 里的 Agent 不属于任何进行中的飞书话题：bridge-schedule 只能由飞书话题里的 Agent 运行';
-type Deps={topics:Pick<Topics,'queue'|'alive'>,schedules:Schedules,app:(id:string)=>App,reply:Platforms['reply'],updateCard:Platforms['updateCard'],now?:()=>number,every?:number};
+type Deps={topics:Pick<Topics,'queue'|'alive'|'caller'>,schedules:Schedules,app:(id:string)=>App,reply:Platforms['reply'],updateCard:Platforms['updateCard'],now?:()=>number,every?:number};
 export class AgentSchedules{
  declare store:Store;declare topics:Deps['topics'];declare schedules:Schedules;declare app:Deps['app'];declare reply:Deps['reply'];declare updateCard:Deps['updateCard'];
  declare now:()=>number;declare every:number;declare timer:NodeJS.Timeout|null;declare drawing:Map<string,Promise<void>>;
@@ -59,18 +58,7 @@ export class AgentSchedules{
  async call(m:Machine,op:string,request:unknown):Promise<Answers[keyof Answers]>{
   if(!oneOf(ops,op))throw Error('未知的操作：'+op);
   if(!isRecord(request))throw Error('请求内容无效');
-  return this[op](await this.caller(m,request),request);
- }
- // The ready topic of the agent in pane pane of Herdr session session on machine m, whose agent is still linked: read in the topic's queue,
- // where a topic whose agent is gone ends (see Topics.alive). Pane ids repeat across machines and sessions, and Bridge reaches one session
- // of a machine.
- async caller(m:Machine,{pane,session}:Received){
-  if(typeof pane!=='string'||!pane)throw Error('缺少 pane：bridge-schedule 要由 Herdr pane 里的 Agent 运行（HERDR_PANE_ID）');
-  if(!m.enabled)throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
-  if((session||'default')!==m.session)throw Error(`这个 Agent 在 Herdr session ${session||'default'} 里，Bridge 连接的是这台机器的 session ${m.session}`);
-  const t=this.store.data.topics.find(x=>x.machineId===m.id&&x.paneId===pane&&x.state==='ready');
-  if(!t||!await this.topics.queue(t,()=>this.topics.alive(this.app(t.appId),t)))throw Error(notTopic);
-  return t;
+  return this[op](await this.topics.caller(m,request,'bridge-schedule'),request);
  }
  // A ready topic belongs to a binding (see Topics.unbind).
  list(t:Topic):Answers['list']{const b=this.binding(t)!;return {binding:{id:b.id,name:b.name},topicId:t.id,schedules:this.schedules.list(b.id).map(s=>this.entry(t,s))};}

@@ -146,6 +146,18 @@ export class Topics{
  }
  // Runs task in the queue of topic t, after what is queued there, and resolves or rejects like it.
  queue<T>(t:Topic,task:()=>T|Promise<T>){return enqueue(this.topicQueues,t.id,task);}
+ // The ready topic of the agent in pane pane of Herdr session session on machine m, the machine whose client passed on a request of an
+ // agent command (bridge-schedule, bridge-message), whose agent is still linked: read in the topic's queue, where a topic whose agent is
+ // gone ends (see alive). Pane ids repeat across machines and sessions, and Bridge reaches one session of a machine. Rejects with what to
+ // tell the agent, naming command.
+ async caller(m:Machine,{pane,session}:{pane?:unknown,session?:unknown},command:string){
+  if(typeof pane!=='string'||!pane)throw Error(`缺少 pane：${command} 要由 Herdr pane 里的 Agent 运行（HERDR_PANE_ID）`);
+  if(!m.enabled)throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
+  if((session||'default')!==m.session)throw Error(`这个 Agent 在 Herdr session ${session||'default'} 里，Bridge 连接的是这台机器的 session ${m.session}`);
+  const t=this.store.data.topics.find(x=>x.machineId===m.id&&x.paneId===pane&&x.state==='ready');
+  if(!t||!await this.queue(t,()=>this.alive(this.app(t.appId),t)))throw Error(`这个 pane 里的 Agent 不属于任何进行中的飞书话题：${command} 只能由飞书话题里的 Agent 运行`);
+  return t;
+ }
  // In the queue of topic t: sends message msg to its agent (see forward), opening the topic first when it is new or failed, and opens the
  // COT of the turn under msg. A message with reacted, the promise of its reaction record (see addReaction), keeps its reaction until its turn
  // ends (see sync) or its COT takes its place, when it was prompted; any other message loses it now. Resolves to the prompted agent, or to

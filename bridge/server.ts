@@ -10,6 +10,7 @@ import {migrateBindings,convertAdopted} from './migration.ts';
 import {Topics} from './topics.ts';
 import {Skills,requestLimit} from './skills.ts';
 import {Schedules} from './schedules.ts';
+import {Messages} from './messages.ts';
 import {AgentSchedules} from './agent-schedules.ts';
 import {staticFile,sendStatic} from './web-assets.ts';
 import {Clients} from './clients.ts';
@@ -38,7 +39,7 @@ async function refresh(m:Machine){if(refreshes.has(m.id))return refreshes.get(m.
  topics.sync(m,agents);
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
 const topics=new Topics(store,{...ops,askModel,placeSkills:(...args)=>skills.place(...args),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),chatBindings=new ChatBindings(store,{reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),chatName:(...args)=>platforms.chatName(...args),askModel,handle:(...args)=>topics.handle(...args)});
-const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>chatBindings.open(...args),onCardAction:(a,evt)=>(evt.action?.value?.bind?chatBindings:evt.action?.value?.schedule?agentSchedules:topics).click(a,evt)}),registrations=new Registrations(store,{connect:async a=>{
+const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>chatBindings.open(...args),onCardAction:(a,evt)=>(evt.action?.value?.bind?chatBindings:evt.action?.value?.schedule?agentSchedules:evt.action?.value?.draft?messages:topics).click(a,evt)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
  if(!a.enabled||platforms.status(a).connection!=='connected'){await platforms.start(a);a.enabled=true;store.save();}
  for(let i=0;i<20;i++){if(platforms.status(a).connection==='connected')return true;await new Promise(r=>setTimeout(r,750));}
@@ -46,8 +47,11 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 }});
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
+// The owner's channel is open-lark on the machine that BRIDGE_OPEN_LARK_MACHINE names, whose client has it in its config (see open-lark.ts).
+const ownerMachine=process.env.BRIDGE_OPEN_LARK_MACHINE;
+const messages=new Messages(store,{topics,app:id=>platforms.app(id),owner:()=>store.data.machines.find(m=>m.name===ownerMachine)||null,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
-function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,...t})=>t),logs:store.data.logs.slice(-60)};}
+function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,sources,drafts,...t})=>t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
 // requests of bridge-schedule and bridge-skill on its machine (see client.ts), which are answered for the machine of its connection: the
 // schedules of its agents, and reads of the skills of the platform alone (see Skills.answer). What the agent reads of a refusal goes through
@@ -56,7 +60,7 @@ const allowedHost=(req:http.IncomingMessage)=>['localhost','127.0.0.1',os.hostna
 const refusal=(e:Error)=>{throw Error(publicText(e.message).slice(0,1200));};
 // Once the client of a machine is in, the projects that adopted a directory there are asked about it (see convertAdopted), one machine after the other.
 const conversions=new Map<string,Promise<unknown>>();
-const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal)}});
+const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal),messages:(m,{op,body})=>messages.call(m,op,body).catch(refusal)}});
 function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}

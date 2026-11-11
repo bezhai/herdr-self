@@ -39,11 +39,28 @@ export type Binding={id:string,name:string,appId:string,chatId:string,chatType:'
 // its agent started in, which is what a reply needs to restore its workspace; an adopted topic has none of them. routed tells that the
 // project and the branch are decided (see Topics.route), which a topic of before the projects never was: it keeps the directory it has. The
 // first card of the topic, with the dropdowns that start it again, is startCard. A topic that ended or failed has endedAt, and swept once its
-// workspace was removed (see Topics.sweep).
+// workspace was removed (see Topics.sweep). Its agent brings messages in as sources and drafts messages to send as the owner (see Messages),
+// which it keeps after it ends; a topic of before them has none.
 export type Topic={id:string,bindingId:string,appId:string,chatId:string,rootId:string,machineId:string,workspaceId:string,tabId:string,paneId:string,agentName:string,title:string,
  state:'starting'|'ready'|'failed'|'closed'|'choosing',error:string,messageIds:string[],replySeq:number,reactions:Reaction[],cards:RequestCard[],createdAt:number,
  adopted?:{picker?:string,kind?:string,session?:string},task?:{messageId:string,content:string,resources?:ResourceDescriptor[]},projectId?:string,agentConfigId?:string,branch?:string,cwd?:string,routed?:true,startCard?:string,endedAt?:number,swept?:true,
- scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number};
+ scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number,sources?:Source[],drafts?:Draft[]};
+// A Feishu chat as open-lark, the owner's Feishu client, reads it (see open-lark.ts), with open-lark's id, which is not the open platform's
+// id of the bot: chatName is the group's name, or the other person's for a direct chat (p2p).
+export type OwnerChat={chatId:string,chatName:string,chatType:'p2p'|'group'};
+// A person mentioned in a message sent as the owner: open-lark's id of the user, and the name, which the text holds as @<name>.
+export type Mention={id:string,name:string};
+// A Feishu message that an agent brought into its topic (see Messages.attach), in chat OwnerChat, as open-lark read it: messageId is
+// open-lark's id, at is when it was sent, in ms, and cardId is its source card in the topic's thread. What it says is only on the card.
+export type Source=OwnerChat&{messageId:string,sender:{id:string,name:string},at:number,cardId?:string};
+// A message that an agent drafted to send as the owner (see Messages.reply and Messages.send) to chat OwnerChat: a reply that quotes
+// replyTo, the messageId of a source of the topic, in its chat, or a message to a chat. text holds @<name> for each of mentions. It goes out
+// only when the owner clicks send on its card (cardId), with clientId, a UUID that changes with the text: open-lark sends the message of a
+// client id at most once, and keeps the text of its first request. state: pending until then; sent, with the open-lark id and the time of
+// the message that went out; dropped when the owner chose not to send it. failure is why the last attempt failed, shown on the card until
+// the next one.
+export type Draft=OwnerChat&{id:string,replyTo?:string,mentions:Mention[],text:string,clientId:string,
+ state:'pending'|'sent'|'dropped',cardId?:string,sentId?:string,sentAt?:number,failure?:string,createdAt:number};
 // A message of a person that the topic marked, with the state_change_seq of the prompt once it was prompted (see Topics.addReaction).
 export type Reaction={messageId:string,reactionId:string,stateSeq:number|null};
 // The card of a request the agent waits on (see Topics.cards).

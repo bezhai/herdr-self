@@ -13,7 +13,7 @@ import {check,card,plain} from './request-cards.ts';import {fits} from './messag
 import {Registrations} from './registration.ts';import {staticFile,sendStatic} from './web-assets.ts';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
 import crypto from 'node:crypto';import {WebSocketServer} from 'ws';import type {WebSocket as WsSocket} from 'ws';import type {AddressInfo} from 'node:net';
-import {link,protocol,closeCodes} from './link.ts';import type {Api,ControlApi,Peer} from './link.ts';import {Clients} from './clients.ts';import {configText,serve,consoleUrl} from './client.ts';
+import {link,protocol,closeCodes} from './link.ts';import type {Api,ControlApi,Peer} from './link.ts';import {Clients} from './clients.ts';import {configText,serve,consoleUrl,readConfig} from './client.ts';
 import type {App,Binding,Machine,Topic,Kind,State,Schedule,Skill,Log,AgentConfig,Project} from './state.ts';import type {ConsoleMachine,ConsoleTopic} from './console-state.ts';import type {ClientStatus} from './clients.ts';import type {Agent,Herdr,Snapshot,Operations,Call} from './core.ts';import type {Message} from './topics.ts';import type {ScheduleOps} from './agent-schedules.ts';
 import type {Ran,HerdrArg,ClientApi} from './link.ts';import type {Reply} from './message-cards.ts';import type {HerdrRequest,Click} from './request-cards.ts';import type {RequestCard} from './state.ts';import type {ToolCall} from './cot.ts';
 import type {NormalizedMessage,ResourceDescriptor,LarkChannel,LarkChannelOptions,CardActionEvent} from '@larksuite/channel';
@@ -3480,10 +3480,12 @@ test('channel startup and shutdown do not revive a cancelled connection',async()
  const store=new Store(dir),messages:unknown[]=[],p=new Platforms(store,{onMessage:(...args)=>messages.push(args),channelFactory:o=>{options=o;return channel;}} as DepsOf<typeof Platforms>),a={id:'a',name:'bot',appId:'cli_test',appSecret:'private',allowedUsers:['ou_owner'],domain:'feishu',enabled:true} as App;
  try{store.data.bindings=[route];const pending=p.start(a);const rejected=assert.rejects(pending,/连接失败/);assert.equal(options.safety!.batch!.text!.delayMs,0);await p.stop(a.id);resolve();await rejected;assert.ok(closes>=2);assert.equal(p.runtime.has(a.id),false);handlers.message({...inbound,senderId:'ou_owner'});assert.deepEqual(messages,[]);}finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the server changes the defaults of a binding that exists and creates none, lists projects and agent configurations, serves app avatars and reports topics without message ids, the task text, reactions, request cards, COT or a schedule waiting for confirmation',async()=>{
+test('the server changes the defaults of a binding that exists and creates none, lists projects and agent configurations, serves app avatars and reports topics without message ids, the task text, reactions, request cards, COT, a schedule waiting for confirmation, or the sources and drafts of messages sent as the owner',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-server-')),state=path.join(dir,'state'),herdr=path.join(dir,'herdr'),agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',agent_session:{value:'s-1'}}];
  fs.mkdirSync(path.join(state,'avatars'),{recursive:true});fs.writeFileSync(path.join(state,'avatars','app-avatar'),png);fs.writeFileSync(path.join(state,'avatars','app-gone'),png);
- const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],task:{messageId:'om_1',content:'密码是 hunter2'},reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},proposal:{id:'p1',kind:'add',fields:{mode:'new',cron:'0 9 * * *',timeZone:'UTC',task:'x'},messageId:'om_p',expiresAt:1},createdAt:1};
+ const topic={bindingId:'b-old',appId:'x',chatId:'oc_9',rootId:'om_1',machineId:'m',workspaceId:'w1',tabId:'w1:t1',paneId:'w1:p1',agentName:'feishu-1',title:'t',error:'',messageIds:['om_1'],task:{messageId:'om_1',content:'密码是 hunter2'},reactions:[{messageId:'om_1',reactionId:'r_1',stateSeq:1}],cards:[{requestId:1,messageId:'om_card',title:'权限确认 · Bash'}],cot:{cotId:'c1',messageId:'om_cot',origin:'om_1',stateSeq:1,toolSeq:0,waiting:false},proposal:{id:'p1',kind:'add',fields:{mode:'new',cron:'0 9 * * *',timeZone:'UTC',task:'x'},messageId:'om_p',expiresAt:1},createdAt:1,
+  sources:[{chatId:'7001',chatName:'孙栎倩',chatType:'p2p',messageId:'7002',sender:{id:'u1',name:'孙栎倩'},at:1,cardId:'om_s'}],
+  drafts:[{id:'d1',chatId:'7001',chatName:'孙栎倩',chatType:'p2p',replyTo:'7002',mentions:[],text:'密码是 hunter2',clientId:'00000000-0000-4000-8000-000000000001',state:'pending',cardId:'om_d',createdAt:1}]};
  const app={name:'bot',appId:'cli_test',appSecret:'secret',domain:'feishu',allowedUsers:[],enabled:false};
  const project={description:'',repos:[],skills:[],workMode:'shared'},projects=[{...project,id:'p-1',name:'work',adopted:{machineId:'m',dir:'~/work'}},{...project,id:'p-2',name:'other'}];
  const agentConfigs=[{id:'c-1',name:'cpu2 · Claude',machineId:'m',kind:'claude',permissionMode:'default'},{id:'c-2',name:'cpu2 · Codex',machineId:'m',kind:'codex'}];
@@ -3507,7 +3509,7 @@ test('the server changes the defaults of a binding that exists and creates none,
   assert.deepEqual(s.projects,[{...project,id:'p-1',name:'work',adopted:true},{...project,id:'p-2',name:'other',adopted:false}]);assert.deepEqual(s.agentConfigs,agentConfigs);
   // The console sees a binding without the Herdr workspaces of its topics.
   const {workspaces,...shown}=group;assert.deepEqual(s.bindings.map((b:Binding)=>b.id),['b-old','b-group','b-direct']);assert.deepEqual(s.bindings.slice(1),[shown,direct]);assert.deepEqual(s.apps[0].avatar,{type:'image/png',updatedAt:5});
-  const {messageIds,task,reactions,cards,cot,proposal,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成',endedAt:s.topics[0].endedAt};assert.deepEqual(s.topics[0],listed);assert.equal(typeof s.topics[0].endedAt,'number');for(const key of ['messageIds','task','reactions','cards','cot','proposal'])assert.equal(key in s.topics[1],false,key);assert.ok(!JSON.stringify(s).includes('hunter2'));
+  const {messageIds,task,reactions,cards,cot,proposal,sources,drafts,...listed}={...topic,id:'t1',state:'failed',error:'Bridge 重启时 Agent 启动未完成',endedAt:s.topics[0].endedAt};assert.deepEqual(s.topics[0],listed);assert.equal(typeof s.topics[0].endedAt,'number');for(const key of ['messageIds','task','reactions','cards','cot','proposal','sources','drafts'])assert.equal(key in s.topics[1],false,key);assert.ok(!JSON.stringify(s).includes('hunter2'));
   // The console only changes the defaults of a binding: other fields sent along are ignored, and a refused change keeps the saved bindings as they are.
   assert.deepEqual(await api('bindings/save',{id:'b-group',defaultProjectId:'p-2',defaultAgentConfigId:'c-2',requireMention:true,name:'改名',chatId:'oc_x',chatType:'p2p',workspaces:{}}),{status:200,body:{ok:true}});
   for(const [body,error] of [[{id:'b-group',defaultProjectId:'gone'},'项目不存在'],[{id:'b-group',defaultAgentConfigId:'gone'},'Agent 配置不存在'],[{id:'b-direct',defaultProjectId:'p-1'},'私聊不固定项目'],
@@ -3800,7 +3802,7 @@ test('with a real Bridge and the real client of a machine, its store of skills f
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-sync-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  fs.mkdirSync(home);const kept=path.join(home,'.local/share/herdr-bridge/skills'),server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
  try{
-  assert.equal(protocol,7);
+  assert.equal(protocol,8);
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
   const logs=async()=>((await api('state')).logs as Log[]).filter(l=>l.kind==='skill').map(l=>l.message);
   const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});
@@ -3978,16 +3980,32 @@ test('the client does not start without a config file it can use or with Node\'s
   ] satisfies [Record<string,string>,string][]){const [status,stderr]=run(env);assert.equal(status,1,stderr);assert.ok(stderr.startsWith('bridge-client: ')&&stderr.includes(error),stderr);}
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the client, bridge-schedule and bridge-skill run on Node alone: bin/bridge-client.ts, bin/bridge-schedule.ts, bin/bridge-skill.ts and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
+test('the client of the machine that runs open-lark, the owner\'s channel, finds it in its config file as openLark: url, the origin of open-lark\'s agent server on this machine, and its full token; a config without openLark has none',()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-')),machine={url:'ws://127.0.0.1:9/api/client',token:'t'},read=(openLark:unknown)=>readConfig(configFile(dir,'client.json',JSON.stringify({...machine,openLark})));
+ try{
+  assert.equal(readConfig(configFile(dir,'plain.json',JSON.stringify(machine))).openLark,undefined);
+  for(const url of ['http://127.0.0.1:8081','http://127.0.0.1:8081/','http://[::1]:8081','http://localhost:8081'])assert.deepEqual(read({url,token:'full'}).openLark,{url:url.replace(/\/$/,''),token:'full'});
+  const where='的 openLark.url 必须是本机上 open-lark 的 Agent 接口地址，http(s)，主机为 127.0.0.1、[::1] 或 localhost，不带路径、查询参数和 #，例如 http://127.0.0.1:8081';
+  for(const [openLark,error] of [
+   ['http://127.0.0.1:8081','的 openLark 必须是 {"url": …, "token": …}'],
+   [{token:'full'},where],[{url:'ftp://127.0.0.1:8081',token:'full'},where],[{url:'http://10.0.0.2:8081',token:'full'},where],
+   [{url:'http://127.0.0.1:8081/agent/v1',token:'full'},where],[{url:'http://u:p@127.0.0.1:8081',token:'full'},where],
+   [{url:'http://127.0.0.1:8081'},'缺少 openLark.token（open-lark 的完整 token）'],[{url:'http://127.0.0.1:8081',token:''},'缺少 openLark.token（open-lark 的完整 token）'],
+  ] satisfies [unknown,string][])assert.throws(()=>read(openLark),{message:`配置文件 ${path.join(dir,'client.json')} ${error}`});
+ }finally{fs.rmSync(dir,{recursive:true});}
+});
+test('the client, bridge-schedule, bridge-skill and bridge-message run on Node alone: bin/bridge-client.ts, bin/bridge-schedule.ts, bin/bridge-skill.ts, bin/bridge-message.ts and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
  // Node erases the type-only imports of a .ts file, which load nothing.
  const imports=(bin:string)=>{
   const seen=new Set<string>(),visit=(file:string)=>{if(seen.has(file))return;seen.add(file);
    for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b(?!\s+type\b)[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
   visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
  };
- assert.deepEqual(imports('bridge-client.ts'),['bin/bridge-client.ts','client.ts','core.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','workspace.ts']);
- assert.deepEqual(imports('bridge-schedule.ts'),['bin/bridge-schedule.ts','client.ts','core.ts','cron.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','request-cards.ts','schedule-command.ts','workspace.ts']);
- assert.deepEqual(imports('bridge-skill.ts'),['bin/bridge-skill.ts','client.ts','core.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','projects.ts','skill-command.ts','workspace.ts']);
+ const client=['client.ts','core.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','open-lark.ts','projects.ts','workspace.ts'],sorted=(files:string[])=>[...files,...client].sort();
+ assert.deepEqual(imports('bridge-client.ts'),sorted(['bin/bridge-client.ts']));
+ assert.deepEqual(imports('bridge-schedule.ts'),sorted(['bin/bridge-schedule.ts','cron.ts','request-cards.ts','schedule-command.ts']));
+ assert.deepEqual(imports('bridge-skill.ts'),sorted(['bin/bridge-skill.ts','skill-command.ts']));
+ assert.deepEqual(imports('bridge-message.ts'),sorted(['bin/bridge-message.ts','message-cards.ts','message-command.ts','outbound-cards.ts','request-cards.ts']));
 });
 // Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
 async function stopClients(f:ClientsFixture,started:ClientProcess[]){
@@ -4049,7 +4067,7 @@ test('without BRIDGE_CLIENT_SOCKET the client and bridge-schedule find the socke
   first.kill();await first.exited;await until(()=>f.clients.status('m').state==='offline','the first client is gone');
   const long=path.join(dir,'s'.repeat(120),'client.sock'),second=bridgeClient(config,{BRIDGE_CLIENT_SOCKET:long});started.push(second);
   await until(()=>f.clients.status('m').state==='online','the second client is online');
-  assert.ok(second.log.includes(`bridge-client: 没能打开 bridge-schedule 和 bridge-skill 用的 socket ${long}：`),second.log);
+  assert.ok(second.log.includes(`bridge-client: 没能打开 bridge-schedule、bridge-skill 和 bridge-message 用的 socket ${long}：`),second.log);
  }finally{await stopClients(f,started);fs.rmSync(dir,{recursive:true});}
 });
 test('a machine\'s client gets in with the token that the console generates and the state keeps only as a hash; the console shows it online with its host, refused with the reason of a version mismatch, or offline; a newer client of the machine replaces the older, which exits; a new token drops the client of the old one, which is refused from then on; the client reconnects after the control plane restarts, and removing the machine drops it',async()=>{

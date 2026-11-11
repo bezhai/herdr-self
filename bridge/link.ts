@@ -4,7 +4,7 @@
 // is the answer to a request of this side. It uses only addEventListener, send and readyState, which Node's WebSocket on the client and
 // the ws package on the control plane both have, and imports only types: the client runs without node_modules.
 
-import type {Kind,PermissionMode,WorkMode} from './state.ts';
+import type {Kind,PermissionMode,WorkMode,OwnerChat,Mention,Source} from './state.ts';
 // The version of what the two sides send each other. The control plane refuses a client of another version (see Clients.hello). 2: the
 // client passes the requests of bridge-schedule on (schedules), which a client of 1 has no socket for. 3: the control plane does everything
 // it does on a machine through its client (see machine.ts), whose methods a client of 2 lacks. 4: placeSkills takes the skills of the
@@ -13,8 +13,9 @@ import type {Kind,PermissionMode,WorkMode} from './state.ts';
 // client prepares the workspace of a topic, launches agents and inspects directories for projects (see ClientApi), and nameBranch is
 // askCheapModel. 6: the control plane asks the model itself, so askCheapModel is gone, and describeRepos returns the READMEs instead of a description.
 // 7: the control plane keeps the store of skills of every machine in line with the platform (compareSkills, stockSkill, pruneSkills), which a
-// client of 6 cannot answer.
-export const protocol=7;
+// client of 6 cannot answer. 8: the client of the machine that runs open-lark reads chats and messages of Feishu and sends messages as the
+// owner (openLarkMessage, openLarkChat, openLarkReply, openLarkSend), and every client passes the requests of bridge-message on (messages).
+export const protocol=8;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 // What one side may ask of the other: the params of each method and what it resolves to. A side's methods (see link) are async functions
@@ -32,6 +33,11 @@ export type SkillDigest={name:string,digest:string};
 // A project as the client needs it to prepare or remove the workspace of a topic: its id, the URLs of its repositories (none for a project
 // without any), how its topics share their directory, and the directory that the project adopted on this machine, if it did.
 export type WorkspaceProject={id:string,repos:string[],workMode:WorkMode,adoptedDir?:string};
+// A Feishu message as open-lark, the owner's Feishu client, reads it (see open-lark.ts): a Source without its card, with what it says as
+// text, where what is not text is written as [图片] or [文件] <file name>, and link, a link that opens it in Feishu, when open-lark gives one.
+export type OwnerMessage=Omit<Source,'cardId'>&{text:string,link?:string};
+// A message that went out as the owner: its open-lark id, when it was sent, in ms, and owner, the name of the Feishu account it went out as.
+export type Sent={messageId:string,at:number,owner:string};
 // What the control plane asks of the client of a machine (see machine.ts). A request carries timeoutMs, the most that a command it runs
 // may take (see Clients.call), except the heartbeat's ping.
 type Timed<P>=P&{timeoutMs?:number};
@@ -73,13 +79,25 @@ export type ClientApi={
  // are not in names; it resolves to the names it took away. Together they keep the store in line with the platform (see Skills.sync).
  compareSkills:{params:Timed<{store:string,skills:SkillDigest[]}>,result:{stale:string[]}},
  pruneSkills:{params:Timed<{store:string,names:string[]}>,result:{removed:string[]}},
+ // The owner's channel: open-lark, on the machine that runs it (see open-lark.ts), with its ids, which are not those of the open platform.
+ // openLarkMessage reads message messageId, and openLarkChat chat chatId. openLarkReply sends a reply that quotes message messageId in its
+ // chat, and openLarkSend a message to chat chatId: text as the owner, with @<name> in it for each of mentions, under clientId, a UUID with
+ // which open-lark sends one message at most however often it is asked, keeping the text of the first request. They reject with code
+ // channel_unconfigured on a machine whose client has no open-lark in its config, which is not one that is offline; channel_unreachable when
+ // open-lark could not be reached or did not answer within timeoutMs, when a send may or may not have gone out; channel_refused when it
+ // answered with an error, whose explanation is the message; invalid_params for params that are not as here.
+ openLarkMessage:{params:Timed<{messageId:string}>,result:OwnerMessage},
+ openLarkChat:{params:Timed<{chatId:string}>,result:OwnerChat},
+ openLarkReply:{params:Timed<{messageId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
+ openLarkSend:{params:Timed<{chatId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
 };
 // What the client of a machine asks of the control plane (see Clients): the hello with which its connection gets in, and the requests of
-// bridge-schedule and bridge-skill, which the client passes on without looking into them (see serve in client.ts).
+// bridge-schedule, bridge-skill and bridge-message, which the client passes on without looking into them (see serve in client.ts).
 export type ControlApi={
  hello:{params:{protocol:number,host:string},result:{machine:{id:string,name:string},heartbeatMs:number}},
  schedules:{params:{op:string,body:unknown},result:unknown},
  skills:{params:{op:string,body:unknown},result:unknown},
+ messages:{params:{op:string,body:unknown},result:unknown},
 };
 // The other side of a link (see link).
 export type Peer<Theirs extends Api>={call<K extends keyof Theirs&string>(method:K,params:Theirs[K]['params'],options?:{timeoutMs?:number}):Promise<Theirs[K]['result']>};
