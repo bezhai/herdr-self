@@ -72,7 +72,10 @@ export function openLarkMethods(config:OpenLark|undefined):OwnerMethods{
  // Send or directly quote-reply as the account just read. Use its acknowledged timestamp when supplied, otherwise the response-arrival time.
  const deliver=async(path:string,p:Outgoing,timeoutMs:number|undefined,reply:boolean)=>{
   const {text,mentions,clientId}=outgoing(p),owner=await me(timeoutMs);
-  const result=await request<SendAnswer>(config,'POST',path,{text,mentions,clientId,expectedSenderId:owner.userId,...reply&&{replyMode:'direct'}},timeoutMs);
+  // A refusal with SENDER_CHANGED means the cached account is stale: drop it so the caller's retry reads /me again. It is not retried here.
+  const result=await request<SendAnswer>(config,'POST',path,{text,mentions,clientId,expectedSenderId:owner.userId,...reply&&{replyMode:'direct'}},timeoutMs).catch(e=>{
+   if(typeof e?.message==='string'&&e.message.startsWith('SENDER_CHANGED：'))account=undefined;throw e;
+  });
   const stamp=result.createdAt??result.sentAt;return {messageId:result.messageId,at:stamp?Date.parse(stamp):Date.now(),owner:owner.displayName};
  };
  return {

@@ -70,6 +70,20 @@ test('the four methods use the agent API, project messages and chats, and send a
  assert.equal(f.seen.filter(r=>r.path==='/agent/v1/me').length,1);
 });
 
+test('a send refused with SENDER_CHANGED drops the cached account so the next send reads /me again',async t=>{
+ let lookups=0,sends=0;
+ const f=await fixture(t,(req,res)=>{
+  if(req.url==='/agent/v1/me')return answer(res,200,++lookups===1?{userId:'owner-id',displayName:'主人账号'}:{userId:'new-id',displayName:'新账号'});
+  if(req.url==='/agent/v1/conversations/feed-group/messages'&&++sends===1)return answer(res,409,{error:{code:'SENDER_CHANGED',message:'账号已更换',recoverable:true,traceId:'test'}});
+  answer(res,202,{messageId:'sent-1',createdAt:'2026-11-11T02:03:04.000Z'});
+ });
+ const api=openLarkMethods(f.config);
+ await assert.rejects(Promise.resolve(api.openLarkSend(sendParams)),(e:Error&{code?:string})=>{assert.equal(e.code,'channel_refused');assert.match(e.message,/^SENDER_CHANGED：/);return true;});
+ assert.equal(lookups,1);
+ assert.deepEqual(await api.openLarkSend(sendParams),{messageId:'sent-1',at:Date.parse('2026-11-11T02:03:04.000Z'),owner:'新账号'});
+ assert.equal(lookups,2);assert.equal(f.seen.at(-1)!.body.expectedSenderId,'new-id');assertAuthorization(f.seen);
+});
+
 test('message text falls back to textPreview and a failed link lookup leaves link out without failing the read',async t=>{
  const f=await fixture(t,(req,res)=>{
   if(req.url==='/agent/v1/messages/m2')return answer(res,200,{item:{id:'m2',feedId:'feed-direct',senderId:'u2',senderName:'陈帆',createdAt:'2026-11-10T01:02:03.000Z',parts:[],textPreview:'只有预览'},attachments:[]});
