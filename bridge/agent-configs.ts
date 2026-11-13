@@ -8,7 +8,7 @@ import type {Machine,AgentConfig,Kind,PermissionMode,State} from './state.ts';
 const agentKinds:Kind[]=['claude','codex','agy'];
 // Claude permission modes: default sends the confirmations Claude asks for to Feishu as cards, auto lets Claude decide and rarely asks.
 // Codex and Antigravity (agy) have none.
-const permissionModes:PermissionMode[]=['default','auto'];
+const permissionModes:PermissionMode[]=['default','auto','bypassPermissions'];
 function claudeMode(v:unknown){if(!oneOf(permissionModes,v))throw Error('权限模式无效');return v;}
 // The permission mode of a Claude configuration; one that a migrated binding had without a mode uses default.
 export const permissionMode=<T>(c:{permissionMode?:T})=>c.permissionMode||'default';

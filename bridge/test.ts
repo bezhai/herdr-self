@@ -349,8 +349,9 @@ test('an agent configuration is a kind of agent with a model on a machine, and f
  const {id,...c}=normalizeAgentConfig({machineId:'m',kind:'claude',model:' Seed ',permissionMode:'auto',allowedCommands:['butler','git-lfs']},configData());
  assert.match(id,/^[0-9a-f-]{36}$/);assert.deepEqual(c,{name:'cpu1 · Claude · Seed',machineId:'m',kind:'claude',model:'Seed',permissionMode:'auto',allowedCommands:['butler','git-lfs']});
  // A Claude configuration has a mode, default without one; no model and no commands are no fields.
+ assert.equal(normalizeAgentConfig({machineId:'m',kind:'claude',permissionMode:'bypassPermissions'},configData()).permissionMode,'bypassPermissions');
  const {id:plainId,...plain}=normalizeAgentConfig({machineId:'n',kind:'claude',model:'',allowedCommands:[]},configData());assert.deepEqual(plain,{name:'cpu2 · Claude',machineId:'n',kind:'claude',permissionMode:'default'});
- for(const permissionMode of ['acceptEdits','plan','bypassPermissions','AUTO',1])assert.throws(()=>normalizeAgentConfig({machineId:'m',kind:'claude',permissionMode},configData()),/^Error: 权限模式无效$/,String(permissionMode));
+ for(const permissionMode of ['acceptEdits','plan','dontAsk','AUTO',1])assert.throws(()=>normalizeAgentConfig({machineId:'m',kind:'claude',permissionMode},configData()),/^Error: 权限模式无效$/,String(permissionMode));
  // Codex and Antigravity have neither: a mode that comes with them is dropped, commands are refused.
  for(const [kind,label] of [['codex','Codex'],['agy','Antigravity']] as const){
   const {id:otherId,...other}=normalizeAgentConfig({machineId:'m',kind,model:'gpt-5',permissionMode:'auto'},configData());assert.deepEqual(other,{name:`cpu1 · ${label} · gpt-5`,machineId:'m',kind,model:'gpt-5'});
@@ -1074,7 +1075,7 @@ test('another topic opens a tab in the same workspace and turns on remote answer
  }finally{f.close();}
 });
 test('a Claude configuration starts each topic agent with -- --permission-mode and its mode, default when it has none',async()=>{
- for(const [config,args] of [[{permissionMode:undefined},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']]] satisfies [Partial<AgentConfig>,string[]][]){
+ for(const [config,args] of [[{permissionMode:undefined},['--','--permission-mode','default']],[{permissionMode:'default'},['--','--permission-mode','default']],[{permissionMode:'auto'},['--','--permission-mode','auto']],[{permissionMode:'bypassPermissions'},['--','--permission-mode','bypassPermissions']]] satisfies [Partial<AgentConfig>,string[]][]){
   const f=topicFixture({config});try{
    await f.send({messageId:'om_1',content:'one'});
    assert.deepEqual(f.h.calls.filter(c=>c[1]==='start'),[['agent','start',f.store.data.topics[0].agentName,'--kind',f.config.kind,'--pane','w1:p1','--timeout','60000',...args]],JSON.stringify(config));

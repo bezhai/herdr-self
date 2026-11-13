@@ -57,7 +57,7 @@ export function launchMethods(env:NodeJS.ProcessEnv):Pick<Methods<ClientApi>,'pr
   async prepareLaunch({kind,model,permissionMode,allowedCommands,dir:given,timeoutMs}){
    if(!kinds.includes(kind))throw invalid('kind');
    if(model!==undefined&&(typeof model!=='string'||!modelName.test(model)))throw invalid('model');
-   if(permissionMode!==undefined&&!['default','auto'].includes(permissionMode))throw invalid('permissionMode');
+   if(permissionMode!==undefined&&!['default','auto','bypassPermissions'].includes(permissionMode))throw invalid('permissionMode');
    if(allowedCommands!==undefined&&(!Array.isArray(allowedCommands)||!allowedCommands.every(c=>typeof c==='string'&&commandName.test(c))))throw invalid('allowedCommands');
    const commands=allowedCommands??[];if(commands.length&&kind!=='claude')throw invalid('allowedCommands：只有 Claude 可以限制可执行的命令');
    const dir=local(given,'dir'),real=await fs.promises.realpath(dir).catch(()=>{throw invalid(`dir 不存在：${dir}`);});

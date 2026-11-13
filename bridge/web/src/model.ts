@@ -80,6 +80,7 @@ export const configName = (machine: { name: string } | undefined, kind: Kind, mo
 export const permissionModes: { id: PermissionMode, note: string }[] = [
   { id: 'default', note: '需要确认的操作在飞书里发确认卡片' },
   { id: 'auto', note: '由 Claude 自动决定，很少需要确认' },
+  { id: 'bypassPermissions', note: '所有操作直接执行，不发确认卡片' },
 ];
 
 // How the topics of a project share its directory.

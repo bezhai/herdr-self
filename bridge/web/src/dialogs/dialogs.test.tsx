@@ -200,7 +200,7 @@ test('agent configuration form names a new configuration after machine, type and
   expect(captions()).toEqual(['配置名称', '机器', 'Agent 类型', '模型', '权限模式', '只允许执行的命令']);
   expect(optionLabels('机器')).toEqual(['cpu2', 'gpu1', 'laptop', 'cpu3', 'gpu2']);
   expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
-  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作在飞书里发确认卡片', 'auto：由 Claude 自动决定，很少需要确认']);
+  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作在飞书里发确认卡片', 'auto：由 Claude 自动决定，很少需要确认', 'bypassPermissions：所有操作直接执行，不发确认卡片']);
   const name = () => screen.getByLabelText<HTMLInputElement>('配置名称').value;
   expect(name()).toBe('cpu2 · Claude');
 

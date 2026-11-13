@@ -11,7 +11,7 @@ export type App={id:string,name:string,appId:string,appSecret:string,domain:'fei
  botOpenId?:string,avatar?:{type:string,updatedAt:number},createdVia?:'registration'};
 // The agent kinds that a binding starts in its topics, and the permission modes of a Claude binding (see platform.ts).
 export type Kind='claude'|'codex'|'agy';
-export type PermissionMode='default'|'auto';
+export type PermissionMode='default'|'auto'|'bypassPermissions';
 // How the topics of a project share its directory: each in a directory of its own, or all in one.
 export type WorkMode='isolated'|'shared';
 // A project (see projects.ts): a name, a description, the URLs of its git repositories (none or more), the names of the skills of the platform

@@ -41,6 +41,15 @@ test('Claude gets its permission mode, which defaults, and its model with the se
  assert.deepEqual(await launch({kind:'claude',permissionMode:'auto',dir:d}),['--permission-mode','auto']);
  assert.deepEqual(await launch({kind:'claude',permissionMode:'auto',model:'Seed-2.0',dir:d}),['--permission-mode','auto','--model','Seed-2.0','--settings','{"availableModels":["Seed-2.0"]}']);
 });
+test('bypassPermissions is passed as it is, and a hook that denies a command still holds under it, since the hook runs before the permission mode is looked at',async()=>{
+ const d=dir('bypass');
+ assert.deepEqual(await launch({kind:'claude',permissionMode:'bypassPermissions',dir:d}),['--permission-mode','bypassPermissions']);
+ const args=await launch({kind:'claude',permissionMode:'bypassPermissions',allowedCommands:['butler'],dir:d});
+ assert.deepEqual(args.slice(0,2),['--permission-mode','bypassPermissions']);assert.equal(args[args.indexOf('--tools')+1],'Bash,Skill,Read');
+ const hook=JSON.parse(args[args.indexOf('--settings')+1]).hooks.PreToolUse[0].hooks[0].command;
+ const r=spawnSync('sh',['-c',hook],{input:JSON.stringify({hook_event_name:'PreToolUse',tool_name:'Bash',tool_input:{command:'rm -rf x'}}),encoding:'utf8'});
+ assert.equal(JSON.parse(r.stdout).hookSpecificOutput.permissionDecision,'deny');
+});
 test('Claude with commands to run is limited to Bash, Skill and Read, allowed only those commands, without MCP servers, and a hook installed on the machine denies every other command; settings are one JSON',async()=>{
  const d=dir('restricted'),args=await launch({kind:'claude',permissionMode:'default',model:'sonnet',allowedCommands:['butler'],dir:d});
  const at=(flag:string)=>args[args.indexOf(flag)+1];
