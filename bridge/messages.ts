@@ -78,7 +78,10 @@ export class Messages{
   if(!fits(card))throw Error('正文太长，确认卡片放不下，请缩短后重新提交');
   t.drafts=[...(t.drafts||[]),d];this.store.save();
   try{d.cardId=await this.deps.reply(this.deps.app(t.appId),t.chatId,t.rootId,{card});this.store.save();return d;}
-  catch(e){t.drafts=(t.drafts||[]).filter(x=>x!==d);this.store.save();throw Error('确认卡片没有发出去，请稍后重试');}
+  catch(e){
+   t.drafts=(t.drafts||[]).filter(x=>x!==d);this.store.save();
+   this.store.log('消息',`确认卡片没有发出去：${brief(e)}`,'error');throw Error(`确认卡片没有发出去：${brief(e)}，请稍后重试`);
+  }
  }
  // A click on a draft card from someone on the app's allowlist (see Platforms.cardAction), answered at once: send, edit, drop or cancel
  // (see draftCard in outbound-cards.ts).

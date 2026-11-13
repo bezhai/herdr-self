@@ -18,8 +18,8 @@ const grey=(content:string)=>styled(content,{text_size:'notation',text_color:'gr
 const escapeMarkdown=(content:string)=>content.replace(/[\\`*_{}\[\]()#+\-.!|<>~]/g,'\\$&');
 // A draft's destination is a bold title line, not the card's header.
 const heading=(content:string)=>({tag:'markdown',content:`**${escapeMarkdown(content)}**`});
-// A draft body keeps its exact text inside a quote container.
-const quote=(content:string)=>({tag:'quote_container',elements:[plain(content)]});
+// A draft body keeps its exact text in a grey block, a column_set of one column, because JSON 2.0 has no quote container.
+const quote=(content:string)=>({tag:'column_set',background_style:'grey',columns:[{tag:'column',width:'weighted',weight:1,elements:[plain(content)]}]});
 // A button that reports its action and this drawing's render number.
 const click=(content:string,type:string,value:ButtonValue)=>({tag:'button',text:{tag:'plain_text',content},type,behaviors:[{type:'callback',value}]});
 // An action in the row under a pending draft.

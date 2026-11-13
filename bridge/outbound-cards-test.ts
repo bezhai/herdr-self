@@ -19,7 +19,8 @@ const grey=(content:string)=>plain(content,{text_size:'notation',text_color:'gre
 // Bold titles use the card's markdown, with every dynamic character kept literal.
 const escapeMarkdown=(content:string)=>content.replace(/[\\`*_{}\[\]()#+\-.!|<>~]/g,'\\$&');
 const heading=(content:string)=>({tag:'markdown',content:`**${escapeMarkdown(content)}**`});
-const quote=(content:string)=>({tag:'quote_container',elements:[plain(content)]});
+// A draft body is a grey column_set holding one weighted column.
+const quote=(content:string)=>({tag:'column_set',background_style:'grey',columns:[{tag:'column',width:'weighted',weight:1,elements:[plain(content)]}]});
 const untitled=(summary:string,elements:object[],updateMulti=false)=>({schema:'2.0',config:{...updateMulti&&{update_multi:true},summary:{content:summary}},body:{elements}});
 const callbackButton=(content:string,type:string,value:object)=>({tag:'column',width:'auto',elements:[{tag:'button',text:{tag:'plain_text',content},type,behaviors:[{type:'callback',value}]}]});
 const actions=(d:Draft,render:number)=>({tag:'column_set',horizontal_spacing:'8px',columns:[
@@ -107,4 +108,23 @@ test('all fixed wording avoids 他 and 她, and message and draft bodies stay in
  };
  for(const card of cards)visit(card);
  assert.ok(texts.includes(message.text));assert.ok(texts.includes(privateDraft.text));
+});
+
+// The tags of the cards that Bridge already posts elsewhere (message-cards.ts, request-cards.ts, schedule-cards.ts), which Feishu has accepted.
+const knownTags=new Set(['button','column','column_set','div','form','input','markdown','multi_select_static','plain_text','select_static']);
+test('no outbound card uses a tag that the other Bridge cards do not use',()=>{
+ const tags=new Set<string>();
+ const visit=(value:unknown)=>{
+  if(Array.isArray(value)){for(const item of value)visit(item);return;}
+  if(!value||typeof value!=='object')return;
+  const item=value as Record<string,unknown>;
+  if(typeof item.tag==='string')tags.add(item.tag);
+  for(const nested of Object.values(item))visit(nested);
+ };
+ const message:OwnerMessage={...privateSource,text:'原消息'};
+ const sent:Draft={...privateDraft,state:'sent',sentAt:now} as Draft;
+ const dropped:Draft={...privateDraft,state:'dropped'} as Draft;
+ const cards=[sourceCard(message,now),...(['pending','editing'] as const).flatMap(view=>[draftCard(privateDraft,view,{render:1,now}),draftCard(groupDraft,view,{render:2,now,quoted:groupSource}),draftCard({...privateDraft,failure:'失败'},view,{render:3,now})]),draftCard(sent,'sent',{render:4,now}),draftCard(dropped,'dropped',{render:5,now})];
+ for(const card of cards)visit(card);
+ assert.deepEqual([...tags].filter(tag=>!knownTags.has(tag)),[]);
 });

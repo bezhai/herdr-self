@@ -77,6 +77,13 @@ test('attach reports an owner-channel failure in the terms of a send failure',as
  await assert.rejects(invoke(f,'attach',{pane:'pane',messageId:'message-1'}),/open-lark 没有响应/);
  assert.equal(f.topic.sources?.length??0,0);assert.equal(f.replies.length,0);
 });
+test('a card that Feishu refuses is logged with its reason, reported to the agent and leaves no draft',async t=>{
+ const f=fixture();t.after(f.close);
+ const rejecting=new Messages(f.store,{topics:{caller:async()=>f.topic,queue:(_t,task)=>Promise.resolve(task())},app:()=>app,owner:()=>ownerMachine,call:fakeCall(async(_m,method)=>method==='openLarkMessage'?message:chat),reply:async()=>{throw Error('invalid card\nsecond line');},updateCard:async()=>{},now:()=>now});
+ await assert.rejects(rejecting.call(agentMachine,'send',{pane:'pane',chatId:'chat-2',text:'你好'}),/确认卡片没有发出去：invalid card，请稍后重试/);
+ assert.equal(f.topic.drafts?.length??0,0);
+ assert.deepEqual(f.store.data.logs.at(-1),{at:f.store.data.logs.at(-1)!.at,kind:'消息',level:'error',message:'确认卡片没有发出去：invalid card'});
+});
 test('reply refuses a message that is not a source of this topic',async t=>{
  const f=fixture();t.after(f.close);
  await assert.rejects(invoke(f,'reply',{pane:'pane',messageId:'elsewhere',text:'回复'}),/这条消息不在本话题的来源里，先用 attach 放进来/);
