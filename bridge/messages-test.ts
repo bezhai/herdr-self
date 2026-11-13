@@ -168,6 +168,12 @@ test('a send click without an owner fails on the card and can be retried after c
  assert.equal(f.store.data.logs.at(-1)!.message,'未能发到 产品讨论：没有配置 open-lark 所在的机器');
  f.setOwner(ownerMachine);f.messages.click(app,click(draft,'send'));await settled();assert.equal(draft.state,'sent');
 });
+test('an edit form with whitespace-only text fails with its own reason even though an owner is configured',async t=>{
+ const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ f.messages.click(app,click(draft,'send','  \n '));await settled();
+ assert.equal(draft.state,'pending');assert.equal(draft.failure,'正文不能为空');assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,0);
+ assert.equal(f.store.data.logs.at(-1)!.message,'未能发到 产品讨论：正文不能为空');assert.equal(f.store.data.logs.at(-1)!.level,'error');
+});
 test('two clicks of the same card while a send is in flight produce only one send',async t=>{
  const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});let resolve!:(value:Sent)=>void;
  f.respond(method=>method==='openLarkSend'?new Promise<Sent>(r=>{resolve=r;}):sent);

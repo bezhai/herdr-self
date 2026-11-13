@@ -100,19 +100,20 @@ export class Messages{
  // Sends d after a click, unless an earlier attempt already finished it. An edited form changes both the text and its idempotency key,
  // and drops only those mentions whose @name the new text no longer has. The caller holds sending until the card has been redrawn.
  async deliver(a:App,t:Topic,d:Draft,evt:Click){
-  let owner:Machine|null=null;
+  // unowned is set only when there really is no owner, so that every earlier error keeps its own reason.
+  let owner:Machine|null=null,unowned=false;
   try{
    const edited=evt.action.formValue?.text;
    if(typeof edited==='string'&&edited!==d.text){d.text=edited;d.clientId=uuid();d.mentions=d.mentions.filter(m=>edited.includes('@'+m.name));}
    if(!d.text.trim())throw Error('正文不能为空');
-   this.store.save();owner=this.deps.owner();if(!owner)throw Error('没有配置 open-lark 所在的机器');
+   this.store.save();owner=this.deps.owner();if(!owner){unowned=true;throw Error('没有配置 open-lark 所在的机器');}
    const params={clientId:d.clientId,text:d.text,mentions:d.mentions},sent=d.replyTo
     ?await this.deps.call(owner,'openLarkReply',{messageId:d.replyTo,...params})
     :await this.deps.call(owner,'openLarkSend',{chatId:d.chatId,...params});
    Object.assign(d,{state:'sent',sentId:sent.messageId,sentAt:sent.at});delete d.failure;this.store.save();
    this.store.log('消息',`以 ${sent.owner} 的身份发到 ${d.chatName}：${clip(d.text,40)}`);await this.draw(a,t,d,'sent');
   }catch(e){
-   const reason=this.failure(owner,e);d.state='pending';d.failure=reason;this.store.save();
+   const reason=owner||unowned?this.failure(owner,e):brief(e)||'未知错误';d.state='pending';d.failure=reason;this.store.save();
    this.store.log('消息',`未能发到 ${d.chatName}：${reason}`,'error');await this.draw(a,t,d,'pending');
   }
  }
