@@ -10,8 +10,7 @@ import type {OwnerMessage,Sent} from './link.ts';
 import type {Tasks} from './task-core.ts';
 import type {Delivery,Input,JournalRecord,Sink} from './task-types.ts';
 import type {CardActionResponse} from '@larksuite/channel';
-// bridge-message on the control plane (see message-command.ts), built on the task core (see task-core.ts). The topic of the agent is a task, made
-// when the agent first uses bridge-message: a message that the agent brings in (attach) is an input of it, read by its id through the owner's
+// bridge-message on the control plane (see message-command.ts), built on the task core (see task-core.ts). The topic of the agent is a task (see Topics.task): a message that the agent brings in (attach) is an input of it, read by its id through the owner's
 // channel so that where it came from is what Feishu says, not what the agent tells; a message that it drafts to send as the owner, a reply that
 // quotes an input in its chat (reply) or a message to a chat (send), is an output delivered to the sink as-owner, whose policy asks for approval.
 // The sink sends through the owner's channel, open-lark on the machine that runs it (see open-lark.ts), once someone on the app's allowlist clicks
@@ -37,7 +36,7 @@ export type MessageOps={[K in Op]:{request:MessageRequest,answer:Answers[K]}};
 // throws; owner() is the machine whose client reaches open-lark, or null when none is set or it is gone; call reaches the client of a machine
 // (see Clients.call); reply(app,chatId,rootId,{card}) posts a card into the thread of a topic and resolves to its message id, and
 // updateCard(app,messageId,card) replaces it; now() is the clock.
-type Deps={tasks:Tasks,topics:Pick<Topics,'caller'|'queue'>,app:(id:string)=>App,owner:()=>Machine|null,call:Call,reply:Platforms['reply'],updateCard:Platforms['updateCard'],now?:()=>number};
+type Deps={tasks:Tasks,topics:Pick<Topics,'caller'|'queue'|'task'>,app:(id:string)=>App,owner:()=>Machine|null,call:Call,reply:Platforms['reply'],updateCard:Platforms['updateCard'],now?:()=>number};
 // A short, safe error explanation for an unexpected failure or a card-update log. An open-lark refusal keeps its full public explanation below.
 const brief=(e:Error|undefined)=>publicText(e?.message).split('\n')[0].slice(0,200);
 const toast=(type:string,content:string)=>({toast:{type,content}});
@@ -85,29 +84,24 @@ export class Messages{
    case 'send':return this.deps.topics.queue(t,()=>this.send(t,request as MessageRequest,owner));
   }
  }
- // The id of the task of topic t, which it gets now if it has none: its goal is the message that opened the topic, or its title.
- task(t:Topic):string{
-  if(!t.taskId){t.taskId=this.deps.tasks.create(t.task?.content||t.title).id;this.store.save();}
-  return t.taskId;
- }
  // Brings message messageId into the task of topic t: reads it through the owner's channel and adds it as an input, whose ref is its id. The
  // core returns the same input for a message that is already one; its source card is drawn from the journal.
  async attach(t:Topic,request:MessageRequest,owner:Machine):Promise<Answers['attach']>{
-  const task=this.task(t),messageId=this.id(request.messageId,'消息');
+  const task=this.deps.topics.task(t),messageId=this.id(request.messageId,'消息');
   let m:OwnerMessage;try{m=await this.deps.call(owner,'openLarkMessage',{messageId});}catch(e){throw Error(failure(owner,e));}
   const input=this.deps.tasks.addInput(task,m,refPrefix+messageId) as Answers['attach']['input'];
   await this.deps.tasks.settled();return {input};
  }
  // Drafts a reply to input messageId of the task of topic t, in the chat of that message.
  async reply(t:Topic,request:MessageRequest):Promise<Answers['reply']>{
-  const task=this.task(t),messageId=this.id(request.messageId,'消息'),quoted=this.quoted(task,messageId);
+  const task=this.deps.topics.task(t),messageId=this.id(request.messageId,'消息'),quoted=this.quoted(task,messageId);
   if(!quoted)throw Error('这条消息不在本话题的来源里，先用 attach 放进来');
   const {text,mentions}=this.checked(request),{chatId,chatName,chatType}=quoted;
   return {delivery:await this.draft(task,{chatId,chatName,chatType,replyTo:messageId},{text,mentions},quoted)};
  }
  // Drafts a message to chat chatId, which it reads through the owner's channel.
  async send(t:Topic,request:MessageRequest,owner:Machine):Promise<Answers['send']>{
-  const task=this.task(t),chatId=this.id(request.chatId,'聊天'),{text,mentions}=this.checked(request);let chat;
+  const task=this.deps.topics.task(t),chatId=this.id(request.chatId,'聊天'),{text,mentions}=this.checked(request);let chat;
   try{chat=await this.deps.call(owner,'openLarkChat',{chatId});}catch(e){throw Error(failure(owner,e));}
   return {delivery:await this.draft(task,chat,{text,mentions})};
  }

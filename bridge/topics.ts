@@ -1,7 +1,7 @@
 import {uuid,publicText,enqueue} from './core.ts';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.ts';
 import {picker,adoptedPicker,intro,nameOf,stillChosen,chosen} from './adoption.ts';
-import {notice,replyCards} from './message-cards.ts';
+import {notice} from './message-cards.ts';
 import {supported} from './platform.ts';
 import {permissionMode} from './agent-configs.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits,label,reason} from './attachments.ts';
@@ -9,6 +9,7 @@ import {slash} from './commands.ts';
 import {createCot,updateCot,completeCot,runStarted,runFinished,runError,status,steps} from './cot.ts';
 import {attachmentFolder} from './machine.ts';
 import {nameTask} from './routing.ts';
+import {threadSinkName} from './thread-sink.ts';
 import {startCard} from './topic-cards.ts';
 import {workspaceOf,hasBranch,sweepable,unused,freeBranch} from './workspaces.ts';
 import {randomBranch} from './worktree-branch.mjs';
@@ -18,6 +19,7 @@ import type {App,Binding,Machine,Topic,Reaction,RequestCard,Kind,Project,AgentCo
 import type {Platforms} from './platform.ts';
 import type {Click,HerdrRequest,Answer} from './request-cards.ts';
 import type {Choice,Offered,Group} from './adoption.ts';
+import type {Tasks} from './task-core.ts';
 import type {Reply} from './message-cards.ts';
 import type {Event} from './cot.ts';
 import type {Named} from './routing.ts';
@@ -63,9 +65,9 @@ export type Message=Pick<NormalizedMessage,'messageId'|'content'>&{resources?:Re
 // A message of a person in a bound chat, as Topics reads it; a missing mention or root counts as none.
 export type Inbound=Message&Pick<NormalizedMessage,'rawContentType'>&Partial<Pick<NormalizedMessage,'rootId'|'mentionedBot'>>;
 type Deps=Pick<Operations,'storeFile'|'removeDirectory'|'prepareWorkspace'|'removeWorkspace'|'prepareLaunch'>&Pick<Platforms,'reply'|'updateCard'|'react'|'unreact'|'request'|'download'>&{
- herdr:Herdr,askModel:AskModel,placeSkills:(m:Machine,cwd:string,kind:Kind,skills:string[])=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number,pause?:(ms:number)=>Promise<void>};
+ herdr:Herdr,tasks:Tasks,askModel:AskModel,placeSkills:(m:Machine,cwd:string,kind:Kind,skills:string[])=>Promise<string[]>,machine:(id:string)=>Machine,app:(id:string)=>App,now?:()=>number,pause?:(ms:number)=>Promise<void>};
 export class Topics{
- declare store:Store;declare herdr:Herdr;declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
+ declare store:Store;declare herdr:Herdr;declare tasks:Tasks;declare machine:Deps['machine'];declare app:Deps['app'];declare reply:Deps['reply'];
  declare updateCard:Deps['updateCard'];declare react:Deps['react'];declare unreact:Deps['unreact'];declare request:Deps['request'];declare download:Deps['download'];
  declare storeFile:Deps['storeFile'];declare removeDirectory:Deps['removeDirectory'];declare askModel:AskModel;declare prepareWorkspace:Deps['prepareWorkspace'];declare removeWorkspace:Deps['removeWorkspace'];declare prepareLaunch:Deps['prepareLaunch'];
  declare placeSkills:Deps['placeSkills'];declare now:()=>number;declare pause:(ms:number)=>Promise<void>;declare topicQueues:Map<string,Promise<unknown>>;declare workspaceQueues:Map<string,Promise<unknown>>;
@@ -80,8 +82,8 @@ export class Topics{
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
  // that the SDK lacks, such as the COT calls, and resolves to its data. download(app,messageId,resource,limit) resolves to {body, type} of
  // a resource of a received message, or rejects with code too_large past limit bytes. now() is the clock.
- constructor(store:Store,{herdr,storeFile,removeDirectory,askModel,prepareWorkspace,removeWorkspace,prepareLaunch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now,pause=ms=>new Promise<void>(resolve=>setTimeout(resolve,ms))}:Deps){
-  this.store=store;this.herdr=herdr;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
+ constructor(store:Store,{herdr,tasks,storeFile,removeDirectory,askModel,prepareWorkspace,removeWorkspace,prepareLaunch,placeSkills,machine,app,reply,updateCard,react,unreact,request,download,now=Date.now,pause=ms=>new Promise<void>(resolve=>setTimeout(resolve,ms))}:Deps){
+  this.store=store;this.herdr=herdr;this.tasks=tasks;this.machine=machine;this.app=app;this.reply=reply;this.updateCard=updateCard;this.react=react;this.unreact=unreact;this.request=request;
   this.download=download;this.storeFile=storeFile;this.removeDirectory=removeDirectory;this.askModel=askModel;this.prepareWorkspace=prepareWorkspace;this.removeWorkspace=removeWorkspace;this.prepareLaunch=prepareLaunch;this.placeSkills=placeSkills;this.now=now;this.pause=pause;this.topicQueues=new Map();this.workspaceQueues=new Map();
   // In memory: the clicks being handled as '<topic id> <request id>' or '<topic id> adopt' → the promise of their handling; per topic the
   // state_change_seq of a blocked agent without requests in the latest list; a counter that numbers card drawings and one for those of the first cards of topics; and the panes being
@@ -124,7 +126,7 @@ export class Topics{
   const id=uuid(),config=this.store.data.agentConfigs.find(c=>c.id===b.defaultAgentConfigId);
   const t:Topic={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:config?.machineId??'',...b.defaultProjectId&&{projectId:b.defaultProjectId},agentConfigId:b.defaultAgentConfigId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
    title,state:'starting',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],task:{messageId:msg.messageId,content:msg.content,...msg.resources&&{resources:msg.resources}},...fields,createdAt:this.now()};
-  this.store.data.topics.push(t);this.store.save();
+  this.store.data.topics.push(t);this.task(t);
   return {topic:t,delivered:this.deliver(a,b,t,msg,{reaction})};
  }
  // Gives message msg ({messageId, content, resources?}) to the agent of topic t in the topic's queue (see prompt). reaction is the id of the
@@ -163,7 +165,7 @@ export class Topics{
  // ends (see sync) or its COT takes its place, when it was prompted; any other message loses it now. Resolves to the prompted agent, or to
  // nothing; rejects when Herdr fails.
  async prompt(a:App,b:Binding,t:Topic,msg:Message,{reacted}:{reacted?:Promise<Reaction|null>|''}={}){
-  let agent;
+  let agent;this.record(t,msg);
   // Settled in the queue, so a later message that closes the topic finds this record.
   try{agent=await this.forward(a,b,t,msg);}
   finally{const r=await reacted;if(agent&&r){r.stateSeq=agent.state_change_seq;this.store.save();}else await this.dropReaction(t,r);}
@@ -620,7 +622,7 @@ export class Topics{
     replySeq:latest?.seq??x.reply_seq??0,adopted:{picker:t.adopted!.picker,kind:x.agent,...x.agent_session&&{session:x.agent_session.value}}});
    this.store.log('话题接管',`${name}：已接管 ${m.name} 上的 ${t.agentName}`);
    await this.notify(a,t,intro(m,x,called,latest));
-   if(latest)try{await this.post(a,t,latest);}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}
+   if(latest)try{const d=await this.relay(t,latest);if(d.state==='failed')this.store.log('话题通知',`${a.name}：${d.error}`,'error');}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}
    try{await this.updateCard(a,t.adopted!.picker!,adoptedPicker(m,x,called,operator.openId));}catch(e){this.store.log('话题接管',`${name}：接管卡片未能更新，${brief(e)}`,'error');}
   }catch(e){
    this.store.log('话题接管',`${name}：接管失败，${brief(e)}`,'error');
@@ -684,6 +686,19 @@ export class Topics{
    await this.clean(t);
   }));
  }
+ // The id of the task of topic t, which it gets now if it has none: its goal is the message that opened the topic, or its title when that has
+ // no text (or 'Feishu topic' when the title is empty too). A topic that began before tasks, and an adopted one, get theirs the first time something needs it.
+ task(t:Topic):string{
+  if(!t.taskId){t.taskId=this.tasks.create(t.task?.content.trim()||t.title||'飞书话题').id;this.store.save();}
+  return t.taskId;
+ }
+ // Records message msg, which is about to be given to the agent of topic t, as an input of its task, whose ref is the message id: the one
+ // place every message of the agent goes through, whether it is a person's, the first one of the topic or the run of a schedule. A message that
+ // is already an input (Feishu delivering it twice) is not added again. Never rejects: a task that cannot take it is only logged.
+ record(t:Topic,msg:Message){
+  try{this.tasks.addInput(this.task(t),{text:msg.content,...msg.resources&&{resources:msg.resources}},'feishu:'+msg.messageId);}
+  catch(e){this.store.log('话题任务',`${t.agentName}：未能记录消息，${brief(e)}`,'error');}
+ }
  // Sends the agent's replies after t.replySeq, up to seq from the agent list, into the thread.
  async pull(m:Machine,t:Topic,seq:number){
   const last=t.replySeq||0,b=this.store.data.bindings.find(x=>x.id===t.bindingId);
@@ -692,18 +707,20 @@ export class Topics{
   // A seq below the stored one means Herdr restarted or handed off and counts from 1 again: take its replies up to seq.
   const a=this.app(t.appId),reset=seq<last,{replies}=await this.herdr(m,['agent','replies',t.paneId,...reset?[]:['--after',String(last)]]);
   for(const r of replies)if(!reset||r.seq<=seq){
-   // At most once, like messages: the seq is on disk before the send, and a failed card is not sent again (see post).
+   // At most once, like messages: the seq is on disk before the delivery, and a failed one is not sent again.
    this.update(t,{replySeq:r.seq});
-   try{await this.post(a,t,r);this.store.log('回复转发',`${b.name}：已转发 ${t.agentName} 的回复`);}
-   catch(e){this.store.log('回复转发',`${b.name}：${t.agentName} 的回复${e.sent?`只发出了前 ${e.sent} 张卡片`:'未发出'}，${brief(e)}`,'error');}
+   try{
+    const d=await this.relay(t,r);
+    if(d.state==='failed')this.store.log('回复转发',`${b.name}：${t.agentName} 的回复${d.error}`,'error');
+    else this.store.log('回复转发',`${b.name}：已转发 ${t.agentName} 的回复`);
+   }catch(e){this.store.log('回复转发',`${b.name}：${t.agentName} 的回复未发出，${brief(e)}`,'error');}
   }
  }
- // Posts reply r of the agent into the thread as its cards, in order. The first card that fails ends the reply: the cards after it are
- // dropped rather than posted after a gap, and most failures (Feishu not connected) would meet them too. Rejects with the error of that
- // card, its sent property counting the cards that went out before it.
- async post(a:App,t:Topic,r:Reply){
-  const cards=replyCards(r);
-  for(const [i,card] of cards.entries())try{await this.reply(a,t.chatId,t.rootId,{card});}catch(e){throw Object.assign(e,{sent:i});}
+ // Records reply r of the agent of topic t as an output of its task and delivers it to the thread sink, which posts it as cards (see
+ // threadSink). Resolves to the delivery, failed when a card did not go out. A reply is never delivered twice: the caller keeps its seq.
+ relay(t:Topic,r:Pick<Reply,'text'|'truncated'>){
+  const task=this.task(t),output=this.tasks.addOutput(task,{text:r.text,...r.truncated&&{truncated:true}});
+  return this.tasks.deliver(output.id,{sink:threadSinkName,to:task});
  }
  // Resolves to the record kept in t.reactions, or to null when Feishu refused the reaction; delivery goes on either way.
  async addReaction(a:App,t:Topic,messageId:string){

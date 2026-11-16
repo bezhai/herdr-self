@@ -40,7 +40,7 @@ export type Binding={id:string,name:string,appId:string,chatId:string,chatType:'
 // project and the branch are decided (see Topics.route), which a topic of before the projects never was: it keeps the directory it has. The
 // first card of the topic, with the dropdowns that start it again, is startCard. A topic that ended or failed has endedAt, and swept once its
 // workspace was removed (see Topics.sweep). Its agent brings messages in and drafts messages to send as the owner (see Messages), which are
-// the inputs and the deliveries of its task (taskId, in the task database; made when the agent first uses them), and deliveryCards holds the
+// the inputs and the deliveries of its task (taskId, in the task database; a topic gets it when it begins, an older or adopted one when something first needs it), and deliveryCards holds the
 // card of each delivery that the thread shows, by delivery id.
 export type Topic={id:string,bindingId:string,appId:string,chatId:string,rootId:string,machineId:string,workspaceId:string,tabId:string,paneId:string,agentName:string,title:string,
  state:'starting'|'ready'|'failed'|'closed'|'choosing',error:string,messageIds:string[],replySeq:number,reactions:Reaction[],cards:RequestCard[],createdAt:number,

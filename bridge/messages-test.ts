@@ -36,7 +36,9 @@ function fixture(options:{caller?:Deps['topics']['caller'],owner?:Machine|null}=
  const updateCard:Deps['updateCard']=async(a,messageId,card)=>{if(rejectUpdate)throw rejectUpdate;updates.push({app:a,messageId,card});};
  store.data.topics.push(topic);store.save();
  const tasks=new Tasks(':memory:',{sinks:{'as-owner':ownerSink({owner:()=>owner,call})},policy,now:()=>now});
- const messages=new Messages(store,{tasks,topics:{caller,queue},app:()=>app,owner:()=>owner,call,reply,updateCard,now:()=>now});
+ // The topic's task is made when something first needs it, as Topics.task does.
+ const task:Deps['topics']['task']=t=>{if(!t.taskId){t.taskId=tasks.create(t.task?.content||t.title).id;store.save();}return t.taskId;};
+ const messages=new Messages(store,{tasks,topics:{caller,queue,task},app:()=>app,owner:()=>owner,call,reply,updateCard,now:()=>now});
  // Wait for the observers of the task core and for the asynchronous work that a click deliberately does not make Feishu's callback wait for.
  const flush=async()=>{for(let i=0;i<4;i++){await new Promise<void>(resolve=>setImmediate(resolve));await tasks.settled();}};
  return {dir,store,topic,tasks,messages,calls,replies,updates,flush,

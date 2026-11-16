@@ -3,7 +3,7 @@ import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 
 import {Readable} from 'node:stream';
 import {normalizeMachine,migrateMachines,operations,Store,publicText} from './core.ts';
 import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';import {modelFrom} from './model.ts';import type {AskModel} from './model.ts';
-import {namingPrompt,parseBranch,validBranch,branchOf,branchFromText,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';
+import {namingPrompt,parseBranch,validBranch,branchOf,branchFromText,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';import {threadSink,threadSinkName} from './thread-sink.ts';import {Tasks} from './task-core.ts';import {Messages} from './messages.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
 import {ChatBindings} from './chat-bindings.ts';
@@ -1007,7 +1007,7 @@ function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:
  const reach=(m:Machine)=>{const host=h.hosts[m.id]||h;if(host.down)throw down(host);};
  // Every reply resolves to the next message id om_bot_<n>.
  // The fake answers each command with what Herdr prints for it, which its type cannot tie to the command.
- const deps:DepsOf<typeof Topics>={herdr:h.herdr as Herdr,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
+ const deps:Omit<DepsOf<typeof Topics>,'tasks'>&{tasks?:Tasks}={herdr:h.herdr as Herdr,machine:id=>{const x=store.data.machines.find(y=>y.id===id);if(!x)throw Error('机器连接不存在');return x;},app:id=>{if(id!==allowed.id)throw Error('应用不存在');return allowed;},
   download:async(a,messageId,r,limit)=>{downloads.push([a.id,messageId,r.type,r.fileKey,limit]);await null;const x=resources[r.fileKey];if(x instanceof Error)throw x;return x||{body:Buffer.from('data:'+r.fileKey),type:'image/png'};},
   storeFile:async(m,root,dir,name,body)=>{stored.push([m.id,root,dir,name,String(body)]);await null;return root.replace(/^~\//,'/home/u/')+'/'+dir+'/'+name;},
   removeDirectory:async(m,dir)=>{removed.push([m.id,dir]);await null;},
@@ -1034,11 +1034,13 @@ function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:
   request:async(a,o)=>{api.push(o as ApiRequest);await null;if(!cot)throw Object.assign(Error('飞书接口错误 99991672：Access denied'),{code:99991672});return o.method==='POST'&&o.url===cotPath?{cot_id:'c'+ ++cots,message_id:'om_cot_'+cots}:{};},...now&&{now}};
  // Waits of the topics (see pause in Topics) only record how long they would have been.
  const paused:number[]=[];deps.pause=async ms=>{paused.push(ms);await null;};
- const topics=new Topics(store,deps);
+ // The task core of the topics: its only sink posts into the topic's thread through topics.reply, which tests may replace.
+ const tasks=new Tasks(':memory:',{sinks:{[threadSinkName]:threadSink({store,app:deps.app,reply:(...args)=>topics.reply(...args)})},policy:{deliver:()=>'allow',end:()=>'allow'},now:Date.now});deps.tasks=tasks;
+ const topics=new Topics(store,deps as DepsOf<typeof Topics>);
  const send=(msg:Partial<NormalizedMessage>)=>topics.handle(allowed,b,{senderType:'user',senderId:'ou_user',chatId:'oc_1',rawContentType:'text',...msg} as NormalizedMessage);
- const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps)};};
+ const restart=()=>{const s=new Store(dir);return {store:s,topics:new Topics(s,deps as DepsOf<typeof Topics>)};};
  const choose=(messageId:string,field:'project'|'agentConfig',option:string,openId='ou_user',render=1)=>topics.click(allowed,{messageId,chatId:'oc_1',operator:{openId},action:{tag:'select_static',value:{restart:field,render},option}} as Click);
- return {dir,store,h,m,topics,config:store.data.agentConfigs[0],project:store.data.projects[0],replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,placed,prepared,dropped,launched,naming,starts,paused,fake,deps,b,send,restart,choose,close(){fs.rmSync(dir,{recursive:true});}};
+ return {dir,store,h,m,topics,tasks,config:store.data.agentConfigs[0],project:store.data.projects[0],replies,reacted,unreacted,updated,api,downloads,resources,stored,removed,placed,prepared,dropped,launched,naming,starts,paused,fake,deps,b,send,restart,choose,close(){void tasks.close();fs.rmSync(dir,{recursive:true});}};
 }
 // The COT calls of fixture f in order: ['create', message the COT answers], ['update', cot id, ...[event type, event]] and ['complete', cot
 // id, reason].
@@ -1051,7 +1053,7 @@ const later=(ms:number)=>new Promise<void>(r=>setTimeout(r,ms));
 test('a new topic creates the binding workspace, names its root tab after the topic, starts the agent there with a longer timeout, turns on remote answers for its pane and prompts it',async()=>{
  const f=topicFixture(),text='请帮我修复登录页在移动端点击提交按钮后没有任何反应的问题',title=text.slice(0,24);try{
   await f.send({messageId:'om_1',content:' '+text+'\n'});
-  const [t]=f.store.data.topics,{id,agentName,createdAt,...rest}=t;
+  const [t]=f.store.data.topics,{id,agentName,createdAt,taskId,...rest}=t;assert.equal(f.tasks.get(taskId!).goal,text);
   assert.equal(agentName,'feishu-'+id.slice(0,8));assert.match(agentName,/^feishu-[0-9a-f]{8}$/);assert.ok(createdAt>0);
   assert.deepEqual(f.h.calls,[['workspace','list'],['workspace','create','--cwd',{path:'~/work'},'--label','飞书 · 个人助手','--no-focus'],['tab','rename','w1:t1',title],['agent','start',agentName,'--kind','claude','--pane','w1:p1','--timeout','60000','--','--permission-mode','default'],['pane','remote-answers','w1:p1','on'],['agent','prompt','w1:p1',text]]);
   assert.deepEqual(f.h.timeouts,[undefined,undefined,undefined,70000,undefined,undefined]);assert.deepEqual([...new Set(f.h.machines)],['m']);assert.equal(f.h.agents[0].remote_answers,true);
@@ -1770,6 +1772,82 @@ test('a card that fails ends its reply: the cards after it are dropped, nothing 
   assert.equal(f.t.replySeq,2);assert.deepEqual(forwarded(f),[['error',`个人助手：${f.t.agentName} 的回复只发出了前 1 张卡片，飞书未连接`],['info',`个人助手：已转发 ${f.t.agentName} 的回复`]]);
  }finally{f.close();}
 });
+// The task of the topic of fixture f as the core has it.
+const taskView=(f:{tasks:Tasks,store:Store})=>f.tasks.get(f.store.data.topics[0].taskId!);
+test('a topic has a task from the moment it begins: its goal and first input are its first message, and the title is the goal of a message without content',async()=>{
+ const f=topicFixture();try{
+  await f.send({messageId:'om_1',content:'请整理周报'});
+  const v=taskView(f);assert.equal(v.goal,'请整理周报');assert.deepEqual(v.inputs.map(i=>[i.ref,i.body]),[['feishu:om_1',{text:'请整理周报'}]]);
+  await f.send({messageId:'om_2',rootId:'om_1',content:'',resources:[{type:'image',fileKey:'k1'}] as ResourceDescriptor[]});
+  assert.equal(f.store.data.topics.length,1);assert.deepEqual(taskView(f).inputs[1].body,{text:'',resources:[{type:'image',fileKey:'k1'}]});
+  const t=f.store.data.topics[0];delete t.taskId;delete t.task;const id=f.topics.task(t);assert.equal(t.taskId,id);assert.equal(f.tasks.get(id).goal,t.title);assert.equal(f.topics.task(t),id);assert.equal(new Store(f.dir).data.topics[0].taskId,id);
+ }finally{f.close();}
+});
+test('a topic that has no task yet, an adopted one, gets it the first time a message is given to its agent, with the topic title as goal',async()=>{
+ const f=await readyTopic();try{
+  const t=f.t;delete t.taskId;delete t.task;t.title='接管的话题';
+  await f.send({messageId:'om_2',rootId:'om_1',content:'继续'});
+  const v=taskView(f);assert.equal(v.goal,'接管的话题');assert.deepEqual(v.inputs.map(i=>i.ref),['feishu:om_2']);
+ }finally{f.close();}
+});
+test('a later message in the thread is an input of the task before the agent is prompted, and also when prompting fails; a command that is not given to the agent is not an input',async()=>{
+ const f=await readyTopic();try{
+  const seen:string[][]=[];f.h.on['agent prompt']=async(args,run)=>{seen.push(taskView(f).inputs.map(i=>i.ref!));return run(args);};
+  await f.send({messageId:'om_2',rootId:'om_1',content:'再做一件事'});
+  assert.deepEqual(seen,[['feishu:om_1','feishu:om_2']]);assert.deepEqual(taskView(f).inputs.map(i=>i.body),[{text:'one'},{text:'再做一件事'}]);
+  f.h.on['agent prompt']=async()=>{throw Error('herdr 不可用');};
+  await f.send({messageId:'om_3',rootId:'om_1',content:'失败的一条'});
+  assert.deepEqual(taskView(f).inputs.map(i=>i.ref),['feishu:om_1','feishu:om_2','feishu:om_3']);
+  await f.send({messageId:'om_4',rootId:'om_1',content:'/stop'});
+  assert.equal(taskView(f).inputs.length,3);
+ }finally{f.close();}
+});
+test('the run of a schedule in mode into is an input of the task of its topic, with the card of the run as its ref',async()=>{
+ const f=scheduleFixture();try{
+  await f.send({messageId:'om_1',content:'one'});const t=f.store.data.topics[0];
+  f.at('2026-11-06T10:00:00+08:00');f.schedules.add({...daily,mode:'into',topicId:t.id,cron:'*/5 * * * *',task:'回复当前时间'});f.at('2026-11-06T10:05:00+08:00');await f.schedules.tick();
+  assert.deepEqual(taskView(f).inputs.map(i=>[i.ref,i.body]),[['feishu:om_1',{text:'one'}],['feishu:om_bot_1',{text:'回复当前时间'}]]);
+ }finally{f.close();}
+});
+test('a schedule run that opens a topic is the first input of its task, with the card of the run as its goal',async()=>{
+ const f=scheduleFixture();try{
+  f.at('2026-11-06T08:58:00+08:00');f.schedules.add(daily);f.at('2026-11-06T09:00:05+08:00');await f.schedules.tick();
+  const v=taskView(f);assert.equal(v.goal,f.store.data.topics[0].task!.content);assert.deepEqual(v.inputs.map(i=>i.ref),['feishu:'+f.store.data.topics[0].task!.messageId]);
+ }finally{f.close();}
+});
+test('every new agent reply is an output of the task delivered to the thread sink in order, with the seq on disk before the delivery; the delivery records the card ids',async()=>{
+ const f=await readyTopic();try{
+  const seen:number[]=[];const reply=f.topics.reply;f.topics.reply=async(...args)=>{seen.push(new Store(f.dir).data.topics[0].replySeq);return reply(...args);};
+  f.h.retained['w1:p1']=[{seq:1,text:'一'},{seq:2,text:'二',truncated:true}];
+  await f.topics.sync(f.m,f.snapshot(2));
+  const v=taskView(f);assert.deepEqual(v.outputs.map(o=>o.body),[{text:'一'},{text:'二',truncated:true}]);assert.deepEqual(seen,[1,2]);
+  assert.deepEqual(v.deliveries.map(d=>[d.state,d.target,d.receipt]),[['delivered',{sink:'thread',to:f.t.taskId},['om_bot_1']],['delivered',{sink:'thread',to:f.t.taskId},['om_bot_2']]]);
+  assert.deepEqual(forwarded(f),[['info',`个人助手：已转发 ${f.t.agentName} 的回复`],['info',`个人助手：已转发 ${f.t.agentName} 的回复`]]);
+ }finally{f.close();}
+});
+test('a card of a reply that fails leaves the delivery failed with the count of cards that went out, and the log says so as before',async()=>{
+ const f=await readyTopic();try{
+  const reply=f.topics.reply;let calls=0;f.topics.reply=async(...args)=>{if(++calls===2)throw Error('飞书未连接');return reply(...args);};
+  f.h.retained['w1:p1']=[{seq:1,text:Array(300).fill('"'.repeat(100)).join('\n')}];
+  await f.topics.sync(f.m,f.snapshot(1));
+  const [d]=taskView(f).deliveries;assert.deepEqual([d.state,d.error,d.receipt],['failed','只发出了前 1 张卡片，飞书未连接',null]);
+  assert.deepEqual(forwarded(f),[['error',`个人助手：${f.t.agentName} 的回复只发出了前 1 张卡片，飞书未连接`]]);
+ }finally{f.close();}
+});
+test('the thread sink rejects for a task that no topic has',async()=>{
+ const f=topicFixture();try{
+  const sink=threadSink({store:f.store,app:f.deps.app,reply:f.deps.reply});
+  await assert.rejects(sink.send('missing',{text:'x'},'k'),/没有这个任务的话题/);
+ }finally{f.close();}
+});
+test('what the agent attaches and drafts through bridge-message lands in the same task as the conversation',async()=>{
+ const f=await readyTopic();try{
+  f.m.session='default';const owner=f.m,call=loose<Call>(async(_m,method)=>method==='openLarkMessage'?{chatId:'oc_x',chatName:'群',chatType:'group',messageId:'om_x',sender:{id:'u',name:'某人'},at:1,text:'原文',link:'l'}:{});
+  const messages=new Messages(f.store,{tasks:f.tasks,topics:f.topics,app:f.deps.app,owner:()=>owner,call,reply:f.deps.reply,updateCard:f.deps.updateCard});
+  await messages.call(f.m,'attach',{pane:'w1:p1',messageId:'om_x'});
+  assert.equal(f.tasks.list().length,1);assert.deepEqual(taskView(f).inputs.map(i=>i.ref),['feishu:om_1','open-lark:om_x']);
+ }finally{f.close();}
+});
 test('sync forwards replies only for ready topics of its machine, bridge-opened or adopted, whose pane has an agent with remote answers on, whatever its name',async()=>{
  const f=topicFixture();try{
   const topic={bindingId:'b',appId:'a',chatId:'oc_1',machineId:'m',paneId:'w1:p1',agentName:'feishu-1',state:'ready',replySeq:0};
@@ -2412,7 +2490,7 @@ test('submitting an agent turns on its remote answers, links the topic to its ma
   assert.deepEqual(f.pick('om_bot_1',claudeChoice),{toast:{type:'info',content:'正在接管'}});
   await f.settled();
   assert.deepEqual(callsOn(f),[['m','api','snapshot'],['m','pane','remote-answers','w2:p1','on'],['m','agent','replies','w2:p1','--after','1']]);
-  const t=f.topic('om_cmd')!,{id,createdAt,messageIds,...rest}=t;
+  const t=f.topic('om_cmd')!,{id,createdAt,messageIds,taskId,...rest}=t;assert.equal(f.tasks.get(taskId!).goal,'接管 · 赤尾重构');
   assert.deepEqual(rest,{bindingId:'b',appId:'a',chatId:'oc_1',rootId:'om_cmd',machineId:'m',workspaceId:'w2',tabId:'w2:t1',paneId:'w2:p1',agentName:'赤尾重构',title:'接管 · 赤尾重构',state:'ready',error:'',replySeq:2,reactions:[],cards:[],adopted:{picker:'om_bot_1',kind:'claude',session:'s-claude'}});
   assert.equal(new Store(f.dir).data.topics.find(x=>x.id===id)!.state,'ready');assert.equal(f.h.agents.find(a=>a.pane_id==='w2:p1')!.remote_answers,true);
   assert.deepEqual(f.replies,[['a','oc_1','om_cmd',notice(['已接管 cpu2 上的 Claude · 赤尾重构','工作目录：~/code/herdr',...introLines,'最近一条回复：'].join('\n'),
