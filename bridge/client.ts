@@ -8,6 +8,7 @@ import type {ClientApi,ControlApi,Methods,Peer} from './link.ts';
 import type {ScheduleOps} from './agent-schedules.ts';
 import type {SkillReads} from './skills.ts';
 import type {MessageOps} from './messages.ts';
+import type {TaskOps} from './agent-tasks.ts';
 import type {OpenLark} from './open-lark.ts';
 // The Bridge client of a machine (bin/bridge-client.ts runs it, one per machine, as a user service). It dials the control plane at
 // the url of its config with the machine's token and stays connected over one WebSocket (see link.ts and clients.ts), does on this
@@ -57,9 +58,9 @@ export const clientSocket=(env=process.env)=>env.BRIDGE_CLIENT_SOCKET||path.join
 // How long the client waits for the control plane to answer a request of a command; the command waits a little longer for the client.
 export const forwardMs=60000;
 const notConnected='本机的 Bridge 客户端没有连上控制面：请稍后重试，一直这样时请主人查看这台机器上客户端的日志';
-// Takes the requests of bridge-schedule, bridge-skill and bridge-message on socket, which only this user may open, in a directory that it
-// creates 0700: POST /schedules/<op>, /skills/<op> and /messages/<op> with a JSON body. While the client is connected (peer() returns the
-// link of its connection, else null), each goes to the control plane as the request schedules, skills or messages {op, body}, which the
+// Takes the requests of bridge-schedule, bridge-skill, bridge-message and bridge-task on socket, which only this user may open, in a directory that it
+// creates 0700: POST /schedules/<op>, /skills/<op>, /messages/<op> and /tasks/<op> with a JSON body. While the client is connected (peer() returns the
+// link of its connection, else null), each goes to the control plane as the request schedules, skills, messages or tasks {op, body}, which the
 // control plane answers for the machine of that connection (see Clients); the client does not look into it, so what it may ask is up to
 // the control plane, which answers only reads of skills that come this way. Answers 200 with the result, 400 with what the control plane
 // refused or when it did not answer within forwardMs, 503 while the client is not connected. A socket already at that path is one that an
@@ -68,22 +69,22 @@ export async function serve(socket:string,peer:()=>Peer<ControlApi>|null){
  const answer=(res:http.ServerResponse,code:number,data:unknown)=>{res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
  const server=http.createServer(async(req,res)=>{
   // A request that a server received has its url.
-  const [,method,op]=req.method==='POST'&&/^\/(schedules|skills|messages)\/([a-z]+)$/.exec(new URL(req.url!,'http://localhost').pathname)||[];if(!op)return answer(res,404,{error:'接口不存在'});
+  const [,method,op]=req.method==='POST'&&/^\/(schedules|skills|messages|tasks)\/([a-z]+)$/.exec(new URL(req.url!,'http://localhost').pathname)||[];if(!op)return answer(res,404,{error:'接口不存在'});
   let s='',body;req.setEncoding('utf8');for await(const b of req)if(s.length<=100000)s+=b;
   if(s.length>100000)return answer(res,400,{error:'请求内容过大'});
   try{body=JSON.parse(s||'{}');}catch{return answer(res,400,{error:'请求内容不是 JSON'});}
   const p=peer();if(!p)return answer(res,503,{error:notConnected});
-  // The pattern of the path lets only these three through.
-  try{answer(res,200,await p.call(method as 'schedules'|'skills'|'messages',{op,body},{timeoutMs:forwardMs}));}
+  // The pattern of the path lets only these four through.
+  try{answer(res,200,await p.call(method as 'schedules'|'skills'|'messages'|'tasks',{op,body},{timeoutMs:forwardMs}));}
   catch(e){answer(res,400,{error:e.timedOut?`控制面 ${forwardMs/1000} 秒内没有回答`:String(e.message)});}
  });
  await fs.promises.mkdir(path.dirname(socket),{recursive:true,mode:0o700});await fs.promises.rm(socket,{force:true});
  await new Promise<void>((resolve,reject)=>{server.once('error',reject);server.listen(socket,resolve);});
  fs.chmodSync(socket,0o600);return server;
 }
-// What the commands ask by path (see serve): the request and the answer of each operation of bridge-schedule and bridge-message and of each
+// What the commands ask by path (see serve): the request and the answer of each operation of bridge-schedule, bridge-message and bridge-task and of each
 // read of bridge-skill, as Bridge defines them.
-type Requests={[K in keyof ScheduleOps as `/schedules/${K}`]:ScheduleOps[K]}&{[K in keyof SkillReads as `/skills/${K}`]:SkillReads[K]}&{[K in keyof MessageOps as `/messages/${K}`]:MessageOps[K]};
+type Requests={[K in keyof ScheduleOps as `/schedules/${K}`]:ScheduleOps[K]}&{[K in keyof SkillReads as `/skills/${K}`]:SkillReads[K]}&{[K in keyof MessageOps as `/messages/${K}`]:MessageOps[K]}&{[K in keyof TaskOps as `/tasks/${K}`]:TaskOps[K]};
 // Where a command writes: process.stdout and process.stderr, or what a test puts in their place.
 export type Output={write(text:string):unknown};
 // Sends the request of a command, path with body, to the client on socket (see serve), on a connection of its own, and resolves to Bridge's

@@ -99,6 +99,8 @@ BRIDGE_MODEL_NAME=<模型名>
 exec "$HOME/.local/share/fnm/node-versions/v24.13.0/installation/bin/node" "$HOME/<Bridge 目录相对 home 的路径>/bin/bridge-message.ts" "$@"
 ```
 
+`bridge-task` 同样放一个包装脚本，例如 `~/.local/bin/bridge-task`，内容与上面相同，只把 `bridge-message.ts` 换成 `bridge-task.ts`。这次升级把协议版本从 8 升到 9：控制面和所有机器的客户端一起升级，客户端才会转发 `bridge-task` 的请求。
+
 **升级到有项目和 Agent 配置的版本**：控制面和所有机器的客户端一起升级（协议版本 7，见下面「实现」的客户端连接）。控制面第一次启动时迁移状态文件（见下面「接入」的「旧版本升级」）；旧版本读不了迁移后的文件，所以迁移前的状态文件先原样复制到状态目录里的 `state.json.before-projects`（已经有这个文件时不覆盖），要退回旧版本时用它换回 `state.json`，同时也要把各机器的客户端退回去；之后每台机器的客户端连上时再把它上面接管了目录的项目转换成仓库项目；迁移后项目的名称、描述和仓库列表在管理台调整。Bridge 在一台机器上第一次用到一个仓库时 clone 它，所以那台机器要能拉取这个仓库（例如有对应主机的 SSH 访问）；仓库放在 `~/.local/share/herdr-bridge` 下（见下面「实现」的「项目的目录和 Agent 的启动准备」），迁移来的项目沿用原来的目录。进行中的话题继续用它们原来的目录。部署后 `/wt` 不再存在，也会从应用的斜杠命令面板里消失（见上面「斜杠命令」）。
 
 **部署管家**（管家话题只能执行 `butler`，用到上面升级时迁移出来的绑定）：
@@ -202,7 +204,19 @@ exec "$HOME/.local/share/fnm/node-versions/v24.13.0/installation/bin/node" "$HOM
     - **修改和点击**：只有应用允许名单里的人可以点击。「修改」把卡片改为一个预填正文的输入框和「发送」「取消」；「取消」画回待确认状态；「不发」记下未发送，卡片只显示「未发送」，不再有按钮。「发送」调用 open-lark，成功后记下消息 ID 和时间，卡片改为「已发送给 <人名或群名> · <时间>」，不再有按钮。表单改正文后会换新的 `clientId`，并去掉正文里已经没有 `@名字` 的 mention，避免 open-lark 按旧 `clientId` 保留第一次的正文。同一份草稿正在发送或已经不是待确认状态时再点「发送」不会重复发送；话题结束以后草稿仍可由主人确认发送。
     - **确认才发送**：`reply` 和 `send` 输出的是「已发出确认卡片，主人点「发送」后才会发出」，不是已经发出。卡片按钮的点击由飞书直接交给 Bridge，不经过 Agent；不能用在对话里回复「确认」代替。没有配置 owner 机器、客户端离线或没有配置 open-lark、open-lark 没有响应或拒绝发送时，卡片保留待确认按钮并写明原因，可以恢复后再次发送；成功和失败都记入类别「消息」的连接日志。
     - **Agent 的说明**：平台上的 `bridge-message` skill 用中文说明什么时候值得起草（查到问题原因、需要同事行动、事情完成），怎样用主人的口吻写一两句话，怎样先 attach 再 reply，以及为什么不能把「确认卡片已发出」说成「消息已发出」。它明确不按网页、文件、群消息等读到的内容起草或发送，参数和报错只看 `bridge-message --help`。由管理员导入平台并设为默认加载，不要另装到 Agent 的全局 skill 目录。
-11. **Skill**：Bridge 保存一组给 Agent 用的 skill（存储见下面「实现」的「skill 的存储」）。管理台的「Skills」页列出它们：名称、描述，以及「默认加载」还是「按需读取」。「+ 新建 skill」填名称和 SKILL.md，SKILL.md 预先填好 frontmatter 的 `name` 和 `description` 两行；卡片上的「编辑」只改 SKILL.md，skill 的其他文件列在 SKILL.md 下面，网页里不编辑它们，按目录整体导入用 `bridge-skill import`（见下面）。卡片上的「设为默认加载」「设为按需读取」在两者之间切换：Bridge 每次为话题启动 Agent 之前（包括定时任务开的话题），把默认加载的 skill 和话题所属项目的 skill 放进 Agent 的工作目录，位置是绑定的 Agent 读项目级 skill 的地方：Claude 是 `<工作目录>/.claude/skills/<名称>`，Codex 和 Antigravity 是 `<工作目录>/.agents/skills/<名称>`；内容变了的同时更新，Bridge 以前放的、现在已经改为按需读取或者删除的从这个目录里移走（做法见下面「实现」的「放置 skill」）。工作目录里的 skill 在这个目录下一次开话题时才放进去、更新或移走；已经在运行的 Agent 用的是它启动时读到的 skill。只有按需读取的 skill 有「删除」：要删除默认加载的 skill，先把它设为按需读取，这样一次误点不会让所有话题都失去它。skill 没有版本历史，覆盖和删除都不能撤销。
+11. **结束任务（`bridge-task`）**：每个话题有一个任务。话题和任务不是一回事：Agent 退出时话题结束，下一条消息会再起一个 Agent，任务仍然开着；只有 Agent 判断目标达成、产出已经交付，或者主人说不做了，才由 Agent 自己结束任务。
+
+    ```text
+    bridge-task end (--achieved | --dropped) --reason <原因>
+    ```
+
+    - **命令**：包装脚本 `bridge-task`（见上面「机器上的客户端」），与 `bridge-message` 一样只连本机客户端，带上 `HERDR_PANE_ID` 和 `HERDR_SESSION`。`--achieved` 和 `--dropped` 必须给一个且只能给一个，`--reason` 必填，一两句话写结果或放弃的原因。所有选项、退出码和报错处理由 `bridge-task --help` 写全。
+    - **控制面的处理**：由 `AgentTasks` 按 pane 找到话题（与 `bridge-message` 相同的认人规则），在话题队列里处理。任务已经结束时拒绝；`--achieved` 时任务还有等主人确认或正在发送的交付（草稿）时拒绝，并告诉 Agent 草稿还在等主人。否则把结束请求记在话题上，回答任务会在当前这一轮结束时结束。
+    - **什么时候生效**：Agent 通常在运行命令之后还会写最后一条回复，它是任务的产出，而任务核心拒绝已结束任务的产出，所以不立即结束。`Topics.sync` 在提出请求的那一轮结束、并且到这一轮为止的回复都已转发之后，才用记下的结果和原因结束任务并清掉请求；Agent 先退出时，在话题结束时生效。结束失败（期间出现了待确认的草稿、策略拒绝）时请求被清掉，记一条错误日志，话题里发一条「任务没有结束：<原因>」。请求之后主人又发了消息，请求作废。
+    - **话题里的显示**：任务结束时发「任务已完成：<原因>」或「任务已放弃：<原因>」，重新打开时发「任务已重新打开」，都是普通提示卡片。
+    - **重新打开**：主人的下一条消息（包括主人的定时任务发进话题的那一条）在记为输入之前先重新打开已结束的任务；用 `bridge-message attach` 带进来的同事消息不会。已结束的任务上 `bridge-message reply` 和 `send` 被拒绝，提示任务已经结束。
+    - **Agent 的说明**：平台上的 `bridge-task` skill 说明什么时候结束任务（目标达成且产出已交付，或者主人说放弃）、结束在当前这一轮结束时生效，以及原因写一两句话。由管理员导入平台并设为默认加载。
+12. **Skill**：Bridge 保存一组给 Agent 用的 skill（存储见下面「实现」的「skill 的存储」）。管理台的「Skills」页列出它们：名称、描述，以及「默认加载」还是「按需读取」。「+ 新建 skill」填名称和 SKILL.md，SKILL.md 预先填好 frontmatter 的 `name` 和 `description` 两行；卡片上的「编辑」只改 SKILL.md，skill 的其他文件列在 SKILL.md 下面，网页里不编辑它们，按目录整体导入用 `bridge-skill import`（见下面）。卡片上的「设为默认加载」「设为按需读取」在两者之间切换：Bridge 每次为话题启动 Agent 之前（包括定时任务开的话题），把默认加载的 skill 和话题所属项目的 skill 放进 Agent 的工作目录，位置是绑定的 Agent 读项目级 skill 的地方：Claude 是 `<工作目录>/.claude/skills/<名称>`，Codex 和 Antigravity 是 `<工作目录>/.agents/skills/<名称>`；内容变了的同时更新，Bridge 以前放的、现在已经改为按需读取或者删除的从这个目录里移走（做法见下面「实现」的「放置 skill」）。工作目录里的 skill 在这个目录下一次开话题时才放进去、更新或移走；已经在运行的 Agent 用的是它启动时读到的 skill。只有按需读取的 skill 有「删除」：要删除默认加载的 skill，先把它设为按需读取，这样一次误点不会让所有话题都失去它。skill 没有版本历史，覆盖和删除都不能撤销。
 
     - **`bridge-skill` 命令**：Agent 查找和阅读平台上的 skill、主人在命令行管理 skill，都用这个命令；`bridge-skill --help` 写全了每个操作、需要的环境变量、退出码和每种报错该怎么办。读（`list`、`search <词>...`、`read <名称>`，加 `--json` 输出 Bridge 返回的 JSON）和 `bridge-schedule` 一样只连本机的 Bridge 客户端，由客户端经它的连接转给 Bridge，不需要密钥。`search` 找名称、描述或 SKILL.md 正文里包含所有这些词的 skill，不分大小写，名称或描述里包含的排在前面。`read` 输出 SKILL.md 全文；skill 带有其他文件时，客户端先把整个 skill 放进这台机器的存放目录 `~/.local/share/herdr-bridge/skills/<名称>`（和放置 skill 用同一个，见下面「放置 skill」），命令在正文前写出这个目录和文件列表，SKILL.md 里的相对路径都相对它。管理（`import <目录>`、`export <名称> [<目录>]`、`preload <名称> on|off`、`remove <名称>`）直接调用管理台的接口，要设置 `BRIDGE_URL`（管理台的地址，例如 `http://<控制面>:8080`）和 `BRIDGE_ACCESS_KEY`（状态目录里 `access-key` 的内容），在哪台能访问管理台的机器上运行都可以，不经过客户端。`import` 以目录名为名称，导入目录里的全部普通文件，有软链接或其他特殊文件时拒绝，但略过固定的一张表里的名称（任何一层目录里都算）：运行环境 `.venv`、`node_modules`，缓存 `__pycache__`、`.pytest_cache`、`.mypy_cache`、`.ruff_cache`、`.DS_Store`，以及 macOS 的 AppleDouble 文件 `._*`。它们属于读目录的那台机器：`.venv` 和系统、架构绑定，一个就可能上百 MB，依赖由使用 skill 的机器自己安装。输出是 `已导入 <名称>`，略过了东西时在后面写 `（略过本机的运行环境和缓存：…）`，只列这次实际略过的名称。表是固定的，不做成配置。已有同名 skill 时整个替换它的文件、是否默认加载不变；`export` 写到 `<目录>/<名称>`（不给目录时是当前目录），已经存在时拒绝，不覆盖。
     - **为什么只有管理员能修改 skill**：客户端的 socket 这台机器上的任何 Agent 都能连，包括被网页、文件或群消息里的文字诱导的 Agent；而平台上的 skill 会放进之后所有 Agent 的工作目录或被它们读到。所以 Bridge 对经客户端来的 skill 请求只回答 `list`、`search` 和 `read`，其他操作一律拒绝（「未知的操作」），Bridge 已断开的机器连读也不回答；写 skill 只能用登录后的管理台或访问密钥，和其他管理接口一样。

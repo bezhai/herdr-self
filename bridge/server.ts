@@ -14,6 +14,7 @@ import {Messages,ownerSink,sinkName} from './messages.ts';
 import {Tasks} from './task-core.ts';
 import {threadSink,threadSinkName} from './thread-sink.ts';
 import {AgentSchedules} from './agent-schedules.ts';
+import {AgentTasks} from './agent-tasks.ts';
 import {staticFile,sendStatic} from './web-assets.ts';
 import {Clients} from './clients.ts';
 import {configText,consoleUrl} from './client.ts';
@@ -57,6 +58,7 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 const messages=new Messages(store,{tasks,topics,app:id=>platforms.app(id),owner,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
+const agentTasks=new AgentTasks(store,{topics,tasks,app:id=>platforms.app(id)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,taskId,deliveryCards,sources,drafts,...t}:Topic&{sources?:unknown,drafts?:unknown})=>t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
@@ -67,7 +69,7 @@ const allowedHost=(req:http.IncomingMessage)=>['localhost','127.0.0.1',os.hostna
 const refusal=(e:Error)=>{throw Error(publicText(e.message).slice(0,1200));};
 // Once the client of a machine is in, the projects that adopted a directory there are asked about it (see convertAdopted), one machine after the other.
 const conversions=new Map<string,Promise<unknown>>();
-const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal),messages:(m,{op,body})=>messages.call(m,op,body).catch(refusal)}});
+const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal),messages:(m,{op,body})=>messages.call(m,op,body).catch(refusal),tasks:(m,{op,body})=>agentTasks.call(m,op,body).catch(refusal)}});
 function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}

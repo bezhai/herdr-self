@@ -57,6 +57,8 @@ const waits=(agent:Agent)=>agent.agent_status==='blocked'||requestIds(agent).len
 // Whether the open COT of topic t has news in agent of a list: tool calls after the seq it shows (tool_call_seq is missing in Herdr versions
 // without tool call records), a change between running and waiting for a confirmation, or the end of its turn.
 const news=(t:Topic,agent:Agent)=>!!t.cot&&(agent.tool_call_seq!=null&&agent.tool_call_seq!==(t.cot.toolSeq||0)||waits(agent)!==Boolean(t.cot.waiting)||turnEnded(t.cot.stateSeq,agent));
+// Whether the end that the agent of topic t asked for (see AgentTasks) is due: the turn in which it asked has ended.
+const ending=(t:Topic,agent:Agent)=>t.endRequest!=null&&turnEnded(t.endRequest.stateSeq,agent);
 // The AG-UI run of the open COT of topic t.
 const run=(t:Topic)=>({threadId:t.rootId,runId:t.cot!.origin});
 const toast=(type:string,content:string)=>({toast:{type,content}});
@@ -282,6 +284,7 @@ export class Topics{
  // its attachments is removed. A reaction still being added is removed when its message settles, unprompted.
  async end(a:App,t:Topic,text:string,reason:string){
   this.update(t,{state:'closed',endedAt:this.now()});
+  await this.finish(t);
   await this.notify(a,t,text);
   await this.wrapUp(a,t,reason);
  }
@@ -438,11 +441,14 @@ export class Topics{
   return Promise.all(this.store.data.topics.filter(t=>t.machineId===m.id&&t.state==='ready').map(t=>{
    const agent=linked(t,agents),seq=agent?.reply_seq,fetch=seq!=null&&seq!==(t.replySeq||0);
    const ids=requestIds(agent),cards=this.gone(t,ids).length>0||this.fresh(t,ids).length>0,blocked=this.blocked(t,agent,ids),cot=agent&&news(t,agent);
-   if(agent&&!fetch&&!ended(t,agent).length&&!cards&&blocked==null&&!cot)return;
+   if(agent&&!fetch&&!ended(t,agent).length&&!cards&&blocked==null&&!cot&&!ending(t,agent))return;
    return enqueue(this.topicQueues,t.id,async()=>{
     if(!agent){if(cards)await this.cards(m,t,ids);await this.alive(this.app(t.appId),t);return;}
-    try{if(fetch)await this.pull(m,t,seq);for(const r of ended(t,agent))await this.dropReaction(t,r);}
-    catch(e){this.store.log('回复转发',`${t.agentName}：${brief(e)}`,'error');}
+    try{
+     if(fetch)await this.pull(m,t,seq);for(const r of ended(t,agent))await this.dropReaction(t,r);
+     // Only after the replies up to this list went out: one that failed to be fetched leaves the end for the next list.
+     if(ending(t,agent)&&t.state==='ready')await this.finish(t);
+    }catch(e){this.store.log('回复转发',`${t.agentName}：${brief(e)}`,'error');}
     if(cards)await this.cards(m,t,ids);
     if(blocked!=null&&t.state==='ready'&&t.blockedSeq!==blocked){this.update(t,{blockedSeq:blocked});await this.notify(this.app(t.appId),t,'Agent 正在等待终端里的操作，请到 Herdr 中处理');}
     if(cot)await this.advance(m,t,agent);
@@ -696,8 +702,20 @@ export class Topics{
  // place every message of the agent goes through, whether it is a person's, the first one of the topic or the run of a schedule. A message that
  // is already an input (Feishu delivering it twice) is not added again. Never rejects: a task that cannot take it is only logged.
  record(t:Topic,msg:Message){
-  try{this.tasks.addInput(this.task(t),{text:msg.content,...msg.resources&&{resources:msg.resources}},'feishu:'+msg.messageId);}
+  try{
+   const task=this.task(t);
+   // The owner wrote again: an ended task is open before its input is added, and an end that the agent asked for in this turn no longer stands.
+   if(this.tasks.get(task).state!=='open')this.tasks.reopen(task,'the owner wrote again');
+   if(t.endRequest)this.update(t,{endRequest:undefined});
+   this.tasks.addInput(task,{text:msg.content,...msg.resources&&{resources:msg.resources}},'feishu:'+msg.messageId);}
   catch(e){this.store.log('话题任务',`${t.agentName}：未能记录消息，${brief(e)}`,'error');}
+ }
+ // Applies the end that the agent of topic t asked for (see AgentTasks) and forgets the request, whatever comes of it: a task that cannot end
+ // (a draft became pending meanwhile, the policy refused) stays open, the failure is logged and the thread says why. Never rejects.
+ async finish(t:Topic){
+  const r=t.endRequest;if(!r)return;this.update(t,{endRequest:undefined});
+  try{this.tasks.end(this.task(t),r.outcome,r.reason);}
+  catch(e){this.store.log('话题任务',`${t.agentName}：任务没有结束，${brief(e)}`,'error');await this.notify(this.app(t.appId),t,`任务没有结束：${brief(e)}`);}
  }
  // Sends the agent's replies after t.replySeq, up to seq from the agent list, into the thread.
  async pull(m:Machine,t:Topic,seq:number){

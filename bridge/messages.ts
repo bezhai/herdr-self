@@ -1,5 +1,5 @@
 import {publicText,oneOf,isRecord} from './core.ts';
-import {sourceCard,draftCard} from './outbound-cards.ts';import {fits} from './message-cards.ts';import {clip} from './request-cards.ts';
+import {sourceCard,draftCard} from './outbound-cards.ts';import {fits,notice} from './message-cards.ts';import {clip} from './request-cards.ts';
 import type {Store,Call} from './core.ts';
 import type {App,Machine,Topic,Mention} from './state.ts';
 import type {Topics} from './topics.ts';
@@ -114,7 +114,9 @@ export class Messages{
   // The ids that the card shows are UUIDs, so a probe of that length measures the real card.
   const probe:Delivery={id:'0'.repeat(36),task,output:'',target,body,key:'',state:'awaiting',receipt:null,error:null,createdAt:now};
   if(!fits(draftCard(probe,'pending',{render:this.renders+1,now,quoted})))throw Error('正文太长，确认卡片放不下，请缩短后重新提交');
-  const {tasks}=this.deps,delivery=await tasks.deliver(tasks.addOutput(task,body).id,target);
+  const {tasks}=this.deps;let delivery;
+  try{delivery=await tasks.deliver(tasks.addOutput(task,body).id,target);}
+  catch(e){throw e?.code==='ended'?Error('这个任务已经结束，不能再起草消息：主人在话题里再写一条消息后任务会重新打开'):e;}
   await tasks.settled();
   const reason=this.refused.get(delivery.id);
   if(reason!==undefined){this.refused.delete(delivery.id);throw Error(`确认卡片没有发出去：${reason}，请稍后重试`);}
@@ -125,10 +127,12 @@ export class Messages{
  async view(r:JournalRecord):Promise<void>{
   try{await this.show(r);}catch(e){this.store.log('消息',`话题里的卡片未能画出：${brief(e)}`,'error');}
  }
- // What a record changes in the thread: an input that is a message gets its source card; an awaiting delivery gets its draft card, or a
+ // What a record changes in the thread: a task that ended or reopened gets a notice with the reason; an input that is a message gets its source card; an awaiting delivery gets its draft card, or a
  // redrawn one when a retry made it await again; delivered, failed and rejected deliveries redraw it as sent, pending with the reason, and dropped.
  async show(r:JournalRecord):Promise<void>{
   const t=this.store.data.topics.find(x=>x.taskId===r.task);if(!t)return;
+  const ended=r.type==='task.ended'?(r.data.outcome==='achieved'?'任务已完成：':'任务已放弃：')+String(r.data.reason):r.type==='task.reopened'?'任务已重新打开':'';
+  if(ended)return void await this.deps.reply(this.deps.app(t.appId),t.chatId,t.rootId,{card:notice(ended)});
   if(r.type==='input.added'){
    const input=this.deps.tasks.get(r.task).inputs.find(i=>i.id===r.data.input);
    if(typeof input?.ref==='string'&&input.ref.startsWith(refPrefix))await this.deps.reply(this.deps.app(t.appId),t.chatId,t.rootId,{card:sourceCard(input.body as OwnerMessage,this.deps.now())});

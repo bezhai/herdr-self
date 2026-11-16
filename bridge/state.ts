@@ -1,5 +1,6 @@
 import type {ResourceDescriptor} from '@larksuite/channel';
 import type {Cot} from './cot.ts';
+import type {Outcome} from './task-types.ts';
 // What Bridge keeps in its state file, collection by collection (see Store in core.ts). Types only: every module that reads or writes a
 // collection takes its shape from here.
 
@@ -33,6 +34,9 @@ export type AgentConfig={id:string,name:string,machineId:string,kind:Kind,model?
 // several machines.
 export type Binding={id:string,name:string,appId:string,chatId:string,chatType:'p2p'|'group',requireMention:boolean,enabled:boolean,defaultProjectId?:string,defaultAgentConfigId:string,
  workspaces?:Record<string,string>};
+// How an agent asked its topic's task to end: as outcome with reason, in the turn after which the agent had state_change_seq stateSeq (null
+// when it reported none, so that only the end of the topic applies it).
+export type EndRequest={outcome:Outcome,reason:string,stateSeq:number|null};
 // A topic of a binding (see topics.ts). An adopted topic waits for an agent to adopt while choosing. A topic that a schedule opened is scheduled by run n of schedule id; a topic of an agent that submitted a schedule holds its
 // proposal until the card is clicked or expires (see AgentSchedules). A topic that Bridge started has the message that opened it (task), the
 // project and the agent configuration it started with, the branch of its worktrees (a project with repos that is isolated) and the directory
@@ -41,11 +45,11 @@ export type Binding={id:string,name:string,appId:string,chatId:string,chatType:'
 // first card of the topic, with the dropdowns that start it again, is startCard. A topic that ended or failed has endedAt, and swept once its
 // workspace was removed (see Topics.sweep). Its agent brings messages in and drafts messages to send as the owner (see Messages), which are
 // the inputs and the deliveries of its task (taskId, in the task database; a topic gets it when it begins, an older or adopted one when something first needs it), and deliveryCards holds the
-// card of each delivery that the thread shows, by delivery id.
+// card of each delivery that the thread shows, by delivery id. endRequest is the end that its agent asked for with bridge-task, until the agent's turn has ended (see Topics.sync).
 export type Topic={id:string,bindingId:string,appId:string,chatId:string,rootId:string,machineId:string,workspaceId:string,tabId:string,paneId:string,agentName:string,title:string,
  state:'starting'|'ready'|'failed'|'closed'|'choosing',error:string,messageIds:string[],replySeq:number,reactions:Reaction[],cards:RequestCard[],createdAt:number,
  adopted?:{picker?:string,kind?:string,session?:string},task?:{messageId:string,content:string,resources?:ResourceDescriptor[]},projectId?:string,agentConfigId?:string,branch?:string,cwd?:string,routed?:true,startCard?:string,endedAt?:number,swept?:true,
- scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number,taskId?:string,deliveryCards?:Record<string,string>};
+ scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number,taskId?:string,endRequest?:EndRequest,deliveryCards?:Record<string,string>};
 // A Feishu chat as open-lark, the owner's Feishu client, reads it (see open-lark.ts), with open-lark's id, which is not the open platform's
 // id of the bot: chatName is the group's name, or the other person's for a direct chat (p2p).
 export type OwnerChat={chatId:string,chatName:string,chatType:'p2p'|'group'};

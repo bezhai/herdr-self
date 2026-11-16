@@ -1,6 +1,6 @@
 // Tests of messages.ts (see package.json); run with node --test.
 import {test} from 'node:test';import strictAssert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {Messages,ownerSink} from './messages.ts';import {Store} from './core.ts';import {Tasks} from './task-core.ts';import {sourceCard,draftCard} from './outbound-cards.ts';import {clip} from './request-cards.ts';
+import {Messages,ownerSink} from './messages.ts';import {notice} from './message-cards.ts';import {Store} from './core.ts';import {Tasks} from './task-core.ts';import {sourceCard,draftCard} from './outbound-cards.ts';import {clip} from './request-cards.ts';
 import type {Call} from './core.ts';import type {App,Machine,Topic} from './state.ts';import type {ClientApi,OwnerMessage,Sent} from './link.ts';import type {Click} from './request-cards.ts';import type {MessageOps} from './messages.ts';import type {Body} from './outbound-cards.ts';
 import type {Delivery,Policy} from './task-types.ts';
 // The assertions of node:assert/strict without narrowing what they check: the state of a delivery changes after an assertion.
@@ -238,4 +238,28 @@ test('a failed card update is only logged and never turns a successful send into
  const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
  f.failUpdate(Error('update refused'));f.messages.click(app,click(d,'send'));await f.flush();
  assert.equal(current(f,d).state,'delivered');assert.ok(f.store.data.logs.some(l=>l.level==='error'&&l.message.includes('update refused')));
+});
+
+test('the thread shows when the task ended and when it was reopened, with the reason, as notices',async t=>{
+ const f=fixture();t.after(f.close);
+ await invoke(f,'attach',{pane:'pane',messageId:'message-1'});await f.flush();f.replies.length=0;
+ f.tasks.end(f.topic.taskId!,'achieved','周报已整理并发给了主人');await f.flush();
+ f.tasks.reopen(f.topic.taskId!,'owner wrote');await f.flush();
+ f.tasks.end(f.topic.taskId!,'dropped','主人说不用了');await f.flush();
+ assert.deepEqual(f.replies.map(r=>r.card),[notice('任务已完成：周报已整理并发给了主人'),notice('任务已重新打开'),notice('任务已放弃：主人说不用了')]);
+ assert.deepEqual(f.replies.map(r=>[r.chatId,r.rootId]),Array(3).fill(['oc_topic','om_root']));
+});
+test('attach brings a message into an ended task without reopening it',async t=>{
+ const f=fixture();t.after(f.close);
+ await invoke(f,'attach',{pane:'pane',messageId:'message-1'});f.tasks.end(f.topic.taskId!,'achieved','好了');
+ await invoke(f,'attach',{pane:'pane',messageId:'message-2'});
+ assert.equal(f.tasks.get(f.topic.taskId!).state,'achieved');assert.equal(f.tasks.get(f.topic.taskId!).inputs.length,2);
+});
+test('reply and send on an ended task are refused with a readable message and draft nothing',async t=>{
+ const f=fixture();t.after(f.close);
+ await invoke(f,'attach',{pane:'pane',messageId:'message-1'});f.tasks.end(f.topic.taskId!,'achieved','好了');f.replies.length=0;
+ const refused=(e:Error&{code?:string})=>e.message==='这个任务已经结束，不能再起草消息：主人在话题里再写一条消息后任务会重新打开'&&e.code===undefined;
+ await assert.rejects(invoke(f,'reply',{pane:'pane',messageId:'message-1',text:'好的'}),refused);
+ await assert.rejects(invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'你好'}),refused);
+ assert.equal(f.deliveries().length,0);assert.equal(f.tasks.get(f.topic.taskId!).outputs.length,0);
 });

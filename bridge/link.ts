@@ -14,8 +14,8 @@ import type {Kind,PermissionMode,WorkMode,OwnerChat,Mention} from './state.ts';
 // askCheapModel. 6: the control plane asks the model itself, so askCheapModel is gone, and describeRepos returns the READMEs instead of a description.
 // 7: the control plane keeps the store of skills of every machine in line with the platform (compareSkills, stockSkill, pruneSkills), which a
 // client of 6 cannot answer. 8: the client of the machine that runs open-lark reads chats and messages of Feishu and sends messages as the
-// owner (openLarkMessage, openLarkChat, openLarkReply, openLarkSend), and every client passes the requests of bridge-message on (messages).
-export const protocol=8;
+// owner (openLarkMessage, openLarkChat, openLarkReply, openLarkSend), and every client passes the requests of bridge-message on (messages). 9: every client passes the requests of bridge-task on (tasks).
+export const protocol=9;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 // What one side may ask of the other: the params of each method and what it resolves to. A side's methods (see link) are async functions
@@ -92,12 +92,13 @@ export type ClientApi={
  openLarkSend:{params:Timed<{chatId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
 };
 // What the client of a machine asks of the control plane (see Clients): the hello with which its connection gets in, and the requests of
-// bridge-schedule, bridge-skill and bridge-message, which the client passes on without looking into them (see serve in client.ts).
+// bridge-schedule, bridge-skill, bridge-message and bridge-task, which the client passes on without looking into them (see serve in client.ts).
 export type ControlApi={
  hello:{params:{protocol:number,host:string},result:{machine:{id:string,name:string},heartbeatMs:number}},
  schedules:{params:{op:string,body:unknown},result:unknown},
  skills:{params:{op:string,body:unknown},result:unknown},
  messages:{params:{op:string,body:unknown},result:unknown},
+ tasks:{params:{op:string,body:unknown},result:unknown},
 };
 // The other side of a link (see link).
 export type Peer<Theirs extends Api>={call<K extends keyof Theirs&string>(method:K,params:Theirs[K]['params'],options?:{timeoutMs?:number}):Promise<Theirs[K]['result']>};

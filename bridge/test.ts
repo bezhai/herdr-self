@@ -6,10 +6,10 @@ import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLim
 import {namingPrompt,parseBranch,validBranch,branchOf,branchFromText,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';import {threadSink,threadSinkName} from './thread-sink.ts';import {Tasks} from './task-core.ts';import {Messages} from './messages.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
-import {ChatBindings} from './chat-bindings.ts';
+import {ChatBindings} from './chat-bindings.ts';import {AgentTasks} from './agent-tasks.ts';
 import {registerCommands,commands} from './commands.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules,isMode} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
-import {check,card,plain} from './request-cards.ts';import {fits} from './message-cards.ts';import {nameOf} from './adoption.ts';
+import {check,card,plain} from './request-cards.ts';import {fits,notice as noticeCard} from './message-cards.ts';import {nameOf} from './adoption.ts';
 import {Registrations} from './registration.ts';import {staticFile,sendStatic} from './web-assets.ts';import {fileURLToPath} from 'node:url';
 import {normalize} from '@larksuite/channel';
 import crypto from 'node:crypto';import {WebSocketServer} from 'ws';import type {WebSocket as WsSocket} from 'ws';import type {AddressInfo} from 'node:net';
@@ -3881,7 +3881,7 @@ test('with a real Bridge and the real client of a machine, its store of skills f
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-sync-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  fs.mkdirSync(home);const kept=path.join(home,'.local/share/herdr-bridge/skills'),server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
  try{
-  assert.equal(protocol,8);
+  assert.equal(protocol,9);
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
   const logs=async()=>((await api('state')).logs as Log[]).filter(l=>l.kind==='skill').map(l=>l.message);
   const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});
@@ -4677,5 +4677,93 @@ test('the first task of a chat bound with the card starts like any topic of a bo
   assert.deepEqual([topic.bindingId,topic.rootId,topic.state,topic.projectId,topic.agentConfigId,topic.cwd],[binding.id,'om_task','ready','p','c','~/work']);
   assert.deepEqual(f.prepared.map(p=>[p[0],(p[1] as {project:{id:string}}).project.id]),[['m','p']]);assert.deepEqual(f.launched,[['m',{kind:'claude',permissionMode:'default',dir:'~/work'}]]);
   assert.deepEqual(f.h.calls.filter(c=>c[1]==='start').map(c=>c.slice(-3)),[['--','--permission-mode','default']]);assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['修复登录页']);
+ }finally{f.close();}
+});
+
+// bridge-task end: the request of the agent is kept on its topic and applied when its turn ends.
+const taskRequests=(f:{store:Store,topics:Topics,tasks:Tasks,m:Machine,deps:{app:(id:string)=>App}})=>{f.m.session='default';return new AgentTasks(f.store,{topics:f.topics,tasks:f.tasks,app:f.deps.app});};
+const endAsk={pane:'w1:p1',outcome:'achieved',reason:'周报已整理并发给了主人'};
+const journalTypes=(f:{tasks:Tasks,store:Store})=>f.tasks.journal(f.store.data.topics[0].taskId!).map(r=>r.type);
+// A delivery of the task that stays sending, as a draft waiting on its card does not settle either.
+function stuckDelivery(f:{tasks:Tasks,topics:Topics,store:Store}){
+ f.topics.reply=()=>new Promise<string>(()=>{});const id=f.store.data.topics[0].taskId!;void f.tasks.deliver(f.tasks.addOutput(id,{text:'卡在路上'}).id,{sink:threadSinkName,to:id});
+}
+test('bridge-task end keeps the request on the topic with the seq of the agent\'s turn and answers that the task ends with the turn, leaving it open',async()=>{
+ const f=await readyTopic();try{
+  const answer=await taskRequests(f).call(f.m,'end',endAsk);
+  assert.deepEqual(answer,{task:f.t.taskId,outcome:'achieved',reason:endAsk.reason});
+  assert.deepEqual(f.t.endRequest,{outcome:'achieved',reason:endAsk.reason,stateSeq:1});assert.equal(taskView(f).state,'open');
+  assert.deepEqual(new Store(f.dir).data.topics[0].endRequest,f.t.endRequest);
+  await taskRequests(f).call(f.m,'end',{pane:'w1:p1',outcome:'dropped',reason:'主人说不用了'});assert.deepEqual(f.t.endRequest,{outcome:'dropped',reason:'主人说不用了',stateSeq:1});
+ }finally{f.close();}
+});
+test('bridge-task end refuses an unknown operation, a bad outcome or reason, a pane that is no topic\'s, a task that has ended, and achieved while a delivery is unsettled',async()=>{
+ const f=await readyTopic();try{
+  const api=taskRequests(f);
+  await assert.rejects(api.call(f.m,'start',endAsk),/未知的操作：start/);await assert.rejects(api.call(f.m,'end',null),/请求内容无效/);
+  await assert.rejects(api.call(f.m,'end',{...endAsk,outcome:'done'}),/结果无效/);
+  for(const reason of [undefined,'  ',7])await assert.rejects(api.call(f.m,'end',{...endAsk,reason}),/需要说明原因/);
+  await assert.rejects(api.call(f.m,'end',{...endAsk,pane:'w9:p9'}),/不属于任何进行中的飞书话题：bridge-task/);
+  stuckDelivery(f);
+  await assert.rejects(api.call(f.m,'end',endAsk),/还有草稿在等主人确认/);assert.equal(f.t.endRequest,undefined);
+  assert.equal((await api.call(f.m,'end',{...endAsk,outcome:'dropped'})).outcome,'dropped');
+  f.tasks.end(f.t.taskId!,'dropped','已放弃');delete f.t.endRequest;
+  await assert.rejects(api.call(f.m,'end',endAsk),/任务已经结束/);assert.equal(f.t.endRequest,undefined);
+ }finally{f.close();}
+});
+test('a recorded end is applied only after the turn that asked for it has ended, and after the replies up to then went out as outputs',async()=>{
+ const f=await readyTopic();try{
+  await taskRequests(f).call(f.m,'end',endAsk);
+  f.h.retained['w1:p1']=[{seq:1,text:'已经整理好了'}];
+  await f.topics.sync(f.m,list(f,{agent_status:'working',state_change_seq:2,reply_seq:1}));
+  assert.equal(taskView(f).state,'open');assert.ok(f.t.endRequest);assert.deepEqual(taskView(f).outputs.map(o=>o.body),[{text:'已经整理好了'}]);
+  f.h.retained['w1:p1'].push({seq:2,text:'最后一句'});
+  await f.topics.sync(f.m,list(f,{agent_status:'done',state_change_seq:3,reply_seq:2}));
+  const v=taskView(f);assert.equal(v.state,'achieved');assert.equal(f.t.endRequest,undefined);assert.equal(f.t.state,'ready');
+  assert.deepEqual(v.outputs.map(o=>o.body),[{text:'已经整理好了'},{text:'最后一句'}]);assert.deepEqual(v.deliveries.map(d=>d.state),['delivered','delivered']);
+  const types=journalTypes(f);assert.ok(types.lastIndexOf('delivery.delivered')<types.indexOf('task.ended'),types.join());
+  assert.deepEqual(f.tasks.journal(v.id).find(r=>r.type==='task.ended')!.data,{outcome:'achieved',reason:endAsk.reason});
+ }finally{f.close();}
+});
+test('a recorded end whose reply could not be fetched waits for the next list instead of losing the reply',async()=>{
+ const f=await readyTopic();try{
+  await taskRequests(f).call(f.m,'end',endAsk);
+  delete f.h.retained['w1:p1'];f.h.on['agent replies']=()=>{throw Error('herdr 不可用');};
+  await f.topics.sync(f.m,list(f,{agent_status:'done',state_change_seq:2,reply_seq:1}));assert.equal(taskView(f).state,'open');assert.ok(f.t.endRequest);
+  delete f.h.on['agent replies'];f.h.retained['w1:p1']=[{seq:1,text:'结果'}];
+  await f.topics.sync(f.m,list(f,{agent_status:'done',state_change_seq:2,reply_seq:1}));
+  assert.deepEqual(taskView(f).outputs.map(o=>o.body),[{text:'结果'}]);assert.equal(taskView(f).state,'achieved');
+ }finally{f.close();}
+});
+test('a recorded end is applied when the topic ends because its agent went away',async()=>{
+ const f=await readyTopic();try{
+  await taskRequests(f).call(f.m,'end',{...endAsk,outcome:'dropped',reason:'主人说不用了'});
+  f.h.agents=[];await f.topics.sync(f.m,[]);
+  assert.equal(f.t.state,'closed');assert.equal(f.t.endRequest,undefined);assert.equal(taskView(f).state,'dropped');
+ }finally{f.close();}
+});
+test('an end that the core refuses clears the request, is logged and leaves a notice in the thread that says why; the task stays open',async()=>{
+ const f=await readyTopic();try{
+  await taskRequests(f).call(f.m,'end',endAsk);stuckDelivery(f);
+  const sent:object[]=[];f.topics.reply=async(_a,_c,_r,content)=>{sent.push((content as {card:object}).card);return 'om_notice';};
+  await f.topics.sync(f.m,list(f,{agent_status:'done',state_change_seq:2}));
+  assert.equal(taskView(f).state,'open');assert.equal(f.t.endRequest,undefined);assert.deepEqual(sent,[noticeCard('任务没有结束：还有交付没有完成')]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='话题任务').map(l=>[l.level,l.message]),[['error',`${f.t.agentName}：任务没有结束，还有交付没有完成`]]);
+ }finally{f.close();}
+});
+test('the next message of a person reopens the ended task before it is recorded as an input, and clears an end that was waiting; a message of a schedule run does the same',async()=>{
+ const f=await readyTopic();try{
+  f.tasks.end(f.t.taskId!,'achieved','好了');
+  await f.send({messageId:'om_2',rootId:'om_1',content:'再补一点'});
+  assert.equal(taskView(f).state,'open');const types=journalTypes(f);assert.ok(types.indexOf('task.reopened')<types.lastIndexOf('input.added'),types.join());
+  assert.deepEqual(taskView(f).inputs.map(i=>i.ref),['feishu:om_1','feishu:om_2']);
+  await taskRequests(f).call(f.m,'end',endAsk);await f.send({messageId:'om_3',rootId:'om_1',content:'等一下'});assert.equal(f.t.endRequest,undefined);
+  f.tasks.end(f.t.taskId!,'dropped','不要了');f.topics.record(f.t,{messageId:'om_run',content:'定时'});assert.equal(taskView(f).state,'open');
+ }finally{f.close();}
+});
+test('a topic that cannot reopen its task logs it',async()=>{
+ const f=await readyTopic();try{
+  f.tasks.end(f.t.taskId!,'achieved','好了');f.tasks.reopen=()=>{throw Error('不能重新打开');};f.topics.record(f.t,{messageId:'om_2',content:'x'});
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='话题任务').map(l=>l.message),[`${f.t.agentName}：未能记录消息，不能重新打开`]);
  }finally{f.close();}
 });
