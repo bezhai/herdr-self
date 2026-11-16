@@ -1,8 +1,9 @@
 // Tests of messages.ts (see package.json); run with node --test.
 import {test} from 'node:test';import strictAssert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {Messages} from './messages.ts';import {Store} from './core.ts';import {sourceCard,draftCard} from './outbound-cards.ts';import {clip} from './request-cards.ts';
-import type {Call} from './core.ts';import type {App,Machine,Topic,Draft,Source} from './state.ts';import type {ClientApi,OwnerMessage,Sent} from './link.ts';import type {Click} from './request-cards.ts';import type {MessageOps} from './messages.ts';
-// The assertions of node:assert/strict without narrowing what they check: a draft changes state after an assertion.
+import {Messages,ownerSink} from './messages.ts';import {Store} from './core.ts';import {Tasks} from './task-core.ts';import {sourceCard,draftCard} from './outbound-cards.ts';import {clip} from './request-cards.ts';
+import type {Call} from './core.ts';import type {App,Machine,Topic} from './state.ts';import type {ClientApi,OwnerMessage,Sent} from './link.ts';import type {Click} from './request-cards.ts';import type {MessageOps} from './messages.ts';import type {Body} from './outbound-cards.ts';
+import type {Delivery,Policy} from './task-types.ts';
+// The assertions of node:assert/strict without narrowing what they check: the state of a delivery changes after an assertion.
 type Narrowing='equal'|'deepEqual'|'ok';
 type Assert=Omit<typeof strictAssert,Narrowing>&{[K in Narrowing]:(...args:Parameters<typeof strictAssert[K]>)=>void};
 const assert:Assert=strictAssert;
@@ -20,31 +21,40 @@ const app:App={id:'a',name:'机器人',appId:'cli_test',appSecret:'test',domain:
 const message:OwnerMessage={chatId:'chat-1',chatName:'GEO 小分队',chatType:'group',messageId:'message-1',sender:{id:'u1',name:'陈帆'},at:now-1000,text:'原消息',link:'https://example.test/message'};
 const chat={chatId:'chat-2',chatName:'产品讨论',chatType:'group'} as const;
 const sent:Sent={messageId:'sent-1',at:now+1000,owner:'主人'};
-// A ready topic with only the fields Messages reads; the other collections stay empty.
-function makeTopic():Topic{return {id:'t',bindingId:'b',appId:'a',chatId:'oc_topic',rootId:'om_root',machineId:'agent',workspaceId:'w',tabId:'tab',paneId:'pane',agentName:'agent',title:'话题',state:'ready',error:'',messageIds:[],replySeq:0,reactions:[],cards:[],createdAt:now};}
-// A fixture whose caller, owner channel and Feishu cards are fakes. respond replaces the owner channel's answers during a test.
+// The policy of server.ts: what goes out as the owner needs approval, nothing else does.
+const policy:Policy={deliver:(_t,_o,target)=>'sink' in target&&target.sink==='as-owner'?'approve':'allow',end:()=>'allow'};
+// A ready topic with only the fields Messages reads; it has no task yet.
+function makeTopic():Topic{return {id:'t',bindingId:'b',appId:'a',chatId:'oc_topic',rootId:'om_root',machineId:'agent',workspaceId:'w',tabId:'tab',paneId:'pane',agentName:'agent',title:'话题',state:'ready',error:'',messageIds:[],replySeq:0,reactions:[],cards:[],createdAt:now,task:{messageId:'om_first',content:'整理一下周报'}};}
+// A fixture whose caller, owner channel and Feishu cards are fakes, over a real task core on :memory:. respond replaces the owner channel's answers.
 function fixture(options:{caller?:Deps['topics']['caller'],owner?:Machine|null}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-messages-')),store=new Store(dir),topic=makeTopic(),calls:CallRecord[]=[],replies:ReplyRecord[]=[],updates:UpdateRecord[]=[];
- let owner=options.owner===undefined?ownerMachine:options.owner;
+ let owner=options.owner===undefined?ownerMachine:options.owner,rejectReply:Error|null=null,rejectUpdate:Error|null=null;
  let handler:Handler=method=>{if(method==='openLarkMessage')return message;if(method==='openLarkChat')return chat;if(method==='openLarkReply'||method==='openLarkSend')return sent;throw Error('未预料的调用：'+method);};
  const caller=options.caller??(async()=>topic),queue:Deps['topics']['queue']=<T>(_t:Topic,task:()=>T|Promise<T>)=>Promise.resolve(task());
  const call=fakeCall(async(machine,method,params)=>{calls.push({machine,method,params});return handler(method,params);});
- const reply:Deps['reply']=async(a,chatId,rootId,{card})=>{replies.push({app:a,chatId,rootId,card});return 'om_card_' + replies.length;};
- const updateCard:Deps['updateCard']=async(a,messageId,card)=>{updates.push({app:a,messageId,card});};
+ const reply:Deps['reply']=async(a,chatId,rootId,{card})=>{if(rejectReply)throw rejectReply;replies.push({app:a,chatId,rootId,card});return 'om_card_'+replies.length;};
+ const updateCard:Deps['updateCard']=async(a,messageId,card)=>{if(rejectUpdate)throw rejectUpdate;updates.push({app:a,messageId,card});};
  store.data.topics.push(topic);store.save();
- const messages=new Messages(store,{topics:{caller,queue},app:()=>app,owner:()=>owner,call,reply,updateCard,now:()=>now});
- return {dir,store,topic,messages,calls,replies,updates,respond(next:Handler){handler=next;},setOwner(next:Machine|null){owner=next;},close(){fs.rmSync(dir,{recursive:true});}};
+ const tasks=new Tasks(':memory:',{sinks:{'as-owner':ownerSink({owner:()=>owner,call})},policy,now:()=>now});
+ const messages=new Messages(store,{tasks,topics:{caller,queue},app:()=>app,owner:()=>owner,call,reply,updateCard,now:()=>now});
+ // Wait for the observers of the task core and for the asynchronous work that a click deliberately does not make Feishu's callback wait for.
+ const flush=async()=>{for(let i=0;i<4;i++){await new Promise<void>(resolve=>setImmediate(resolve));await tasks.settled();}};
+ return {dir,store,topic,tasks,messages,calls,replies,updates,flush,
+  deliveries:():Delivery[]=>topic.taskId?tasks.get(topic.taskId).deliveries:[],
+  respond(next:Handler){handler=next;},setOwner(next:Machine|null){owner=next;},failReply(e:Error|null){rejectReply=e;},failUpdate(e:Error|null){rejectUpdate=e;},
+  async close(){await tasks.close();fs.rmSync(dir,{recursive:true});}};
 }
 // Calls one op with its answer narrowed to that op, just as message-command consumes MessageOps.
 async function invoke<K extends keyof MessageOps>(f:ReturnType<typeof fixture>,op:K,request:unknown):Promise<MessageOps[K]['answer']>{
  return await f.messages.call(agentMachine,op,request) as MessageOps[K]['answer'];
 }
-// A click of one of a draft's buttons, with the submitted text when the editing form supplies it.
-function click(d:Draft,draft:'send'|'edit'|'drop'|'cancel',text?:string):Click{return {messageId:d.cardId||'om_card_early',operator:{openId:'ou_owner'},action:{value:{draft,draftId:d.id,render:1},...text!==undefined&&{formValue:{text}}}};}
-// The first card is drawn before reply resolves to its card id, which is not part of that drawing.
-const atPost=(d:Draft):Draft=>{const copy={...d};delete copy.cardId;return copy;};
-// Wait for the asynchronous work that click deliberately does not make Feishu's callback wait for.
-const settled=()=>new Promise<void>(resolve=>setImmediate(resolve));
+// A click of one of a delivery's buttons, with the submitted text when the editing form supplies it.
+function click(d:Delivery,action:'send'|'edit'|'drop'|'cancel',text?:string,messageId='om_card_early'):Click{return {messageId,operator:{openId:'ou_owner'},action:{value:{draft:action,deliveryId:d.id,render:1},...text!==undefined&&{formValue:{text}}}};}
+// The delivery d as the task core has it now.
+const current=(f:ReturnType<typeof fixture>,d:Delivery)=>f.tasks.get(f.topic.taskId!).deliveries.find(x=>x.id===d.id)!;
+const bodyOf=(d:Delivery)=>d.body as Body;
+const lastLog=(f:ReturnType<typeof fixture>)=>f.store.data.logs.at(-1)!;
+const toast=(content:string)=>({toast:{type:'info',content}});
 
 test('call rejects an unknown operation and a non-object request before looking up the topic',async t=>{
  const f=fixture({owner:null});t.after(f.close);
@@ -55,96 +65,108 @@ test('an agent outside a live topic is refused with the caller error unchanged',
  const reason='这个 pane 里的 Agent 不属于任何进行中的飞书话题：bridge-message 只能由飞书话题里的 Agent 运行';
  const f=fixture({caller:async()=>{throw Error(reason);}});t.after(f.close);
  await assert.rejects(invoke(f,'attach',{pane:'pane',messageId:'message-1'}),(e:any)=>e.message===reason);
- assert.equal(f.calls.length,0);assert.equal(f.replies.length,0);
+ assert.equal(f.calls.length,0);assert.equal(f.replies.length,0);assert.equal(f.tasks.list().length,0);
 });
 test('every operation needs the configured open-lark machine',async t=>{
  const f=fixture({owner:null});t.after(f.close);
  await assert.rejects(invoke(f,'attach',{pane:'pane',messageId:'message-1'}),/Bridge 没有配置 open-lark 所在的机器（控制面的 BRIDGE_OPEN_LARK_MACHINE）/);
 });
-test('attach stores only the source metadata, posts its source card and is idempotent',async t=>{
+test('the first use makes the topic a task whose goal is the first message, or the title without one, and later uses reuse it',async t=>{
+ const f=fixture();t.after(f.close);
+ await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
+ assert.equal(f.tasks.list().length,1);assert.equal(f.tasks.get(f.topic.taskId!).goal,'整理一下周报');
+ assert.equal(new Store(f.dir).data.topics[0].taskId,f.topic.taskId);
+ await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});assert.equal(f.tasks.list().length,1);
+ const g=fixture();t.after(g.close);delete g.topic.task;
+ await invoke(g,'attach',{pane:'pane',messageId:'message-1'});assert.equal(g.tasks.get(g.topic.taskId!).goal,'话题');
+});
+test('attach adds the message as read as an input with an open-lark ref, posts its source card and is idempotent',async t=>{
  const f=fixture();t.after(f.close);
  const first=await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
- const expected:Source={chatId:'chat-1',chatName:'GEO 小分队',chatType:'group',messageId:'message-1',sender:{id:'u1',name:'陈帆'},at:now-1000,cardId:'om_card_1'};
- assert.deepEqual(first,{source:expected});assert.equal('text' in first.source,false);assert.equal('link' in first.source,false);
+ assert.equal(first.input.ref,'open-lark:message-1');assert.deepEqual(first.input.body,message);
+ assert.deepEqual(f.tasks.get(f.topic.taskId!).inputs.map(i=>i.id),[first.input.id]);
  assert.deepEqual(f.replies,[{app,chatId:'oc_topic',rootId:'om_root',card:sourceCard(message,now)}]);
  assert.deepEqual(f.calls,[{machine:ownerMachine,method:'openLarkMessage',params:{messageId:'message-1'}}]);
  const again=await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
- assert.equal(again.source,first.source);assert.equal(f.calls.length,1);assert.equal(f.replies.length,1);
- assert.deepEqual(new Store(f.dir).data.topics[0].sources,[expected]);
+ assert.equal(again.input.id,first.input.id);assert.equal(f.tasks.get(f.topic.taskId!).inputs.length,1);assert.equal(f.replies.length,1);
 });
 test('attach reports an owner-channel failure in the terms of a send failure',async t=>{
  const f=fixture();t.after(f.close);f.respond(()=>{throw Object.assign(Error('offline'),{code:'channel_unreachable'});});
  await assert.rejects(invoke(f,'attach',{pane:'pane',messageId:'message-1'}),/open-lark 没有响应/);
- assert.equal(f.topic.sources?.length??0,0);assert.equal(f.replies.length,0);
+ assert.equal(f.tasks.get(f.topic.taskId!).inputs.length,0);assert.equal(f.replies.length,0);
 });
-test('a card that Feishu refuses is logged with its reason, reported to the agent and leaves no draft',async t=>{
+test('a card that does not fit is refused before anything is recorded',async t=>{
  const f=fixture();t.after(f.close);
- const rejecting=new Messages(f.store,{topics:{caller:async()=>f.topic,queue:(_t,task)=>Promise.resolve(task())},app:()=>app,owner:()=>ownerMachine,call:fakeCall(async(_m,method)=>method==='openLarkMessage'?message:chat),reply:async()=>{throw Error('invalid card\nsecond line');},updateCard:async()=>{},now:()=>now});
- await assert.rejects(rejecting.call(agentMachine,'send',{pane:'pane',chatId:'chat-2',text:'你好'}),/确认卡片没有发出去：invalid card，请稍后重试/);
- assert.equal(f.topic.drafts?.length??0,0);
- assert.deepEqual(f.store.data.logs.at(-1),{at:f.store.data.logs.at(-1)!.at,kind:'消息',level:'error',message:'确认卡片没有发出去：invalid card'});
+ await assert.rejects(invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'长'.repeat(60000),mentions:[]}),/正文太长，确认卡片放不下，请缩短后重新提交/);
+ assert.equal(f.replies.length,0);assert.equal(f.deliveries().length,0);assert.equal(f.tasks.get(f.topic.taskId!).outputs.length,0);
 });
-test('reply refuses a message that is not a source of this topic',async t=>{
+test('a card that Feishu refuses is logged with its reason, reported to the agent and leaves the delivery rejected',async t=>{
+ const f=fixture();t.after(f.close);f.failReply(Error('invalid card\nsecond line'));
+ await assert.rejects(invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'你好'}),/确认卡片没有发出去：invalid card，请稍后重试/);
+ assert.deepEqual(f.deliveries().map(d=>d.state),['rejected']);
+ assert.deepEqual(f.store.data.logs.find(l=>l.level==='error'),{at:lastLog(f).at,kind:'消息',level:'error',message:'确认卡片没有发出去：invalid card'});
+});
+test('reply refuses a message that is not an input of this topic',async t=>{
  const f=fixture();t.after(f.close);
  await assert.rejects(invoke(f,'reply',{pane:'pane',messageId:'elsewhere',text:'回复'}),/这条消息不在本话题的来源里，先用 attach 放进来/);
- assert.equal(f.replies.length,0);assert.equal(f.topic.drafts?.length??0,0);
+ assert.equal(f.replies.length,0);assert.equal(f.deliveries().length,0);
 });
-test('send drafts for the chat open-lark reports rather than the chat the agent names',async t=>{
+test('send drafts for the chat open-lark reports rather than the chat the agent names, as an awaiting delivery to as-owner',async t=>{
  const f=fixture();t.after(f.close);f.respond(method=>method==='openLarkChat'?{chatId:'actual-chat',chatName:'真实群名',chatType:'group'}:sent);
- const {draft}=await invoke(f,'send',{pane:'pane',chatId:'agent-chat',text:'正文',mentions:[]});
- assert.deepEqual([draft.chatId,draft.chatName,draft.chatType,draft.state,draft.text,draft.createdAt],['actual-chat','真实群名','group','pending','正文',now]);
- assert.match(draft.id,/^[0-9a-f-]{36}$/);assert.match(draft.clientId,/^[0-9a-f-]{36}$/);
- assert.deepEqual(f.replies[0].card,draftCard(atPost(draft),'pending',{render:1,now}));
- assert.equal(f.replies[0].chatId,'oc_topic');assert.equal(f.replies[0].rootId,'om_root');
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'agent-chat',text:'正文',mentions:[]});
+ assert.deepEqual(d.target,{sink:'as-owner',to:{chatId:'actual-chat',chatName:'真实群名',chatType:'group'}});assert.deepEqual(d.body,{text:'正文',mentions:[]});assert.equal(d.state,'awaiting');
+ assert.deepEqual(f.tasks.get(f.topic.taskId!).outputs.map(o=>[o.id,o.body]),[[d.output,{text:'正文',mentions:[]}]]);
+ assert.deepEqual(f.replies[0].card,draftCard(d,'pending',{render:1,now}));assert.equal(f.replies[0].chatId,'oc_topic');assert.equal(f.replies[0].rootId,'om_root');
+ assert.deepEqual(f.topic.deliveryCards,{[d.id]:'om_card_1'});assert.equal(f.calls.some(c=>c.method==='openLarkSend'),false);
 });
 test('a draft with a mention missing from its text is refused',async t=>{
  const f=fixture();t.after(f.close);
  await assert.rejects(invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'没有提到名字',mentions:[{id:'u2',name:'孙栎倩'}]}),/正文里没有 @孙栎倩/);
- assert.equal(f.topic.drafts?.length??0,0);assert.equal(f.replies.length,0);
+ assert.equal(f.deliveries().length,0);assert.equal(f.replies.length,0);
 });
-test('reply uses its source chat and quoted source, then sends through openLarkReply',async t=>{
+test('reply uses the chat of its input and quotes it, then sends through openLarkReply with the key as client id',async t=>{
  const f=fixture();t.after(f.close);
- const {source}=await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
- const {draft}=await invoke(f,'reply',{pane:'pane',messageId:'message-1',text:'引用回复',mentions:[]});
- assert.deepEqual([draft.chatId,draft.chatName,draft.chatType,draft.replyTo],['chat-1','GEO 小分队','group','message-1']);
- assert.deepEqual(f.replies[1].card,draftCard(atPost(draft),'pending',{render:1,now,quoted:source}));
- assert.deepEqual(f.messages.click(app,click(draft,'send')),{toast:{type:'info',content:'正在发送'}});await settled();
- assert.deepEqual(f.calls.at(-1),{machine:ownerMachine,method:'openLarkReply',params:{messageId:'message-1',clientId:draft.clientId,text:'引用回复',mentions:[]}});
- assert.equal(draft.state,'sent');assert.deepEqual(f.updates.at(-1),{app,messageId:'om_card_2',card:draftCard(draft,'sent',{render:2,now,quoted:source})});
+ await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
+ const {delivery:d}=await invoke(f,'reply',{pane:'pane',messageId:'message-1',text:'引用回复',mentions:[]});
+ assert.deepEqual(d.target,{sink:'as-owner',to:{chatId:'chat-1',chatName:'GEO 小分队',chatType:'group',replyTo:'message-1'}});
+ assert.deepEqual(f.replies[1].card,draftCard(d,'pending',{render:1,now,quoted:message}));
+ assert.deepEqual(f.messages.click(app,click(d,'send')),toast('正在发送'));await f.flush();
+ assert.deepEqual(f.calls.at(-1),{machine:ownerMachine,method:'openLarkReply',params:{messageId:'message-1',clientId:d.key,text:'引用回复',mentions:[]}});
+ const after=current(f,d);assert.equal(after.state,'delivered');assert.deepEqual(after.receipt,sent);
+ assert.deepEqual(f.updates.at(-1),{app,messageId:'om_card_2',card:draftCard(after,'sent',{render:2,now,quoted:message})});
 });
-test('a successful send records the sent message and logs the owner, chat and clipped text',async t=>{
+test('a successful send logs the owner, chat and clipped text and redraws the card as sent',async t=>{
  const f=fixture();t.after(f.close);const text='一'.repeat(50)+'末尾';
- const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text,mentions:[]});f.topic.state='closed';
- const response=f.messages.click(app,click(draft,'send'));assert.deepEqual(response,{toast:{type:'info',content:'正在发送'}});await settled();
- assert.deepEqual(f.calls.at(-1),{machine:ownerMachine,method:'openLarkSend',params:{chatId:'chat-2',clientId:draft.clientId,text,mentions:[]}});
- assert.deepEqual([draft.state,draft.sentId,draft.sentAt,draft.failure],['sent','sent-1',now+1000,undefined]);
- assert.deepEqual(f.updates.at(-1),{app,messageId:'om_card_1',card:draftCard(draft,'sent',{render:2,now})});
- assert.deepEqual(f.store.data.logs.at(-1),{at:f.store.data.logs.at(-1)!.at,kind:'消息',level:'info',message:`以 主人 的身份发到 产品讨论：${clip(text,40)}`});
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text,mentions:[]});
+ assert.deepEqual(f.messages.click(app,click(d,'send')),toast('正在发送'));await f.flush();
+ assert.deepEqual(f.calls.at(-1),{machine:ownerMachine,method:'openLarkSend',params:{chatId:'chat-2',clientId:d.key,text,mentions:[]}});
+ assert.deepEqual(f.updates.at(-1),{app,messageId:'om_card_1',card:draftCard(current(f,d),'sent',{render:2,now})});
+ assert.deepEqual(lastLog(f),{at:lastLog(f).at,kind:'消息',level:'info',message:`以 主人 的身份发到 产品讨论：${clip(text,40)}`});
+ assert.deepEqual(f.messages.click(app,click(d,'send')),toast('这条消息已经发送'));
 });
-test('submitting edited text sends that text under a new client id and drops mentions no longer in it',async t=>{
+test('submitting edited text sends that text under a new key and drops mentions no longer in it',async t=>{
  const f=fixture();t.after(f.close);const mentions=[{id:'u1',name:'陈帆'},{id:'u2',name:'孙栎倩'}];
- const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'@陈帆 @孙栎倩 旧正文',mentions});const oldClientId=draft.clientId;
- f.messages.click(app,click(draft,'send','@陈帆 新正文'));await settled();
- assert.equal(draft.text,'@陈帆 新正文');assert.notEqual(draft.clientId,oldClientId);assert.deepEqual(draft.mentions,[{id:'u1',name:'陈帆'}]);
- assert.deepEqual(f.calls.at(-1),{machine:ownerMachine,method:'openLarkSend',params:{chatId:'chat-2',clientId:draft.clientId,text:'@陈帆 新正文',mentions:[{id:'u1',name:'陈帆'}]}});
- assert.equal(draft.state,'sent');assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'sent',{render:2,now}));
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'@陈帆 @孙栎倩 旧正文',mentions});
+ f.messages.click(app,click(d,'send','@陈帆 新正文'));await f.flush();
+ const after=current(f,d);assert.deepEqual(after.body,{text:'@陈帆 新正文',mentions:[{id:'u1',name:'陈帆'}]});assert.notEqual(after.key,d.key);
+ assert.deepEqual(f.calls.at(-1),{machine:ownerMachine,method:'openLarkSend',params:{chatId:'chat-2',clientId:after.key,text:'@陈帆 新正文',mentions:[{id:'u1',name:'陈帆'}]}});
+ assert.equal(after.state,'delivered');assert.deepEqual(f.updates.at(-1)!.card,draftCard(after,'sent',{render:2,now}));
 });
-test('drop marks a draft unsent and a later stale send click does not send it',async t=>{
- const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
- assert.deepEqual(f.messages.click(app,click(draft,'drop')),{toast:{type:'info',content:'已取消发送'}});await settled();
- assert.equal(draft.state,'dropped');assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'dropped',{render:2,now}));
- const updates=f.updates.length;f.messages.click(app,click(draft,'send'));await settled();
+test('drop rejects the delivery and a later stale send click does not send it',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ assert.deepEqual(f.messages.click(app,click(d,'drop')),toast('已取消发送'));await f.flush();
+ assert.equal(current(f,d).state,'rejected');assert.deepEqual(f.updates.at(-1)!.card,draftCard(current(f,d),'dropped',{render:2,now}));
+ const updates=f.updates.length;assert.deepEqual(f.messages.click(app,click(d,'send')),toast('这条消息已取消发送'));await f.flush();
  assert.equal(f.calls.some(c=>c.method==='openLarkSend'),false);assert.equal(f.updates.length,updates);
 });
-test('edit draws the form and cancel restores the pending card without changing the draft',async t=>{
- const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'原正文',mentions:[]}),clientId=draft.clientId;
- assert.deepEqual(f.messages.click(app,click(draft,'edit')),{toast:{type:'info',content:'请修改正文'}});await settled();
- assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'editing',{render:2,now}));
- assert.deepEqual(f.messages.click(app,click(draft,'cancel','没有保存的正文')),{toast:{type:'info',content:'已取消修改'}});await settled();
- assert.deepEqual([draft.text,draft.clientId,draft.state],['原正文',clientId,'pending']);
- assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'pending',{render:3,now}));assert.equal(f.calls.some(c=>c.method==='openLarkSend'),false);
+test('edit draws the form and cancel restores the pending card without changing the delivery',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'原正文',mentions:[]});
+ assert.deepEqual(f.messages.click(app,click(d,'edit')),toast('请修改正文'));await f.flush();
+ assert.deepEqual(f.updates.at(-1)!.card,draftCard(d,'editing',{render:2,now}));
+ assert.deepEqual(f.messages.click(app,click(d,'cancel','没有保存的正文')),toast('已取消修改'));await f.flush();
+ assert.deepEqual(current(f,d),d);assert.deepEqual(f.updates.at(-1)!.card,draftCard(d,'pending',{render:3,now}));assert.equal(f.calls.some(c=>c.method==='openLarkSend'),false);
 });
-test('send failures name their cause on a pending card, log an error and can be retried',async t=>{
+test('send failures name their cause on a pending card, log an error, and a retry click sends with the same key',async t=>{
  const cases:[string,Error,string][]=[
   ['client offline',Object.assign(Error('offline'),{code:'client_offline'}),'cpu2 的 Bridge 客户端不在线'],
   ['channel unconfigured',Object.assign(Error('no config'),{code:'channel_unconfigured'}),'cpu2 的 Bridge 客户端没有配置 open-lark'],
@@ -153,43 +175,65 @@ test('send failures name their cause on a pending card, log an error and can be 
   ['channel refused',Object.assign(Error('SENDER_CHANGED：账号已更换'),{code:'channel_refused'}),'open-lark 拒绝了这次发送：SENDER_CHANGED：账号已更换'],
  ];
  for(const [name,error,reason] of cases)await t.test(name,async t=>{
-  const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
-  f.respond(method=>{if(method==='openLarkSend')throw error;return sent;});f.messages.click(app,click(draft,'send'));await settled();
-  assert.equal(draft.state,'pending');assert.equal(draft.failure,reason);assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'pending',{render:2,now}));
-  assert.deepEqual(f.store.data.logs.at(-1),{at:f.store.data.logs.at(-1)!.at,kind:'消息',level:'error',message:'未能发到 产品讨论：'+reason});
-  f.respond(()=>sent);f.messages.click(app,click(draft,'send'));await settled();
-  assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,2);assert.deepEqual([draft.state,draft.failure],['sent',undefined]);
-  assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'sent',{render:3,now}));
+  const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+  f.respond(method=>{if(method==='openLarkSend')throw error;return sent;});f.messages.click(app,click(d,'send'));await f.flush();
+  const failed=current(f,d);assert.equal(failed.state,'failed');assert.equal(failed.error,reason);assert.deepEqual(f.updates.at(-1)!.card,draftCard(failed,'pending',{render:2,now}));
+  assert.deepEqual(lastLog(f),{at:lastLog(f).at,kind:'消息',level:'error',message:'未能发到 产品讨论：'+reason});
+  f.respond(()=>sent);assert.deepEqual(f.messages.click(app,click(d,'send')),toast('正在发送'));await f.flush();
+  const sends=f.calls.filter(c=>c.method==='openLarkSend');assert.equal(sends.length,2);assert.deepEqual(sends.map(c=>c.params.clientId),[d.key,d.key]);
+  assert.deepEqual([current(f,d).state,current(f,d).error],['delivered',null]);assert.deepEqual(f.updates.at(-1)!.card,draftCard(current(f,d),'sent',{render:4,now}));
  });
 });
 test('a refused send keeps the full multiline open-lark explanation on the card and in the log',async t=>{
- const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
  const explanation='第一行说明\n'+'后'.repeat(250)+'\n最后一行',error=Object.assign(Error('REFUSED：'+explanation),{code:'channel_refused'}),reason='open-lark 拒绝了这次发送：REFUSED：'+explanation;
- f.respond(method=>{if(method==='openLarkSend')throw error;return sent;});f.messages.click(app,click(draft,'send'));await settled();
- assert.equal(draft.failure,reason);assert.deepEqual(f.updates.at(-1)!.card,draftCard(draft,'pending',{render:2,now}));
- assert.equal(f.store.data.logs.at(-1)!.message,'未能发到 产品讨论：'+reason);assert.equal(f.store.data.logs.at(-1)!.level,'error');
+ f.respond(method=>{if(method==='openLarkSend')throw error;return sent;});f.messages.click(app,click(d,'send'));await f.flush();
+ assert.equal(current(f,d).error,reason);assert.deepEqual(f.updates.at(-1)!.card,draftCard(current(f,d),'pending',{render:2,now}));
+ assert.equal(lastLog(f).message,'未能发到 产品讨论：'+reason);assert.equal(lastLog(f).level,'error');
 });
 test('a send click without an owner fails on the card and can be retried after configuration',async t=>{
- const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});f.setOwner(null);
- f.messages.click(app,click(draft,'send'));await settled();assert.equal(draft.failure,'没有配置 open-lark 所在的机器');assert.equal(draft.state,'pending');
- assert.equal(f.store.data.logs.at(-1)!.message,'未能发到 产品讨论：没有配置 open-lark 所在的机器');
- f.setOwner(ownerMachine);f.messages.click(app,click(draft,'send'));await settled();assert.equal(draft.state,'sent');
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});f.setOwner(null);
+ f.messages.click(app,click(d,'send'));await f.flush();assert.equal(current(f,d).error,'没有配置 open-lark 所在的机器');assert.equal(current(f,d).state,'failed');
+ assert.equal(lastLog(f).message,'未能发到 产品讨论：没有配置 open-lark 所在的机器');
+ f.setOwner(ownerMachine);f.messages.click(app,click(d,'send'));await f.flush();assert.equal(current(f,d).state,'delivered');
 });
-test('an edit form with whitespace-only text fails with its own reason even though an owner is configured',async t=>{
- const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
- f.messages.click(app,click(draft,'send','  \n '));await settled();
- assert.equal(draft.state,'pending');assert.equal(draft.failure,'正文不能为空');assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,0);
- assert.equal(f.store.data.logs.at(-1)!.message,'未能发到 产品讨论：正文不能为空');assert.equal(f.store.data.logs.at(-1)!.level,'error');
+test('an edit form with whitespace-only text is refused on the card and sends nothing',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ f.messages.click(app,click(d,'send','  \n '));await f.flush();
+ assert.equal(current(f,d).state,'awaiting');assert.deepEqual(f.updates.at(-1)!.card,draftCard(current(f,d),'pending',{render:2,now,failure:'正文不能为空'}));
+ assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,0);assert.deepEqual(lastLog(f),{at:lastLog(f).at,kind:'消息',level:'error',message:'未能发到 产品讨论：正文不能为空'});
 });
 test('two clicks of the same card while a send is in flight produce only one send',async t=>{
- const f=fixture();t.after(f.close);const {draft}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});let resolve!:(value:Sent)=>void;
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});let resolve!:(value:Sent)=>void;
  f.respond(method=>method==='openLarkSend'?new Promise<Sent>(r=>{resolve=r;}):sent);
- const first=f.messages.click(app,click(draft,'send')),second=f.messages.click(app,click(draft,'send'));
- assert.deepEqual(first,{toast:{type:'info',content:'正在发送'}});assert.deepEqual(second,{toast:{type:'info',content:'正在发送，请稍候'}});
- assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,1);resolve(sent);await settled();
- assert.equal(draft.state,'sent');assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,1);
+ const first=f.messages.click(app,click(d,'send')),second=f.messages.click(app,click(d,'send'));
+ assert.deepEqual(first,toast('正在发送'));assert.deepEqual(second,toast('正在发送，请稍候'));
+ await new Promise<void>(r=>setImmediate(r));assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,1);resolve(sent);await f.flush();
+ assert.equal(current(f,d).state,'delivered');assert.equal(f.calls.filter(c=>c.method==='openLarkSend').length,1);
 });
-test('a click whose draft id is not in the app gets only an expired-card toast',t=>{
- const f=fixture();t.after(f.close);const d={id:'missing'} as Draft;
- assert.deepEqual(f.messages.click(app,click(d,'send')),{toast:{type:'info',content:'这张卡片已失效'}});assert.equal(f.updates.length,0);
+test('a click that arrives before the card id was saved records the card id of the event',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ delete f.topic.deliveryCards![d.id];f.messages.click(app,click(d,'edit',undefined,'om_early'));await f.flush();
+ assert.equal(f.topic.deliveryCards![d.id],'om_early');assert.equal(f.updates.at(-1)!.messageId,'om_early');
+});
+test('a click on an old draft card or on an unknown delivery gets only an expired-card toast',async t=>{
+ const f=fixture();t.after(f.close);await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ const old={messageId:'om_old',operator:{openId:'ou_owner'},action:{value:{draft:'send',draftId:'old-draft',render:1}}} as Click;
+ assert.deepEqual(f.messages.click(app,old),toast('这张卡片已失效'));
+ assert.deepEqual(f.messages.click(app,click({id:'missing'} as Delivery,'send')),toast('这张卡片已失效'));await f.flush();
+ assert.equal(f.updates.length,0);assert.equal(f.calls.some(c=>c.method==='openLarkSend'),false);
+});
+test('a failure while drawing one record is logged and does not stall the records after it',async t=>{
+ const f=fixture();t.after(f.close);f.failReply(Error('card refused'));
+ const first=await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
+ assert.equal(f.tasks.get(f.topic.taskId!).inputs.length,1);assert.equal(f.replies.length,0);
+ assert.ok(f.store.data.logs.some(l=>l.level==='error'&&l.message.includes('card refused')));
+ f.failReply(null);f.respond(method=>method==='openLarkMessage'?{...message,messageId:'message-2'}:method==='openLarkChat'?chat:sent);
+ const second=await invoke(f,'attach',{pane:'pane',messageId:'message-2'});assert.notEqual(second.input.id,first.input.id);
+ assert.deepEqual(f.replies.map(r=>r.card),[sourceCard({...message,messageId:'message-2'},now)]);
+});
+test('a failed card update is only logged and never turns a successful send into a retry',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ f.failUpdate(Error('update refused'));f.messages.click(app,click(d,'send'));await f.flush();
+ assert.equal(current(f,d).state,'delivered');assert.ok(f.store.data.logs.some(l=>l.level==='error'&&l.message.includes('update refused')));
 });

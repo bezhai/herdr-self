@@ -4,7 +4,7 @@
 // is the answer to a request of this side. It uses only addEventListener, send and readyState, which Node's WebSocket on the client and
 // the ws package on the control plane both have, and imports only types: the client runs without node_modules.
 
-import type {Kind,PermissionMode,WorkMode,OwnerChat,Mention,Source} from './state.ts';
+import type {Kind,PermissionMode,WorkMode,OwnerChat,Mention} from './state.ts';
 // The version of what the two sides send each other. The control plane refuses a client of another version (see Clients.hello). 2: the
 // client passes the requests of bridge-schedule on (schedules), which a client of 1 has no socket for. 3: the control plane does everything
 // it does on a machine through its client (see machine.ts), whose methods a client of 2 lacks. 4: placeSkills takes the skills of the
@@ -33,9 +33,9 @@ export type SkillDigest={name:string,digest:string};
 // A project as the client needs it to prepare or remove the workspace of a topic: its id, the URLs of its repositories (none for a project
 // without any), how its topics share their directory, and the directory that the project adopted on this machine, if it did.
 export type WorkspaceProject={id:string,repos:string[],workMode:WorkMode,adoptedDir?:string};
-// A Feishu message as open-lark, the owner's Feishu client, reads it (see open-lark.ts): a Source without its card, with what it says as
+// A Feishu message as open-lark, the owner's Feishu client, reads it (see open-lark.ts): a chat, an open-lark id, the sender, when it was sent (ms) and what it says as
 // text, where what is not text is written as [图片] or [文件] <file name>, and link, a link that opens it in Feishu, when open-lark gives one.
-export type OwnerMessage=Omit<Source,'cardId'>&{text:string,link?:string};
+export type OwnerMessage=OwnerChat&{messageId:string,sender:{id:string,name:string},at:number,text:string,link?:string};
 // A message that went out as the owner: its open-lark id, when it was sent, in ms, and owner, the name of the Feishu account it went out as.
 export type Sent={messageId:string,at:number,owner:string};
 // What the control plane asks of the client of a machine (see machine.ts). A request carries timeoutMs, the most that a command it runs

@@ -8,12 +8,14 @@ import {serve} from './client.ts';
 import {main,usage} from './message-command.ts';
 import {sourceLine} from './outbound-cards.ts';
 import type {ControlApi,Peer} from './link.ts';
-import type {Draft,Source} from './state.ts';
+import type {Delivery,Input} from './task-types.ts';
+import type {OwnerMessage} from './link.ts';
 
-// A source and a draft as the control plane answers bridge-message with them.
-const source:Source={messageId:'m1',chatId:'c1',chatName:'GEO 小分队',chatType:'group',sender:{id:'u1',name:'陈帆'},at:Date.parse('2026-11-11T10:49:00+08:00')};
-const draft:Draft={id:'d1',clientId:'client-1',chatId:'c1',chatName:'GEO 小分队',chatType:'group',text:'请看一下',mentions:[],state:'pending',createdAt:source.at};
-const answers={attach:{source},reply:{draft},send:{draft}};
+// An input that is a message and a delivery of a draft, as the control plane answers bridge-message with them.
+const body:OwnerMessage={messageId:'m1',chatId:'c1',chatName:'GEO 小分队',chatType:'group',sender:{id:'u1',name:'陈帆'},at:Date.parse('2026-11-11T10:49:00+08:00'),text:'原消息'};
+const input:Input&{body:OwnerMessage}={id:'i1',task:'k1',body,ref:'open-lark:m1',delivery:null,at:body.at};
+const delivery:Delivery={id:'d1',task:'k1',output:'o1',target:{sink:'as-owner',to:{chatId:'c1',chatName:'GEO 小分队',chatType:'group'}},body:{text:'请看一下',mentions:[]},key:'key-1',state:'awaiting',receipt:null,error:null,createdAt:body.at};
+const answers={attach:{input},reply:{delivery},send:{delivery}};
 type Request={op:string,body:unknown};
 type Call=[string,Request,{timeoutMs:number}|undefined];
 // A Bridge client on its real Unix-socket server, with a fake control-plane peer; calls records what the command forwards.
@@ -31,7 +33,7 @@ async function run(socket:string,args:string[],env:NodeJS.ProcessEnv={}){
 test('bridge-message sends attach, reply and send to /messages/<op> with their ids, text, repeated mentions and the pane and session of the agent',async()=>{
  const client=await fakeClient();try{
   const before=Date.now(),attached=await run(client.socket,['attach','m1'],{HERDR_SESSION:'work'}),after=Date.now();
-  assert.equal(attached.code,0);assert.equal(attached.err,'');assert.ok([before,after].some(now=>attached.out===`已放进话题：${sourceLine(source,now)}\n`),attached.out);
+  assert.equal(attached.code,0);assert.equal(attached.err,'');assert.ok([before,after].some(now=>attached.out===`已放进话题：${sourceLine(body,now)}\n`),attached.out);
   assert.deepEqual(await run(client.socket,['reply','m1','--text','第一行\n第二行 @陈帆 @孙栎倩','--mention','u1=陈帆','--mention=u2=孙栎倩']),{code:0,out:'已发出确认卡片，主人点「发送」后才会发出\n',err:''});
   assert.deepEqual(await run(client.socket,['--json','send','c2','--mention','u3=名字=含等号','--text=--以选项开头的正文','--pane','w2:p3','--session=other']),{code:0,out:JSON.stringify(answers.send,null,2)+'\n',err:''});
   assert.deepEqual(client.calls,[

@@ -10,13 +10,15 @@ import {migrateBindings,convertAdopted} from './migration.ts';
 import {Topics} from './topics.ts';
 import {Skills,requestLimit} from './skills.ts';
 import {Schedules} from './schedules.ts';
-import {Messages} from './messages.ts';
+import {Messages,ownerSink,sinkName} from './messages.ts';
+import {Tasks} from './task-core.ts';
 import {AgentSchedules} from './agent-schedules.ts';
 import {staticFile,sendStatic} from './web-assets.ts';
 import {Clients} from './clients.ts';
 import {configText,consoleUrl} from './client.ts';
 import type {Call} from './core.ts';
-import type {Machine} from './state.ts';
+import type {Machine,Topic} from './state.ts';
+import type {Policy} from './task-types.ts';
 import type {HerdrStatus,ConsoleState} from './console-state.ts';
 const bridgeUrl=consoleUrl(process.env.BRIDGE_URL),dir=stateDir(),store=new Store(dir),live=new Map<string,HerdrStatus>(),refreshes=new Map<string,Promise<void>>();
 // auth and attempts are looked up also for a request without a session cookie, or without a remote address once its socket closed.
@@ -48,10 +50,14 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 // The owner's channel is open-lark on the machine that BRIDGE_OPEN_LARK_MACHINE names, whose client has it in its config (see open-lark.ts).
-const ownerMachine=process.env.BRIDGE_OPEN_LARK_MACHINE;
-const messages=new Messages(store,{topics,app:id=>platforms.app(id),owner:()=>store.data.machines.find(m=>m.name===ownerMachine)||null,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
+const ownerMachine=process.env.BRIDGE_OPEN_LARK_MACHINE,owner=()=>store.data.machines.find(m=>m.name===ownerMachine)||null;
+// The task core, in tasks.db of the state directory. Its only sink sends as the owner, and what goes there needs the owner's approval; every
+// other delivery and every end goes ahead.
+const taskPolicy:Policy={deliver:(_task,_output,target)=>'sink' in target&&target.sink===sinkName?'approve':'allow',end:()=>'allow'};
+const tasks=new Tasks(path.join(dir,'tasks.db'),{sinks:{[sinkName]:ownerSink({owner,call})},policy:taskPolicy,now:Date.now});
+const messages=new Messages(store,{tasks,topics,app:id=>platforms.app(id),owner,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
-function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,sources,drafts,...t})=>t),logs:store.data.logs.slice(-60)};}
+function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,taskId,deliveryCards,sources,drafts,...t}:Topic&{sources?:unknown,drafts?:unknown})=>t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
 // requests of bridge-schedule and bridge-skill on its machine (see client.ts), which are answered for the machine of its connection: the
 // schedules of its agents, and reads of the skills of the platform alone (see Skills.answer). What the agent reads of a refusal goes through

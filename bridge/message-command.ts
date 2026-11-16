@@ -94,7 +94,7 @@ export async function main(argv:string[],{env=process.env,stdout=process.stdout,
   const pane=requestedPane??env.HERDR_PANE_ID,session=requestedSession??env.HERDR_SESSION;
   const body:MessageRequest={...op==='send'?{chatId:id}:{messageId:id},...op!=='attach'&&{text:fields.text,mentions:fields.mentions??[]},...pane&&{pane},...session&&{session}};
   const r=await send(clientSocket(env),`/messages/${op}`,body);
-  const text='source' in r?`已放进话题：${sourceLine(r.source,Date.now())}`:'已发出确认卡片，主人点「发送」后才会发出';
+  const text='input' in r?`已放进话题：${sourceLine(r.input.body,Date.now())}`:'已发出确认卡片，主人点「发送」后才会发出';
   stdout.write((json?JSON.stringify(r,null,2):text)+'\n');return 0;
  }catch(e){stderr.write(`bridge-message: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
 }
