@@ -49,17 +49,18 @@ function dangerous(segment:string){
  }
  return true;
 }
-// The URL of path, relative to the root of service, with query; it throws invalid_params for anything that is not a path under that root: no
-// leading /, a // at its start, a scheme, a backslash, a query or fragment in it, a . or .. segment (also percent-encoded), or a result that is
-// not under the root's origin and path. It makes no request.
+// The URL of path, relative to the root of service, with query; the path / is the root itself, exactly as configured (no trailing / added, since
+// a service may answer only at its bare root), and any other path is joined to the root. It throws invalid_params for anything that is not the
+// root or a path under it: no leading /, a // at its start, a scheme, a backslash, a query or fragment in it, a . or .. segment (also
+// percent-encoded), or a result that is not under the root's origin and path. It makes no request.
 export function serviceUrl(service:Service,path:unknown,query:unknown):URL{
  if(typeof path!=='string'||!path.startsWith('/')||path.startsWith('//'))throw invalid('路径必须以 / 开头，不能以 // 开头');
  if(path.includes('\\')||/[?#]/.test(path)||controls.test(path))throw invalid('路径里不能有反斜杠、?、# 和控制字符，查询参数用 --url-query');
  if(path.includes('://')||/^\/[a-z][a-z0-9+.-]*:/i.test(path))throw invalid('路径里不能有 scheme');
  if(path.split('/').some(dangerous))throw invalid('路径里不能有 . 或 .. 段，也不能有它们的编码');
  if(query!==undefined&&(!Array.isArray(query)||query.length>100||query.some(p=>!Array.isArray(p)||p.length!==2||typeof p[0]!=='string'||typeof p[1]!=='string')))throw invalid('query 必须是最多 100 个 [名, 值] 的数组');
- const root=new URL(service.url);let url:URL;try{url=new URL(service.url+path);}catch{throw invalid('路径不合法');}
- if(url.origin!==root.origin||!url.pathname.startsWith(root.pathname.replace(/\/$/,'')+'/'))throw invalid('路径必须在服务的根路径之下');
+ const root=new URL(service.url),isRoot=path==='/';let url:URL;try{url=new URL(isRoot?service.url:service.url+path);}catch{throw invalid('路径不合法');}
+ if(url.origin!==root.origin||!(isRoot||url.pathname.startsWith(root.pathname.replace(/\/$/,'')+'/')))throw invalid('路径必须在服务的根路径之下');
  for(const [k,v] of (query??[]) as [string,string][])url.searchParams.append(k,v);
  return url;
 }

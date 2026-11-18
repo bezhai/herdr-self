@@ -58,7 +58,10 @@ test('the services of the config are read: name, url with its path as the root, 
 
 test('serviceUrl puts a path under the root of the service with the query pairs URL-encoded, and rejects every other form',()=>{
  const s:Service={url:'http://127.0.0.1:8081/api/v1',token:'x',methods:['GET'],headers:[]},bare:Service={...s,url:'http://127.0.0.1:8081'};
- assert.equal(serviceUrl(s,'/',[]).href,'http://127.0.0.1:8081/api/v1/');
+ assert.equal(serviceUrl(s,'/',[]).href,'http://127.0.0.1:8081/api/v1');
+ assert.equal(serviceUrl(s,'/',[['q','a b']]).href,'http://127.0.0.1:8081/api/v1?q=a+b');
+ assert.equal(serviceUrl(bare,'/',[]).href,'http://127.0.0.1:8081/');
+ assert.equal(serviceUrl(bare,'/',[['q','x']]).href,'http://127.0.0.1:8081/?q=x');
  assert.equal(serviceUrl(s,'/items/search',[['q','中文 a&b'],['n','5']]).href,'http://127.0.0.1:8081/api/v1/items/search?q=%E4%B8%AD%E6%96%87+a%26b&n=5');
  assert.equal(serviceUrl(s,'/a/feed%2D1/b',undefined).pathname,'/api/v1/a/feed%2D1/b');
  assert.equal(serviceUrl(s,'/a.b/c..d',[]).pathname,'/api/v1/a.b/c..d');

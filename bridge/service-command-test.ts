@@ -30,7 +30,8 @@ test('bridge-call sends service, method, path without its query, query pairs, he
  await run(c.socket,['notes','PUT','/search','[1]']);assert.equal(c.calls[2][1].body.body,'[1]');
  await run(c.socket,['notes','POST','/search']);assert.deepEqual(c.calls[3][1].body,{service:'notes',method:'POST',path:'/search'});
  await run(c.socket,['notes','GET','/']);assert.equal(c.calls[4][1].body.path,'/');
- await run(c.socket,['notes','GET','me']);assert.equal(c.calls[5][1].body.path,'me');
+ await run(c.socket,['notes','GET','/?q=x','--url-query','n=1']);assert.deepEqual(c.calls[5][1].body,{service:'notes',method:'GET',path:'/',query:[['q','x'],['n','1']]});
+ await run(c.socket,['notes','GET','me']);assert.equal(c.calls[6][1].body.path,'me');
 });
 
 test('bridge-call reads a body from @file',async t=>{
