@@ -4,6 +4,7 @@ import type {Duplex} from 'node:stream';
 import {WebSocketServer} from 'ws';
 import type {WebSocket} from 'ws';
 import {link,protocol,closeCodes} from './link.ts';
+import {serviceName} from './services.ts';
 import type {ClientApi,ControlApi,Peer} from './link.ts';
 import type {Store} from './core.ts';
 import type {Machine} from './state.ts';
@@ -23,9 +24,11 @@ const offline=(m:Machine)=>Object.assign(Error(`机器 ${m.name} 离线：它的
 export type Asked={[K in Exclude<keyof ControlApi,'hello'>]?:(m:Machine,params:ControlApi[K]['params'])=>ControlApi[K]['result']|Promise<ControlApi[K]['result']>};
 type Options={allowedHost?:(req:IncomingMessage)=>boolean,methods?:Asked,joined?:(m:Machine)=>void,heartbeatMs?:number,helloMs?:number,graceMs?:number};
 // The client of a machine that is in, on WebSocket ws.
-type Live={ws:WebSocket,peer:Peer<ClientApi>,name:string,host:string,since:number};
+type Live={ws:WebSocket,peer:Peer<ClientApi>,name:string,host:string,since:number,services:string[]};
 // The connection of a machine's client as the console shows it (see status).
 export type ClientStatus={state:'online',host:string,since:number}|{state:'refused',error:string}|{state:'offline'};
+// The service names of a hello: the valid ones, each once, as many as a client could have a sensible use for. A client of this protocol sends an array; anything else is no services.
+const announced=(services:unknown)=>Array.isArray(services)?[...new Set(services.filter((s):s is string=>typeof s==='string'&&serviceName.test(s)))].slice(0,64):[];
 export class Clients{
  declare store:Store;declare allowedHost:NonNullable<Options['allowedHost']>;declare methods:Asked;declare joined:NonNullable<Options['joined']>;
  declare heartbeatMs:number;declare helloMs:number;declare graceMs:number;declare live:Map<string,Live>;declare refusals:Map<string,string>;
@@ -53,6 +56,10 @@ export class Clients{
   return c.peer.call(method,{...params,timeoutMs},{timeoutMs:timeoutMs+this.graceMs}).catch(e=>{throw e.code==='timed_out'?Object.assign(e,{timedOut:true}):e;});
  }
  online(id:string){return this.live.has(id);}
+ // The machines that are enabled and whose client is in, with the names of the services that each announced in its hello (see ServiceCalls).
+ offers(){
+  return this.store.data.machines.flatMap(machine=>{const c=this.live.get(machine.id);return machine.enabled&&c?[{machine,services:c.services}]:[];});
+ }
  // online with the host the client runs on and since when; else refused with why its last hello failed; else offline.
  status(id:string):ClientStatus{const c=this.live.get(id);if(c)return {state:'online',host:c.host,since:c.since};const error=this.refusals.get(id);return error?{state:'refused',error}:{state:'offline'};}
  // The http server's upgrade event: only /api/client becomes a WebSocket. Neither the socket of an upgrade request nor a WebSocket of
@@ -72,7 +79,7 @@ export class Clients{
   });
  }
  // The token is looked up again: a new token, or the machine's removal, may have come since the upgrade.
- hello(token:string,ws:WebSocket,peer:Peer<ClientApi>,{protocol:version,host}:ControlApi['hello']['params']){
+ hello(token:string,ws:WebSocket,peer:Peer<ClientApi>,{protocol:version,host,services}:ControlApi['hello']['params']){
   const m=this.machineOf(token);if(!m){ws.close(closeCodes.token,'token 无效');throw Error('token 无效');}
   if(this.idOn(ws)!=null)throw Error('已经完成握手');
   if(version!==protocol){
@@ -80,9 +87,11 @@ export class Clients{
    if(this.refusals.get(m.id)!==reason)this.store.log('机器连接',`${m.name}：客户端被拒绝，${reason}`,'error');
    this.refusals.set(m.id,reason);ws.close(closeCodes.version,reason);throw Error(reason);
   }
-  const old=this.live.get(m.id),c:Live={ws,peer,name:m.name,host:typeof host==='string'?host.slice(0,100):'',since:Date.now()};
+  const old=this.live.get(m.id),c:Live={ws,peer,name:m.name,host:typeof host==='string'?host.slice(0,100):'',since:Date.now(),services:announced(services)};
   this.live.set(m.id,c);this.refusals.delete(m.id);old?.ws.close(closeCodes.replaced,'这台机器的另一个客户端已连接');
-  this.store.log('机器连接',`${m.name} 的客户端已连接（${c.host}）${old?'，替换了之前的连接':''}`);this.joined(m);
+  this.store.log('机器连接',`${m.name} 的客户端已连接（${c.host}）${old?'，替换了之前的连接':''}`);
+  for(const name of c.services){const others=this.offers().filter(o=>o.machine.id!==m.id&&o.services.includes(name));if(others.length)this.store.log('服务',`服务「${name}」同时由 ${[m.name,...others.map(o=>o.machine.name)].join('、')} 提供，配置有误，暂时不能调用`,'error');}
+  this.joined(m);
   return {machine:{id:m.id,name:m.name},heartbeatMs:this.heartbeatMs};
  }
  // The id of the machine whose client is in on ws, if any.

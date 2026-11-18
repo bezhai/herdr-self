@@ -15,6 +15,7 @@ import {Tasks} from './task-core.ts';
 import {threadSink,threadSinkName} from './thread-sink.ts';
 import {AgentSchedules} from './agent-schedules.ts';
 import {AgentTasks} from './agent-tasks.ts';
+import {ServiceCalls} from './service-calls.ts';
 import {staticFile,sendStatic} from './web-assets.ts';
 import {Clients} from './clients.ts';
 import {configText,consoleUrl} from './client.ts';
@@ -69,7 +70,8 @@ const allowedHost=(req:http.IncomingMessage)=>['localhost','127.0.0.1',os.hostna
 const refusal=(e:Error)=>{throw Error(publicText(e.message).slice(0,1200));};
 // Once the client of a machine is in, the projects that adopted a directory there are asked about it (see convertAdopted), one machine after the other.
 const conversions=new Map<string,Promise<unknown>>();
-const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal),messages:(m,{op,body})=>messages.call(m,op,body).catch(refusal),tasks:(m,{op,body})=>agentTasks.call(m,op,body).catch(refusal)}});
+const serviceCalls=new ServiceCalls({offers:()=>clients.offers(),call,log:(...args)=>store.log(...args)});
+const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal),messages:(m,{op,body})=>messages.call(m,op,body).catch(refusal),tasks:(m,{op,body})=>agentTasks.call(m,op,body).catch(refusal),services:(m,{op,body})=>serviceCalls.call(m,op,body).catch(refusal)}});
 function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
 function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}

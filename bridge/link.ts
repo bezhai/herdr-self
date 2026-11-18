@@ -15,7 +15,9 @@ import type {Kind,PermissionMode,WorkMode,OwnerChat,Mention} from './state.ts';
 // 7: the control plane keeps the store of skills of every machine in line with the platform (compareSkills, stockSkill, pruneSkills), which a
 // client of 6 cannot answer. 8: the client of the machine that runs open-lark reads chats and messages of Feishu and sends messages as the
 // owner (openLarkMessage, openLarkChat, openLarkReply, openLarkSend), and every client passes the requests of bridge-message on (messages). 9: every client passes the requests of bridge-task on (tasks).
-export const protocol=9;
+// 10: a client offers the local HTTP services of its config by name (its hello names them) and performs a request of one for an agent
+// (callService), and every client passes the requests of bridge-call on (services).
+export const protocol=10;
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 // What one side may ask of the other: the params of each method and what it resolves to. A side's methods (see link) are async functions
@@ -38,6 +40,13 @@ export type WorkspaceProject={id:string,repos:string[],workMode:WorkMode,adopted
 export type OwnerMessage=OwnerChat&{messageId:string,sender:{id:string,name:string},at:number,text:string,link?:string};
 // A message that went out as the owner: its open-lark id, when it was sent, in ms, and owner, the name of the Feishu account it went out as.
 export type Sent={messageId:string,at:number,owner:string};
+// A request of an agent to a service of a machine (see services.ts): service, the name of the service; method; path, relative to the root of the
+// service, with no query or fragment; query, its pairs; body, the JSON text of a POST, PUT or PATCH (the client sends {} when there is none); and
+// headers, the request headers that the service lets an agent pass, by lower-case name. It carries no credential: the client of the machine that
+// offers the service builds the request itself.
+export type ServiceRequest={service:string,method:string,path:string,query?:[string,string][],body?:string,headers?:Record<string,string>};
+// What the service answered: status, contentType, and the body, as text when it is text (encoding text) and else base64 of its bytes.
+export type ServiceAnswer={status:number,contentType:string,encoding:'text'|'base64',body:string};
 // What the control plane asks of the client of a machine (see machine.ts). A request carries timeoutMs, the most that a command it runs
 // may take (see Clients.call), except the heartbeat's ping.
 type Timed<P>=P&{timeoutMs?:number};
@@ -90,15 +99,23 @@ export type ClientApi={
  openLarkChat:{params:Timed<{chatId:string}>,result:OwnerChat},
  openLarkReply:{params:Timed<{messageId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
  openLarkSend:{params:Timed<{chatId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
+// callService makes one request of the service request.service of the client's config with that service's token, and resolves to its answer,
+// also when the status is an error. It rejects with code service_unknown for a name that the config lacks; method_not_allowed and
+// header_not_allowed for a method or header that the service's config does not allow; invalid_params for a request that is not as
+// ServiceRequest, or whose path leaves the root of the service; service_unreachable when the service did not answer within timeoutMs;
+// response_too_large for an answer over 20 MB. Their messages are for the agent and carry no token.
+ callService:{params:Timed<ServiceRequest>,result:ServiceAnswer},
 };
 // What the client of a machine asks of the control plane (see Clients): the hello with which its connection gets in, and the requests of
-// bridge-schedule, bridge-skill, bridge-message and bridge-task, which the client passes on without looking into them (see serve in client.ts).
+// bridge-schedule, bridge-skill, bridge-message, bridge-task and bridge-call, which the client passes on without looking into them (see serve in client.ts).
+// The hello names the services of the client's config (services; the names only).
 export type ControlApi={
- hello:{params:{protocol:number,host:string},result:{machine:{id:string,name:string},heartbeatMs:number}},
+ hello:{params:{protocol:number,host:string,services:string[]},result:{machine:{id:string,name:string},heartbeatMs:number}},
  schedules:{params:{op:string,body:unknown},result:unknown},
  skills:{params:{op:string,body:unknown},result:unknown},
  messages:{params:{op:string,body:unknown},result:unknown},
  tasks:{params:{op:string,body:unknown},result:unknown},
+ services:{params:{op:string,body:unknown},result:unknown},
 };
 // The other side of a link (see link).
 export type Peer<Theirs extends Api>={call<K extends keyof Theirs&string>(method:K,params:Theirs[K]['params'],options?:{timeoutMs?:number}):Promise<Theirs[K]['result']>};

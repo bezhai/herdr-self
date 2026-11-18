@@ -3881,7 +3881,7 @@ test('with a real Bridge and the real client of a machine, its store of skills f
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-sync-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  fs.mkdirSync(home);const kept=path.join(home,'.local/share/herdr-bridge/skills'),server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
  try{
-  assert.equal(protocol,9);
+  assert.equal(protocol,10);
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
   const logs=async()=>((await api('state')).logs as Log[]).filter(l=>l.kind==='skill').map(l=>l.message);
   const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});
@@ -3992,6 +3992,37 @@ test('the control plane takes a client at /api/client only from an allowed Host,
   ws.close();await until(()=>f.clients.status('m').state==='offline','the client is offline');
  }finally{f.close();}
 });
+test('a client names its services in its hello; the control plane keeps the valid names of each machine that is enabled and online, logs a name that two machines offer, and forgets a machine that is gone',async()=>{
+ const f=await clientsFixture();
+ try{
+  const other:Machine={id:'n',name:'cpu1',session:'default',enabled:true};f.store.data.machines.push(other);const token2=f.clients.issue(other);
+  const a=await dial(f.url,f.token);hello(a,{protocol,host:'a',services:['notes','wiki','notes','Bad_Name',3,'x'.repeat(40)]});await framesOf(a).wait(x=>x.id===1);
+  assert.deepEqual(f.clients.offers().map(o=>[o.machine.name,o.services]),[['cpu2',['notes','wiki']]]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='服务'),[]);
+  const b=await dial(f.url,token2);hello(b,{protocol,host:'b',services:['notes']});await framesOf(b).wait(x=>x.id===1);
+  assert.deepEqual(f.clients.offers().map(o=>[o.machine.name,o.services]),[['cpu2',['notes','wiki']],['cpu1',['notes']]]);
+  assert.deepEqual(f.store.data.logs.filter(l=>l.kind==='服务').map(l=>[l.level,l.message]),[['error','服务「notes」同时由 cpu1、cpu2 提供，配置有误，暂时不能调用']]);
+  other.enabled=false;assert.deepEqual(f.clients.offers().map(o=>o.machine.name),['cpu2']);
+  a.close();await until(()=>f.clients.offers().length===0,'no machine offers anything');
+  const c=await dial(f.url,f.token);hello(c,{protocol,host:'c'});await framesOf(c).wait(x=>x.id===1);assert.deepEqual(f.clients.offers().map(o=>o.services),[[]]);
+  c.close();b.close();await until(()=>f.store.data.machines.every(m=>f.clients.status(m.id).state!=='online'),'the clients are gone');
+ }finally{f.close();}
+});
+test('the client announces the names of the services of its config in its hello and answers callService for them',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-')),wss=new WebSocketServer({port:0,host:'127.0.0.1'}),connections:{ws:WsSocket,frames:Frames}[]=[];await new Promise(r=>wss.once('listening',r));
+ wss.on('connection',ws=>connections.push({ws,frames:framesOf(ws)}));
+ const service=http.createServer((req,res)=>{res.writeHead(200,{'content-type':'text/plain'});res.end('auth='+req.headers.authorization+' url='+req.url);});await new Promise<void>(r=>service.listen(0,'127.0.0.1',r));
+ const config=JSON.stringify({url:`ws://127.0.0.1:${(wss.address() as AddressInfo).port}/api/client`,token:'machine-token',services:{notes:{url:`http://127.0.0.1:${(service.address() as AddressInfo).port}/v1`,token:'service-secret'}}});
+ const client=bridgeClient(configFile(dir,'client.json',config),{BRIDGE_CLIENT_SOCKET:path.join(dir,'client.sock')});
+ try{
+  const c=await until(()=>connections[0],'a connection'),h=await c.frames.wait(x=>x.method==='hello');assert.deepEqual(h.params,{protocol,host:os.hostname(),services:['notes']});
+  c.ws.send(JSON.stringify({id:h.id,result:{machine:{id:'m',name:'cpu2'},heartbeatMs:60000}}));
+  c.ws.send(JSON.stringify({id:5,method:'callService',params:{service:'notes',method:'GET',path:'/items',query:[['a','1']]}}));
+  assert.deepEqual(await c.frames.wait(x=>x.id===5&&!x.method),{id:5,result:{status:200,contentType:'text/plain',encoding:'text',body:'auth=Bearer service-secret url=/v1/items?a=1'}});
+  c.ws.send(JSON.stringify({id:6,method:'callService',params:{service:'wiki',method:'GET',path:'/'}}));
+  const refused=await c.frames.wait(x=>x.id===6&&!x.method);assert.equal(refused.error.code,'service_unknown');assert.ok(!JSON.stringify(refused).includes('service-secret'));
+ }finally{client.kill();wss.close();service.close();fs.rmSync(dir,{recursive:true});}
+});
 test('a peer that sends a frame no client may send, with or without the right token, or drops a request for another path, does not bring the control plane down',async()=>{
  const f=await clientsFixture(),port=Number(new URL(f.url).port);
  const upgrade=(p:string,token:string)=>[`GET ${p} HTTP/1.1`,'Host: 127.0.0.1','Upgrade: websocket','Connection: Upgrade','Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==','Sec-WebSocket-Version: 13','Authorization: Bearer '+token,'',''].join('\r\n');
@@ -4002,14 +4033,14 @@ test('a peer that sends a frame no client may send, with or without the right to
    s.write(upgrade('/api/client',token));await until(()=>got.startsWith('HTTP/1.1 101'),'the upgrade');s.write(Buffer.from([0x81,0x02,0x68,0x69]));await closed;
   }
   const s=net.connect(port,'127.0.0.1');s.on('error',()=>{});s.write(upgrade('/api/other',f.token));s.resetAndDestroy();await later(100);
-  const ws=await dial(f.url,f.token);await link<ClientApi,ControlApi>(ws,{ping:()=>({})}).call('hello',{protocol,host:'h'});assert.equal(f.clients.status('m').state,'online');
+  const ws=await dial(f.url,f.token);await link<ClientApi,ControlApi>(ws,{ping:()=>({})}).call('hello',{protocol,host:'h',services:[]});assert.equal(f.clients.status('m').state,'online');
   ws.close();await until(()=>f.clients.status('m').state==='offline','the client is offline');
  }finally{f.close();}
 });
 test('the control plane pings each client every heartbeat and drops one that does not answer within it; a machine is offline once its client is gone',async()=>{
  const f=await clientsFixture({heartbeatMs:100});
  try{
-  const answering=await dial(f.url,f.token),result=await link<ClientApi,ControlApi>(answering,{ping:()=>({})}).call('hello',{protocol,host:'a'});
+  const answering=await dial(f.url,f.token),result=await link<ClientApi,ControlApi>(answering,{ping:()=>({})}).call('hello',{protocol,host:'a',services:[]});
   assert.equal(result.heartbeatMs,100);await later(450);assert.equal(f.clients.status('m').state,'online');
   answering.close();await until(()=>f.clients.status('m').state==='offline','the closed client is offline');
   const mute=await dial(f.url,f.token),frames=framesOf(mute),closed=closeOf(mute);hello(mute,{protocol,host:'b'});
@@ -4025,7 +4056,7 @@ test('the client dials the URL of its config with its token, says hello with its
  const connection=(n:number)=>until(()=>connections[n],'connection '+(n+1)),welcome=(c:typeof connections[number],h:Json,heartbeatMs:number)=>c.ws.send(JSON.stringify({id:h.id,result:{machine:{id:'m',name:'cpu2'},heartbeatMs}}));
  try{
   let c=await connection(0);assert.equal(c.req.url,'/api/client');assert.equal(c.req.headers.authorization,'Bearer machine-token');
-  let h=await c.frames.wait(x=>x.method==='hello');assert.deepEqual(h.params,{protocol,host:os.hostname()});welcome(c,h,60000);
+  let h=await c.frames.wait(x=>x.method==='hello');assert.deepEqual(h.params,{protocol,host:os.hostname(),services:[]});welcome(c,h,60000);
   await until(()=>client.log.includes('已连接控制面，机器「cpu2」'),'the client says it is connected');
   c.ws.send(JSON.stringify({id:1,method:'ping',params:{}}));c.ws.send(JSON.stringify({id:2,method:'exec',params:{argv:['id']}}));
   assert.deepEqual(await c.frames.wait(x=>x.id===1&&!x.method),{id:1,result:{}});
@@ -4073,17 +4104,18 @@ test('the client of the machine that runs open-lark, the owner\'s channel, finds
   ] satisfies [unknown,string][])assert.throws(()=>read(openLark),{message:`配置文件 ${path.join(dir,'client.json')} ${error}`});
  }finally{fs.rmSync(dir,{recursive:true});}
 });
-test('the client, bridge-schedule, bridge-skill and bridge-message run on Node alone: bin/bridge-client.ts, bin/bridge-schedule.ts, bin/bridge-skill.ts, bin/bridge-message.ts and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
+test('the client, bridge-schedule, bridge-skill, bridge-message and bridge-call run on Node alone: bin/bridge-client.ts, bin/bridge-schedule.ts, bin/bridge-skill.ts, bin/bridge-message.ts, bin/bridge-call.ts and everything they import load only Node\'s built-in modules and each other, never a package',()=>{
  // Node erases the type-only imports of a .ts file, which load nothing.
  const imports=(bin:string)=>{
   const seen=new Set<string>(),visit=(file:string)=>{if(seen.has(file))return;seen.add(file);
    for(const [,spec] of fs.readFileSync(file,'utf8').matchAll(/(?:^import\b(?!\s+type\b)[^'"]*?|\bimport\s*\(\s*)['"]([^'"]+)['"]/gm)){if(spec.startsWith('node:'))continue;assert.ok(/^\.\.?\//.test(spec),`${path.relative(bridgeDir,file)} imports ${spec}`);visit(path.resolve(path.dirname(file),spec));}};
   visit(path.join(bridgeDir,'bin',bin));return [...seen].map(f=>path.relative(bridgeDir,f)).sort();
  };
- const client=['client.ts','core.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','open-lark.ts','projects.ts','workspace.ts'],sorted=(files:string[])=>[...files,...client].sort();
+ const client=['client.ts','core.ts','launch.ts','link.ts','machine-tools.ts','machine.ts','open-lark.ts','projects.ts','services.ts','workspace.ts'],sorted=(files:string[])=>[...files,...client].sort();
  assert.deepEqual(imports('bridge-client.ts'),sorted(['bin/bridge-client.ts']));
  assert.deepEqual(imports('bridge-schedule.ts'),sorted(['bin/bridge-schedule.ts','cron.ts','request-cards.ts','schedule-command.ts']));
  assert.deepEqual(imports('bridge-skill.ts'),sorted(['bin/bridge-skill.ts','skill-command.ts']));
+ assert.deepEqual(imports('bridge-call.ts'),sorted(['bin/bridge-call.ts','service-command.ts']));
  assert.deepEqual(imports('bridge-message.ts'),sorted(['bin/bridge-message.ts','message-cards.ts','message-command.ts','outbound-cards.ts','request-cards.ts']));
 });
 // Stops the client processes started and closes the clients fixture f once none of its machines is online any more.
@@ -4245,7 +4277,7 @@ test('a command that runs past the timeout the control plane gave it is killed b
  // A client that never answers: the request carries its timeout, and the control plane gives up graceMs after it.
  const g=await clientsFixture({graceMs:300});
  try{
-  const ws=await dial(g.url,g.token),got:ClientApi['herdr']['params'][]=[];await link<ClientApi,ControlApi>(ws,{ping:()=>({}),herdr:params=>{got.push(params);return new Promise(()=>{});}}).call('hello',{protocol,host:'h'});
+  const ws=await dial(g.url,g.token),got:ClientApi['herdr']['params'][]=[];await link<ClientApi,ControlApi>(ws,{ping:()=>({}),herdr:params=>{got.push(params);return new Promise(()=>{});}}).call('hello',{protocol,host:'h',services:[]});
   const started=Date.now();await assert.rejects(g.clients.call(g.store.data.machines[0],'herdr',{session:'default',args:['x']},{timeoutMs:200}),(e:Thrown)=>e.timedOut===true&&e.message==='请求超时：herdr');
   const waited=Date.now()-started;assert.ok(waited>=450&&waited<2000,String(waited));assert.deepEqual(got,[{session:'default',args:['x'],timeoutMs:200}]);
   ws.close();await until(()=>!g.clients.online('m'),'the client is gone');

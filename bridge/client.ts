@@ -10,6 +10,9 @@ import type {SkillReads} from './skills.ts';
 import type {MessageOps} from './messages.ts';
 import type {TaskOps} from './agent-tasks.ts';
 import type {OpenLark} from './open-lark.ts';
+import {parseServices} from './services.ts';
+import type {Service} from './services.ts';
+import type {ServiceOps} from './service-calls.ts';
 // The Bridge client of a machine (bin/bridge-client.ts runs it, one per machine, as a user service). It dials the control plane at
 // the url of its config with the machine's token and stays connected over one WebSocket (see link.ts and clients.ts), does on this
 // machine what the control plane asks of it with a fixed set of methods (see machine.ts), and passes the requests of bridge-schedule,
@@ -29,8 +32,9 @@ export function consoleUrl(value:string|undefined){
 export const configText=(origin:string,token:string)=>JSON.stringify({url:origin.replace(/^http/,'ws')+'/api/client',token},null,2)+'\n';
 // The url, the token and the Herdr of the config file: herdr, the path of the Herdr program on this machine, absolute or with ~/ for the
 // home directory, is ~/.local/bin/herdr unless the file names another. On the machine that runs open-lark, the owner's channel, openLark
-// is where its agent server listens on this machine and its full token (see open-lark.ts). It holds tokens, so no one else may read it.
-export type Config={url:string,token:string,herdr:string,openLark?:OpenLark};
+// is where its agent server listens on this machine and its full token (see open-lark.ts). services are the local HTTP services that the client offers
+// agents by name (see services.ts), each with its token. It holds tokens, so no one else may read it.
+export type Config={url:string,token:string,herdr:string,openLark?:OpenLark,services?:Record<string,Service>};
 export function readConfig(file:string):Config{
  let mode:number;try{mode=fs.statSync(file).mode;}catch(e){throw Error(`读不到配置文件 ${file}：${e.code||e.message}`);}
  if(mode&0o077)throw Error(`配置文件 ${file} 的权限是 ${(mode&0o777).toString(8)}，其他用户也能读到 token，改成 600：chmod 600 ${file}`);
@@ -39,7 +43,7 @@ export function readConfig(file:string):Config{
  if(!url||!['ws:','wss:'].includes(url.protocol)||url.hash)throw Error(`配置文件 ${file} 的 url 必须是 ws:// 或 wss:// 开头的控制面地址，例如 ws://<控制面地址>:8080/api/client`);
  if(typeof c.token!=='string'||!c.token)throw Error(`配置文件 ${file} 缺少 token`);
  const herdr=c.herdr??'~/.local/bin/herdr';if(typeof herdr!=='string'||!/^(~\/|\/)/.test(herdr))throw Error(`配置文件 ${file} 的 herdr 必须是 Herdr 程序的绝对路径或 ~/ 开头的路径`);
- return {url:url.href,token:c.token,herdr,...c.openLark!==undefined&&{openLark:openLark(file,c.openLark)}};
+ return {url:url.href,token:c.token,herdr,...c.openLark!==undefined&&{openLark:openLark(file,c.openLark)},...c.services!==undefined&&{services:parseServices(file,c.services)}};
 }
 // openLark of config file: its token goes only to open-lark on this machine, so its url can name no other host.
 function openLark(file:string,o:unknown):OpenLark{
@@ -59,8 +63,8 @@ export const clientSocket=(env=process.env)=>env.BRIDGE_CLIENT_SOCKET||path.join
 export const forwardMs=60000;
 const notConnected='本机的 Bridge 客户端没有连上控制面：请稍后重试，一直这样时请主人查看这台机器上客户端的日志';
 // Takes the requests of bridge-schedule, bridge-skill, bridge-message and bridge-task on socket, which only this user may open, in a directory that it
-// creates 0700: POST /schedules/<op>, /skills/<op>, /messages/<op> and /tasks/<op> with a JSON body. While the client is connected (peer() returns the
-// link of its connection, else null), each goes to the control plane as the request schedules, skills, messages or tasks {op, body}, which the
+// creates 0700: POST /schedules/<op>, /skills/<op>, /messages/<op>, /tasks/<op> and /services/<op> with a JSON body. While the client is connected (peer() returns the
+// link of its connection, else null), each goes to the control plane as the request schedules, skills, messages, tasks or services {op, body}, which the
 // control plane answers for the machine of that connection (see Clients); the client does not look into it, so what it may ask is up to
 // the control plane, which answers only reads of skills that come this way. Answers 200 with the result, 400 with what the control plane
 // refused or when it did not answer within forwardMs, 503 while the client is not connected. A socket already at that path is one that an
@@ -69,13 +73,13 @@ export async function serve(socket:string,peer:()=>Peer<ControlApi>|null){
  const answer=(res:http.ServerResponse,code:number,data:unknown)=>{res.writeHead(code,{'content-type':'application/json; charset=utf-8'});res.end(JSON.stringify(data));};
  const server=http.createServer(async(req,res)=>{
   // A request that a server received has its url.
-  const [,method,op]=req.method==='POST'&&/^\/(schedules|skills|messages|tasks)\/([a-z]+)$/.exec(new URL(req.url!,'http://localhost').pathname)||[];if(!op)return answer(res,404,{error:'接口不存在'});
+  const [,method,op]=req.method==='POST'&&/^\/(schedules|skills|messages|tasks|services)\/([a-z]+)$/.exec(new URL(req.url!,'http://localhost').pathname)||[];if(!op)return answer(res,404,{error:'接口不存在'});
   let s='',body;req.setEncoding('utf8');for await(const b of req)if(s.length<=100000)s+=b;
   if(s.length>100000)return answer(res,400,{error:'请求内容过大'});
   try{body=JSON.parse(s||'{}');}catch{return answer(res,400,{error:'请求内容不是 JSON'});}
   const p=peer();if(!p)return answer(res,503,{error:notConnected});
-  // The pattern of the path lets only these four through.
-  try{answer(res,200,await p.call(method as 'schedules'|'skills'|'messages'|'tasks',{op,body},{timeoutMs:forwardMs}));}
+  // The pattern of the path lets only these five through.
+  try{answer(res,200,await p.call(method as 'schedules'|'skills'|'messages'|'tasks'|'services',{op,body},{timeoutMs:forwardMs}));}
   catch(e){answer(res,400,{error:e.timedOut?`控制面 ${forwardMs/1000} 秒内没有回答`:String(e.message)});}
  });
  await fs.promises.mkdir(path.dirname(socket),{recursive:true,mode:0o700});await fs.promises.rm(socket,{force:true});
@@ -84,7 +88,7 @@ export async function serve(socket:string,peer:()=>Peer<ControlApi>|null){
 }
 // What the commands ask by path (see serve): the request and the answer of each operation of bridge-schedule, bridge-message and bridge-task and of each
 // read of bridge-skill, as Bridge defines them.
-type Requests={[K in keyof ScheduleOps as `/schedules/${K}`]:ScheduleOps[K]}&{[K in keyof SkillReads as `/skills/${K}`]:SkillReads[K]}&{[K in keyof MessageOps as `/messages/${K}`]:MessageOps[K]}&{[K in keyof TaskOps as `/tasks/${K}`]:TaskOps[K]};
+type Requests={[K in keyof ScheduleOps as `/schedules/${K}`]:ScheduleOps[K]}&{[K in keyof SkillReads as `/skills/${K}`]:SkillReads[K]}&{[K in keyof MessageOps as `/messages/${K}`]:MessageOps[K]}&{[K in keyof TaskOps as `/tasks/${K}`]:TaskOps[K]}&{[K in keyof ServiceOps as `/services/${K}`]:ServiceOps[K]};
 // Where a command writes: process.stdout and process.stderr, or what a test puts in their place.
 export type Output={write(text:string):unknown};
 // Sends the request of a command, path with body, to the client on socket (see serve), on a connection of its own, and resolves to Bridge's
@@ -112,7 +116,7 @@ export function send<P extends keyof Requests>(socket:string,path:P,body:Request
 // the server of serve leaves its socket where it is: the client that replaced it may run on this machine and have put its own socket at
 // that path already. methods are what the control plane may ask of the client (see link.ts). Returns a function that returns the link of
 // the connection while one is in, else null (see serve).
-export function run({url,token}:Pick<Config,'url'|'token'>,log:(s:string)=>void,methods:Methods<ClientApi>){
+export function run({url,token,services={}}:Pick<Config,'url'|'token'|'services'>,log:(s:string)=>void,methods:Methods<ClientApi>){
  let wait=1000,current:{ws:WebSocket,peer:Peer<ControlApi>}|null=null;
  const connect=()=>{
   const ws=new WebSocket(url,{headers:{authorization:'Bearer '+token}}),peer=link<ClientApi,ControlApi>(ws,methods);let opened=false,done=false,silence=0,timer:NodeJS.Timeout|undefined;
@@ -121,7 +125,7 @@ export function run({url,token}:Pick<Config,'url'|'token'>,log:(s:string)=>void,
   ws.addEventListener('message',watch);
   ws.addEventListener('open',async()=>{
    opened=true;
-   try{const r=await peer.call('hello',{protocol,host:os.hostname()},{timeoutMs:10000});wait=1000;silence=3*r.heartbeatMs;watch();current={ws,peer};log(`已连接控制面，机器「${r.machine.name}」`);}
+   try{const r=await peer.call('hello',{protocol,host:os.hostname(),services:Object.keys(services)},{timeoutMs:10000});wait=1000;silence=3*r.heartbeatMs;watch();current={ws,peer};log(`已连接控制面，机器「${r.machine.name}」`);}
    catch{ws.close();}
   });
   ws.addEventListener('close',e=>{
@@ -145,6 +149,6 @@ export async function main(env=process.env){
  let config:Config;try{config=readConfig(configPath(env));}catch(e){log(e.message);process.exitCode=1;return;}
  let shellEnv:NodeJS.ProcessEnv;try{shellEnv=await loginEnvironment(env);}catch(e){log(`没能取得登录 shell 的环境，命令按客户端自己的环境运行：${e.message}`);shellEnv=stripped(env);}
  // Without its socket the client runs on, and only bridge-schedule, bridge-skill and bridge-message fail on this machine.
- const socket=clientSocket(env),peer=run(config,log,{ping:()=>({}),...methods({herdr:config.herdr,env:shellEnv,openLark:config.openLark})});
+ const socket=clientSocket(env),peer=run(config,log,{ping:()=>({}),...methods({herdr:config.herdr,env:shellEnv,openLark:config.openLark,services:config.services})});
  serve(socket,peer).catch(e=>log(`没能打开 bridge-schedule、bridge-skill 和 bridge-message 用的 socket ${socket}：${e.message}`));
 }

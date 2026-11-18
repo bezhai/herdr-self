@@ -5,6 +5,8 @@ import {invalid,refused,string,local,inside,name,run,gitRunner} from './machine-
 import {workspaceMethods} from './workspace.ts';
 import {launchMethods} from './launch.ts';
 import {openLarkMethods} from './open-lark.ts';
+import {serviceMethods} from './services.ts';
+import type {Service} from './services.ts';
 import type {Methods,ClientApi,SkillFiles,SkillDigest} from './link.ts';
 import type {OpenLark} from './open-lark.ts';
 // What the client of a machine (see client.ts) does there for the control plane: a fixed set of methods, each of which runs a program of
@@ -89,9 +91,9 @@ async function stock(kept:string,{name:n,digest,files}:SkillFiles){
  return target;
 }
 // The methods of a client whose Herdr is the program at herdr (a leading ~/ is the home directory), whose commands run with env (see
-// loginEnvironment), and which reaches open-lark at openLark, on the machine that runs it (see open-lark.ts). Every request carries
+// loginEnvironment), and which reaches open-lark at openLark, on the machine that runs it (see open-lark.ts), and the local HTTP services of its config at services (see services.ts). Every request carries
 // timeoutMs, the most that a command it runs may take (see run).
-export function methods({herdr,env,openLark}:{herdr:string,env:NodeJS.ProcessEnv,openLark?:OpenLark}):Omit<Methods<ClientApi>,'ping'>{
+export function methods({herdr,env,openLark,services={}}:{herdr:string,env:NodeJS.ProcessEnv,openLark?:OpenLark,services?:Record<string,Service>}):Omit<Methods<ClientApi>,'ping'>{
  const program=herdr.replace(/^~\//,os.homedir()+'/');
  const git=gitRunner(env);
  return {
@@ -197,5 +199,6 @@ export function methods({herdr,env,openLark}:{herdr:string,env:NodeJS.ProcessEnv
   ...workspaceMethods(git),
   ...launchMethods(env),
   ...openLarkMethods(openLark),
+  ...serviceMethods(services),
  };
 }
