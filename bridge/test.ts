@@ -1020,7 +1020,7 @@ function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:
   prepareLaunch:async(m,params)=>{
    launched.push([m.id,params]);await null;reach(m);if(fake.fail.launch)throw fake.fail.launch;
    if(params.kind==='codex')return {args:[...params.model?['-m',params.model]:[],'-c',`projects={"${params.dir}"={trust_level="trusted"}}`]};
-   if(params.kind==='agy')return {args:['--settings',JSON.stringify({trustedWorkspaces:[params.dir]})]};
+   if(params.kind==='agy')return {args:['--settings',JSON.stringify({trustedWorkspaces:[params.dir],toolPermission:"always-proceed"})]};
    return {args:[...params.permissionMode?['--permission-mode',params.permissionMode]:[],...params.model?['--model',params.model]:[]]};
   },
   askModel:async prompt=>{naming.push({prompt});await null;const r=fake.model(prompt);if(r instanceof Error)throw r;return r;},
@@ -1261,7 +1261,7 @@ test('the configuration of an agent decides how it is launched: its model, its p
   [{permissionMode:undefined},{kind:'claude',permissionMode:'default'},['--','--permission-mode','default']],
   [{kind:'codex',model:'gpt-5'},{kind:'codex',model:'gpt-5'},['--','-m','gpt-5','-c','projects={"~/work"={trust_level="trusted"}}']],
   [{kind:'codex'},{kind:'codex'},['--','-c','projects={"~/work"={trust_level="trusted"}}']],
-  [{kind:'agy'},{kind:'agy'},['--','--settings','{"trustedWorkspaces":["~/work"]}']]] satisfies [Partial<AgentConfig>,Sent,string[]][]){
+  [{kind:'agy'},{kind:'agy'},['--','--settings','{"trustedWorkspaces":["~/work"],"toolPermission":"always-proceed"}']]] satisfies [Partial<AgentConfig>,Sent,string[]][]){
   const f=topicFixture({config});try{
    await f.send({messageId:'om_1',content:'one'});
    assert.deepEqual(f.launched,[['m',{...params,dir:'~/work'}]],JSON.stringify(config));

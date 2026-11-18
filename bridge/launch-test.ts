@@ -75,8 +75,8 @@ test('Codex runs in its pane with the network its sandbox needs, never stops at 
  const base=['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust','-c','check_for_update_on_startup=false'];
  assert.deepEqual(await launch({kind:'codex',dir:link}),[...base,'-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`]);
  assert.deepEqual(await launch({kind:'codex',model:'gpt-5.5',dir:real}),[...base,'-m','gpt-5.5','-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`]);
- assert.deepEqual(await launch({kind:'agy',dir:link}),['--settings',JSON.stringify({trustedWorkspaces:[link]})]);
- assert.deepEqual(await launch({kind:'agy',model:'gemini-3',dir:real}),['--model','gemini-3','--settings',JSON.stringify({trustedWorkspaces:[real]})]);
+ assert.deepEqual(await launch({kind:'agy',dir:link}),['--settings',JSON.stringify({trustedWorkspaces:[link],toolPermission:"always-proceed"})]);
+ assert.deepEqual(await launch({kind:'agy',model:'gemini-3',dir:real}),['--model','gemini-3','--settings',JSON.stringify({trustedWorkspaces:[real],toolPermission:"always-proceed"})]);
  // The path is a TOML string: a quote or a backslash in it stays in it.
  const odd=dir('odd "dir"\\x');assert.equal((await launch({kind:'codex',dir:odd})).at(-1),`projects={${JSON.stringify(odd)}={trust_level="trusted"}}`);
  // Neither touches the trust file of Claude.

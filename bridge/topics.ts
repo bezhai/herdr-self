@@ -35,9 +35,10 @@ const brief=(e:Error)=>publicText(e.message).split('\n')[0].slice(0,200);
 // meant for the message.
 const offline=(e:Error,after:string)=>`${brief(e)}。${after}`;
 // While Herdr's remote answers setting is on for the agent of a pane, the permission and question hooks of Claude and Codex wait for an
-// answer from Feishu (see cards); Antigravity has no such hooks, its approvals and questions get the blocked notice (see blocked). Bridge
-// turns the setting on before a topic is ready and off when it lets go of an agent that keeps running. Herdr clears it when the agent
-// exits, is released or changes to another agent, so a ready topic is linked to the agent of its pane for as long as the agent reports it.
+// answer from Feishu (see cards); Antigravity has no such hooks, so its questions and the approvals its ask rules raise get the blocked
+// notice (see blocked); it is launched with always-proceed, so it asks nothing else. Bridge turns the setting on before a topic is ready
+// and off when it lets go of an agent that keeps running. Herdr clears it when the agent exits, is released or changes to another agent,
+// so a ready topic is linked to the agent of its pane for as long as the agent reports it.
 const linked=(t:Topic,agents:Agent[])=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
 const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'on':'off'];
 const endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';

@@ -67,8 +67,10 @@ export function launchMethods(env:NodeJS.ProcessEnv):Pick<Methods<ClientApi>,'pr
     // a Feishu topic can answer, so it does not check.
     return {args:['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust','-c','check_for_update_on_startup=false',...model?['-m',model]:[],'-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`]};
    }
-   // Antigravity compares the path with $PWD, so the path as it is given, not the real one.
-   if(kind==='agy')return {args:[...model?['--model',model]:[],'--settings',JSON.stringify({trustedWorkspaces:[dir]})]};
+   // Antigravity compares the path with $PWD, so the path as it is given, not the real one. Its default toolPermission asks before the
+   // first shell command, and that prompt cannot reach Feishu (no permission hook), so always-proceed runs actions without asking while
+   // deny and ask rules in the settings still apply.
+   if(kind==='agy')return {args:[...model?['--model',model]:[],'--settings',JSON.stringify({trustedWorkspaces:[dir],toolPermission:'always-proceed'})]};
    const main=await mainCheckout(git,real,timeoutMs);
    // Outside Git a directory inherits the trust of an ancestor, such as the home directory; it is registered itself only when none has it.
    trust(claudeFile(env),projects=>{
