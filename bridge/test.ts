@@ -893,7 +893,8 @@ test('a change of the platform goes to every machine that is online and in use: 
 test('a push or an alignment that fails is only logged as an error with its reason, never thrown at the change that caused it, and the next one carries on; syncs and placements on one machine never run at once',async()=>{
  const f=syncFixture();try{
   f.join();const [m1]=f.store.data.machines;f.state.broken='stockSkill';
-  const entry=f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','a')}));assert.equal(entry.name,'alpha');await later(60);
+  const entry=f.skills.put('alpha',encoded({'SKILL.md':skillText('alpha','a')}));assert.equal(entry.name,'alpha');
+  await until(()=>f.logs().filter(l=>l.startsWith('error')).length>=2,'both pushes failed');
   assert.deepEqual(f.logs().filter(l=>l.startsWith('error')),['error: cpu1：未能更新 skill 副本，磁盘已满','error: cpu2：未能更新 skill 副本，磁盘已满']);
   assert.equal(f.store.data.logs.find(l=>l.level==='error')!.kind,'skill');
   f.state.broken='';await f.skills.align(m1);assert.deepEqual(f.stores.m1,{alpha:entry.digest});
