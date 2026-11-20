@@ -175,6 +175,34 @@ test('a model that fails is tried again next round, and judges the group once it
  r=await w.newChats.judgeNew({about:w.about()});assert.equal(r.judged,1);assert.equal(w.sent.length,1);
 });
 
+// A Meego reader that fails while down is set (as bytedcli does when the service's PATH has none).
+const flakyMeego=()=>{const m=async url=>{if(m.down)throw Error('bytedcli meego workitem get 失败（ENOENT）');return {url,...WORK_ITEM};};m.down=true;return m;};
+test('a Meego work item that cannot be read postpones the judgment: no model run, the group stays new and is judged once it reads',async t=>{
+ const meego=flakyMeego(),w=await world(t,{meego});patchView(w.lark);
+ await w.newChats.judgeNew({about:w.about()});
+ const feed=w.group('火山发文平台映射',{description:MEEGO});w.group('没有 Meego 链接的群');
+ let r=await w.newChats.judgeNew({about:w.about()});
+ assert.equal(r.judged,1,'a group without a Meego link is judged as before');
+ assert.deepEqual(w.prompts.map(p=>p.data.chat.name),['没有 Meego 链接的群'],'no model run without the work item');
+ const row=w.newChats.row(feed);
+ assert.equal(row.status,'new');assert.equal(row.attempts,1);assert.match(row.error,/Meego 工作项/);assert.match(row.error,/ENOENT/);
+ assert.ok(w.store.errors().some(e=>/火山发文平台映射/.test(e.message)&&/Meego 工作项/.test(e.message)&&/ENOENT/.test(e.message)&&/下一轮再试/.test(e.message)));
+ meego.down=false;
+ r=await w.newChats.judgeNew({about:w.about()});
+ assert.equal(r.judged,1);assert.equal(w.newChats.row(feed).status,'ask');assert.equal(w.newChats.row(feed).error,undefined);
+ const seen=w.prompts.at(-1).data.chat;
+ assert.equal(seen.name,'火山发文平台映射');assert.equal(seen.meego[0].workItem.work_item_attribute.role_members[0].members[0],'原智鸿','the model sees the roles');
+});
+
+test('a Meego work item that stays unreadable gives the group up after skipAfter rounds, never judged',async t=>{
+ const w=await world(t,{meego:flakyMeego()});patchView(w.lark);
+ await w.newChats.judgeNew({about:w.about()});const feed=w.group('需求群',{description:MEEGO});
+ for(let i=0;i<7;i++)await w.newChats.judgeNew({about:w.about()});
+ assert.equal(w.prompts.length,0);assert.equal(w.sent.length,0);
+ const row=w.newChats.row(feed);assert.equal(row.status,'given_up');assert.equal(row.attempts,5);assert.match(row.error,/Meego 工作项/);
+ assert.ok(w.store.errors().some(e=>/需求群/.test(e.message)&&/不再试/.test(e.message)&&/ENOENT/.test(e.message)));
+});
+
 test('the card waits for the bot: a group judged while it is offline gets its card once it is back, and once only',async t=>{
  const w=await world(t);patchView(w.lark);
  await w.newChats.judgeNew({about:w.about()});w.group('需求群');w.bot.connected=false;
@@ -197,6 +225,13 @@ test('the dry run of a verdict that does not start work has no card',async t=>{
  const w=await world(t,{answers:[{requirement:true,mine:false,reason:'你已经做完了'}]});patchView(w.lark);
  const r=await w.newChats.judge(w.group('已经做完的群'),{about:w.about()});
  assert.equal(r.verdict.mine,false);assert.equal(r.card,undefined);
+});
+
+test('the dry run of a group whose Meego work item cannot be read fails with the read error and asks no model',async t=>{
+ const w=await world(t,{meego:flakyMeego()});patchView(w.lark);
+ const feed=w.group('火山发文平台映射',{description:MEEGO});
+ await assert.rejects(w.newChats.judge(feed,{about:w.about()}),e=>/Meego 工作项/.test(e.message)&&/ENOENT/.test(e.message));
+ assert.equal(w.prompts.length,0);assert.equal(w.newChats.row(feed),undefined);
 });
 
 // ---- the click

@@ -8,8 +8,8 @@
 // model's call (see prompt.mjs newChatSystemPrompt): this gathers, asks, checks the answer and applies it.
 // "Never seen" is the chat table, not what a message says: a chat that exists when this first runs is recorded as seen and
 // never judged, and a long dormant group that wakes up later counts as new, which the model sees from the date of its first
-// message. A group is judged once: a verdict, positive or not, is final; a judgment that fails is tried again on the next
-// rounds, a few times.
+// message. A group is judged once: a verdict, positive or not, is final; a judgment that fails, or that would lack a Meego
+// work item it links to, is tried again on the next rounds, a few times.
 import {gatherMaterial,bytedcliMeego} from './newchat-material.mjs';
 import {composeNewChat,readNewChat} from './prompt.mjs';
 import {proposalCard,startingCard,startedCard,failedCard,ignoredCard} from './newchat-cards.mjs';
@@ -97,6 +97,10 @@ export class NewChats{
  // The verdict as kept: the model's fields, and what the ids it chose (or the group's binding) are called in Bridge.
  async #assess(feedId,state,about,record){
   const material=await gatherMaterial({lark:this.lark,feedId,meego:this.meego});
+  // A work item's roles say who does the requirement, the evidence the verdict turns on, and a verdict is final: one that
+  // could not be read fails the judgment, to be tried again, instead of the model judging without it.
+  const unread=material.meego.find(x=>x.error);
+  if(unread)throw Error(`Meego 工作项 ${unread.url} 读不出：${unread.error}`);
   const binding=material.openChatId?state.bindings?.find(b=>b.chatId===material.openChatId):undefined;
   const named=(list,id)=>{const x=id&&one(list,id);return x?{id:x.id,name:x.name}:null;};
   const boundTo=binding&&{project:named(state.projects,binding.defaultProjectId),agent:named(state.agentConfigs,binding.defaultAgentConfigId)};

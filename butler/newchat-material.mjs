@@ -3,8 +3,8 @@
 // entry, settings (labels, who owns it, the announcement), chat tabs, bots with when they joined, and its first messages;
 // the Meego work items behind any Meego link in those are read with bytedcli, read-only. What cannot be read is left out
 // and named in `unavailable`, or, for a Meego link, shown with its error: a judgment is better made on what there is than
-// not made. Links carry login tokens in their query (Meego's wiki links do), and the model must never see or copy one, so
-// every text is scrubbed.
+// not made, except without a work item (newchat.mjs then waits for the next round). Links carry login tokens in their
+// query (Meego's wiki links do), and the model must never see or copy one, so every text is scrubbed.
 import {execFile} from 'node:child_process';
 
 // How many of the first messages are read, how long each text may be, and how many Meego work items are read at most.
