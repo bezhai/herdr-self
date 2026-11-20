@@ -29,6 +29,9 @@ const DAY=86_400_000;
 export const DEFAULTS={everyMs:600_000,ownerCheckMs:15_000,heartbeatMs:60_000,maxMessages:40,maxPromptBytes:80_000,contextMessages:8,matterMessages:3,ownerMessages:5,textChars:1500,skipAfter:3,
  reviewEveryMs:10_800_000,profileEveryMs:DAY,profileMessages:1000,notMine:20,activeMs:7*DAY,involvementMs:30*DAY,profileChats:60};
 const message=e=>e?.message??String(e);
+// What batches, reviews and the new-group judgment are told of me: 关于TA (the meta profile), my notes and the matters I
+// marked as not mine (the latest notMine of them).
+export const aboutOf=(store,matters,notMine=DEFAULTS.notMine)=>({profile:store.meta('profile'),notes:matters.notes(),notMine:matters.notMine(notMine)});
 const alive=pid=>{try{process.kill(pid,0);return true;}catch(e){return e.code==='EPERM';}};
 // Whether what is done every everyMs is due: it has never been done (last has no at), or that long ago.
 const due=(last,everyMs,now)=>!(now-last?.at<everyMs);
@@ -46,10 +49,11 @@ export class Processor{
  // now: the clock. onMattersChanged: called once a batch or a part of a review has made, changed or closed matters, and
  // once the command line has closed or reopened some (see checkMark).
  // onProfile({text, added, at}): called once 关于TA has been written, with what the model says it newly inferred
- // compared with the last one (a list, possibly empty). What either throws or rejects with is recorded and changes
+ // compared with the last one (a list, possibly empty). newChats: {judgeNew({about})}, which a round ends with (see
+ // #newChats), none when butler is not set up to start work in groups. What either throws or rejects with is recorded and changes
  // nothing else.
- constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now,onMattersChanged=()=>{},onProfile=()=>{}}){
-  this.store=store;this.matters=matters;this.model=model;this.options={...DEFAULTS,...options};this.log=log;this.pid=pid;this.now=now;
+ constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now,onMattersChanged=()=>{},onProfile=()=>{},newChats}){
+  this.store=store;this.matters=matters;this.model=model;this.newChats=newChats;this.options={...DEFAULTS,...options};this.log=log;this.pid=pid;this.now=now;
   this.onMattersChanged=onMattersChanged;this.onProfile=onProfile;this.#limit=this.options.maxMessages;
  }
 
@@ -134,12 +138,14 @@ export class Processor{
   const go=()=>!this.#halting&&!failed;
   const profile=go()&&this.#profileDue()?await this.#profile():undefined;
   const result={runs,failures,profile,review:go()&&this.#reviewDue()?await this.#review():undefined};
+  // The groups butler sees for the first time are judged last: nothing waits for the model behind them.
+  if(this.newChats&&go())result.newChats=await this.#newChats();
   this.#failed=failures>0||Boolean(profile?.error||result.review?.error);
   this.#beat({lastRoundAt:this.now()});
   return result;
  }
- // What batches and reviews are told of me: 关于TA (the meta profile), my notes and the matters I marked as not mine.
- #about(){return {profile:this.store.meta('profile'),notes:this.matters.notes(),notMine:this.matters.notMine(this.options.notMine)};}
+ // What batches and reviews are told of me (see aboutOf).
+ #about(){return aboutOf(this.store,this.matters,this.options.notMine);}
  // 关于TA, after a round's batches and before its review, which then judges by it. It is due when none has been
  // written (the first round after deployment writes it), once profileEveryMs have passed since the last one, and
  // when my notes are no longer those it was written with. One that fails is recorded and goes again on the next
@@ -185,6 +191,12 @@ export class Processor{
    this.store.setMeta('review',{...last,failedAt:this.now(),error:message(e)});
    return {error:message(e)};
   }
+ }
+ // The judgment of new groups (see newchat.mjs). One that fails is recorded and goes again on the next round; it holds
+ // up nothing.
+ async #newChats(){
+  try{return await this.newChats.judgeNew({about:this.#about()});}
+  catch(e){this.store.addError('加工',`判断新群没有完成，下一轮再试：${message(e)}`);return {error:message(e)};}
  }
  #changed(){this.#tell('事项有变化',()=>this.onMattersChanged());}
  // Calls a hook; what it throws or rejects with is recorded, after what happened (what).

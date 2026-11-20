@@ -1,6 +1,8 @@
-// Client of open-lark's legacy Agent API (/agent/v1) with the read-only token. butler only reads: every request goes
-// through readOnly(), so the one POST it may send is the @me history search, and never the pins route, whose GET marks
-// pinned messages read in Lark.
+// Client of open-lark's legacy Agent API (/agent/v1). butler reads with the read-only token: every request of that
+// client goes through readOnly(), so the one POST it may send is the @me history search, and never the pins route, whose
+// GET marks pinned messages read in Lark. The one thing butler writes, adding a bot to a group as the owner (see
+// newchat.mjs), goes through a second client with a token of its own, whose guard, addBotOnly(), allows that route and no
+// other.
 
 // What butler calls, as GET /agent/v1 lists routes. open-lark makes no stability promise for this API, so startup
 // checks they are all there.
@@ -16,6 +18,13 @@ export function readOnly(method,path){
  throw Error(`butler 只读：拒绝 ${method} ${path}`);
 }
 
+// The guard of the client that writes: exactly POST /conversations/<feedId>/bots, which adds a bot to a group, and nothing
+// else, not even a read.
+export function addBotOnly(method,path){
+ if(method==='POST'&&/^\/conversations\/\d+\/bots$/.test(path))return;
+ throw Error(`butler 只允许把机器人加进群：拒绝 ${method} ${path}`);
+}
+
 export class OpenLarkError extends Error{
  constructor(status,code,message){super(`open-lark 返回 ${status}${code?`（${code}）`:''}：${message}`);this.status=status;this.code=code;}
 }
@@ -25,13 +34,14 @@ export const isHealthy=s=>s?.state==='live'&&s?.mode==='frontier';
 
 export class OpenLark{
  // gapMs: pause between requests. Reads of messages, threads and the @me history can make open-lark call Lark, and
- // requests are sent one at a time.
- constructor({url,token,gapMs=100,timeoutMs=30000,fetch=globalThis.fetch}){
-  this.base=url.replace(/\/$/,'');this.token=token;this.gapMs=gapMs;this.timeoutMs=timeoutMs;this.fetch=fetch;this.queue=Promise.resolve();
+ // requests are sent one at a time. guard(method, path): throws unless the request may be sent; readOnly, unless this
+ // is the client that adds bots (addBotOnly).
+ constructor({url,token,gapMs=100,timeoutMs=30000,fetch=globalThis.fetch,guard=readOnly}){
+  this.base=url.replace(/\/$/,'');this.token=token;this.gapMs=gapMs;this.timeoutMs=timeoutMs;this.fetch=fetch;this.guard=guard;this.queue=Promise.resolve();
  }
  get eventsUrl(){const u=new URL(`${this.base}/agent/v1/events`);u.protocol=u.protocol==='https:'?'wss:':'ws:';return u.toString();}
  #request(method,path,{query,body}={}){
-  readOnly(method,path);
+  this.guard(method,path);
   const run=async()=>{
    const url=new URL(`${this.base}/agent/v1${path}`);
    for(const [k,v] of Object.entries(query??{}))if(v!==undefined&&v!==null)url.searchParams.set(k,String(v));
@@ -53,6 +63,14 @@ export class OpenLark{
  syncStatus(){return this.#request('GET','/sync/status');}
  conversations({scope,limit=100,cursor}){return this.#request('GET','/conversations',{query:{scope,limit,cursor}});}
  conversation(feedId){return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}`);}
+ // What a new group shows besides its conversation entry: settings (labels, owner, announcement), chat tabs and the
+ // bots in it (each with when it joined).
+ settings(feedId){return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}/settings`);}
+ chatTabs(feedId){return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}/chat-tabs`);}
+ bots(feedId){return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}/bots`);}
+ // The one write: the bot botId (as open-lark knows it) joins the group as me, which every member sees. Only a client
+ // made with addBotOnly can send it.
+ addBot(feedId,botId){return this.#request('POST',`/conversations/${encodeURIComponent(feedId)}/bots`,{body:{botId}});}
  // One of afterPosition, beforePosition, aroundPosition or tail.
  messages(feedId,{afterPosition,beforePosition,aroundPosition,tail,limit=100}){
   return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}/messages`,{query:{afterPosition,beforePosition,aroundPosition,tail:tail?1:undefined,limit}});

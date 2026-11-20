@@ -97,6 +97,8 @@ open-lark 的推送（`/agent/v1/events` WebSocket）只推送当下发生的事
 
 收集器只用 open-lark 的只读 token，所有请求都经过同一个检查：只允许 GET，以及唯一一个读用途的 POST `/search/mention-history`；任何路径里有 `pins` 的请求都会被拒绝，因为 `GET /conversations/:feedId/pins` 会清除飞书里置顶消息的未读标记。它从不发消息，也读不到 open-lark 的全权限 token 和数据库凭据：配置里只放只读 token，收集器不读 open-lark 的 `app.env`。代价是 token 轮换时要改两处。即使配置里误放了全权限 token，收集器发出的仍然只有上面这些读请求。
 
+收集器和命令行的读都经 `readOnly()`，这一点不变。管家唯一的写，是「新群开工」里把 Bridge 的机器人以我的身份加进一个群（见「新群开工」），它走另一个客户端：用另一个 token（`BUTLER_OPEN_LARK_WRITE_TOKEN`），检查换成 `addBotOnly()`，只允许 `POST /conversations/<数字 id>/bots`，连读都不允许；只读的客户端调用同一个方法会被 `readOnly()` 拒绝。
+
 open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启动时用 `GET /agent/v1` 的路由目录检查它要用的路由都在，不全就记一条错误，每分钟重新检查，直到齐了才开始收集。
 
 ## 加工端
@@ -280,6 +282,55 @@ ssh <cpu1 的 SSH 地址> 'mkdir -p -m 700 ~/.local/share/butler-model'
 
 `machine add` 需要两边的 herdr 版本兼容；它要求批准安装、更新或替换远端 herdr 时，先停下来确认。`BUTLER_MODEL_CWD` 写这个目录在模型机器上的绝对路径：herdr 对不存在的目录和 `~` 开头的路径都会悄悄换成主目录。这个目录在已信任的主目录下面，claude 启动时不会停在信任对话框上。
 
+## 新群开工
+
+我被拉进一个新的需求群时，不用自己去开 agent：加工端让模型判断这个群是不是需求群、是不是该我动手，是的话在机器人的私聊里发一张卡片，我点「开工」，Bridge 就在群里开一个话题，带着模型写好的第一条提示，工作机上的 agent 照项目和 Agent 配置起来。想法和取舍见 `.local/prd/requirement-group-start.md`。
+
+### 什么算「新群」
+
+butler 的聊天表里还没有记录过的群聊（普通群和话题群）。不看系统消息的措辞，也不看群名：进群记录要群主或管理员才读得到，建群时我在拉群名单里也不会有「邀请你加入」的消息。第一次运行时（`meta` 里的 `newChats` 没有 `seededAt`）聊天表里已有的群都记为「已见过」，不判断，上线不会一下子冒出一堆卡片。很久不动的老群后来突然有了动静，对 butler 来说也是新群，模型能看到群里第一条消息的时间，由它判断。
+
+加工端每一轮（10 分钟）在整理消息、「关于TA」和整理事项之后做这一步，一轮最多判断 10 个群。每个群只判断一次，判断出的结果不管是不是需求群都是终局，存在 `new_chats` 表里（第一次见到的时间、模型的原始回复和解析出的字段、卡片、我的选择、Bridge 的结果）；判断本身失败（读不到群、模型没有回答、回答不合格）时下一轮再试，试满 5 次放弃，记一条错误（来源「新群」）。模型运行在 `model_runs` 里的类别是 `newchat`。
+
+### 读到什么，模型决定什么
+
+代码只收集材料，不下判断（`newchat-material.mjs`）：open-lark 的群条目（名称、描述、人数、`openChatId`）、群设置（标签、我是不是群主或管理员、群公告文档）、聊天标签页、群里的机器人和它们加入的时间、群里最早的 20 条消息；群描述、标签页和消息里每个 Meego 工作项链接（最多 3 个，同一个工作项只读一次），用 `bytedcli meego workitem get --url <链接> --json`（只读）读出工作项，其中有角色和成员、当前节点、状态和字段，人只留名字，不留邮箱和 id。链接里带 token 的查询参数（比如 Meego wiki 链接里的 `disposable_login_token`）一律去掉，模型看不到。读不到的部分在 `unavailable` 里说明，Meego 读不出的链接带着错误，不拦着判断。再加上 Bridge 的项目和 Agent 配置（`GET /api/state`，Agent 配置带机器名）、这个群在 Bridge 里已有的绑定，以及和别的运行一样的「关于TA」、我的说明和不归我的事项。
+
+模型回答固定的格式：`requirement`（是不是需求群）、`mine`（是不是我动手）、`reason`（一两句话）、`title`、`prompt`（开工的第一条提示）、`projectId`、`agentConfigId`。什么是需求群、什么时候是我动手（我是开发还是只是被拉进来知情）、需求已经完成算不算、选哪个项目和哪台机器上的 Agent，都在提示词里（`prompt.mjs` 的 `newChatSystemPrompt`）和「关于TA」、说明里，代码里没有关于群名、角色名或 Meego 状态的规则。「工作项目在 cpu2 上做」这类偏好写进说明，不写进代码。代码检查回答：两个布尔值必须有，要开工时必须有 `title` 和 `prompt`，选的 id 必须在 Bridge 的列表里（不在的当作没选，记一条错误）。第一条提示保留模型从材料里抄来的链接（agent 要靠它找文档），`reason` 和 `title` 里的链接和别处一样换成「[链接]」。
+
+### 卡片和点击
+
+两个都是 true 时发一张卡片到机器人的私聊（`newchat-cards.mjs`）：标题「新需求群：群名」，模型的理由，「项目：项目名 · Agent：Agent 配置名」，第一条提示（灰底），「开工」和「不用」。模型没有选出 Bridge 里有的项目或 Agent 配置时，卡片写「没有合适的项目，需要先在 Bridge 里建」，只有「不用」。群在 Bridge 里已经有绑定时，卡片显示绑定的项目和 Agent 配置，开工时不带项目和配置。机器人没连上或发送失败时，卡片等下一轮再发，不会重复判断。
+
+- 「不用」：卡片变成「已忽略」，别的什么都不做。
+- 「开工」：飞书要求 3 秒内回答，所以卡片先变成「开工中」（没有按钮，防止点两次），后台依次做：
+  1. 把 Bridge 的机器人加进群（open-lark 的 `POST /conversations/:feedId/bots`，`{botId}`，以我的身份，群里所有人看得到）。群在 Bridge 里已有绑定、机器人已经在群里（`GET /conversations/:feedId/bots` 里有任何字段等于 `BUTLER_BRIDGE_BOT_ID`），或者上一次点击已经加过，就不再加。
+  2. 调 Bridge 的 `POST /api/topics/open`（`chatId` 是群的 `openChatId`，`prompt`、`title`，群没有绑定时再带 `projectId` 和 `agentConfigId`，`key` 是 `newchat:<feedId>`，重复请求不会重复开话题）。机器人刚加进群还不能发言时 Bridge 返回错误码 `bot_cannot_post`，butler 每 3 秒再试，最多 60 秒。
+  3. 卡片变成「已开工：群名」，带「打开群」按钮；任何一步失败，卡片变成「开工失败：原因」，保留「开工」和「不用」，再点「开工」从失败的那一步接着做。
+  群里同事看到的是机器人发的「开工：标题」，之后是话题里平常的输出。
+
+### 干跑
+
+```bash
+BUTLER_BRIDGE_URL=http://<cpu1 的地址>:8080 BUTLER_BRIDGE_KEY=<访问密钥> ./cli.mjs newchat judge <群的 feedId> [--json]
+```
+
+现在让模型判断这个群，打印读到的材料（摘要）、判断和会发给我的卡片。什么都不发、不写：不发卡片，不加机器人，不调 `topics/open`，`new_chats` 表和 `model_runs` 都不碰（模型运行不记）。Bridge 的地址和密钥配置里没有时，可以只放在这条命令的环境变量里。
+
+### 配置
+
+前四项要么都有，要么都没有（都没有时这个功能关闭，加工端照旧）；有了还要配置管家机器人，卡片要发给我：
+
+| 键 | 用途 |
+| --- | --- |
+| `BUTLER_BRIDGE_URL` | Bridge 控制面的地址，如 `http://<cpu1 的地址>:8080` |
+| `BUTLER_BRIDGE_KEY` | Bridge 控制面的访问密钥（`Authorization: Bearer`） |
+| `BUTLER_OPEN_LARK_WRITE_TOKEN` | open-lark 能写的 token，只用来加机器人，只有 `addBotOnly()` 放行的那一个请求会用到它 |
+| `BUTLER_BRIDGE_BOT_ID` | Bridge 的机器人在 open-lark 里的 id（加机器人用的 `botId`，open-lark 的机器人候选列表里有） |
+| `BUTLER_BYTEDCLI` | 可选，默认 `bytedcli`；systemd 用户服务的 PATH 里没有它时写完整路径（读 Meego 要用，机器上要登录过） |
+
+这些手工部署，不进 git。部署顺序：先 Bridge（两台机器同步，重启 cpu1 的控制面），再 butler（同步到 cpu2，改配置，重启 `butler-processor`）；重启会中断一次进行中的模型运行，下一轮重做。
+
 ## 管家机器人
 
 机器人是管家自己的飞书应用，不复用 Bridge 的机器人。它的长连接（飞书 SDK `@larksuite/channel` 的 WebSocket，断开后由 SDK 重连）由加工端的进程持有，没有第三个进程。没有配置机器人时，加工端照常加工，只是不发卡片。
@@ -426,6 +477,7 @@ grep '^OPEN_LARK_AGENT_READ_TOKEN=' ~/.config/open-lark/app.env | sed 's/^OPEN_L
 | `BUTLER_HERDR` | `herdr` | 本机 herdr 可执行文件。systemd 用户服务的 PATH 里通常没有 `~/.local/bin`，服务里写完整路径 |
 | `BUTLER_BOT_APP_ID`、`BUTLER_BOT_APP_SECRET`、`BUTLER_BOT_OWNER` | 无 | 管家机器人的应用和主人的 open_id，由 `bot create` 写入；三个要么都有，要么都没有 |
 | `BUTLER_BOT_DOMAIN` | `feishu` | `feishu`（open.feishu.cn）或 `lark`（open.larksuite.com），由 `bot create` 写入 |
+| `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY`、`BUTLER_OPEN_LARK_WRITE_TOKEN`、`BUTLER_BRIDGE_BOT_ID`、`BUTLER_BYTEDCLI` | 无 | 新群开工（见「新群开工」）；前四项要么都有，要么都没有 |
 | `BUTLER_DIGEST_DAYS` | `1-5` | 汇总的工作日，1 是周一，7 是周日，可以写 `1-5`、`1,3,5`、`1-3,6` |
 | `BUTLER_DIGEST_HOURS` | `10:00-20:00` | 汇总的工作时间 |
 | `BUTLER_DIGEST_EVERY` | `1h` | 工作时间内汇总的间隔，如 `30m`、`2h` |
@@ -458,6 +510,7 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 ./cli.mjs list [--category mention|dm|reply|thread|instant|flagged|own|stored] [--since 2h] [--until 2026-10-22T18:00] [--limit 50] [--json]
 ./cli.mjs messages <聊天名或 id> [--day 2026-11-06] [--since 2h] [--until 2026-11-06T18:00] [--search 文字] [--limit 100] [--json]
 ./cli.mjs topics [<聊天名或 id>] [--day 2026-11-06] [--since 7d] [--until 2026-11-06] [--search 文字] [--picked | --not-picked] [--limit 50] [--json]
+./cli.mjs newchat judge <群的 feedId> [--json]
 ./cli.mjs corrections [list] [--json]
 ./cli.mjs corrections pick|unpick <话题编号> <我的原话> [--json]
 ./cli.mjs corrections missed <聊天名或 id> <日期> <我的原话> [--json]
@@ -539,6 +592,7 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 - `matters reopen <编号>`：重新打开一个结束了的事项（模型关掉的、我关掉的都可以），结束的理由和时间清掉；没有结束时什么都不改。`matters close` 和 `matters reopen` 改了事项以后，运行中的加工端在 15 秒内让最新那份汇总的卡片跟上（见「汇总」）。
 - `notes`（或 `notes list`）：我的说明，编号、原话和记下的时间。`notes add <文字>`：把参数按我的原话记成一条说明（几个参数用空格连起来）；同样的话已经记过时不再记。`notes remove <编号>`：按编号删掉一条，编号不会再给别的说明。说明存在存储里，加工端和分级自己去读：加工端下一轮按新的说明重写「关于TA」，再把未结束的事项整理一遍；说明一小时内不再变时，分级的模型按它重新给聊天分级（见「关于TA 和说明」和「给聊天分级」）。
 - `ignore`（或 `ignore list`）：忽略名单，每个发送方带着从什么时候起忽略。`ignore add`：按完整名称、id 或名称中唯一的一段文字把发送方加入忽略名单，只能是发过要交给模型的消息的发送方（我自己除外；消息都只是存下的发送方不在其中），对应多个时列出它们并拒绝；已经在名单上的什么都不改。`ignore remove` 移出名单，之后的新消息照常交给模型。改动直接写进存储，加工端下一批就按新名单处理。
+- `newchat judge <feedId>`：干跑，让模型现在判断这个群，打印材料摘要、判断和卡片，什么都不发不写，见「新群开工」。
 - `bot create`：创建管家机器人的飞书应用，见上面「创建应用」。`bot update`：给已经配置的应用加上新应用有、它还没有的权限和回调，见上面「给已有的应用加上卡片回调」。
 - `status` 还显示机器人的连接状态（已连接、正在重连、连接失败和原因；加工端没在运行时显示未运行）、上一份汇总的时间，以及有要发的内容时下一份汇总的时间和其中新事项、结束事项的数量。
 

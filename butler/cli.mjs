@@ -7,11 +7,14 @@
 // command that reads prints the store's records as JSON with --json, and every one that writes prints what it changed,
 // before and after, in words or with --json as JSON: the agent reads the one and tells me the other.
 import {parseArgs} from 'node:util';
-import {loadConfig,saveConfig,requireToken,requireModel,storeFile} from './config.mjs';
-import {OpenLark} from './open-lark.mjs';
+import {loadConfig,saveConfig,requireToken,requireModel,requireBridge,newChatSetup,storeFile} from './config.mjs';
+import {OpenLark,addBotOnly} from './open-lark.mjs';
+import {Bridge} from './bridge-client.mjs';
+import {NewChats} from './newchat.mjs';
+import {bytedcliMeego,describeMaterial} from './newchat-material.mjs';
 import {CATEGORIES,LEVELS,LEVEL_NAMES} from './rules.mjs';
 import {Matters} from './matters.mjs';
-import {Processor,DEFAULTS as PROCESSOR} from './processor.mjs';
+import {Processor,DEFAULTS as PROCESSOR,aboutOf} from './processor.mjs';
 import {HerdrModel} from './herdr-model.mjs';
 import {Grader} from './grader.mjs';
 import {Reader,dayOf,startOf,nextDay} from './reading.mjs';
@@ -89,6 +92,11 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
                                    加入忽略名单
   ignore remove <发送方名称或 id>... [--json]
                                    移出忽略名单
+  newchat judge <群的 feedId> [--json]
+                                   干跑：让模型现在判断这个群是不是该开工的需求群，打印读到的材料、判断和会发给我的卡片；
+                                   什么都不发、不写、不记。需要 Bridge 的地址和密钥（配置里的 BUTLER_BRIDGE_URL 和
+                                   BUTLER_BRIDGE_KEY，也可以只放在这条命令的环境变量里）。加工端自己会判断没见过的群，
+                                   配置了机器人和「新群开工」的四项配置时才运行
   bot create [--name 名称]          通过飞书的官方流程创建管家机器人的应用，凭证写进配置文件
   bot update                       通过飞书的官方流程给已经配置的应用加上它还没有的权限和回调（卡片上的按钮要用的回调）
 
@@ -447,6 +455,18 @@ async function main(argv){
     }
     throw new UsageError(`corrections 没有这个操作：${action}`);
    }
+   case 'newchat':{
+    const [action,feedId]=rest;
+    if(action!=='judge'||!/^\d+$/.test(feedId??''))throw new UsageError('用法：butler newchat judge <群的 feedId，数字> [--json]（butler groups 可以列出）');
+    const newChats=new NewChats({store,matters,lark:openLark(),bridge:new Bridge(requireBridge(config)),model:herdrModel(config),meego:bytedcliMeego(config.bytedcli)});
+    const r=await newChats.judge(feedId,{about:aboutOf(store,matters)});
+    if(values.json){json({material:r.material,verdict:r.verdict,card:r.card});return 0;}
+    const v=r.verdict;
+    console.log(`== 读到的材料 ==\n${describeMaterial(r.material)}\n\n== 模型的判断 ==\n是需求群：${v.requirement?'是':'否'}；要我动手：${v.mine?'是':'否'}\n理由：${v.reason}`);
+    if(v.requirement&&v.mine)console.log(`标题：${v.title}\n项目：${v.project?.name??'（没有选出）'}　Agent：${v.agent?.name??'（没有选出）'}${v.bound?'　（群在 Bridge 里已有绑定）':''}\n第一条提示：\n${v.prompt}`);
+    console.log(r.card?`\n== 会发给我的卡片（没有发） ==\n${JSON.stringify(r.card,null,1)}`:'\n== 卡片 ==\n这个判断不开工，不会发卡片');
+    return 0;
+   }
    case 'groups':{
     await refreshGroups(store,openLark());
     const levels=new Map(store.levels().map(l=>[l.feedId,l])),groups=values.search?find(store.groups(),values.search,'feedId'):store.groups();
@@ -536,11 +556,19 @@ async function main(argv){
 // on a timer of its own, and runs the bot, when one is configured: digests and the level cards.
 async function processCommand(config,once){
  const model=herdrModel(config),store=new Store(storeFile(config),{linkBase:config.linkBase,log:m=>console.error(m)}),matters=new Matters(store);
+ // The bot is made first: the processor's round also judges new groups, which sends its cards. Starting work in new groups
+ // needs the bot (its cards) and the four keys of its settings (see config.mjs newChatSetup); without them it is off.
+ let bot,newChats;
+ const setup=newChatSetup(config);
+ if(setup&&!config.bot)throw Error(`配置文件 ${config.file} 配置了「新群开工」，但没有配置管家机器人（它的卡片要发给我），先 butler bot create`);
+ if(config.bot&&!once){const {Bot}=await feishu();bot=new Bot({store,...config.bot,log:m=>console.log(m)});}
+ if(setup&&bot)newChats=new NewChats({store,matters,lark:new OpenLark({url:config.openLarkUrl,token:requireToken(config),gapMs:0}),
+  adder:new OpenLark({url:config.openLarkUrl,token:setup.writeToken,gapMs:0,guard:addBotOnly}),bridge:new Bridge({url:setup.bridgeUrl,key:setup.bridgeKey}),bot,model,botId:setup.botId,meego:bytedcliMeego(config.bytedcli)});
  const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
  // The latest digest follows the matters: whatever a batch, a review or the command line changes refreshes it. What the
  // model newly inferred about me when it wrote 关于TA goes to me (see levels.mjs).
- let bot,digests,levels;
- const processor=new Processor({store,matters,model,options,log:m=>console.log(m),onMattersChanged:()=>digests?.refresh(),onProfile:p=>levels?.inferred(p)});
+ let digests,levels;
+ const processor=new Processor({store,matters,model,options,log:m=>console.log(m),onMattersChanged:()=>digests?.refresh(),onProfile:p=>levels?.inferred(p),newChats});
  if(once){
   try{
    await processor.start({periodic:false});const r=await processor.runOnce();await processor.stop();
@@ -555,18 +583,17 @@ async function processCommand(config,once){
  // After the first pass that graded chats, the level list goes to me.
  const grader=new Grader({store,matters,model,log:m=>console.log(m),onPass:p=>levels?.passed(p)});
  const reader=new Reader({store,matters,topics:new Topics(store),model,log:m=>console.log(m)});
- if(config.bot){
-  const {Bot}=await feishu();
-  bot=new Bot({store,...config.bot,log:m=>console.log(m)});
+ if(bot){
   digests=new Digests({store,matters,bot,schedule:config.schedule});
   levels=new LevelCards({store,bot,schedule:config.schedule,exams:n=>matters.exams(n)});
-  // A choice on a weekly card's ⋯ is the level cards'; any other click, the digests'.
-  bot.onCardAction=evt=>levels.click(evt)??digests.click(evt);
+  // A button of a new group's card is NewChats'; a choice on a weekly card's ⋯, the level cards'; any other click, the
+  // digests'.
+  bot.onCardAction=evt=>newChats?.click(evt)??levels.click(evt)??digests.click(evt);
  }
  // The model runs under way (a batch, a grading and a read) are waited for, bounded; a grading cut off is done again,
  // and a read goes on from where it stopped.
  const stop=async()=>{
-  await Promise.race([Promise.all([processor.stop(),grader.stop(),reader.stop(),digests?.stop(),levels?.stop()]),new Promise(r=>setTimeout(r,20_000))]);
+  await Promise.race([Promise.all([processor.stop(),grader.stop(),reader.stop(),digests?.stop(),levels?.stop(),newChats?.settled()]),new Promise(r=>setTimeout(r,20_000))]);
   await Promise.race([bot?.stop(),new Promise(r=>setTimeout(r,5000))]);process.exit(0);
  };
  process.on('SIGTERM',stop);process.on('SIGINT',stop);

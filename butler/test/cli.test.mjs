@@ -387,7 +387,7 @@ test('help lists every command and its flags, and nothing of a conversation in t
   'level [list] [--json]','level set <级别> <聊天名或 id>... [--reason 文字] [--json]','level clear <聊天名或 id>... [--json]','level history [--since 时间] [--json]',
   'level grade [<聊天名或 id>...] [--json]','process [--once]','matters [list] [--all] [--json]','matters close <编号> [--reason 文字] [--json]','matters reopen <编号> [--json]',
   'notes [list] [--json]','notes add <文字> [--json]','notes remove <编号> [--json]','profile [--json]','ignore [list] [--json]','ignore add <发送方名称或 id>... [--json]',
-  'ignore remove <发送方名称或 id>... [--json]','bot create [--name 名称]','bot update','--config 配置文件',
+  'ignore remove <发送方名称或 id>... [--json]','newchat judge <群的 feedId> [--json]','bot create [--name 名称]','bot update','--config 配置文件',
   'topics [<聊天名或 id>] [--day 日期] [--since 时间] [--until 时间] [--search 文字] [--picked | --not-picked] [--limit 条数] [--json]',
   'messages <聊天名或 id> [--day 日期] [--since 时间] [--until 时间] [--search 文字] [--limit 条数] [--json]','corrections [list] [--json]',
   'corrections pick <话题编号> <我的原话> [--json]','corrections unpick <话题编号> <我的原话> [--json]','corrections missed <聊天名或 id> <日期> <我的原话> [--json]',

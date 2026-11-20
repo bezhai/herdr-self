@@ -41,7 +41,12 @@ export function loadConfig(file=process.env.BUTLER_CONFIG||defaultConfigPath()){
  try{stat=fs.statSync(file);}catch(e){if(e.code==='ENOENT')throw Error(`配置文件不存在：${file}（格式见 butler/README.md）`);throw e;}
  if(stat.mode&0o077)throw Error(`配置文件 ${file} 里有 open-lark 的只读 token 和机器人的密钥，权限必须是 600（现在是 ${(stat.mode&0o777).toString(8)}）：chmod 600 ${file}`);
  const v=parseEnv(fs.readFileSync(file,'utf8'));
+ // Starting work in a new group (see newchat.mjs): Bridge's address and access key (the environment of one command may
+ // give them instead, for a dry run), the open-lark token that may add a bot, and Bridge's bot as open-lark knows it.
+ const bridgeUrl=process.env.BUTLER_BRIDGE_URL||v.BUTLER_BRIDGE_URL,bridgeKey=process.env.BUTLER_BRIDGE_KEY||v.BUTLER_BRIDGE_KEY;
  return {file,token:v.BUTLER_OPEN_LARK_TOKEN||undefined,bot:bot(v,file),
+  newChat:{bridgeUrl:bridgeUrl?httpUrl(bridgeUrl,'BUTLER_BRIDGE_URL'):undefined,bridgeKey:bridgeKey||undefined,writeToken:v.BUTLER_OPEN_LARK_WRITE_TOKEN||undefined,botId:v.BUTLER_BRIDGE_BOT_ID||undefined},
+  bytedcli:home(v.BUTLER_BYTEDCLI||'bytedcli'),
   schedule:readSchedule({days:v.BUTLER_DIGEST_DAYS||undefined,hours:v.BUTLER_DIGEST_HOURS||undefined,every:v.BUTLER_DIGEST_EVERY||undefined,
    offHoursNew:v.BUTLER_DIGEST_OFF_HOURS_NEW||undefined,offHoursGap:v.BUTLER_DIGEST_OFF_HOURS_GAP||undefined}),
   openLarkUrl:httpUrl(v.BUTLER_OPEN_LARK_URL||'http://127.0.0.1:8081','BUTLER_OPEN_LARK_URL'),
@@ -59,6 +64,21 @@ export function loadConfig(file=process.env.BUTLER_CONFIG||defaultConfigPath()){
 export function requireToken(config){
  if(!config.token)throw Error(`配置文件 ${config.file} 没有 BUTLER_OPEN_LARK_TOKEN（open-lark 的只读 token）`);
  return config.token;
+}
+// Bridge's address and key, which the dry run of a new group's judgment needs.
+export function requireBridge(config){
+ const {bridgeUrl,bridgeKey}=config.newChat;
+ if(!bridgeUrl||!bridgeKey)throw Error(`配置文件 ${config.file} 没有 BUTLER_BRIDGE_URL 和 BUTLER_BRIDGE_KEY（Bridge 控制面的地址和访问密钥；干跑时也可以放在这条命令的环境变量里）`);
+ return {url:bridgeUrl,key:bridgeKey};
+}
+// The settings for starting work in new groups: all four keys, or undefined when none is set (the feature is off). Some but
+// not all is an error that names what is missing.
+export function newChatSetup(config){
+ const keys={BUTLER_BRIDGE_URL:'bridgeUrl',BUTLER_BRIDGE_KEY:'bridgeKey',BUTLER_OPEN_LARK_WRITE_TOKEN:'writeToken',BUTLER_BRIDGE_BOT_ID:'botId'};
+ const missing=Object.entries(keys).filter(([,k])=>!config.newChat[k]).map(([key])=>key);
+ if(missing.length===Object.keys(keys).length)return undefined;
+ if(missing.length)throw Error(`配置文件 ${config.file} 里「新群开工」的配置不全，缺少 ${missing.join('、')}`);
+ return config.newChat;
 }
 export function requireModel(config){
  if(!config.modelMachine)throw Error(`配置文件 ${config.file} 没有 BUTLER_MODEL_MACHINE（herdr 里保存的模型机器的名称，见 butler/README.md）`);

@@ -22,6 +22,7 @@ export const CATALOG = [
  'PATCH /agent/v1/messages/:messageId','DELETE /agent/v1/messages/:messageId','GET /agent/v1/messages/:messageId/thread',
  'GET /agent/v1/messages/:messageId/reactions','POST /agent/v1/messages/:messageId/reactions','DELETE /agent/v1/messages/:messageId/reactions/:key',
  'POST /agent/v1/messages/:messageId/replies','GET /agent/v1/threads/feed','POST /agent/v1/search/mention-history',
+ 'GET /agent/v1/conversations/:feedId/settings','GET /agent/v1/conversations/:feedId/chat-tabs','GET /agent/v1/conversations/:feedId/bots','POST /agent/v1/conversations/:feedId/bots',
 ].map(r=>{const [method,path]=r.split(' ');return {method,path};});
 const READ_POSTS=new Set(['/agent/v1/search/mention-history']);
 
@@ -200,6 +201,11 @@ export class FakeOpenLark{
    case 'GET /agent/v1/conversations/:feedId':{const c=this.conversations.get(parts[1]);return c?send(200,this.conversationView(c)):error(404,'CONVERSATION_NOT_FOUND','Conversation not found');}
    case 'GET /agent/v1/conversations/:feedId/messages':{const c=this.conversations.get(parts[1]);if(!c)return send(500,{statusCode:500,error:'Internal Server Error',message:'Conversation not found'});return send(200,this.#page(c,q));}
    case 'GET /agent/v1/conversations/:feedId/pins':return send(200,{items:[]});
+   // What a test sets on the chat: c.settings, c.tabs (chat-tabs) and c.bots; a bot added by a write is kept in c.added.
+   case 'GET /agent/v1/conversations/:feedId/settings':{const c=this.conversations.get(parts[1]);return c?send(200,{feedId:c.feedId,...c.settings}):error(404,'CONVERSATION_NOT_FOUND','Conversation not found');}
+   case 'GET /agent/v1/conversations/:feedId/chat-tabs':{const c=this.conversations.get(parts[1]);return c?send(200,{builtIns:[],order:[],tabs:c.tabs??[]}):error(404,'CONVERSATION_NOT_FOUND','Conversation not found');}
+   case 'GET /agent/v1/conversations/:feedId/bots':{const c=this.conversations.get(parts[1]);return c?send(200,{items:[...(c.bots??[]),...(c.added??[])]}):error(404,'CONVERSATION_NOT_FOUND','Conversation not found');}
+   case 'POST /agent/v1/conversations/:feedId/bots':{const c=this.conversations.get(parts[1]);if(!c)return error(404,'CONVERSATION_NOT_FOUND','Conversation not found');(c.added??=[]).push({appId:body.botId});return send(200,{added:true,botId:body.botId,feedId:c.feedId});}
    case 'GET /agent/v1/messages/:messageId':{const v=this.messages.get(parts[1]);return v&&!this.notStored.has(v.id)?send(200,{item:clone(v),attachments:[]}):error(404,'MESSAGE_NOT_FOUND','Message not found');}
    case 'GET /agent/v1/messages/:messageId/thread':return send(200,this.#thread(parts[1],q));
    // From open-lark's own store, without asking Lark (repository.reactionsForMessage); an unknown message has none.

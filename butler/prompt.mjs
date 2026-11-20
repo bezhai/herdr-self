@@ -83,6 +83,34 @@ export function profileSystemPrompt(me){
  ].join(' ');
 }
 
+// The new-group run's: a group TA has just appeared in is judged once, and the model drafts the first prompt of the work
+// when it is one TA does (see newchat.mjs). What makes a group a requirement group, and what makes TA the one who does
+// the work, is all in these words and in 关于TA, TA's notes and the group's own material: butler has no rule on group names,
+// roles or states of a work item. The first prompt is the only text of the model's that keeps links, as the agent that
+// gets it must be given the documents the group points at, and it is told to copy them from the material, not to make them.
+export function newChatSystemPrompt(me){
+ return [
+  `你替「${me}」判断一个TA刚出现的飞书群：它是不是为一个需求、项目或一件具体的事情拉起来的需求群，TA要不要在这个群里动手做事；要做的话，替TA写开工用的第一条提示，并从 Bridge 的项目和 Agent 配置里各选一个。`,
+  '你会收到一个 JSON：now 是现在的时间；profile、notes 和 notMine 说明TA是做什么的、哪些事不归TA、有什么偏好；chat 是这个群能读到的全部资料：name 是群名，description 是群描述，labels 是群的标签，memberCount 是人数，isOwner 和 isAdmin 说明TA在群里的身份，announcement 是群公告文档的链接，firstMessageAt 是群里第一条消息的时间（群是什么时候建的），tabs 是群的聊天标签页，bots 是群里的机器人和它们加入的时间，messages 是群里最早的几条消息（system 为 true 的是系统消息），meego 是群里 Meego 链接指向的工作项（带着角色和成员、当前节点、状态、字段，读不出时是 error），unavailable 是没有读到的部分；projects 是 Bridge 里的项目（id、name、description、repos），agentConfigs 是 Bridge 里的 Agent 配置（id、name、所在机器 machine、kind），bound 是这个群在 Bridge 里已经有的绑定，没有时是 null。',
+  ABOUT,
+  '需求群是为一个具体的需求、项目或事情拉起来的、成员围着一个目标协作的群。闲聊群、兴趣群、通知群、答疑群、用户群、活动群，和很久以前就建好、只是这次才出现的老群，通常不是：看 firstMessageAt、群描述、标签和消息里有没有一个具体的目标。资料太少、看不出是不是时，按不是处理。',
+  'TA要不要在群里动手，看TA在这件事里是什么角色：按 meego 里的角色和成员、当前节点和负责人、群描述和消息，再结合 profile 和 notes 判断TA是具体做事的人（比如要写代码、改系统的开发），还是只是被拉进来知情、关注、评审或验收。只是被通知的不用开工；需求在 Meego 里已经完成，或者已经过了TA动手的阶段、TA已经在群里说自己在做了，也不用另外开工。',
+  'requirement 为 true 表示是需求群，mine 为 true 表示TA要在这个群里动手做事；只有两个都是 true，才要写 title、prompt、projectId 和 agentConfigId。reason 一两句话，写给TA看，说清为什么是或者不是（比如TA是这个需求的 Server 开发，或者TA只是关注人）。',
+  'title 是这件事的一句话标题，不超过 30 个字，群里的人都会看到，写需求本身，不要写群名里的「需求同步群」这类词。prompt 是交给在工作机上开工的 agent 的第一条提示，agent 只看得到这一条，看不到这个群：写清要做什么需求、TA在里面的角色、背景和群里已经说了什么，把资料里出现的需求、文档和工作项链接原样抄进来（只用资料里有的链接，不要编造），让它先读文档和代码、弄清要做的事再动手，不确定的地方先问TA；资料里没有的事实不要写。',
+  'projectId 从 projects 里选一个 id，agentConfigId 从 agentConfigs 里选一个 id，都不要自己编；项目看群的需求和项目的名称、描述、仓库对不对得上，Agent 配置参考 notes 里TA对机器和 Agent 的偏好；bound 不是 null 时这个群已经绑好了，选不选都可以。没有合适的就写 null，不要凑。',
+  DATA,
+  '只输出一个 JSON 对象，不要输出任何别的文字：{"requirement":true或false,"mine":true或false,"reason":"…","title":"…","prompt":"…","projectId":"…或null","agentConfigId":"…或null"}。不开工时 title、prompt、projectId、agentConfigId 写 null。',
+ ].join(' ');
+}
+// What the model is shown of a new group. material: see newchat-material.mjs; projects, agentConfigs and machines: Bridge's
+// lists; bound: {project, agentConfig} the group's binding in Bridge goes by (names), or null; about: see aboutMe.
+export function composeNewChat({now,me,material,projects,agentConfigs,machines=[],bound=null,about}){
+ const machine=id=>machines.find(m=>m.id===id)?.name??id;
+ const data={now:at(now),me,...aboutMe(about),chat:material,projects:projects.map(p=>({id:p.id,name:p.name,description:p.description,repos:p.repos})),
+  agentConfigs:agentConfigs.map(a=>({id:a.id,name:a.name,machine:machine(a.machineId),kind:a.kind})),bound};
+ return {system:newChatSystemPrompt(me),prompt:`以下是这个群的资料：\n${JSON.stringify(data)}`};
+}
+
 // Whom a message @s, by name, TA for me (meId: my user id, when known); an @ of everyone is mentionsAll's.
 function mentionsOf(parts=[],meId){
  const names=parts.filter(p=>p.kind==='at'&&p.refId!=='all').map(p=>meId&&p.refId===meId?'TA':(p.text??'').replace(/^@/,'').trim()||'某人');
@@ -253,4 +281,27 @@ export function readReview(text,{refs,matterIds}){
  const problems=[];
  if(Array.isArray(v.new)&&v.new.length)problems.push(`整理时不新建事项，回复里的 ${v.new.length} 个新事项没有采纳`);
  return {updated:readUpdates(v.updates,{refs,matterIds},problems),problems};
+}
+
+// A new group's verdict, from the model's reply: whether it is a requirement group, whether TA does the work and why,
+// and, when both, the title, the first prompt and the project and agent config chosen (null when the model chose none,
+// or one that is not in Bridge's lists, which is a problem). projectIds and agentConfigIds: the ids the model was shown. A
+// reply that is no verdict, or that wants to start work with no title or prompt, throws. The first prompt keeps its
+// links (see newChatSystemPrompt); the reason, which is shown to me, loses them as any text of the model's.
+const TITLE=60,FIRST_PROMPT=6000,REASON=300;
+const tidy=(v,max)=>typeof v==='string'?v.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g,'').trim().slice(0,max):'';
+export function readNewChat(text,{projectIds,agentConfigIds}){
+ const v=parse(text);
+ if(!isObject(v)||typeof v.requirement!=='boolean'||typeof v.mine!=='boolean')throw Error(`模型的回复里没有 requirement 和 mine（true 或 false）：${String(text).slice(0,200)}`);
+ const reason=clean(v.reason,REASON);if(!reason)throw Error(`模型的回复里没有 reason：${String(text).slice(0,200)}`);
+ const start=v.requirement&&v.mine,problems=[];
+ const title=start?clean(v.title,TITLE):null,prompt=start?tidy(v.prompt,FIRST_PROMPT):null;
+ if(start&&!title)throw Error(`模型要开工，但回复里没有 title：${String(text).slice(0,200)}`);
+ if(start&&!prompt)throw Error(`模型要开工，但回复里没有 prompt：${String(text).slice(0,200)}`);
+ const pick=(value,ids,what)=>{
+  if(!start||value===null||value===undefined||value==='')return null;
+  if(typeof value==='string'&&ids.has(value))return value;
+  problems.push(`${what} ${JSON.stringify(value)} 不在 Bridge 的列表里，按没有选处理`);return null;
+ };
+ return {requirement:v.requirement,mine:v.mine,reason,title,prompt,projectId:pick(v.projectId,projectIds,'projectId'),agentConfigId:pick(v.agentConfigId,agentConfigIds,'agentConfigId'),problems};
 }
