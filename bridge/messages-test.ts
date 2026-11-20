@@ -263,3 +263,26 @@ test('reply and send on an ended task are refused with a readable message and dr
  await assert.rejects(invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'你好'}),refused);
  assert.equal(f.deliveries().length,0);assert.equal(f.tasks.get(f.topic.taskId!).outputs.length,0);
 });
+// The fixture's topic and a later one that holds the same task, as a re-adopted agent session does (see Topics.adopt).
+function later(f:ReturnType<typeof fixture>){const t:Topic={...f.topic,id:'t2',rootId:'om_root2',chatId:'oc_topic2',createdAt:now+1,deliveryCards:undefined};f.store.data.topics.push(t);f.store.save();return t;}
+test('of the topics that hold a task, the notices of its end and reopening and the source cards go to the latest one, whatever the order of the list',async t=>{
+ const f=fixture();t.after(f.close);await invoke(f,'attach',{pane:'pane',messageId:'message-1'});await f.flush();
+ const second=later(f);f.store.data.topics.reverse();f.replies.length=0;
+ f.tasks.end(f.topic.taskId!,'achieved','好了');await f.flush();f.tasks.reopen(f.topic.taskId!,'owner wrote');await f.flush();
+ assert.deepEqual(f.replies.map(r=>[r.chatId,r.rootId,r.card]),[['oc_topic2','om_root2',notice('任务已完成：好了')],['oc_topic2','om_root2',notice('任务已重新打开')]]);
+ assert.equal(second.taskId,f.topic.taskId);
+});
+test('a click on a draft card that an earlier topic of the task posted redraws that card and sends the delivery',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ later(f);f.store.data.topics.reverse();
+ assert.deepEqual(f.messages.click(app,click(d,'send',undefined,'om_card_1')),toast('正在发送'));await f.flush();
+ assert.equal(current(f,d).state,'delivered');assert.deepEqual(f.updates.map(u=>u.messageId),['om_card_1']);
+ assert.equal(f.store.data.topics.find(x=>x.id==='t2')!.deliveryCards,undefined);
+});
+test('a draft that is made after the task moved to a later topic is drawn in that topic, and a click before its card id was saved finds that topic',async t=>{
+ const f=fixture();t.after(f.close);await invoke(f,'attach',{pane:'pane',messageId:'message-1'});const second=later(f);f.topic.deliveryCards=undefined;f.replies.length=0;
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ assert.deepEqual(f.replies.map(r=>r.rootId),['om_root2']);assert.deepEqual(Object.keys(second.deliveryCards??{}),[d.id]);
+ delete second.deliveryCards![d.id];f.messages.click(app,click(d,'edit',undefined,'om_early'));await f.flush();
+ assert.equal(second.deliveryCards![d.id],'om_early');assert.equal(f.topic.deliveryCards?.[d.id],undefined);
+});

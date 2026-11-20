@@ -466,6 +466,7 @@ test('Bridge takes every message of a person; it can forward text, rich text, im
 // What the SDK makes of an image message with image key key, and of a sticker.
 // A message as the SDK makes it, with the fields that a test gives.
 type Received=Partial<NormalizedMessage>&Pick<NormalizedMessage,'rawContentType'|'content'>;
+const fromFeishu='（来自飞书话题）\n';
 const imageOf=(key:string):Received=>({rawContentType:'image',content:`![image](${key})`,resources:[{type:'image',fileKey:key}]}),sticker:Received={rawContentType:'sticker',content:'<sticker key="stk_1"/>',resources:[{type:'sticker',fileKey:'stk_1'}]};
 const imageMessage={...inbound,messageId:'om_image',...imageOf('img_1')},stickerMessage={...inbound,messageId:'om_sticker',...sticker};
 const unsupportedText='暂不支持这类消息，目前只能转发文字、图片和文件';
@@ -2462,6 +2463,13 @@ test('/adopt is a command only on a root message: in a thread it is a message to
   assert.deepEqual(f.replies.map(r=>r[2]),['om_cmd2']);assert.equal(f.pickers().length,1);
  }finally{f.close();}
 });
+test('in an adopted topic a message that starts with / is prompted as it is, without the line that says it came from Feishu, so that the agent still takes it as one of its commands',async()=>{
+ const f=await adoptFixture();try{
+  await f.adopt('om_cmd',claudeChoice,1);f.h.calls.length=0;
+  await f.send({messageId:'om_2',rootId:'om_cmd',content:'/compact'});await f.send({messageId:'om_3',rootId:'om_cmd',content:'看看 /compact 之后还剩多少'});
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),['/compact',fromFeishu+'看看 /compact 之后还剩多少']);
+ }finally{f.close();}
+});
 test('the Chinese commands of earlier versions are messages like any other: /接管 opens a topic and /结束接管 is prompted to the adopted agent',async()=>{
  const f=await adoptFixture();try{
   await f.send({messageId:'om_old',content:'/接管'});
@@ -2590,7 +2598,7 @@ test('an adopted topic prompts its pane, forwards only the replies after the one
  const f=await adoptFixture();try{
   const t=await f.adopt('om_cmd',claudeChoice);f.h.calls.length=0;f.h.machines.length=0;f.replies.length=0;f.api.length=0;
   await f.send({messageId:'om_2',rootId:'om_cmd',content:'继续'});
-  assert.deepEqual(callsOn(f),[['m','agent','list'],['m','agent','prompt','w2:p1','继续']]);assert.deepEqual([t!.reactions,t!.cot!.origin,t!.cot!.stateSeq],[[],'om_2',4]);
+  assert.deepEqual(callsOn(f),[['m','agent','list'],['m','agent','prompt','w2:p1',fromFeishu+'继续']]);assert.deepEqual([t!.reactions,t!.cot!.origin,t!.cot!.stateSeq],[[],'om_2',4]);
   assert.deepEqual(cotLog(f),[['create','om_2'],['update','c2',['RUN_STARTED',{threadId:'om_cmd',runId:'om_2'}]]]);
   const agent=f.h.agents.find(a=>a.pane_id==='w2:p1');f.h.retained['w2:p1'].push({seq:3,text:'新回复'});f.h.requests['w2:p1']=[bash];f.h.calls.length=0;
   await f.topics.sync(f.m,f.h.agents.map(a=>a===agent?{...a,reply_seq:3,request_ids:[1],agent_status:'done',state_change_seq:9}:a));
@@ -2646,7 +2654,7 @@ test('in a binding that requires the mention, messages in an adopted topic need 
   await f.send({messageId:'om_2',rootId:'om_cmd',content:'继续'});await f.send({messageId:'om_3',rootId:'om_cmd',content:'/release'});
   assert.deepEqual([f.h.calls,f.replies,f.reacted,t!.state,t!.messageIds],[[],[],[],'ready',['om_cmd']]);
   await f.send({messageId:'om_4',rootId:'om_cmd',content:'继续',mentionedBot:true});
-  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w2:p1','继续']]);f.h.calls.length=0;
+  assert.deepEqual(f.h.calls,[['agent','list'],['agent','prompt','w2:p1',fromFeishu+'继续']]);f.h.calls.length=0;
   await f.send({messageId:'om_5',rootId:'om_cmd',content:'/release',mentionedBot:true});
   assert.deepEqual(f.h.calls,[['pane','remote-answers','w2:p1','off']]);assert.equal(t!.state,'closed');
  }finally{f.close();}
@@ -2695,19 +2703,57 @@ test('an adopted topic writes attachments under the working directory that Herdr
  const f=await adoptFixture();try{
   const t=await f.adopt('om_cmd',claudeChoice),prompts=()=>f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),root='/home/someone/code/herdr/.herdr-bridge';f.replies.length=0;
   await f.send({messageId:'om_2',rootId:'om_cmd',...imageOf('img_a')});
-  assert.deepEqual(f.stored,[['m',root,t!.id,'om_2-1.png','data:img_a']]);assert.deepEqual(prompts().at(-1),`[图片 1：${root}/${t!.id}/om_2-1.png]`);
+  assert.deepEqual(f.stored,[['m',root,t!.id,'om_2-1.png','data:img_a']]);assert.deepEqual(prompts().at(-1),`${fromFeishu}[图片 1：${root}/${t!.id}/om_2-1.png]`);
   const agent=f.h.agents.find(a=>a.pane_id==='w2:p1');agent!.foreground_cwd='/home/someone/code/herdr/sub';
   await f.send({messageId:'om_3',rootId:'om_cmd',...imageOf('img_b')});
   assert.equal(f.stored.at(-1)![1],'/home/someone/code/herdr/sub/.herdr-bridge');assert.equal(t!.attachmentDir,`/home/someone/code/herdr/sub/.herdr-bridge/${t!.id}`);
   delete agent!.foreground_cwd;delete agent!.cwd;assert.deepEqual(f.replies,[]);
   await f.send({messageId:'om_4',rootId:'om_cmd',...imageOf('img_c')});
-  assert.deepEqual([f.stored.length,f.downloads.length,prompts().at(-1)],[2,2,'[图片 1：下载失败]']);assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能把附件交给 Agent：图片 1 写入失败')]);
+  assert.deepEqual([f.stored.length,f.downloads.length,prompts().at(-1)],[2,2,fromFeishu+'[图片 1：下载失败]']);assert.deepEqual(f.replies.map(r=>r[3]),[notice('未能把附件交给 Agent：图片 1 写入失败')]);
   assert.match(attachmentLogs(f).at(-1)![1],/图片 1 写入失败，Agent 的工作目录未知/);
   await f.send({messageId:'om_5',rootId:'om_cmd',content:'/release'});
   assert.equal(t!.state,'closed');assert.deepEqual(f.removed,[['m',`/home/someone/code/herdr/sub/.herdr-bridge/${t!.id}`]]);assert.equal(t!.attachmentDir,undefined);
  }finally{f.close();}
 });
 
+test('what an adopted topic prompts starts with a line that says it came from a Feishu topic, also with attachments; a topic that Bridge opened prompts the text as it is',async()=>{
+ const f=await adoptFixture();try{
+  const t=await f.adopt('om_cmd',claudeChoice),prompts=()=>f.h.calls.filter(c=>c[1]==='prompt').map(c=>c[3]),root='/home/someone/code/herdr/.herdr-bridge';
+  await f.send({messageId:'om_2',rootId:'om_cmd',content:'继续'});
+  await f.send({messageId:'om_3',rootId:'om_cmd',...imageOf('img_a')});
+  assert.deepEqual(prompts().slice(-2),[fromFeishu+'继续',`${fromFeishu}[图片 1：${root}/${t!.id}/om_3-1.png]`]);
+  await f.send({messageId:'om_4',rootId:'om_1',content:'普通话题'});assert.deepEqual(prompts().at(-1),'普通话题');
+ }finally{f.close();}
+});
+// Releases the topic whose thread starts at root and adopts the same agent again in a new topic, whose picker is the next message of the bot.
+async function readopt(f:Awaited<ReturnType<typeof adoptFixture>>,root:string,newRoot:string,choice:object=claudeChoice){
+ await f.send({messageId:'om_rel_'+newRoot,rootId:root,content:'/release'});
+ return f.adopt(newRoot,choice,f.replies.length+1);
+}
+test('adopting an agent session that an earlier topic adopted continues that topic\'s task if it is open: the new topic holds the same task and the log says so; its replies and the notices of the task go to the new thread',async()=>{
+ const f=await adoptFixture();try{
+  const one=await f.adopt('om_cmd',claudeChoice),task=one!.taskId!;assert.ok(task);
+  const before=f.tasks.list().length,two=await readopt(f,'om_cmd','om_cmd2');
+  assert.deepEqual([two!.state,two!.taskId],['ready',task]);assert.equal(f.tasks.list().length,before);
+  assert.match(adoptLogs(f).at(-1)![1],/已接管 cpu2 上的 赤尾重构.*延续/);
+  f.replies.length=0;const o=f.tasks.addOutput(task,{text:'新进展'});await f.tasks.deliver(o.id,{sink:'thread',to:task});await f.tasks.settled();
+  assert.deepEqual(f.replies.map(r=>r[2]),['om_cmd2']);
+  assert.equal(new Store(f.dir).data.topics.find(x=>x.id===two!.id)!.taskId,task);
+ }finally{f.close();}
+});
+test('an agent session whose earlier task has ended, that no earlier topic adopted, that is another one, or that is not reported gets a task of its own',async()=>{
+ const f=await adoptFixture();try{
+  const one=await f.adopt('om_cmd',claudeChoice);f.tasks.end(one!.taskId!,'achieved','好了');
+  const ended=await readopt(f,'om_cmd','om_cmd2');assert.notEqual(ended!.taskId,one!.taskId);assert.equal(f.tasks.get(ended!.taskId!).state,'open');
+  // The latest topic of the session decides: its task is open, the first topic's ended one is not looked at.
+  const third=await readopt(f,'om_cmd2','om_cmd3');assert.equal(third!.taskId,ended!.taskId);
+  const agent=f.h.agents.find(a=>a.pane_id==='w2:p1')!;agent.agent_session={...agent.agent_session!,value:'s-new'};
+  const other=await readopt(f,'om_cmd3','om_cmd4',{...claudeChoice,session:'s-new'});assert.notEqual(other!.taskId,third!.taskId);
+  const codex=await f.adopt('om_cmd5',codexChoice,f.replies.length+1);await f.send({messageId:'om_c1',rootId:'om_cmd5',content:'hi'});assert.ok(codex!.taskId);
+  const again=await readopt(f,'om_cmd5','om_cmd6',codexChoice);
+  assert.notEqual(again!.taskId,codex!.taskId);
+ }finally{f.close();}
+});
 test('worktree branches: an answer names a branch only with a valid BRANCH= line, and that of claude (as the worktree-task plugin asks it) also only with a clean exit, the fallback looks like Herdr\'s names, and the worktree of a branch is beside its repository with / as -',()=>{
  assert.equal(parseBranch('x\nBRANCH=feat/a-b c\nBRANCH=fix/z'),'feat/a-b');assert.equal(parseBranch('nothing'),undefined);
  for(const b of ['feat/add-login','fix/a1','style/x'])assert.ok(validBranch(b),b);

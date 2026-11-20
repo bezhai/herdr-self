@@ -1,6 +1,7 @@
 import {uuid,publicText,enqueue} from './core.ts';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.ts';
 import {picker,adoptedPicker,intro,nameOf,stillChosen,chosen} from './adoption.ts';
+import {latest} from './task-topic.ts';
 import {notice} from './message-cards.ts';
 import {supported} from './platform.ts';
 import {permissionMode} from './agent-configs.ts';
@@ -41,7 +42,9 @@ const offline=(e:Error,after:string)=>`${brief(e)}。${after}`;
 // so a ready topic is linked to the agent of its pane for as long as the agent reports it.
 const linked=(t:Topic,agents:Agent[])=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
 const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'on':'off'];
-const endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
+// The line that starts what an adopted topic prompts: the agent was started in a terminal and cannot tell that the owner now writes from Feishu.
+// A text that starts with / goes without it, so that the agent still takes it as one of its commands (/compact and the like).
+const fromFeishu='（来自飞书话题）',endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
 // Where the images and files of a topic go, under the working directory of its agent (see attach).
 const attachmentRoot=(cwd:string)=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;
@@ -237,7 +240,8 @@ export class Topics{
   if(!agent&&!await this.open(a,b,t))return;
   // An adopted topic that gets here is ready, with its agent.
   const text=await this.attach(a,t,msg,t.adopted?agent!.foreground_cwd||agent!.cwd:t.cwd);
-  let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,text]);}
+  const prompt=t.adopted&&!text.startsWith('/')?fromFeishu+'\n'+text:text;
+  let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,prompt]);}
   catch(e){if(e.code!=='agent_blocked')throw e;await this.notify(a,t,'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息');return this.noticed(t);}
   this.store.log('消息投递',`${a.name} → ${b.name}：已发送到 ${t.agentName}`);return r.agent;
  }
@@ -624,10 +628,11 @@ export class Topics{
    claim=m.id+' '+x.pane_id;this.claims.add(claim);
    await this.herdr(m,remoteAnswers(x.pane_id,true));
    let latest=null;try{latest=await this.latest(m,x);}catch(e){this.store.log('话题接管',`${name}：未能读取最近一条回复，${brief(e)}`,'error');}
+   const earlier=this.continued(t,m.id,x);
    // The reply shown in the intro is not forwarded again.
-   this.update(t,{machineId:m.id,workspaceId:x.workspace_id||'',tabId:x.tab_id||'',paneId:x.pane_id,agentName:called,title:'接管 · '+called,state:'ready',
+   this.update(t,{...earlier&&{taskId:earlier},machineId:m.id,workspaceId:x.workspace_id||'',tabId:x.tab_id||'',paneId:x.pane_id,agentName:called,title:'接管 · '+called,state:'ready',
     replySeq:latest?.seq??x.reply_seq??0,adopted:{picker:t.adopted!.picker,kind:x.agent,...x.agent_session&&{session:x.agent_session.value}}});
-   this.store.log('话题接管',`${name}：已接管 ${m.name} 上的 ${t.agentName}`);
+   this.store.log('话题接管',`${name}：已接管 ${m.name} 上的 ${t.agentName}${earlier?'，延续此前话题的任务':''}`);
    await this.notify(a,t,intro(m,x,called,latest));
    if(latest)try{const d=await this.relay(t,latest);if(d.state==='failed')this.store.log('话题通知',`${a.name}：${d.error}`,'error');}catch(e){this.store.log('话题通知',`${a.name}：${brief(e)}`,'error');}
    try{await this.updateCard(a,t.adopted!.picker!,adoptedPicker(m,x,called,operator.openId));}catch(e){this.store.log('话题接管',`${name}：接管卡片未能更新，${brief(e)}`,'error');}
@@ -635,6 +640,15 @@ export class Topics{
    this.store.log('话题接管',`${name}：接管失败，${brief(e)}`,'error');
    if(t.state==='choosing')await this.redraw(a,t,'接管失败，请稍后重试');
   }finally{if(claim)this.claims.delete(claim);}
+ }
+ // The task that topic t continues when it adopts agent x of machine machineId: the task of the latest earlier topic that adopted the same
+ // agent session (same machine, kind and session), if that task is still open. Nothing for an agent that reports no session, for a session no
+ // topic adopted before, and for a task that has ended, which leave topic t its own task (see task).
+ continued(t:Topic,machineId:string,x:Agent):string|undefined{
+  if(!x.agent_session)return;
+  const same=this.store.data.topics.filter(o=>o!==t&&o.machineId===machineId&&o.adopted?.kind===x.agent&&o.adopted?.session===x.agent_session!.value);
+  const last=latest(same);
+  if(last?.taskId&&this.tasks.get(last.taskId).state==='open')return last.taskId;
  }
  // Draws the picker of topic t again, led by notice. Never rejects.
  async redraw(a:App,t:Topic,notice:string){

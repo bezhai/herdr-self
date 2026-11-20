@@ -1,5 +1,5 @@
 import {publicText,oneOf,isRecord} from './core.ts';
-import {sourceCard,draftCard} from './outbound-cards.ts';import {fits,notice} from './message-cards.ts';import {clip} from './request-cards.ts';
+import {sourceCard,draftCard} from './outbound-cards.ts';import {topicOfTask} from './task-topic.ts';import {fits,notice} from './message-cards.ts';import {clip} from './request-cards.ts';
 import type {Store,Call} from './core.ts';
 import type {App,Machine,Topic,Mention} from './state.ts';
 import type {Topics} from './topics.ts';
@@ -130,15 +130,17 @@ export class Messages{
  // What a record changes in the thread: a task that ended or reopened gets a notice with the reason; an input that is a message gets its source card; an awaiting delivery gets its draft card, or a
  // redrawn one when a retry made it await again; delivered, failed and rejected deliveries redraw it as sent, pending with the reason, and dropped.
  async show(r:JournalRecord):Promise<void>{
-  const t=this.store.data.topics.find(x=>x.taskId===r.task);if(!t)return;
+  const latest=topicOfTask(this.store.data.topics,r.task);if(!latest)return;
   const ended=r.type==='task.ended'?(r.data.outcome==='achieved'?'任务已完成：':'任务已放弃：')+String(r.data.reason):r.type==='task.reopened'?'任务已重新打开':'';
-  if(ended)return void await this.deps.reply(this.deps.app(t.appId),t.chatId,t.rootId,{card:notice(ended)});
+  if(ended)return void await this.deps.reply(this.deps.app(latest.appId),latest.chatId,latest.rootId,{card:notice(ended)});
   if(r.type==='input.added'){
    const input=this.deps.tasks.get(r.task).inputs.find(i=>i.id===r.data.input);
-   if(typeof input?.ref==='string'&&input.ref.startsWith(refPrefix))await this.deps.reply(this.deps.app(t.appId),t.chatId,t.rootId,{card:sourceCard(input.body as OwnerMessage,this.deps.now())});
+   if(typeof input?.ref==='string'&&input.ref.startsWith(refPrefix))await this.deps.reply(this.deps.app(latest.appId),latest.chatId,latest.rootId,{card:sourceCard(input.body as OwnerMessage,this.deps.now())});
    return;
   }
   const d=this.deps.tasks.get(r.task).deliveries.find(x=>x.id===r.data.delivery);if(!d||!('sink' in d.target)||d.target.sink!==sinkName)return;
+  // A card that an earlier topic of the task posted stays in its own thread, which is where it is redrawn; a new one goes to the latest topic.
+  const t=this.store.data.topics.find(x=>x.taskId===r.task&&x.deliveryCards?.[d.id])??latest;
   const to=d.target.to as Address,{text}=d.body as Body;
   if(r.type==='delivery.awaiting'){
    if(t.deliveryCards?.[d.id])return this.draw(t,d,'pending');
@@ -163,17 +165,18 @@ export class Messages{
   const quoted=this.quoted(d.task,(d.target as {to:Address}).to.replyTo??''),card=draftCard(d,view,{render:++this.renders,now:this.deps.now(),quoted,...failure&&{failure}});
   try{await this.deps.updateCard(this.deps.app(t.appId),cardId,card);}catch(e){this.store.log('消息',`确认卡片未能更新：${brief(e)}`,'error');}
  }
- // The topic and the delivery of delivery id, for an app. A click on a card of before the task core, or of another app, finds none.
- find(a:App,id:string):{topic:Topic,delivery:Delivery}|undefined{
-  for(const topic of this.store.data.topics){
-   if(topic.appId!==a.id||!topic.taskId)continue;
-   const delivery=this.deps.tasks.get(topic.taskId).deliveries.find(d=>d.id===id);if(delivery)return {topic,delivery};
-  }
+ // The topic and the delivery of delivery id, for an app, for a click on the card with message id messageId. Of the topics that hold the task of
+ // the delivery, the topic is the one whose thread has the card, so that a card of an earlier thread is still redrawn there, else (the click came
+ // before the reply that posted it returned) the topic of the task (see topicOfTask). A click on a card of before the task core, or of another app, finds none.
+ find(a:App,id:string,messageId:string):{topic:Topic,delivery:Delivery}|undefined{
+  const held=this.store.data.topics.filter(x=>x.appId===a.id&&x.taskId&&this.deps.tasks.get(x.taskId).deliveries.some(d=>d.id===id));
+  const topic=held.find(x=>x.deliveryCards?.[id]===messageId)??(held[0]&&topicOfTask(held,held[0].taskId!));if(!topic)return;
+  return {topic,delivery:this.deps.tasks.get(topic.taskId!).deliveries.find(d=>d.id===id)!};
  }
  // A click on a draft card from someone on the app's allowlist (see Platforms.cardAction), answered at once: send, edit, drop or cancel
  // (see draftCard in outbound-cards.ts). The delivery's own state, which the core changes synchronously, guards against a second click.
  click(a:App,evt:Click):CardActionResponse{
-  const v=evt.action?.value||{},found=typeof v.deliveryId==='string'?this.find(a,v.deliveryId):undefined;
+  const v=evt.action?.value||{},found=typeof v.deliveryId==='string'?this.find(a,v.deliveryId,evt.messageId):undefined;
   if(!found||!v.draft||!['send','edit','drop','cancel'].includes(v.draft))return toast('info','这张卡片已失效');
   const {topic,delivery:d}=found;
   // Feishu can deliver the click before the reply that posted the card returned its message id.
