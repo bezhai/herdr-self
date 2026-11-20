@@ -10,7 +10,7 @@ import {OpenLark,addBotOnly} from '../open-lark.mjs';
 import {Bridge,BOT_CANNOT_POST} from '../bridge-client.mjs';
 import {NewChats} from '../newchat.mjs';
 import {meegoLinks,gatherMaterial} from '../newchat-material.mjs';
-import {readNewChat} from '../prompt.mjs';
+import {readNewChat,newChatSystemPrompt} from '../prompt.mjs';
 
 process.env.TZ='Asia/Shanghai';
 const BOT='cli_bridge_bot';
@@ -57,6 +57,9 @@ const buttonValue=(card,label)=>buttons(card).find(([l])=>l===label)?.[1];
 const headerOf=card=>card.header.title.content;
 
 // ---- gathering the material
+test('the judgment asks for people by name in the reason and the first prompt, never 他 or 她',()=>{
+ assert.match(newChatSystemPrompt('原智鸿'),/提到人一律写名字，不用「他」「她」/);
+});
 test('meegoLinks finds Meego work item links in texts, once each, without a login token',()=>{
  assert.deepEqual(meegoLinks([`见 ${MEEGO}?tabKey=detail，和 ${MEEGO}`,'https://meego.example.com/ug/issue/detail/55?x=1','https://example.com/detail/9','无链接']),
   [`${MEEGO}?tabKey=detail`,'https://meego.example.com/ug/issue/detail/55?x=1'],'one work item once, however it is linked; only Meego\'s links');
