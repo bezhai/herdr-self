@@ -125,10 +125,11 @@ export class Topics{
   return this.deliver(a,b,t,msg,{reaction:msg.messageId});
  }
  // Opens a topic of binding b whose root is message rootId and gives its agent message msg (see deliver): the one way into a new topic, for
- // a person's message and for a schedule's run alike (see schedules.ts). The record is on disk before the first await, so messages arriving
- // meanwhile join this topic instead of opening another tab; it holds the id of msg, which is not handled again, and fields, such as the
- // schedule run that opened it. Returns {topic, delivered}: the record, and what deliver resolves to.
- begin(a:App,b:Binding,rootId:string,{title,msg,reaction,fields}:{title:string,msg:Message,reaction?:string,fields?:Pick<Topic,'scheduled'>}){
+ // a person's message, a schedule's run and a caller of the API alike (see schedules.ts and api-topics.ts). The record is on disk before the
+ // first await, so messages arriving meanwhile join this topic instead of opening another tab; it holds the id of msg, which is not handled
+ // again, and fields, such as the schedule run that opened it or the key of the request of the API. Returns {topic, delivered}: the record,
+ // and what deliver resolves to.
+ begin(a:App,b:Binding,rootId:string,{title,msg,reaction,fields}:{title:string,msg:Message,reaction?:string,fields?:Pick<Topic,'scheduled'|'openKey'>}){
   const id=uuid(),config=this.store.data.agentConfigs.find(c=>c.id===b.defaultAgentConfigId);
   const t:Topic={id,bindingId:b.id,appId:a.id,chatId:b.chatId,rootId,machineId:config?.machineId??'',...b.defaultProjectId&&{projectId:b.defaultProjectId},agentConfigId:b.defaultAgentConfigId,workspaceId:'',tabId:'',paneId:'',agentName:'feishu-'+id.slice(0,8),
    title,state:'starting',error:'',messageIds:[msg.messageId],replySeq:0,reactions:[],cards:[],task:{messageId:msg.messageId,content:msg.content,...msg.resources&&{resources:msg.resources}},...fields,createdAt:this.now()};

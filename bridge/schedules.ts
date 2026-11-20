@@ -3,6 +3,7 @@ import {parseCron,zone,next,previous,when} from './cron.ts';
 import {notice} from './message-cards.ts';
 import {clip} from './request-cards.ts';
 import {titleOf} from './attachments.ts';
+import {promptLimit} from './platform.ts';
 import type {Store} from './core.ts';
 import type {App,Mode,Schedule,Run,Topic} from './state.ts';
 import type {Topics} from './topics.ts';
@@ -20,8 +21,6 @@ const grace=2*3600000;
 const kept=3,quiet=24*3600000;
 // The runs that a schedule keeps in its record.
 const history=20;
-// The longest task: as long as a message that a person can prompt an agent with (see forwardable in platform.ts).
-const taskLimit=16000;
 // What cards and logs call schedule s: the first 8 characters of its id, which bridge-schedule also takes (see AgentSchedules).
 export const short=(s:{id:string})=>s.id.slice(0,8);
 const brief=(e:Error|undefined)=>publicText(e?.message).split('\n')[0].slice(0,200);
@@ -67,10 +66,11 @@ export class Schedules{
   return structuredClone(s);
  }
  // cron, timeZone and task as stored: the expression with single spaces, the time zone in its canonical form and the task trimmed, at most
- // 16000 characters. Throws when one is invalid or the expression has no time left to run.
+ // as long as a message that a person can prompt an agent with (see promptLimit in platform.ts). Throws when one is invalid or the
+ // expression has no time left to run.
  check({cron,timeZone,task}:{cron:unknown,timeZone:unknown,task:unknown}){
   const c=parseCron(cron),tz=zone(timeZone);
-  if(typeof task!=='string'||!task.trim()||task.trim().length>taskLimit)throw Error(`任务文字为空或超过 ${taskLimit} 字`);
+  if(typeof task!=='string'||!task.trim()||task.trim().length>promptLimit)throw Error(`任务文字为空或超过 ${promptLimit} 字`);
   if(next(c,tz,this.now())==null)throw Error('这个时间表达式不会再运行');
   return {cron:String(cron).trim().split(/\s+/).join(' '),timeZone:tz,task:task.trim()};
  }

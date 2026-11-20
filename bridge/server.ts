@@ -10,6 +10,7 @@ import {migrateBindings,convertAdopted} from './migration.ts';
 import {Topics} from './topics.ts';
 import {Skills,requestLimit} from './skills.ts';
 import {Schedules} from './schedules.ts';
+import {ApiTopics} from './api-topics.ts';
 import {Messages,ownerSink,sinkName} from './messages.ts';
 import {Tasks} from './task-core.ts';
 import {threadSink,threadSinkName} from './thread-sink.ts';
@@ -58,6 +59,7 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 }});
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
+const apiTopics=new ApiTopics(store,{topics,send:(...args)=>platforms.send(...args),chatName:(...args)=>platforms.chatName(...args)});
 const messages=new Messages(store,{tasks,topics,app:id=>platforms.app(id),owner,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 const agentTasks=new AgentTasks(store,{topics,tasks,app:id=>platforms.app(id)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
@@ -118,6 +120,8 @@ const server=http.createServer(async(req,res)=>{try{
  else if(p==='/api/agent-configs/remove'){removeAgentConfig(store,b.id);}
  else if(p==='/api/bindings/save'){const x=binding(b.id);changeBinding(x,b,store.data);store.save();store.log('会话绑定',`${x.name}：${bindingTarget(x,store.data)}，之后新开的话题生效`);}
  else if(p==='/api/bindings/remove'){store.data.bindings=store.data.bindings.filter(x=>x.id!==b.id);store.save();topics.unbind(b.id);}
+ // A topic that a trusted caller opens in a chat (see ApiTopics), whose refusals answer with their own status and code for the caller to react to.
+ else if(p==='/api/topics/open'){const {status,body:answer}=await apiTopics.answer(b);return json(res,status,answer);}
  // Writes to skills come only from the console and the access key, never from an agent: a skill goes into every later topic, and an
  // agent can be talked into anything by what it reads.
  else if(p==='/api/skills/save'){skills.save(b.name,b.text,{create:Boolean(b.create)});}

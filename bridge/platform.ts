@@ -40,11 +40,12 @@ export function normalizeApp(b:{name?:unknown,appId?:unknown,appSecret?:unknown,
 export type BindingFields={name?:unknown,defaultProjectId?:unknown,defaultAgentConfigId?:unknown,requireMention?:unknown,enabled?:unknown,[field:string]:unknown};
 type BindingData=Pick<State,'bindings'|'projects'|'agentConfigs'>;
 // The default project and agent configuration of a binding of a chat of chatType, once checked: the configuration must exist, a group has
-// a project that exists and a direct chat has none.
+// a project that exists and a direct chat has none. One that does not exist is refused with the code unknown_agent_config or unknown_project,
+// which a caller of the API reads (see ApiTopics).
 function defaults(chatType:Binding['chatType'],projectId:unknown,configId:unknown,data:BindingData){
- const config=data.agentConfigs.find(c=>c.id===configId);if(!config)throw Error('Agent 配置不存在');
+ const config=data.agentConfigs.find(c=>c.id===configId);if(!config)throw Object.assign(Error('Agent 配置不存在'),{code:'unknown_agent_config'});
  if(chatType==='p2p'){if(projectId!=null&&projectId!=='')throw Error('私聊不固定项目');return {defaultAgentConfigId:config.id};}
- const project=data.projects.find(p=>p.id===projectId);if(!project)throw Error('项目不存在');
+ const project=data.projects.find(p=>p.id===projectId);if(!project)throw Object.assign(Error('项目不存在'),{code:'unknown_project'});
  return {defaultProjectId:project.id,defaultAgentConfigId:config.id};
 }
 // A binding routes one chat of an app to a default project and a default agent configuration; every topic in that chat gets its own agent
@@ -87,8 +88,11 @@ export const routable=(msg:Pick<NormalizedMessage,'senderType'|'senderId'>)=>msg
 // The kinds of messages whose content Bridge can hand to an agent: text, and rich text with its images and files, an image and a file (see
 // attachments.ts). Bridge gets nothing out of the others, such as stickers, merged forwards and cards.
 export const supported=(msg:Pick<NormalizedMessage,'rawContentType'>)=>['text','post','image','file'].includes(msg.rawContentType);
-// A message that Bridge can prompt an agent with: of a supported kind, with content of at most 16000 characters.
-export function forwardable(msg:Pick<NormalizedMessage,'rawContentType'|'content'>){const content=msg.content?.trim();return supported(msg)&&Boolean(content)&&content.length<=16000;}
+// The longest text that Bridge prompts an agent with, in characters: a person's message, the task of a schedule or the prompt of a caller of
+// the API.
+export const promptLimit=16000;
+// A message that Bridge can prompt an agent with: of a supported kind, with content of at most promptLimit characters.
+export function forwardable(msg:Pick<NormalizedMessage,'rawContentType'|'content'>){const content=msg.content?.trim();return supported(msg)&&Boolean(content)&&content.length<=promptLimit;}
 // A failed download of a message resource: Feishu answers with a JSON body, which a stream response carries as a stream. Keeps Feishu's
 // code like openApi; any other failure stays as it is.
 async function resourceError(e:Error&{response?:{data?:any}}){

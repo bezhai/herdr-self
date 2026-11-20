@@ -6,7 +6,7 @@ import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLim
 import {namingPrompt,parseBranch,validBranch,branchOf,branchFromText,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';import {threadSink,threadSinkName} from './thread-sink.ts';import {Tasks} from './task-core.ts';import {Messages} from './messages.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
-import {ChatBindings} from './chat-bindings.ts';import {AgentTasks} from './agent-tasks.ts';
+import {ChatBindings} from './chat-bindings.ts';import {AgentTasks} from './agent-tasks.ts';import {ApiTopics} from './api-topics.ts';
 import {registerCommands,commands} from './commands.ts';
 import {parseCron,zone,next,previous,upcoming,when,phrase} from './cron.ts';import {Schedules,isMode} from './schedules.ts';import {AgentSchedules} from './agent-schedules.ts';import {main as runCommand,parse as parseCommand,usage} from './schedule-command.ts';import {main as runSkill,parse as parseSkill,usage as skillUsage} from './skill-command.ts';
 import {check,card,plain} from './request-cards.ts';import {fits,notice as noticeCard} from './message-cards.ts';import {nameOf} from './adoption.ts';
@@ -3124,6 +3124,130 @@ test('the timer of the schedules checks them every interval from start until sto
   await later(30);assert.equal(ticks,seen);
  }finally{fs.rmSync(dir,{recursive:true});}
 });
+// The topics that a caller opens through POST /api/topics/open (see ApiTopics) over a topic fixture (see topicFixture), whose binding b binds
+// chat oc_1 of app a, the only app, whose App ID is cli_bot. Besides project p and agent configuration c there are project promoter (p2) and
+// configuration c2, which runs Claude in auto mode on the same machine. f.posted records every message the bot posts into a chat outside a
+// thread as [app id, chat id, content], which resolves to the next om_open_<n>; with f.postFails set it rejects with that error instead.
+// f.names[chat id] is the name of the chat in Feishu and f.read records every chat whose name is read; reading a chat without a name fails,
+// like reading a chat that the bot is not in. f.settled() waits for what the topics queued: the starts of their agents.
+function apiTopicFixture(options:TopicOptions={}){
+ const f:ReturnType<typeof topicFixture>&{postFails?:Error|null}=topicFixture(options),posted:unknown[][]=[],read:string[]=[],names:Record<string,string>={};let n=0;
+ f.store.data.apps=[{...allowed,appId:'cli_bot'}];f.store.data.projects.push({id:'p2',name:'promoter',description:'',repos:[],skills:[],workMode:'shared'});
+ f.store.data.agentConfigs.push({...routeConfig,id:'c2',name:'cpu2 · Claude · auto',permissionMode:'auto'});f.store.save();
+ const apiDeps:DepsOf<typeof ApiTopics>={topics:f.topics,
+  send:async(a,chatId,content)=>{posted.push([a.id,chatId,content]);await null;if(f.postFails)throw f.postFails;return 'om_open_'+ ++n;},
+  chatName:async(_a,chatId)=>{read.push(chatId);await null;if(!Object.hasOwn(names,chatId))throw Error('飞书接口错误 232011：Operator can NOT be out of the chat.');return names[chatId];}};
+ const apiTopics=new ApiTopics(f.store,apiDeps);
+ return Object.assign(f,{apiTopics,apiDeps,posted,read,names,open:(request:Record<string,unknown>)=>apiTopics.open(request),
+  settled:()=>Promise.all(f.store.data.topics.map(t=>f.topics.queue(t,()=>{})))});
+}
+const apiLogs=(f:{store:Store})=>f.store.data.logs.filter(l=>['会话绑定','开话题'].includes(l.kind)).map(l=>[l.level,l.kind,l.message]);
+test('a caller opens a topic in a chat without a binding: the chat is bound to the project and the agent configuration that the request names, under the chat\'s name and with the defaults of a binding made from the card, and the bot posts 开工：<title> into the chat as the root of a topic whose first message is the prompt',async()=>{
+ const f=apiTopicFixture();try{
+  f.names.oc_new='火山发文平台映射 - [需求同步群]';
+  const r=await f.open({chatId:'oc_new',prompt:' 读一下需求文档，列出要改的接口\n',title:' 火山发文\n平台映射 ',projectId:'p2',agentConfigId:'c2',key:'oc_new'});
+  const b=f.store.data.bindings[1],[t]=f.store.data.topics;
+  assert.deepEqual(r,{topicId:t.id,bindingId:b.id,rootMessageId:'om_open_1',created:true});
+  assert.deepEqual(b,{id:b.id,name:'火山发文平台映射 - [需求同步群]',appId:'a',chatId:'oc_new',chatType:'group',requireMention:true,enabled:true,defaultProjectId:'p2',defaultAgentConfigId:'c2'});
+  assert.deepEqual(f.posted,[['a','oc_new',notice('开工：火山发文 平台映射')]]);assert.deepEqual(f.read,['oc_new']);
+  assert.deepEqual([t.bindingId,t.chatId,t.rootId,t.title,t.messageIds,t.task,t.projectId,t.agentConfigId,t.openKey],
+   [b.id,'oc_new','om_open_1','火山发文 平台映射',['om_open_1'],{messageId:'om_open_1',content:'读一下需求文档，列出要改的接口'},'p2','c2','oc_new']);
+  const saved=new Store(f.dir).data;assert.deepEqual([saved.bindings[1],saved.lastAgentConfigId,saved.topics.map(x=>[x.id,x.openKey])],[b,'c2',[[t.id,'oc_new']]]);
+  // The topic starts like every other, with the project and the configuration of the new binding: its agent gets the prompt, nothing gets a
+  // reaction and the COT answers the root.
+  await f.settled();
+  assert.deepEqual([t.state,(f.prepared[0][1] as Sent).project.id,(f.launched[0][1] as Sent).permissionMode],['ready','p2','auto']);
+  assert.deepEqual(f.h.calls.find(c=>c[1]==='prompt'),['agent','prompt','w1:p1','读一下需求文档，列出要改的接口']);
+  assert.deepEqual([f.reacted,f.replies],[[],[]]);assert.deepEqual(cotLog(f)[0],['create','om_open_1']);
+  assert.deepEqual(apiLogs(f),[['info','会话绑定','火山发文平台映射 - [需求同步群] → promoter · cpu2 · Claude · auto'],['info','开话题','火山发文平台映射 - [需求同步群]：经接口开了话题「火山发文 平台映射」']]);
+ }finally{f.close();}
+});
+test('a caller opens a topic in a bound chat with the chat\'s binding: the project and the agent configuration of the request are ignored, unknown ones too, and the chat\'s name is not read; without a title the topic is named like one that a message opens, and a long title is cut',async()=>{
+ const f=apiTopicFixture();try{
+  const prompt='把首页的按钮改成蓝色，然后跑一遍测试，最后提交一个合并请求';
+  const r=await f.open({chatId:'oc_1',prompt,projectId:'gone',agentConfigId:'c2'});
+  const [t]=f.store.data.topics,title=titleOf({content:prompt});
+  assert.deepEqual(r,{topicId:t.id,bindingId:'b',rootMessageId:'om_open_1',created:true});
+  assert.deepEqual([f.store.data.bindings.length,f.read,t.title,t.projectId,t.agentConfigId,Object.hasOwn(t,'openKey')],[1,[],title,'p','c',false]);
+  assert.deepEqual(f.posted,[['a','oc_1',notice('开工：'+title)]]);
+  await f.open({chatId:'oc_1',prompt:'x',title:'长'.repeat(61)});await f.open({chatId:'oc_1',prompt:'先看日志',title:' \n'});
+  assert.deepEqual(f.store.data.topics.slice(1).map(x=>x.title),['长'.repeat(59)+'…','先看日志']);
+  await f.settled();
+ }finally{f.close();}
+});
+test('a repeated key answers with the result of the first request and opens nothing, also when both arrive together and after a restart; a request that failed leaves its key to the next one',async()=>{
+ const f=apiTopicFixture();try{
+  const request={chatId:'oc_1',prompt:'看一下这个需求',key:'oc_new'};
+  const [first,second]=await Promise.all([f.open(request),f.open({...request,prompt:'别的',title:'别的'})]);
+  assert.equal(first.created,true);assert.deepEqual(second,{...first,created:false});
+  assert.deepEqual(await new ApiTopics(new Store(f.dir),f.apiDeps).open({...request,chatId:'oc_other'}),{...first,created:false});
+  assert.deepEqual([f.posted.length,f.store.data.topics.length],[1,1]);
+  f.postFails=Error('飞书接口错误 230002：Bot/User can NOT be out of the chat.');
+  await assert.rejects(f.open({...request,key:'k2'}),{code:'bot_cannot_post'});assert.equal(f.store.data.topics.length,1);
+  f.postFails=null;const third=await f.open({...request,key:'k2'});
+  assert.equal(third.created,true);assert.notEqual(third.topicId,first.topicId);assert.deepEqual(f.store.data.topics.map(t=>t.openKey),['oc_new','k2']);
+  await f.settled();
+ }finally{f.close();}
+});
+test('a chat without a binding needs both a project and an agent configuration: a missing one is invalid input, one that does not exist is refused with its own code, and nothing is posted or bound',async()=>{
+ const f=apiTopicFixture();try{
+  f.names.oc_new='新群';
+  for(const [fields,code,message] of [[{agentConfigId:'c'},'invalid_request',/projectId/],[{projectId:'p'},'invalid_request',/agentConfigId/],[{projectId:'',agentConfigId:'c'},'invalid_request',/projectId/],
+   [{projectId:'gone',agentConfigId:'c'},'unknown_project',/项目不存在/],[{projectId:'p',agentConfigId:'gone'},'unknown_agent_config',/Agent 配置不存在/]] satisfies [object,string,RegExp][])
+   await assert.rejects(f.open({chatId:'oc_new',prompt:'x',...fields}),{code,message},JSON.stringify(fields));
+  assert.deepEqual([f.posted,f.read,f.store.data.bindings.length,f.store.data.topics],[[],[],1,[]]);
+ }finally{f.close();}
+});
+test('with more than one app a request names its app, by Bridge\'s id of the app or by its App ID; without one, with one that does not exist and without any app it is invalid input',async()=>{
+ const f=apiTopicFixture();try{
+  f.store.data.apps.push({...allowed,id:'a2',name:'other',appId:'cli_other'});
+  for(const appId of [undefined,null,'a3','cli_none'])await assert.rejects(f.open({chatId:'oc_1',prompt:'x',appId}),{code:'invalid_request'},String(appId));
+  assert.deepEqual(f.posted,[]);
+  await f.open({chatId:'oc_1',prompt:'x',appId:'a'});await f.open({chatId:'oc_1',prompt:'y',appId:'cli_bot'});
+  assert.deepEqual(f.posted.map(p=>p.slice(0,2)),[['a','oc_1'],['a','oc_1']]);assert.deepEqual(f.store.data.topics.map(t=>t.bindingId),['b','b']);
+  // A binding is of the chat of one app: for app a2, chat oc_1 has none, so the request needs a project and a configuration.
+  await assert.rejects(f.open({chatId:'oc_1',prompt:'x',appId:'cli_other'}),{code:'invalid_request',message:/projectId/});
+  f.store.data.apps=[];await assert.rejects(f.open({chatId:'oc_1',prompt:'x'}),{code:'invalid_request'});
+  await f.settled();
+ }finally{f.close();}
+});
+test('a request whose root message the bot cannot post, such as before the bot is in the group, is refused with bot_cannot_post and the reason of Feishu, and binds and opens nothing; once the bot can post, the same request binds the chat and opens the topic, and a chat whose name cannot be read is called 群聊',async()=>{
+ const f=apiTopicFixture();try{
+  const request={chatId:'oc_new',prompt:'开始做',projectId:'p',agentConfigId:'c',key:'oc_new'};
+  f.postFails=Object.assign(Error('飞书接口错误 230002：Bot/User can NOT be out of the chat.'),{code:230002});
+  await assert.rejects(f.open(request),{code:'bot_cannot_post',message:'机器人未能在这个聊天里发消息：飞书接口错误 230002：Bot/User can NOT be out of the chat.'});
+  assert.deepEqual([f.store.data.bindings.length,f.store.data.topics,f.read],[1,[],[]]);
+  f.postFails=null;const r=await f.open(request),b=f.store.data.bindings[1];
+  assert.deepEqual([r.created,r.bindingId,b.chatId,b.name,f.store.data.topics.length],[true,b.id,'oc_new','群聊',1]);
+  assert.deepEqual(apiLogs(f),[['error','开话题','bot：未能在聊天 oc_new 里发出话题的根消息，飞书接口错误 230002：Bot/User can NOT be out of the chat.'],
+   ['error','会话绑定','bot：未能读取群名称，飞书接口错误 232011：Operator can NOT be out of the chat.'],['info','会话绑定','群聊 → work · cpu2 · Claude'],['info','开话题','群聊：经接口开了话题「开始做」']]);
+  await f.settled();
+ }finally{f.close();}
+});
+test('a request is checked before anything goes to Feishu: chatId is the open chat id of a chat, prompt a text of at most 16000 characters, and title, key, projectId, agentConfigId and appId are texts when given, a key of at most 200 characters',async()=>{
+ const f=apiTopicFixture();try{
+  const valid={chatId:'oc_1',prompt:'x'};
+  for(const fields of [{chatId:undefined},{chatId:'1234'},{chatId:'oc_'},{chatId:7},{chatId:'oc_1 2'},{prompt:undefined},{prompt:' \n'},{prompt:'x'.repeat(16001)},{prompt:['x']},
+   {title:5},{key:''},{key:'k'.repeat(201)},{key:{}},{projectId:1},{agentConfigId:true},{appId:['a']}])
+   await assert.rejects(f.open({...valid,...fields}),{code:'invalid_request'},JSON.stringify(fields).slice(0,60));
+  assert.deepEqual([f.posted,f.read,f.store.data.topics],[[],[],[]]);
+  await f.open({...valid,prompt:` ${'x'.repeat(16000)}\n`,key:'k'.repeat(200),title:null,projectId:null});
+  assert.equal(f.store.data.topics[0].task!.content,'x'.repeat(16000));
+  await f.settled();
+ }finally{f.close();}
+});
+test('POST /api/topics/open answers 200 with the result; a refusal answers its status with the error and its code: 400 invalid_request, 404 unknown_project and unknown_agent_config, 409 bot_cannot_post; any other failure is left to the server',async()=>{
+ const f=apiTopicFixture();try{
+  const ok=await f.apiTopics.answer({chatId:'oc_1',prompt:'x'});
+  assert.deepEqual(ok,{status:200,body:{topicId:f.store.data.topics[0].id,bindingId:'b',rootMessageId:'om_open_1',created:true}});
+  assert.deepEqual(await f.apiTopics.answer({chatId:'oc_1'}),{status:400,body:{error:'prompt 为空或超过 16000 个字符',code:'invalid_request'}});
+  assert.deepEqual(await f.apiTopics.answer({chatId:'oc_new',prompt:'x',projectId:'gone',agentConfigId:'c'}),{status:404,body:{error:'项目不存在',code:'unknown_project'}});
+  assert.deepEqual(await f.apiTopics.answer({chatId:'oc_new',prompt:'x',projectId:'p',agentConfigId:'gone'}),{status:404,body:{error:'Agent 配置不存在',code:'unknown_agent_config'}});
+  f.postFails=Error('飞书未连接');assert.deepEqual(await f.apiTopics.answer({chatId:'oc_1',prompt:'x'}),{status:409,body:{error:'机器人未能在这个聊天里发消息：飞书未连接',code:'bot_cannot_post'}});
+  f.postFails=null;f.apiTopics.topics={begin:()=>{throw Error('磁盘已满');}};await assert.rejects(f.apiTopics.answer({chatId:'oc_1',prompt:'x'}),/磁盘已满/);
+  await f.settled();
+ }finally{f.close();}
+});
 // The agent schedules over a schedule fixture (see scheduleFixture), with its clock; its machine cpu2 is of the Herdr session default.
 // f.call(op,fields,t) is a request of the agent of topic t (the first topic by default) that the client of its machine passed on;
 // f.click(id,choice,openId) clicks 确认 or 取消 on the card of proposal id, and f.drawn() waits for the cards being redrawn. f.open(messageId)
@@ -3645,6 +3769,10 @@ test('the server changes the defaults of a binding that exists and creates none,
   assert.deepEqual((await api('state')).body.bindings.slice(1),[changedShown,direct]);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state,'state.json'),'utf8')).bindings.slice(1),[changed,direct]);
   assert.deepEqual((await api('state')).body.logs.filter((l:Log)=>l.kind==='会话绑定').map((l:Log)=>l.message),['群：other · cpu2 · Codex，之后新开的话题生效']);
   assert.equal((await api('bindings/remove',{id:'b-old'})).status,200);assert.deepEqual((await api('state')).body.topics.map((t:ConsoleTopic)=>t.id),['t2']);
+  // A caller opens a topic with the access key: among three apps it names one, and an app that is not connected cannot post, which binds nothing.
+  assert.deepEqual(await api('topics/open',{chatId:'oc_8',prompt:'x'}),{status:400,body:{error:'Bridge 有多个应用，需要用 appId 指明',code:'invalid_request'}});
+  assert.deepEqual(await api('topics/open',{appId:'cli_plain',chatId:'oc_new',prompt:'x',projectId:'p-1',agentConfigId:'c-1'}),{status:409,body:{error:'机器人未能在这个聊天里发消息：飞书未连接',code:'bot_cannot_post'}});
+  assert.deepEqual((await api('state')).body.bindings.map((b:Binding)=>b.id),['b-group','b-direct']);
   const avatar=async(id:string,headers:Record<string,string>={authorization:'Bearer '+key})=>fetch(`http://127.0.0.1:${port}/api/apps/avatar?id=${encodeURIComponent(id)}`,{headers});
   const image=await avatar('app-avatar');assert.equal(image.status,200);assert.equal(image.headers.get('content-type'),'image/png');assert.equal(image.headers.get('cache-control'),'private, max-age=300');assert.deepEqual(Buffer.from(await image.arrayBuffer()),png);
   assert.equal((await avatar('app-avatar',{})).status,401);for(const id of ['app-plain','unknown','../state.json'])assert.equal((await avatar(id)).status,404,id);
