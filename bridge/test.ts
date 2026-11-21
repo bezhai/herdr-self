@@ -3142,14 +3142,14 @@ function apiTopicFixture(options:TopicOptions={}){
   settled:()=>Promise.all(f.store.data.topics.map(t=>f.topics.queue(t,()=>{})))});
 }
 const apiLogs=(f:{store:Store})=>f.store.data.logs.filter(l=>['会话绑定','开话题'].includes(l.kind)).map(l=>[l.level,l.kind,l.message]);
-test('a caller opens a topic in a chat without a binding: the chat is bound to the project and the agent configuration that the request names, under the chat\'s name and with the defaults of a binding made from the card, and the bot posts 开工：<title> into the chat as the root of a topic whose first message is the prompt',async()=>{
+test('a caller opens a topic in a chat without a binding: the chat is bound to the project and the agent configuration that the request names, under the chat\'s name and with the defaults of a binding made from the card, and the bot posts the root text of the request, as the caller wrote it, into the chat as the root of a topic whose first message is the prompt; the topic and its tab are named by the title',async()=>{
  const f=apiTopicFixture();try{
   f.names.oc_new='火山发文平台映射 - [需求同步群]';
-  const r=await f.open({chatId:'oc_new',prompt:' 读一下需求文档，列出要改的接口\n',title:' 火山发文\n平台映射 ',projectId:'p2',agentConfigId:'c2',key:'oc_new'});
+  const r=await f.open({chatId:'oc_new',prompt:' 读一下需求文档，列出要改的接口\n',title:' 火山发文\n平台映射 ',rootText:' 原智鸿的 Agent：火山发文\n平台映射 ',projectId:'p2',agentConfigId:'c2',key:'oc_new'});
   const b=f.store.data.bindings[1],[t]=f.store.data.topics;
   assert.deepEqual(r,{topicId:t.id,bindingId:b.id,rootMessageId:'om_open_1',created:true});
   assert.deepEqual(b,{id:b.id,name:'火山发文平台映射 - [需求同步群]',appId:'a',chatId:'oc_new',chatType:'group',requireMention:true,enabled:true,defaultProjectId:'p2',defaultAgentConfigId:'c2'});
-  assert.deepEqual(f.posted,[['a','oc_new',notice('开工：火山发文 平台映射')]]);assert.deepEqual(f.read,['oc_new']);
+  assert.deepEqual(f.posted,[['a','oc_new',notice('原智鸿的 Agent：火山发文 平台映射')]]);assert.deepEqual(f.read,['oc_new']);
   assert.deepEqual([t.bindingId,t.chatId,t.rootId,t.title,t.messageIds,t.task,t.projectId,t.agentConfigId,t.openKey],
    [b.id,'oc_new','om_open_1','火山发文 平台映射',['om_open_1'],{messageId:'om_open_1',content:'读一下需求文档，列出要改的接口'},'p2','c2','oc_new']);
   const saved=new Store(f.dir).data;assert.deepEqual([saved.bindings[1],saved.lastAgentConfigId,saved.topics.map(x=>[x.id,x.openKey])],[b,'c2',[[t.id,'oc_new']]]);
@@ -3158,27 +3158,30 @@ test('a caller opens a topic in a chat without a binding: the chat is bound to t
   await f.settled();
   assert.deepEqual([t.state,(f.prepared[0][1] as Sent).project.id,(f.launched[0][1] as Sent).permissionMode],['ready','p2','auto']);
   assert.deepEqual(f.h.calls.find(c=>c[1]==='prompt'),['agent','prompt','w1:p1','读一下需求文档，列出要改的接口']);
+  assert.deepEqual(f.h.calls.find(c=>c[0]==='tab'),['tab','rename','w1:t1','火山发文 平台映射'],'the tab has the title, not the root text');
   assert.deepEqual([f.reacted,f.replies],[[],[]]);assert.deepEqual(cotLog(f)[0],['create','om_open_1']);
   assert.deepEqual(apiLogs(f),[['info','会话绑定','火山发文平台映射 - [需求同步群] → promoter · cpu2 · Claude · auto'],['info','开话题','火山发文平台映射 - [需求同步群]：经接口开了话题「火山发文 平台映射」']]);
  }finally{f.close();}
 });
-test('a caller opens a topic in a bound chat with the chat\'s binding: the project and the agent configuration of the request are ignored, unknown ones too, and the chat\'s name is not read; without a title the topic is named like one that a message opens, and a long title is cut',async()=>{
+test('a caller opens a topic in a bound chat with the chat\'s binding: the project and the agent configuration of the request are ignored, unknown ones too, and the chat\'s name is not read; without a title the topic is named like one that a message opens, without a root text (or a blank one) the root message is the title, and a long title or root text is cut',async()=>{
  const f=apiTopicFixture();try{
   const prompt='把首页的按钮改成蓝色，然后跑一遍测试，最后提交一个合并请求';
   const r=await f.open({chatId:'oc_1',prompt,projectId:'gone',agentConfigId:'c2'});
   const [t]=f.store.data.topics,title=titleOf({content:prompt});
   assert.deepEqual(r,{topicId:t.id,bindingId:'b',rootMessageId:'om_open_1',created:true});
   assert.deepEqual([f.store.data.bindings.length,f.read,t.title,t.projectId,t.agentConfigId,Object.hasOwn(t,'openKey')],[1,[],title,'p','c',false]);
-  assert.deepEqual(f.posted,[['a','oc_1',notice('开工：'+title)]]);
+  assert.deepEqual(f.posted,[['a','oc_1',notice(title)]]);
   await f.open({chatId:'oc_1',prompt:'x',title:'长'.repeat(61)});await f.open({chatId:'oc_1',prompt:'先看日志',title:' \n'});
-  assert.deepEqual(f.store.data.topics.slice(1).map(x=>x.title),['长'.repeat(59)+'…','先看日志']);
+  await f.open({chatId:'oc_1',prompt:'y',title:'标题',rootText:'根'.repeat(101)});await f.open({chatId:'oc_1',prompt:'z',title:'标题二',rootText:' \n'});
+  assert.deepEqual(f.store.data.topics.slice(1).map(x=>x.title),['长'.repeat(59)+'…','先看日志','标题','标题二']);
+  assert.deepEqual(f.posted.slice(1).map(p=>p[2]),[notice('长'.repeat(59)+'…'),notice('先看日志'),notice('根'.repeat(99)+'…'),notice('标题二')]);
   await f.settled();
  }finally{f.close();}
 });
 test('a repeated key answers with the result of the first request and opens nothing, also when both arrive together and after a restart; a request that failed leaves its key to the next one',async()=>{
  const f=apiTopicFixture();try{
   const request={chatId:'oc_1',prompt:'看一下这个需求',key:'oc_new'};
-  const [first,second]=await Promise.all([f.open(request),f.open({...request,prompt:'别的',title:'别的'})]);
+  const [first,second]=await Promise.all([f.open(request),f.open({...request,prompt:'别的',title:'别的',rootText:'别的'})]);
   assert.equal(first.created,true);assert.deepEqual(second,{...first,created:false});
   assert.deepEqual(await new ApiTopics(new Store(f.dir),f.apiDeps).open({...request,chatId:'oc_other'}),{...first,created:false});
   assert.deepEqual([f.posted.length,f.store.data.topics.length],[1,1]);
@@ -3224,11 +3227,11 @@ test('a request whose root message the bot cannot post, such as before the bot i
   await f.settled();
  }finally{f.close();}
 });
-test('a request is checked before anything goes to Feishu: chatId is the open chat id of a chat, prompt a text of at most 16000 characters, and title, key, projectId, agentConfigId and appId are texts when given, a key of at most 200 characters',async()=>{
+test('a request is checked before anything goes to Feishu: chatId is the open chat id of a chat, prompt a text of at most 16000 characters, and title, rootText, key, projectId, agentConfigId and appId are texts when given, a key of at most 200 characters',async()=>{
  const f=apiTopicFixture();try{
   const valid={chatId:'oc_1',prompt:'x'};
   for(const fields of [{chatId:undefined},{chatId:'1234'},{chatId:'oc_'},{chatId:7},{chatId:'oc_1 2'},{prompt:undefined},{prompt:' \n'},{prompt:'x'.repeat(16001)},{prompt:['x']},
-   {title:5},{key:''},{key:'k'.repeat(201)},{key:{}},{projectId:1},{agentConfigId:true},{appId:['a']}])
+   {title:5},{rootText:5},{rootText:['x']},{key:''},{key:'k'.repeat(201)},{key:{}},{projectId:1},{agentConfigId:true},{appId:['a']}])
    await assert.rejects(f.open({...valid,...fields}),{code:'invalid_request'},JSON.stringify(fields).slice(0,60));
   assert.deepEqual([f.posted,f.read,f.store.data.topics],[[],[],[]]);
   await f.open({...valid,prompt:` ${'x'.repeat(16000)}\n`,key:'k'.repeat(200),title:null,projectId:null});

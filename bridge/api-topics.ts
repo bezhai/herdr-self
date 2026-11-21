@@ -8,10 +8,12 @@ import type {App,Topic} from './state.ts';
 import type {Topics} from './topics.ts';
 import type {Platforms} from './platform.ts';
 // Topics that a trusted caller opens in a chat through POST /api/topics/open, such as butler starting the work of a group that the
-// owner joined. The bot posts the root message 开工：<title> into the chat and the topic opens under it with the prompt as its first
-// message (see Topics.begin), as the run of a schedule does. A chat without a binding gets one first, with the project and the agent
-// configuration that the caller chose and the chat's name, like one made from the binding card; a bound chat keeps its own. Bridge
-// decides nothing here: what to start and where is the caller's, who holds more context than Bridge has.
+// owner joined. The bot posts the root message into the chat, the caller's root text or else its title, as it is (Bridge adds no words
+// of its own), and the topic opens under it with the prompt as its first message (see Topics.begin), as the run of a schedule does. The
+// topic, its tab and its task are named by the title only: the root text is what the people in the chat read. A chat without a
+// binding gets one first, with the project and the agent configuration that the caller chose and the chat's name, like one made from
+// the binding card; a bound chat keeps its own. Bridge decides nothing here: what to start and where, and what the root message says,
+// is the caller's, who holds more context than Bridge has.
 // The codes of a refusal, which the caller reacts to, with the HTTP status of each. Only bot_cannot_post may pass by itself: the bot is
 // not in the chat yet, or its app is not connected, so the caller may send the same request again a little later.
 const statuses={invalid_request:400,unknown_project:404,unknown_agent_config:404,bot_cannot_post:409};
@@ -21,14 +23,15 @@ const refusals=Object.keys(statuses) as Refusal[];
 // platform.ts).
 const refused=(code:Refusal,message:string)=>Object.assign(Error(message),{code});
 const invalid=(message:string)=>refused('invalid_request',message);
-// The longest key and title; a longer title is cut, since it only names the topic.
-const keyLimit=200,titleLimit=60;
+// The longest key, title and root text; a longer title or root text is cut, since it only names the topic or heads it.
+const keyLimit=200,titleLimit=60,rootTextLimit=100;
 // The first line of what failed, for a log line and the refusal.
 const brief=(e:Error)=>publicText(e.message).split('\n')[0].slice(0,200);
 // v, a field of the request that is a text when given: undefined when it is absent or null.
 function optional(name:string,v:unknown){if(v==null)return undefined;if(typeof v!=='string')throw invalid(name+' 应为文字');return v;}
-// A request once checked: the chat, the prompt trimmed, the title of the topic, and the key, project and agent configuration when given.
-type Checked={chatId:string,prompt:string,title:string,key?:string,projectId?:string,agentConfigId?:string};
+// A request once checked: the chat, the prompt trimmed, the title of the topic, the text of its root message, and the key, project and
+// agent configuration when given.
+type Checked={chatId:string,prompt:string,title:string,rootText:string,key?:string,projectId?:string,agentConfigId?:string};
 // What the caller gets for topic t: the topic, its binding, the root message, and whether this request opened it.
 export type Opened={topicId:string,bindingId:string,rootMessageId:string,created:boolean};
 const opened=(t:Topic,created:boolean):Opened=>({topicId:t.id,bindingId:t.bindingId,rootMessageId:t.rootId,created});
@@ -55,16 +58,19 @@ export class ApiTopics{
   return enqueue(this.queues,'open',()=>this.start(a,r));
  }
  // The fields of request, checked before anything goes to Feishu: chatId is an open chat id, prompt a text of at most promptLimit characters,
- // and title, key, projectId and agentConfigId are texts when given. A title is cut to 60 characters, and without one the topic is named
- // like one that a message opens (see titleOf). Throws with the code invalid_request.
+ // and title, rootText, key, projectId and agentConfigId are texts when given. A title is cut to 60 characters, and without one the topic
+ // is named like one that a message opens (see titleOf); a root text is cut to 100, and without one the root message is the title.
+ // Throws with the code invalid_request.
  check(request:Record<string,unknown>):Checked{
   const {chatId,prompt}=request;
   if(typeof chatId!=='string'||!/^oc_[a-zA-Z0-9]+$/.test(chatId))throw invalid('chatId 应为聊天的 open chat id（oc_…）');
   if(typeof prompt!=='string'||!prompt.trim()||prompt.trim().length>promptLimit)throw invalid(`prompt 为空或超过 ${promptLimit} 个字符`);
-  const title=optional('title',request.title)?.replace(/\s+/g,' ').trim(),key=optional('key',request.key);
+  const text=(name:string)=>optional(name,request[name])?.replace(/\s+/g,' ').trim();
+  const title=text('title'),rootText=text('rootText'),key=optional('key',request.key);
   if(key!=null&&(!key||key.length>keyLimit))throw invalid(`key 应为 1 到 ${keyLimit} 个字符`);
   const projectId=optional('projectId',request.projectId),agentConfigId=optional('agentConfigId',request.agentConfigId);
-  return {chatId,prompt:prompt.trim(),title:title?clip(title,titleLimit):titleOf({content:prompt}),key,projectId,agentConfigId};
+  const named=title?clip(title,titleLimit):titleOf({content:prompt});
+  return {chatId,prompt:prompt.trim(),title:named,rootText:rootText?clip(rootText,rootTextLimit):named,key,projectId,agentConfigId};
  }
  // The app that the request names by Bridge's id of the app or by its App ID, or without a name the only app there is.
  appOf(appId:unknown){
@@ -86,7 +92,7 @@ export class ApiTopics{
    normalizeBinding(fields(chatLabel('group')),chat,this.store.data);
   }
   let root:string;
-  try{root=await this.send(a,r.chatId,{card:notice('开工：'+r.title)});}
+  try{root=await this.send(a,r.chatId,{card:notice(r.rootText)});}
   catch(e){
    this.store.log('开话题',`${a.name}：未能在聊天 ${r.chatId} 里发出话题的根消息，${brief(e)}`,'error');
    throw refused('bot_cannot_post','机器人未能在这个聊天里发消息：'+brief(e));
