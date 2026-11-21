@@ -31,7 +31,7 @@ export class Bridge{
  }
  // Bridge's state as the console reads it: projects, agentConfigs, machines, bindings, apps.
  state(){return this.#request('GET','/api/state');}
- // Opens a topic in a chat with a first prompt (fields: chatId, prompt, title, projectId, agentConfigId, appId, key; see
+ // Opens a topic in a chat with a first prompt (fields: chatId, prompt, title, rootText, projectId, agentConfigId, appId, key; see
  // bridge/README.md); resolves with {topicId, bindingId, rootMessageId, created}. While the bot cannot post in the chat
  // yet it asks again every retryMs, for retryForMs; the idempotency key makes asking again safe.
  async openTopic(input){

@@ -93,10 +93,10 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
   ignore remove <发送方名称或 id>... [--json]
                                    移出忽略名单
   newchat judge <群的 feedId> [--json]
-                                   干跑：让模型现在判断这个群是不是该开工的需求群，打印读到的材料、判断和会发给我的卡片；
+                                   干跑：让模型现在判断这个群是不是该交给 Agent 的需求群，打印读到的材料、判断和会发给我的卡片；
                                    什么都不发、不写、不记。需要 Bridge 的地址和密钥（配置里的 BUTLER_BRIDGE_URL 和
                                    BUTLER_BRIDGE_KEY，也可以只放在这条命令的环境变量里）。加工端自己会判断没见过的群，
-                                   配置了机器人和「新群开工」的四项配置时才运行
+                                   配置了机器人和「新需求群」的四项配置时才运行
   bot create [--name 名称]          通过飞书的官方流程创建管家机器人的应用，凭证写进配置文件
   bot update                       通过飞书的官方流程给已经配置的应用加上它还没有的权限和回调（卡片上的按钮要用的回调）
 
@@ -464,7 +464,7 @@ async function main(argv){
     const v=r.verdict;
     console.log(`== 读到的材料 ==\n${describeMaterial(r.material)}\n\n== 模型的判断 ==\n是需求群：${v.requirement?'是':'否'}；要我动手：${v.mine?'是':'否'}\n理由：${v.reason}`);
     if(v.requirement&&v.mine)console.log(`标题：${v.title}\n项目：${v.project?.name??'（没有选出）'}　Agent：${v.agent?.name??'（没有选出）'}${v.bound?'　（群在 Bridge 里已有绑定）':''}\n第一条提示：\n${v.prompt}`);
-    console.log(r.card?`\n== 会发给我的卡片（没有发） ==\n${JSON.stringify(r.card,null,1)}`:'\n== 卡片 ==\n这个判断不开工，不会发卡片');
+    console.log(r.card?`\n== 会发给我的卡片（没有发） ==\n${JSON.stringify(r.card,null,1)}`:'\n== 卡片 ==\n这个判断不交给 Agent，不会发卡片');
     return 0;
    }
    case 'groups':{
@@ -560,7 +560,7 @@ async function processCommand(config,once){
  // needs the bot (its cards) and the four keys of its settings (see config.mjs newChatSetup); without them it is off.
  let bot,newChats;
  const setup=newChatSetup(config);
- if(setup&&!config.bot)throw Error(`配置文件 ${config.file} 配置了「新群开工」，但没有配置管家机器人（它的卡片要发给我），先 butler bot create`);
+ if(setup&&!config.bot)throw Error(`配置文件 ${config.file} 配置了「新需求群」，但没有配置管家机器人（它的卡片要发给我），先 butler bot create`);
  if(config.bot&&!once){const {Bot}=await feishu();bot=new Bot({store,...config.bot,log:m=>console.log(m)});}
  if(setup&&bot)newChats=new NewChats({store,matters,lark:new OpenLark({url:config.openLarkUrl,token:requireToken(config),gapMs:0}),
   adder:new OpenLark({url:config.openLarkUrl,token:setup.writeToken,gapMs:0,guard:addBotOnly}),bridge:new Bridge({url:setup.bridgeUrl,key:setup.bridgeKey}),bot,model,botId:setup.botId,meego:bytedcliMeego(config.bytedcli)});

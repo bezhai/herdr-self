@@ -15,7 +15,7 @@ test('state reads /api/state with the access key; a wrong key is an error that s
 
 test('openTopic posts what it is given and returns the answer; the same key opens nothing twice',async t=>{
  const bridge=await start(t),b=client(bridge);
- const input={chatId:'oc_1',prompt:'做这个需求',title:'火山发文',projectId:'p1',agentConfigId:'a1',key:'newchat:1'};
+ const input={chatId:'oc_1',prompt:'做这个需求',title:'火山发文',rootText:'原智鸿的 Agent：火山发文',projectId:'p1',agentConfigId:'a1',key:'newchat:1'};
  const first=await b.openTopic(input),again=await b.openTopic(input);
  assert.deepEqual(first,{topicId:'t1',bindingId:'b1',rootMessageId:'om_root1',created:true});
  assert.deepEqual(again,{...first,created:false});

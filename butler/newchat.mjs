@@ -2,9 +2,9 @@
 // table when the processor looks) is judged once by the model, from everything that can be read about it (see
 // newchat-material.mjs) and from Bridge's projects and agent configs. A positive verdict, that it is a requirement group in
 // which I do the work, becomes one card in my direct chat with the bot, with the model's reason, the project and agent
-// config it chose and the first prompt (see newchat-cards.mjs). My click on 开工 adds Bridge's bot to the group as me
-// through open-lark, the one write butler makes there, and has Bridge open a topic in it with that prompt; 不用 does
-// nothing. What a requirement group is, whether I am the one who works on it, and what the first prompt says are all the
+// config it chose and the first prompt (see newchat-cards.mjs). My click on 交给 Agent adds Bridge's bot to the group as
+// me through open-lark, the one write butler makes there, and has Bridge open a topic in it with that prompt, its root
+// message in my agent's name; 不用 does nothing. What a requirement group is, whether I am the one who works on it, and what the first prompt says are all the
 // model's call (see prompt.mjs newChatSystemPrompt): this gathers, asks, checks the answer and applies it.
 // "Never seen" is the chat table, not what a message says: a chat that exists when this first runs is recorded as seen and
 // never judged, and a long dormant group that wakes up later counts as new, which the model sees from the date of its first
@@ -12,7 +12,7 @@
 // work item it links to, is tried again on the next rounds, a few times.
 import {gatherMaterial,bytedcliMeego} from './newchat-material.mjs';
 import {composeNewChat,readNewChat} from './prompt.mjs';
-import {proposalCard,startingCard,startedCard,failedCard,ignoredCard} from './newchat-cards.mjs';
+import {proposalCard,startingCard,startedCard,failedCard,ignoredCard,rootText} from './newchat-cards.mjs';
 
 const SCHEMA=`
 CREATE TABLE IF NOT EXISTS new_chats(
@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS new_chats(
  judged_at INTEGER, run_id INTEGER, output TEXT, verdict TEXT, card_message_id TEXT, chosen TEXT, chosen_at INTEGER, bot_added_at INTEGER, result TEXT);
 `;
 // A group's status: seeded (there when butler first ran, never judged), new (to judge), no (judged, not for me), ask (judged
-// positive: its card goes to me, and waits for my click), starting (开工 clicked, under way), started, ignored (不用),
+// positive: its card goes to me, and waits for my click), starting (交给 Agent clicked, under way), started, ignored (不用),
 // given_up (the judgment failed skipAfter times).
 const message=e=>e?.message??String(e);
 const one=(list,id)=>list.find(x=>x.id===id);
@@ -140,7 +140,7 @@ export class NewChats{
  }
 
  // A click on a button of a proposal (a CardActionEvent; the bot hands on only mine, see bot.mjs): 不用 ignores the group;
- // 开工 starts the work, which takes longer than Feishu waits for an answer (3 seconds), so the card turns into a "working"
+ // 交给 Agent starts the work, which takes longer than Feishu waits for an answer (3 seconds), so the card turns into a "working"
  // one at once and the result is put on it when the work is done (see settled). Returns undefined for a click that is not
  // one of these.
  click({action}={}){
@@ -151,25 +151,25 @@ export class NewChats{
   if(!row?.verdict)return {toast:toast('info','没有这个群的记录了')};
   const {verdict}=row,at=this.now(),fit=NewChats.#fit(verdict),names={chat:verdict.chat,project:verdict.project?.name??'沿用群的绑定',agent:verdict.agent?.name??'沿用群的绑定'};
   const answer=(t,card)=>({toast:t,card:{type:'raw',data:card}});
-  if(row.status==='started')return answer(toast('info','已经开工了'),startedCard(names));
+  if(row.status==='started')return answer(toast('info','已经交给 Agent 了'),startedCard(names));
   if(row.status==='ignored')return answer(toast('info','已经忽略了这个群'),ignoredCard(names));
-  if(row.status==='starting')return answer(toast('info','正在开工，稍等'),startingCard(names));
+  if(row.status==='starting')return answer(toast('info','正在交给 Agent，稍等'),startingCard(names));
   if(row.status!=='ask')return {toast:toast('info','这个群现在没有可点的卡片')};
   if(v.do==='skip'){
    this.#set(row.feedId,{status:'ignored',chosen:'skip',chosen_at:at});
    return answer(toast('info','已忽略'),ignoredCard(names));
   }
-  if(!fit)return {toast:toast('info','没有合适的项目，开不了工')};
+  if(!fit)return {toast:toast('info','没有合适的项目，没法交给 Agent')};
   this.#set(row.feedId,{status:'starting',chosen:'start',chosen_at:at});
   const work=this.#start(row.feedId).finally(()=>this.#work.delete(work));this.#work.add(work);
-  return answer(toast('info','开工中……'),startingCard(names));
+  return answer(toast('info','正在交给 Agent……'),startingCard(names));
  }
  // Resolves once every start under way is done and its card is up to date.
  async settled(){await Promise.all([...this.#work]);}
 
- // The work of 开工: the bot joins the group as me (unless the group is bound in Bridge, which has its bot there, the bot
- // is in the group already, or an earlier try added it), then Bridge opens the topic. The card becomes 已开工, or
- // 开工失败 with the reason and 开工 kept for another try. Never rejects.
+ // The work of 交给 Agent: the bot joins the group as me (unless the group is bound in Bridge, which has its bot there, the
+ // bot is in the group already, or an earlier try added it), then Bridge opens the topic, its root message in my agent's
+ // name. The card becomes 已交给 Agent, or 没交给 Agent with the reason and 再试 for another try. Never rejects.
  async #start(feedId){
   const row=this.row(feedId),v=row.verdict,names={chat:v.chat,project:v.project?.name??'沿用群的绑定',agent:v.agent?.name??'沿用群的绑定'};
   let card;
@@ -181,12 +181,12 @@ export class NewChats{
     }
     this.#set(feedId,{bot_added_at:this.now()});
    }
-   const result=await this.bridge.openTopic({chatId:v.chat.openChatId,prompt:v.prompt,title:v.title,...!v.bound&&{projectId:v.projectId,agentConfigId:v.agentConfigId},key:`newchat:${feedId}`});
+   const result=await this.bridge.openTopic({chatId:v.chat.openChatId,prompt:v.prompt,title:v.title,rootText:rootText(this.matters.me(),v.title),...!v.bound&&{projectId:v.projectId,agentConfigId:v.agentConfigId},key:`newchat:${feedId}`});
    this.#set(feedId,{status:'started',error:null,result:JSON.stringify(result)});
    card=startedCard(names);
   }catch(e){
    this.#set(feedId,{status:'ask',error:message(e)});
-   this.store.addError('新群',`群 ${v.chat.name} 开工失败：${message(e)}`);
+   this.store.addError('新群',`群 ${v.chat.name} 没交给 Agent：${message(e)}`);
    card=failedCard({...names,verdict:v,reason:message(e),at:this.now()});
   }
   try{await this.bot.updateCard(row.cardMessageId,card);}

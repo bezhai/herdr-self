@@ -77,7 +77,7 @@ export function newChatSetup(config){
  const keys={BUTLER_BRIDGE_URL:'bridgeUrl',BUTLER_BRIDGE_KEY:'bridgeKey',BUTLER_OPEN_LARK_WRITE_TOKEN:'writeToken',BUTLER_BRIDGE_BOT_ID:'botId'};
  const missing=Object.entries(keys).filter(([,k])=>!config.newChat[k]).map(([key])=>key);
  if(missing.length===Object.keys(keys).length)return undefined;
- if(missing.length)throw Error(`配置文件 ${config.file} 里「新群开工」的配置不全，缺少 ${missing.join('、')}`);
+ if(missing.length)throw Error(`配置文件 ${config.file} 里「新需求群」的配置不全，缺少 ${missing.join('、')}`);
  return config.newChat;
 }
 export function requireModel(config){

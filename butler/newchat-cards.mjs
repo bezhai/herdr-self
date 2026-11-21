@@ -1,7 +1,8 @@
 // The cards of a new group, in my direct chat with the bot: the proposal (why, which project and agent config, the first
-// prompt, 开工 and 不用) and what it turns into after a click. The copy is decided in the spec (.local/prd/requirement-group-start.md)
-// and used as written. Text from the model and from the group is always plain text (see cards.mjs); the only link is
-// butler's, to the group, in a button's link property.
+// prompt, 交给 Agent and 不用) and what it turns into after a click; and the root message of the topic Bridge opens in the
+// group. The copy is decided in the spec (.local/prd/requirement-group-start.md) and used as written. Text from the model
+// and from the group is always plain text (see cards.mjs); the only link is butler's, to the group, in a button's link
+// property.
 import {plain} from './cards.mjs';
 
 const GREY={text_size:'notation',text_color:'grey'};
@@ -24,17 +25,21 @@ export function proposalCard({chat,verdict,project,agent,at}){
  const value=act=>({act:'newchat',do:act,chat:chat.feedId,t:at});
  const fit=project&&agent;
  return card(`新需求群：${chat.name}`,'blue',[plain(verdict.reason),
-  ...fit?[plain(`项目：${project} · Agent：${agent}`),quote(verdict.prompt),buttons([button('开工','primary',value('start')),button('不用','default',value('skip'))])]
+  ...fit?[plain(`项目：${project} · Agent：${agent}`),quote(verdict.prompt),buttons([button('交给 Agent','primary',value('start')),button('不用','default',value('skip'))])]
    :[plain('没有合适的项目，需要先在 Bridge 里建'),buttons([button('不用','default',value('skip'))])]],`新需求群：${chat.name}`);
 }
 // The card while the bot is added and the topic opened: no buttons, so that a second click cannot start it twice.
-export const startingCard=({chat})=>card(`开工中：${chat.name}`,'blue',[plain('正在把 Bridge 的机器人加进群、开话题……')]);
-// After 开工: the group, and a way to open it.
-export const startedCard=({chat,project,agent})=>card(`已开工：${chat.name}`,'green',[plain(`项目：${project} · Agent：${agent}`),...open(chat.openChatId).map(b=>({tag:'column_set',columns:[{tag:'column',width:'auto',elements:[b]}]}))]);
-// When it did not work: why, with 开工 kept so that I can try again, and 不用.
+export const startingCard=({chat})=>card(`正在交给 Agent：${chat.name}`,'blue',[plain('正在把 Bridge 的机器人加进群、开话题……')]);
+// Once it is handed to the agent: the group, and a way to open it.
+export const startedCard=({chat,project,agent})=>card(`已交给 Agent：${chat.name}`,'green',[plain(`项目：${project} · Agent：${agent}`),...open(chat.openChatId).map(b=>({tag:'column_set',columns:[{tag:'column',width:'auto',elements:[b]}]}))]);
+// When it did not work: why, with 再试 (which starts again) and 不用.
 export function failedCard({chat,verdict,project,agent,reason,at}){
  const value=act=>({act:'newchat',do:act,chat:chat.feedId,t:at});
- return card(`开工失败：${reason}`,'red',[plain(`${chat.name}`,GREY),plain(`项目：${project} · Agent：${agent}`),quote(verdict.prompt),
-  buttons([button('开工','primary',value('start')),button('不用','default',value('skip'))])],`开工失败：${reason}`);
+ return card(`没交给 Agent：${reason}`,'red',[plain(`${chat.name}`,GREY),plain(`项目：${project} · Agent：${agent}`),quote(verdict.prompt),
+  buttons([button('再试','primary',value('start')),button('不用','default',value('skip'))])],`没交给 Agent：${reason}`);
 }
 export const ignoredCard=({chat})=>card('已忽略','grey',[plain(chat.name)]);
+// The text of the topic's root message, which Bridge posts as it is in the group, where my colleagues see it: the topic
+// is my agent's, about title (the model's). The topic itself, its tab and its task keep the bare title. me: my name (see
+// matters.mjs me).
+export const rootText=(me,title)=>`${me}的 Agent：${title}`;

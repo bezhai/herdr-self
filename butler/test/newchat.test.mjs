@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {startFakeOpenLark} from './fake-open-lark.mjs';
 import {FakeBridge,KEY} from './fake-bridge.mjs';
-import {tempStore,sleep} from './helpers.mjs';
+import {tempStore,sleep,post} from './helpers.mjs';
 import {shown,componentsOf,OWNER} from './fake-channel.mjs';
 import {Matters} from '../matters.mjs';
 import {Processor,aboutOf} from '../processor.mjs';
@@ -59,6 +59,10 @@ const headerOf=card=>card.header.title.content;
 // ---- gathering the material
 test('the judgment asks for people by name in the reason and the first prompt, never 他 or 她',()=>{
  assert.match(newChatSystemPrompt('原智鸿'),/提到人一律写名字，不用「他」「她」/);
+});
+test('the judgment speaks of handing the group to an agent, the words of the card, so that the reason it writes does too',()=>{
+ const system=newChatSystemPrompt('原智鸿');
+ assert.match(system,/交给 Agent/);assert.doesNotMatch(system,/开工|开不了工/);
 });
 test('meegoLinks finds Meego work item links in texts, once each, without a login token',()=>{
  assert.deepEqual(meegoLinks([`见 ${MEEGO}?tabKey=detail，和 ${MEEGO}`,'https://meego.example.com/ug/issue/detail/55?x=1','https://example.com/detail/9','无链接']),
@@ -134,8 +138,8 @@ test('the model is shown the group, 关于TA, my notes, Bridge\'s projects and a
  assert.equal(card.config.update_multi,true);
  const text=shown(w.sent[0]);
  assert.match(text,/你是这个需求的 Server 开发/);assert.match(text,/项目：GenVI · Agent：Claude Code（cpu2）/);assert.match(text,/先读 PRD 再做/);
- assert.deepEqual(buttons(card).map(b=>b[0]),['开工','不用']);
- assert.deepEqual(buttonValue(card,'开工'),{act:'newchat',do:'start',chat:feed,t:buttonValue(card,'开工').t});
+ assert.deepEqual(buttons(card).map(b=>b[0]),['交给 Agent','不用']);
+ assert.deepEqual(buttonValue(card,'交给 Agent'),{act:'newchat',do:'start',chat:feed,t:buttonValue(card,'交给 Agent').t});
  assert.equal(w.store.meta('processor')===undefined||true,true);
 });
 
@@ -153,10 +157,11 @@ test('a negative verdict sends nothing; the judgment is kept',async t=>{
 test('with no fitting project or agent config the card says so and has only 不用',async t=>{
  for(const verdict of [{...VERDICT,projectId:null},{...VERDICT,agentConfigId:'nope'},{...VERDICT,projectId:'unknown-project'}]){
   const w=await world(t,{answers:[verdict]});patchView(w.lark);
-  await w.newChats.judgeNew({about:w.about()});w.group('需求群');await w.newChats.judgeNew({about:w.about()});
+  await w.newChats.judgeNew({about:w.about()});const feed=w.group('需求群');await w.newChats.judgeNew({about:w.about()});
   const card=w.sent[0].card,text=shown(w.sent[0]);
   assert.match(text,/没有合适的项目，需要先在 Bridge 里建/);assert.doesNotMatch(text,/项目：/);
   assert.deepEqual(buttons(card).map(b=>b[0]),['不用']);
+  assert.equal(click(w.newChats,'om_card1',{act:'newchat',do:'start',chat:feed,t:1}).toast.content,'没有合适的项目，没法交给 Agent');
  }
 });
 
@@ -237,49 +242,55 @@ test('the dry run of a group whose Meego work item cannot be read fails with the
 // ---- the click
 async function proposed(t,opts){
  const w=await world(t,opts);patchView(w.lark);
+ // My name, as butler knows it: the sender of my latest message (a direct chat, which is never judged).
+ post(w.store,{chat:'d1',mine:true,text:'好的'});
  await w.newChats.judgeNew({about:w.about()});
  const feed=w.group('火山发文平台映射 - [需求同步群]',{description:MEEGO});
  await w.newChats.judgeNew({about:w.about()});
  return {...w,feed,card:w.sent[0].card,id:'om_card1'};
 }
 
-test('开工 adds the bot as me, then opens the topic through Bridge, then turns the card into 已开工 with a link to the group',async t=>{
+test('交给 Agent adds the bot as me, then opens the topic through Bridge with a root message in my agent\'s name, then turns the card into 已交给 Agent with a link to the group',async t=>{
  const w=await proposed(t);
- const r=click(w.newChats,w.id,buttonValue(w.card,'开工'));
- assert.equal(r.toast.type,'info','answered at once, the work goes on');assert.equal(buttons(r.card.data).length,0,'no second click while it works');
+ const r=click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));
+ assert.deepEqual(r.toast,{type:'info',content:'正在交给 Agent……'},'answered at once, the work goes on');assert.equal(buttons(r.card.data).length,0,'no second click while it works');
+ assert.equal(headerOf(r.card.data),'正在交给 Agent：火山发文平台映射 - [需求同步群]');
+ const meanwhile=click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));
+ assert.equal(meanwhile.toast.content,'正在交给 Agent，稍等');assert.equal(headerOf(meanwhile.card.data),'正在交给 Agent：火山发文平台映射 - [需求同步群]');
  await w.newChats.settled();
  assert.deepEqual(w.order,['add','open','update']);
  assert.deepEqual(w.lark.writes().map(x=>[x.method,x.path,x.body]),[['POST',`/agent/v1/conversations/${w.feed}/bots`,{botId:BOT}]]);
- assert.deepEqual(w.bridge.opens().map(x=>x.body),[{chatId:`oc_${w.feed}`,prompt:VERDICT.prompt,title:VERDICT.title,projectId:'genvi',agentConfigId:'cc-cpu2',key:`newchat:${w.feed}`}]);
+ assert.deepEqual(w.bridge.opens().map(x=>x.body),[{chatId:`oc_${w.feed}`,prompt:VERDICT.prompt,title:'火山发文平台映射',rootText:'原智鸿的 Agent：火山发文平台映射',projectId:'genvi',agentConfigId:'cc-cpu2',key:`newchat:${w.feed}`}],
+  'the topic keeps the model\'s title; the root message, which the group sees, says whose agent it is');
  const done=w.updated.at(-1);assert.equal(done.id,w.id);
- assert.equal(headerOf(done.card),'已开工：火山发文平台映射 - [需求同步群]');
+ assert.equal(headerOf(done.card),'已交给 Agent：火山发文平台映射 - [需求同步群]');
  const link=[...componentsOf(done.card)].find(c=>c.behaviors?.some(b=>b.type==='open_url'));
  assert.match(link.behaviors[0].default_url,new RegExp(`oc_${w.feed}`));assert.equal(buttons(done.card).length,0);
  assert.equal(w.newChats.row(w.feed).status,'started');
- const again=click(w.newChats,w.id,buttonValue(w.card,'开工'));
- assert.match(again.toast.content,/已经开工/);await w.newChats.settled();assert.equal(w.bridge.opens().length,1,'a second click opens nothing');
+ const again=click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));
+ assert.equal(again.toast.content,'已经交给 Agent 了');await w.newChats.settled();assert.equal(w.bridge.opens().length,1,'a second click opens nothing');
 });
 
 test('the bot is retried while Bridge says it cannot post yet, then the topic opens',async t=>{
  const w=await proposed(t);
  w.bridge.script.push({status:409,body:{error:'机器人还不能发言',code:BOT_CANNOT_POST}});
- click(w.newChats,w.id,buttonValue(w.card,'开工'));await w.newChats.settled();
- assert.equal(w.bridge.opens().length,2);assert.equal(headerOf(w.updated.at(-1).card),'已开工：火山发文平台映射 - [需求同步群]');
+ click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));await w.newChats.settled();
+ assert.equal(w.bridge.opens().length,2);assert.equal(headerOf(w.updated.at(-1).card),'已交给 Agent：火山发文平台映射 - [需求同步群]');
 });
 
 test('the bot already in the group is not added again; a group Bridge has bound gets no project in the request',async t=>{
  const w=await proposed(t,{bridgeState:{bindings:[]}});
  w.lark.conversations.get(w.feed).bots=[{displayName:'Bridge',appId:BOT}];
- click(w.newChats,w.id,buttonValue(w.card,'开工'));await w.newChats.settled();
+ click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));await w.newChats.settled();
  assert.deepEqual(w.order,['open','update'],'no add');
  const bound=await world(t,{bridgeState:{bindings:[{id:'b0',chatId:'oc_x',defaultProjectId:'ops',defaultAgentConfigId:'cc-cpu1'}]}});patchView(bound.lark);
  await bound.newChats.judgeNew({about:bound.about()});const feed=bound.group('已绑定的群');bound.lark.conversations.get(feed).openChatId='oc_x';
  await bound.newChats.judgeNew({about:bound.about()});
  assert.deepEqual(bound.prompts[0].data.bound,{project:'运维脚本',agentConfig:'Claude Code（cpu1）'});
  assert.match(shown(bound.sent[0]),/项目：运维脚本 · Agent：Claude Code（cpu1）/,'the card shows what the binding has');
- click(bound.newChats,'om_card1',buttonValue(bound.sent[0].card,'开工'));await bound.newChats.settled();
+ click(bound.newChats,'om_card1',buttonValue(bound.sent[0].card,'交给 Agent'));await bound.newChats.settled();
  assert.deepEqual(bound.order,['open','update'],'a bound group has its bot');
- assert.deepEqual(bound.bridge.opens().map(x=>Object.keys(x.body).sort()),[['chatId','key','prompt','title']]);
+ assert.deepEqual(bound.bridge.opens().map(x=>Object.keys(x.body).sort()),[['chatId','key','prompt','rootText','title']]);
 });
 
 test('不用 ignores the group: the card becomes 已忽略 and nothing is written anywhere',async t=>{
@@ -288,27 +299,29 @@ test('不用 ignores the group: the card becomes 已忽略 and nothing is writte
  assert.match(headerOf(r.card.data),/已忽略/);assert.equal(buttons(r.card.data).length,0);
  await w.newChats.settled();
  assert.deepEqual(w.order,[]);assert.deepEqual(w.lark.writes(),[]);assert.deepEqual(w.bridge.opens(),[]);assert.equal(w.newChats.row(w.feed).status,'ignored');
- const late=click(w.newChats,w.id,buttonValue(w.card,'开工'));assert.match(late.toast.content,/忽略/);await w.newChats.settled();assert.deepEqual(w.order,[],'it stays ignored');
+ const late=click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));assert.match(late.toast.content,/忽略/);await w.newChats.settled();assert.deepEqual(w.order,[],'it stays ignored');
 });
 
-test('a failed start says why on the card, which keeps 开工; the retry does not add the bot again',async t=>{
+test('a failed start says why on the card, which offers 再试 and 不用; the retry does not add the bot again',async t=>{
  const w=await proposed(t);
  w.bridge.script.push({status:400,body:{error:'项目不存在',code:'unknown_project'}});
- click(w.newChats,w.id,buttonValue(w.card,'开工'));await w.newChats.settled();
+ click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));await w.newChats.settled();
  const failed=w.updated.at(-1).card;
- assert.match(headerOf(failed),/^开工失败：/);assert.match(headerOf(failed),/项目不存在/);assert.ok(buttonValue(failed,'开工'));
+ assert.match(headerOf(failed),/^没交给 Agent：/);assert.match(headerOf(failed),/项目不存在/);assert.equal(failed.config.summary.content,headerOf(failed));
+ assert.deepEqual(buttons(failed).map(b=>b[0]),['再试','不用']);assert.equal(buttonValue(failed,'再试').do,'start');
+ assert.ok(w.store.errors().some(e=>e.message.startsWith('群 火山发文平台映射 - [需求同步群] 没交给 Agent：')&&/项目不存在/.test(e.message)));
  assert.deepEqual(w.order,['add','open','update']);
- click(w.newChats,w.id,buttonValue(failed,'开工'));await w.newChats.settled();
+ click(w.newChats,w.id,buttonValue(failed,'再试'));await w.newChats.settled();
  assert.deepEqual(w.order,['add','open','update','open','update'],'the bot is in the group already');
- assert.equal(headerOf(w.updated.at(-1).card),'已开工：火山发文平台映射 - [需求同步群]');
+ assert.equal(headerOf(w.updated.at(-1).card),'已交给 Agent：火山发文平台映射 - [需求同步群]');
 });
 
 test('adding the bot can fail too: nothing is opened and the card says so',async t=>{
  const w=await proposed(t);w.faults.add=1;
- click(w.newChats,w.id,buttonValue(w.card,'开工'));await w.newChats.settled();
- assert.match(headerOf(w.updated.at(-1).card),/^开工失败：/);assert.equal(w.bridge.opens().length,0);
- click(w.newChats,w.id,buttonValue(w.updated.at(-1).card,'开工'));await w.newChats.settled();
- assert.deepEqual(w.order,['add','update','add','open','update']);assert.equal(headerOf(w.updated.at(-1).card),'已开工：火山发文平台映射 - [需求同步群]');
+ click(w.newChats,w.id,buttonValue(w.card,'交给 Agent'));await w.newChats.settled();
+ assert.match(headerOf(w.updated.at(-1).card),/^没交给 Agent：/);assert.equal(w.bridge.opens().length,0);
+ click(w.newChats,w.id,buttonValue(w.updated.at(-1).card,'再试'));await w.newChats.settled();
+ assert.deepEqual(w.order,['add','update','add','open','update']);assert.equal(headerOf(w.updated.at(-1).card),'已交给 Agent：火山发文平台映射 - [需求同步群]');
 });
 
 test('clicks that are not this card\'s are not answered; one on a group butler does not know says so',async t=>{
@@ -346,6 +359,8 @@ test('readNewChat checks the schema: booleans, a title and a prompt when there i
  assert.equal(odd.projectId,null);assert.equal(odd.agentConfigId,'cc');assert.match(odd.problems[0],/x/);
  for(const bad of ['不是 JSON','{"requirement":"yes","mine":true,"reason":"r"}','{"requirement":true,"mine":true,"reason":"r","title":"","prompt":"p"}','{"requirement":true,"mine":true,"reason":"r","title":"t","prompt":""}','{"requirement":true,"mine":false}'])
   assert.throws(()=>readNewChat(bad,lists),undefined,bad);
+ assert.throws(()=>readNewChat('{"requirement":true,"mine":true,"reason":"r","title":"","prompt":"p"}',lists),/^Error: 模型判断要交给 Agent，但回复里没有 title/);
+ assert.throws(()=>readNewChat('{"requirement":true,"mine":true,"reason":"r","title":"t","prompt":""}',lists),/^Error: 模型判断要交给 Agent，但回复里没有 prompt/);
  const links=readNewChat(JSON.stringify({requirement:true,mine:true,reason:'见 https://a.b/c',title:'t',prompt:'读 https://a.b/c 再做',projectId:null,agentConfigId:null}),lists);
  assert.equal(links.prompt,'读 https://a.b/c 再做','the first prompt keeps the links the model copied');assert.equal(links.reason,'见 [链接]','the reason is shown to me and carries none');
 });
