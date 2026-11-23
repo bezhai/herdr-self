@@ -986,7 +986,8 @@ const cotPath='/open-apis/im/v1/message_cot';
 // the machine is down (see h.hosts). f.prepared records prepareWorkspace as [machine id, params, timeoutMs], and its dir is the adopted
 // directory, else /ws/<project id> for a shared project and /ws/<project id>/<topic id> for an isolated one; f.dropped records
 // removeWorkspace the same way, and f.launched prepareLaunch as [machine id, params], which answers with the model and permission mode
-// as flags of the agent. f.fail.prepare, .remove and .launch, when set, make that operation reject with it; f.fail.kept is what
+// as flags of the agent, and resumes a session to resume of Claude or Codex that f.fake.sessions holds, as the client resumes one whose
+// transcript it finds (see prepareLaunch in launch.ts). f.fail.prepare, .remove and .launch, when set, make that operation reject with it; f.fail.kept is what
 // removeWorkspace reports as branchKept. f.model answers askModel from its prompt, by default a PROJECT=NONE line when the prompt asks
 // for a project and BRANCH=feat/add-login, as text or an Error to reject with; f.naming records the prompt of each call.
 // The first card of each topic (see startCard in topic-cards.ts) is left out of f.replies and takes its id from om_start_<n>, so that the
@@ -997,13 +998,13 @@ type TopicOptions={binding?:Partial<Binding>,config?:Partial<AgentConfig>,projec
 type Card={schema?:string,config?:Record<string,any>,header?:{title:{tag?:string,content:string},template:string},body:{elements:Record<string,any>[]},[field:string]:unknown};
 // An OpenAPI request of Bridge as a test reads it.
 type ApiRequest={method:string,url:string,data:Record<string,any>,params?:Record<string,any>};
-type Fake={fail:{prepare?:Error,remove?:Error,launch?:Error,kept?:boolean},model:(prompt:string)=>string|Error};
+type Fake={fail:{prepare?:Error,remove?:Error,launch?:Error,kept?:boolean},model:(prompt:string)=>string|Error,sessions:string[]};
 function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:TopicOptions={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-topics-')),store=new Store(dir),h=fakeHerdr(),replies:[string,string,string,{card:Card}][]=[],reacted:string[][]=[],unreacted:string[][]=[],
   updated:[string,string,Card][]=[],api:ApiRequest[]=[],m={id:'m',name:'cpu2',enabled:true,...machine} as Machine;
  const downloads:unknown[][]=[],resources:Record<string,{body:Buffer<ArrayBuffer>,type:string}|Error>={},stored:unknown[][]=[],removed:unknown[][]=[],
   placed:unknown[][]=[],prepared:unknown[][]=[],dropped:unknown[][]=[],launched:unknown[][]=[],naming:{prompt:string}[]=[],starts:[string,Card][]=[];
- const fake:Fake={fail:{},model:prompt=>(prompt.includes('PROJECT=')?'PROJECT=NONE\n':'')+'BRANCH=feat/add-login\n'};
+ const fake:Fake={fail:{},model:prompt=>(prompt.includes('PROJECT=')?'PROJECT=NONE\n':'')+'BRANCH=feat/add-login\n',sessions:[]};
  store.data.machines=[m,...machines];store.data.projects=[{...routeProject,...project}];store.data.agentConfigs=[{...routeConfig,...config}];store.data.bindings=[{...route,...binding}];store.save();
  const b=store.data.bindings[0];let sent=0,cots=0,begun=0;
  const reach=(m:Machine)=>{const host=h.hosts[m.id]||h;if(host.down)throw down(host);};
@@ -1021,9 +1022,10 @@ function topicFixture({binding,config,project,machine,machines=[],cot=true,now}:
   removeWorkspace:async(m,params,options)=>{dropped.push([m.id,params,options?.timeoutMs]);await null;reach(m);if(fake.fail.remove)throw fake.fail.remove;return {branchKept:Boolean(fake.fail.kept)};},
   prepareLaunch:async(m,params)=>{
    launched.push([m.id,params]);await null;reach(m);if(fake.fail.launch)throw fake.fail.launch;
-   if(params.kind==='codex')return {args:[...params.model?['-m',params.model]:[],'-c',`projects={"${params.dir}"={trust_level="trusted"}}`]};
-   if(params.kind==='agy')return {args:['--settings',JSON.stringify({trustedWorkspaces:[params.dir],toolPermission:"always-proceed"})]};
-   return {args:[...params.permissionMode?['--permission-mode',params.permissionMode]:[],...params.model?['--model',params.model]:[]]};
+   const resume=params.kind!=='agy'&&params.resume!==undefined&&fake.sessions.includes(params.resume)?params.resume:undefined,resumed=resume!==undefined;
+   if(params.kind==='codex')return {args:[...resumed?['resume']:[],...params.model?['-m',params.model]:[],'-c',`projects={"${params.dir}"={trust_level="trusted"}}`,...resumed?[resume]:[]],resumed};
+   if(params.kind==='agy')return {args:['--settings',JSON.stringify({trustedWorkspaces:[params.dir],toolPermission:"always-proceed"})],resumed};
+   return {args:[...params.permissionMode?['--permission-mode',params.permissionMode]:[],...params.model?['--model',params.model]:[],...resumed?['--resume',resume]:[]],resumed};
   },
   askModel:async prompt=>{naming.push({prompt});await null;const r=fake.model(prompt);if(r instanceof Error)throw r;return r;},
   reply:async(a,chatId,rootId,content)=>{
@@ -1375,9 +1377,12 @@ test('an agent that cannot be closed leaves the topic as it was with a notice; a
 });
 const day=24*3600000;
 // A topic of the group of genvi whose agent has gone and that ended at the time of the fixture's clock, which the test moves on.
-async function endedTopic(){
- const clock={at:Date.parse('2026-03-01T08:00:00Z')},f=topicFixture({now:()=>clock.at});withProjects(f,genvi);f.b.defaultProjectId='g';
+// A topic of project genvi whose agent exited; with session, its agent reported that agent session to Herdr before, which a list showed Bridge.
+// The other options are those of topicFixture.
+async function endedTopic({session,...options}:TopicOptions&{session?:string}={}){
+ const clock={at:Date.parse('2026-03-01T08:00:00Z')},f=topicFixture({...options,now:()=>clock.at});withProjects(f,genvi);f.b.defaultProjectId='g';
  await f.send({messageId:'om_1',content:'修复登录页'});const t=f.store.data.topics[0];
+ if(session){f.h.agents[0].agent_session={value:session};await f.topics.sync(f.m,f.h.agents);}
  f.h.agents=[];await f.topics.sync(f.m,[]);for(const l of [f.h.calls,f.prepared,f.naming,f.launched,f.replies])l.length=0;
  return {...f,t,clock};
 }
@@ -1406,6 +1411,89 @@ test('a topic is not started again by a message that is no reply to a person: /s
   assert.deepEqual([t.state,f.h.calls,f.prepared],['closed',[],[]]);
   delete t.routed;await f.send({messageId:'om_4',rootId:'om_1',content:'hi'});assert.deepEqual([t.state,f.h.calls,f.prepared],['closed',[],[]]);
   t.routed=true;t.adopted={};await f.send({messageId:'om_5',rootId:'om_1',content:'hi'});assert.deepEqual([t.state,f.h.calls,f.prepared],['closed',[],[]]);
+ }finally{f.close();}
+});
+const notResumed=notice('未能恢复之前的 Agent 会话，已启动新的会话'),heldElsewhere=notice('该话题的 Agent 会话正在 Bridge 之外的 pane 里运行，没有再启动一个。要在飞书里继续，请在聊天里发送 /adopt 接管它');
+// The sessions that the launches of fixture f asked the client to resume, one entry per launch (undefined for none).
+const resumes=(f:{launched:unknown[][]})=>f.launched.map(l=>(l[1] as {resume?:string}).resume);
+test('a topic that Bridge started records the agent session that its agent reports in an agent list, on disk, and follows it when the agent gets another one; an adopted topic keeps its own record',async()=>{
+ const f=await readyTopic();try{
+  assert.equal(f.t.session,undefined);
+  f.h.agents[0].agent_session={value:'s-1'};await f.topics.sync(f.m,f.h.agents);
+  assert.deepEqual([f.t.session,new Store(f.dir).data.topics[0].session,f.h.calls],[{agent:'claude',id:'s-1'},{agent:'claude',id:'s-1'},[]]);
+  // Claude's /clear starts a new session in the same agent; a list in which the agent reports none leaves the record.
+  f.h.agents[0].agent_session={value:'s-2'};await f.topics.sync(f.m,f.h.agents);assert.deepEqual(f.t.session,{agent:'claude',id:'s-2'});
+  await f.topics.sync(f.m,list(f,{agent_session:undefined}));assert.deepEqual(f.t.session,{agent:'claude',id:'s-2'});
+  delete f.t.session;f.t.adopted={kind:'claude',session:'s-0'};await f.topics.sync(f.m,f.h.agents);assert.deepEqual([f.t.session,f.t.adopted],[undefined,{kind:'claude',session:'s-0'}]);
+ }finally{f.close();}
+});
+test('a reply in a finished topic resumes the agent session it recorded, with its agent configuration as it is now, and gives the agent just the reply; the machine is asked first whether a live agent holds the session',async()=>{
+ const f=await endedTopic({session:'s-1'}),{t}=f;try{
+  f.fake.sessions=['s-1'];f.config.permissionMode='bypassPermissions';
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual(f.h.calls.map(c=>c.slice(0,2)),[['agent','list'],['workspace','list'],['tab','create'],['agent','start'],['pane','remote-answers'],['agent','prompt']]);
+  assert.deepEqual([resumes(f),f.h.calls.find(c=>c[1]==='start')!.slice(-5)],[['s-1'],['--','--permission-mode','bypassPermissions','--resume','s-1']]);
+  assert.deepEqual(f.h.calls.at(-1),['agent','prompt','w1:p2','接着做']);assert.deepEqual([t.state,t.session,f.replies],['ready',{agent:'claude',id:'s-1'},[]]);
+ }finally{f.close();}
+});
+test('a reply in a finished topic without a recorded session starts a new one as before, without asking the machine for its agents and without a notice',async()=>{
+ const f=await endedTopic(),{t}=f;try{
+  f.fake.sessions=['s-1'];await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual(f.h.calls.map(c=>c.slice(0,2)),[['workspace','list'],['tab','create'],['agent','start'],['pane','remote-answers'],['agent','prompt']]);
+  assert.deepEqual([resumes(f),f.h.calls.find(c=>c[1]==='start')!.slice(-3),t.state,f.replies],[[undefined],['--','--permission-mode','default'],'ready',[]]);
+ }finally{f.close();}
+});
+test('a session that cannot be resumed gives way to a new one, which the topic says in one line: the client finds no session to resume, the configuration is now of another kind, or the start that resumes fails; the record goes, and the new agent\'s session is recorded',async()=>{
+ {const f=await endedTopic({session:'s-1'}),{t}=f;try{
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual([resumes(f),f.h.calls.find(c=>c[1]==='start')!.slice(-3),t.state,t.session],[['s-1'],['--','--permission-mode','default'],'ready',undefined]);
+  assert.deepEqual(f.replies.map(r=>r[3]),[notResumed]);assert.deepEqual(f.h.calls.at(-1),['agent','prompt','w1:p2','接着做']);
+  f.h.agents[0].agent_session={value:'s-new'};await f.topics.sync(f.m,f.h.agents);assert.deepEqual(t.session,{agent:'claude',id:'s-new'});
+ }finally{f.close();}}
+ {const f=await endedTopic({session:'s-1'}),{t}=f;try{
+  f.fake.sessions=['s-1'];Object.assign(f.config,{kind:'codex'});delete f.config.permissionMode;
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual([resumes(f),f.h.calls.find(c=>c[1]==='start')![4],t.state,t.session,f.replies.map(r=>r[3])],[[undefined],'codex','ready',undefined,[notResumed]]);
+  assert.equal(f.h.calls.some(c=>c[0]==='agent'&&c[1]==='list'),false);
+ }finally{f.close();}}
+ {const f=await endedTopic({session:'s-1'}),{t}=f;try{
+  f.fake.sessions=['s-1'];f.h.on['agent start']=()=>{throw coded('timeout','timed out waiting for agent startup');};
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual(resumes(f),['s-1',undefined]);
+  assert.deepEqual(f.h.calls.filter(c=>c[1]==='start').map(c=>[c[6],...c.slice(c.indexOf('--'))]),[['w1:p2','--','--permission-mode','default','--resume','s-1'],['w1:p2','--','--permission-mode','default']]);
+  assert.deepEqual([t.state,t.session,f.replies.map(r=>r[3]),f.h.calls.at(-1)],['ready',undefined,[notResumed],['agent','prompt','w1:p2','接着做']]);
+  assert.match(f.store.data.logs.map(l=>l.message).join('\n'),/未能恢复 Agent 会话 s-1，改为启动新的会话，timed out waiting for agent startup/);
+ }finally{f.close();}}
+});
+test('a topic of Antigravity, whose sessions Bridge never resumes, continues exactly as before: its agent\'s session is not recorded, the machine is not asked for its agents, even one that runs the old conversation, and the new session starts without a notice',async()=>{
+ const f=await endedTopic({session:'s-1',config:{kind:'agy',permissionMode:undefined}}),{t}=f;try{
+  assert.equal(t.session,undefined);f.fake.sessions=['s-1'];
+  f.h.agents=[{agent:'agy',pane_id:'w1:p1',agent_status:'idle',state_change_seq:3,agent_session:{value:'s-1'}} as Agent];
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual(f.h.calls.map(c=>c.slice(0,2)),[['workspace','list'],['tab','create'],['agent','start'],['pane','remote-answers'],['agent','prompt']]);
+  assert.deepEqual([resumes(f),f.h.calls.find(c=>c[1]==='start')![4],t.state,t.session,f.replies],[[undefined],'agy','ready',undefined,[]]);
+  assert.deepEqual(f.h.calls.at(-1),['agent','prompt','w1:p2','接着做']);
+ }finally{f.close();}
+});
+test('a session that a live agent on the machine holds, such as one that the owner resumed in a terminal, is not launched again: the topic says where it runs and how to adopt it, and stays as it was until that agent is gone',async()=>{
+ const f=await endedTopic({session:'s-1'}),{t}=f;try{
+  f.fake.sessions=['s-1'];
+  // The owner resumed the session by hand in the pane the topic had: Herdr reports it, without remote answers.
+  f.h.agents=[{agent:'claude',pane_id:'w1:p1',agent_status:'idle',state_change_seq:3,agent_session:{value:'s-1'}} as Agent];f.unreacted.length=0;
+  await f.send({messageId:'om_2',rootId:'om_1',content:'接着做'});
+  assert.deepEqual([f.h.calls,f.prepared,f.launched,t.state,f.replies.map(r=>r[3])],[[['agent','list']],[],[],'closed',[heldElsewhere]]);
+  assert.deepEqual(f.unreacted.map(u=>u[1]),['om_2']);
+  // The same id of an agent of another kind holds nothing; once the owner's agent is gone the next reply resumes the session.
+  f.h.agents=[{agent:'codex',pane_id:'w1:p1',agent_status:'idle',state_change_seq:3,agent_session:{value:'s-1'}} as Agent];f.h.calls.length=0;f.replies.length=0;
+  await f.send({messageId:'om_3',rootId:'om_1',content:'再试一次'});
+  assert.deepEqual([t.state,resumes(f),f.replies,f.h.calls.at(-1)],['ready',['s-1'],[],['agent','prompt','w1:p2','再试一次']]);
+ }finally{f.close();}
+});
+test('a topic started again under another agent configuration from its first card starts a new session, not the one it recorded',async()=>{
+ const f=await restartable(),{t}=f;try{
+  f.fake.sessions=['s-1'];f.h.agents[0].agent_session={value:'s-1'};await f.topics.sync(f.m,f.h.agents);assert.deepEqual(t.session,{agent:'claude',id:'s-1'});
+  f.choose('om_start_1','agentConfig','c2');await Promise.all(f.topics.answering.values());
+  assert.deepEqual([t.state,resumes(f),t.session],['ready',[undefined],undefined]);assert.deepEqual(f.replies.map(r=>r[3]),[notice('已换成 Agent 配置 cpu1 · Codex，话题重新开始。')]);
  }finally{f.close();}
 });
 test('a daily sweep removes the workspace of a topic that ended or failed more than 7 days ago, once, and a reply after that restores it from the branch',async()=>{
@@ -4059,7 +4147,7 @@ test('with a real Bridge and the real client of a machine, its store of skills f
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-sync-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  fs.mkdirSync(home);const kept=path.join(home,'.local/share/herdr-bridge/skills'),server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
  try{
-  assert.equal(protocol,10);
+  assert.equal(protocol,11);
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
   const logs=async()=>((await api('state')).logs as Log[]).filter(l=>l.kind==='skill').map(l=>l.message);
   const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});

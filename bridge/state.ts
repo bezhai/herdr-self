@@ -47,10 +47,12 @@ export type EndRequest={outcome:Outcome,reason:string,stateSeq:number|null};
 // the inputs and the deliveries of its task (taskId, in the task database; a topic gets it when it begins, an older or adopted one when something first needs it), and deliveryCards holds the
 // card of each delivery that the thread shows, by delivery id. endRequest is the end that its agent asked for with bridge-task, until the agent's turn has ended (see Topics.sync).
 // A topic that a caller opened through the API with an idempotency key keeps it as openKey, which answers a repeated request (see ApiTopics).
+// A topic that Bridge started keeps session, the agent session that its agent last reported (the agent's kind and the session's id; see
+// Topics.sync), which the next start of the topic resumes when it can (see Topics.open); a topic of before it has none.
 export type Topic={id:string,bindingId:string,appId:string,chatId:string,rootId:string,machineId:string,workspaceId:string,tabId:string,paneId:string,agentName:string,title:string,
  state:'starting'|'ready'|'failed'|'closed'|'choosing',error:string,messageIds:string[],replySeq:number,reactions:Reaction[],cards:RequestCard[],createdAt:number,
  adopted?:{picker?:string,kind?:string,session?:string},task?:{messageId:string,content:string,resources?:ResourceDescriptor[]},projectId?:string,agentConfigId?:string,branch?:string,cwd?:string,routed?:true,startCard?:string,endedAt?:number,swept?:true,
- scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number,taskId?:string,endRequest?:EndRequest,deliveryCards?:Record<string,string>,openKey?:string};
+ scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number,taskId?:string,endRequest?:EndRequest,deliveryCards?:Record<string,string>,openKey?:string,session?:{agent:string,id:string}};
 // A Feishu chat as open-lark, the owner's Feishu client, reads it (see open-lark.ts), with open-lark's id, which is not the open platform's
 // id of the bot: chatName is the group's name, or the other person's for a direct chat (p2p).
 export type OwnerChat={chatId:string,chatName:string,chatType:'p2p'|'group'};

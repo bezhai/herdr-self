@@ -1,4 +1,5 @@
-import {uuid,publicText,enqueue} from './core.ts';
+import {uuid,publicText,enqueue,oneOf} from './core.ts';
+import {resumableKinds} from './link.ts';
 import {title,check,answered,pending,answerOf,answerArgs,settled,expired,failed} from './request-cards.ts';
 import {picker,adoptedPicker,intro,nameOf,stillChosen,chosen} from './adoption.ts';
 import {latest} from './task-topic.ts';
@@ -46,6 +47,9 @@ const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'
 // A text that starts with / goes without it, so that the agent still takes it as one of its commands (/compact and the like).
 const fromFeishu='（来自飞书话题）',endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
+// What a topic that starts again says when it could not resume the agent session it recorded (see open), and when a live agent outside it
+// holds that session (see heldElsewhere).
+const notResumed='未能恢复之前的 Agent 会话，已启动新的会话',sessionElsewhere=`该话题的 Agent 会话正在 Bridge 之外的 pane 里运行，没有再启动一个。要在飞书里继续，请在聊天里发送 ${slash.adopt} 接管它`;
 // Where the images and files of a topic go, under the working directory of its agent (see attach).
 const attachmentRoot=(cwd:string)=>cwd.replace(/\/+$/,'')+'/'+attachmentFolder;
 // Marks a message from the moment a topic accepts it until the agent's turn for it ends, unless a COT takes its place (see openCot).
@@ -229,8 +233,8 @@ export class Topics{
   try{await this.reply(a,b.chatId,msg.rootId||msg.messageId,{card:notice(unsupportedNotice)});}catch(e){this.store.log('话题通知',`${b.name}：${brief(e)}`,'error');}
  }
  // Sends message msg to the topic's agent, opening the topic first when it is new or failed, or when it ended and Bridge started it: a
- // reply continues the topic in its project, on its branch and with its agent configuration, and its workspace is prepared again, which
- // restores one that the sweep removed (see sweep). A topic still waiting for an agent to adopt, and an adopted one that ended, prompt nothing. The images and files of the message are written under the agent's working directory first (see attach): the topic's
+ // reply continues the topic in its project, on its branch and with its agent configuration as it is now, resuming the agent session it
+ // recorded where it can (see open), and its workspace is prepared again, which restores one that the sweep removed (see sweep). A topic still waiting for an agent to adopt, and an adopted one that ended, prompt nothing. The images and files of the message are written under the agent's working directory first (see attach): the topic's
  // own for a topic that Bridge opened in a tab, and for an adopted one what Herdr reports for the agent, where the agent runs before where
  // its shell is. Resolves to the prompted agent, or to nothing when the message was not prompted.
  async forward(a:App,b:Binding,t:Topic,msg:Message){
@@ -333,19 +337,21 @@ export class Topics{
  }
  // Starts the agent of topic t: decides its project and branch (see route), prepares the workspace on the machine, places Bridge's skills in
  // it, prepares the launch, opens a tab there and starts the agent, and shows the card with the settings it started with (see showCard).
- // Returns false when that failed; the topic is then failed and notified, and the card is there to start it again with other settings.
+ // The agent resumes the session that the topic recorded when it can (see launch); a topic that recorded one and starts a new session
+ // forgets it and says so once it is ready, and the new agent's session is recorded as it reports it (see sync). Returns false when that
+ // failed; the topic is then failed and notified, and the card is there to start it again with other settings. Returns false too, with the
+ // topic as it was, when a live agent outside it holds the session it would resume (see heldElsewhere).
  async open(a:App,b:Binding,t:Topic){
-  this.update(t,{state:'starting',error:''});delete t.endedAt;delete t.swept;let m:Machine;
+  let m:Machine,resumed=false;
   try{
    const config=this.agentConfig(t);m=this.target(t);
+   if(await this.heldElsewhere(a,m,t))return false;
+   this.update(t,{state:'starting',error:''});delete t.endedAt;delete t.swept;
    await this.route(b,t);if(t.routed)await this.showCard(a,t);
    const dir=await this.workspace(m,t);
    Object.assign(t,await enqueue(this.workspaceQueues,b.id,()=>this.openTab(m,b,t,dir)));this.store.save();
    await this.place(m,b,config.kind,dir,this.projectOf(t)?.skills??[]);
-   const args=await this.launchArguments(m,config,dir);
-   try{await this.startAgent(m,t,config.kind,args);}
-   // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
-   catch(e){if(e.code!=='agent_not_ready')throw e;}
+   resumed=await this.launch(m,t,config,dir,this.resumable(t)?.id);
    // Before the topic is ready, which links it to its agent only while the setting is on.
    await this.herdr(m,remoteAnswers(t.paneId,true));
   }catch(e){
@@ -355,7 +361,35 @@ export class Topics{
    await this.notify(a,t,e.code==='client_offline'?offline(e,'话题没有启动，请稍后重发消息'):'启动失败，请在 Bridge 管理台查看原因');
    return false;
   }
-  this.update(t,{state:'ready'});this.store.log('Agent 会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}`);return true;
+  this.update(t,{state:'ready'});this.store.log('Agent 会话',`${b.name}：已在 ${m.name} 启动 ${t.agentName}${resumed?'，恢复了之前的 Agent 会话':''}`);
+  if(t.session&&!resumed){this.update(t,{session:undefined});await this.notify(a,t,notResumed);}
+  return true;
+ }
+ // The session that the start of topic t resumes: the one it recorded, while its agent configuration is of the session's kind.
+ resumable(t:Topic){const s=t.session;return s&&this.store.data.agentConfigs.find(c=>c.id===t.agentConfigId)?.kind===s.agent?s:undefined;}
+ // Whether a live agent on machine m, the machine of topic t, holds the session that the start of t would resume, such as one that the owner
+ // resumed by hand in a terminal: the topic then says so, and Bridge starts no second agent on the session. Rejects when Herdr fails.
+ async heldElsewhere(a:App,m:Machine,t:Topic){
+  const s=this.resumable(t);if(!s)return false;
+  const {agents}=await this.herdr(m,['agent','list']);
+  if(!agents.some(x=>x.agent===s.agent&&x.agent_session?.value===s.id))return false;
+  this.store.log('Agent 会话',`${t.agentName}：Agent 会话 ${s.id} 正在 ${m.name} 的其他 pane 里运行，没有启动`);
+  await this.notify(a,t,sessionElsewhere);return true;
+ }
+ // Starts the agent of configuration config in the pane of topic t on machine m, in directory dir, resuming session resume when the client
+ // finds it there (see prepareLaunch in link.ts). A start that resumes and fails gives way to a new session in the same pane: an agent that
+ // cannot resume the session after all ends, and Herdr reports that only when its timeout runs out. Resolves to whether the agent resumed it.
+ async launch(m:Machine,t:Topic,config:AgentConfig,dir:string,resume?:string):Promise<boolean>{
+  const {args,resumed}=await this.launchArguments(m,config,dir,resume);
+  try{await this.startAgent(m,t,config.kind,args);}
+  catch(e){
+   // The agent exists but waits for a confirmation such as a trust prompt; prompts then report agent_blocked.
+   if(e.code==='agent_not_ready')return resumed;
+   if(!resumed)throw e;
+   this.store.log('Agent 会话',`${t.agentName}：未能恢复 Agent 会话 ${resume}，改为启动新的会话，${brief(e)}`,'error');
+   return this.launch(m,t,config,dir);
+  }
+  return resumed;
  }
  // The agent configuration that topic t starts with.
  agentConfig(t:Topic){
@@ -397,12 +431,12 @@ export class Topics{
   const {dir}=await this.prepareWorkspace(m,{project:workspaceOf(this.projectOf(t),m.id),topicId:t.id,...t.branch&&{branch:t.branch}},{timeoutMs:workspaceTimeoutMs});
   this.update(t,{cwd:dir});return dir;
  }
- // What follows the -- of `agent start` for configuration config in directory dir: all of it comes from the client of the machine, which also
- // prepares what it needs there, such as the trust of the directory (see prepareLaunch in link.ts).
- async launchArguments(m:Machine,config:AgentConfig,dir:string){
-  const {args}=await this.prepareLaunch(m,{kind:config.kind,...config.model&&{model:config.model},...config.kind==='claude'&&{permissionMode:permissionMode(config)},
-   ...config.allowedCommands&&{allowedCommands:config.allowedCommands},dir},{timeoutMs:launchTimeoutMs});
-  return ['--',...args];
+ // What follows the -- of `agent start` for configuration config in directory dir, and whether it resumes session resume: all of it comes
+ // from the client of the machine, which also prepares what it needs there, such as the trust of the directory (see prepareLaunch in link.ts).
+ async launchArguments(m:Machine,config:AgentConfig,dir:string,resume?:string){
+  const {args,resumed}=await this.prepareLaunch(m,{kind:config.kind,...config.model&&{model:config.model},...config.kind==='claude'&&{permissionMode:permissionMode(config)},
+   ...config.allowedCommands&&{allowedCommands:config.allowedCommands},dir,...resume&&{resume}},{timeoutMs:launchTimeoutMs});
+  return {args:['--',...args],resumed};
  }
  // Shows the first card of topic t, which the first start posts into the thread and every start after it draws again (see startCard): the
  // project, the branch, the agent configuration, and the dropdowns that offer the other projects and configurations. Never rejects: a card
@@ -437,7 +471,8 @@ export class Topics{
   b.workspaces={...b.workspaces,[m.id]:r.workspace.workspace_id};return {workspaceId:r.workspace.workspace_id,tabId:r.tab.tab_id,paneId:r.root_pane.pane_id};
  }
  // Takes an agent list of machine m after each refresh. The linked agent of a ready topic reports reply_seq, the seq of its latest reply
- // (missing in Herdr versions without replies), state_change_seq, which grows with every status change, and request_ids. In the topic's
+ // (missing in Herdr versions without replies), state_change_seq, which grows with every status change, request_ids, and its agent
+ // session, which the topic records right away (see keepSession). In the topic's
  // queue, so that they never overlap with prompts: new replies are fetched and then the reactions of ended turns removed (a failed fetch
  // keeps the reactions for the next list); the cards follow the requests (see cards); a blocked agent gets its notice (see blocked); and
  // last, so that it never holds back any of these, the open COT follows the agent (see advance). A topic without its linked agent in the
@@ -445,7 +480,7 @@ export class Topics{
  // the topic turned remote answers on. Never rejects; resolves when the work it queued is done.
  sync(m:Machine,agents:Agent[]){
   return Promise.all(this.store.data.topics.filter(t=>t.machineId===m.id&&t.state==='ready').map(t=>{
-   const agent=linked(t,agents),seq=agent?.reply_seq,fetch=seq!=null&&seq!==(t.replySeq||0);
+   const agent=linked(t,agents),seq=agent?.reply_seq,fetch=seq!=null&&seq!==(t.replySeq||0);this.keepSession(t,agent);
    const ids=requestIds(agent),cards=this.gone(t,ids).length>0||this.fresh(t,ids).length>0,blocked=this.blocked(t,agent,ids),cot=agent&&news(t,agent);
    if(agent&&!fetch&&!ended(t,agent).length&&!cards&&blocked==null&&!cot&&!ending(t,agent))return;
    return enqueue(this.topicQueues,t.id,async()=>{
@@ -460,6 +495,15 @@ export class Topics{
     if(cot)await this.advance(m,t,agent);
    }).catch(e=>this.store.log('话题通知',`${t.agentName}：${brief(e)}`,'error'));
   }));
+ }
+ // Records the agent session that agent, linked to topic t, reports, when it is not the one recorded (Claude's /clear starts another): the
+ // session that the next start of a topic that Bridge started resumes (see open). Only an agent of resumableKinds (see link.ts) has one to
+ // record, so a topic of another kind starts again as a new topic does: no notice, and no agent of the machine holds it back. Outside the
+ // queue, since it waits for nothing and prompts do not read it. An adopted topic keeps the session it adopted (see adopt).
+ keepSession(t:Topic,agent:Agent|undefined){
+  const id=agent?.agent_session?.value;
+  if(t.adopted||!agent||!oneOf(resumableKinds,agent.agent)||!id||t.session?.agent===agent.agent&&t.session.id===id)return;
+  this.update(t,{session:{agent:agent.agent,id}});
  }
  // A blocked agent without requests waits on something that Feishu cannot answer, such as a Codex question, any Antigravity approval or
  // question, or a trust prompt. Resolves to the state_change_seq of such a blocked episode once two lists in a row report it and no
@@ -526,7 +570,8 @@ export class Topics{
   delete t.cwd;
   if('projectId' in change){delete t.routed;Object.assign(t,change);}
   else Object.assign(t,change,{machineId:this.store.data.agentConfigs.find(c=>c.id===change.agentConfigId)!.machineId});
-  this.update(t,{workspaceId:'',tabId:'',paneId:'',replySeq:0});
+  // The new settings start a new session.
+  this.update(t,{workspaceId:'',tabId:'',paneId:'',replySeq:0,session:undefined});
   const task=t.task!,reacted=t.scheduled?undefined:this.addReaction(a,t,task.messageId);
   await this.promptOrNotify(a,b,t,task,reacted);
   if(t.state==='ready')await this.notify(a,t,said);

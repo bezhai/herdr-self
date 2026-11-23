@@ -16,8 +16,14 @@ import type {Kind,PermissionMode,WorkMode,OwnerChat,Mention} from './state.ts';
 // client of 6 cannot answer. 8: the client of the machine that runs open-lark reads chats and messages of Feishu and sends messages as the
 // owner (openLarkMessage, openLarkChat, openLarkReply, openLarkSend), and every client passes the requests of bridge-message on (messages). 9: every client passes the requests of bridge-task on (tasks).
 // 10: a client offers the local HTTP services of its config by name (its hello names them) and performs a request of one for an agent
-// (callService), and every client passes the requests of bridge-call on (services).
-export const protocol=10;
+// (callService), and every client passes the requests of bridge-call on (services). 11: prepareLaunch takes the session of a finished topic
+// to resume (resume) and answers whether its arguments resume it (resumed), which a client of 10 would ignore and start a new session.
+export const protocol=11;
+// The kinds of agent whose sessions prepareLaunch can resume (see ClientApi), and so the only ones whose sessions a topic records (see
+// Topics.keepSession). Antigravity is not one: agy --conversation <id> takes an id, but one it lacks starts a new conversation with only a
+// warning on the screen, and where a conversation ran is in the binary records of its database alone, so no client can tell that it ran in
+// the directory of the topic (agy 1.5.15, 2026-11-23).
+export const resumableKinds:readonly Kind[]=['claude','codex'];
 // Close codes with which the control plane refuses or ends a client connection; a short reason goes with each, and the client logs both.
 export const closeCodes={token:4001,version:4002,host:4003,replaced:4004,hello:4005};
 // What one side may ask of the other: the params of each method and what it resolves to. A side's methods (see link) are async functions
@@ -74,12 +80,14 @@ export type ClientApi={
  // prepareLaunch: the setup that an agent of kind needs on this machine before it starts in dir: its trust of the directory (for Claude, the
  // trust of the main checkout of the repository that holds dir is registered, and a worktree follows its main checkout), and for Claude with
  // allowedCommands, the hook that lets only those commands through. It resolves to the extra arguments of the agent command (those after
- // the -- of `herdr agent start`) for model, permissionMode and the trust of Codex and Antigravity. Calling it again is fine.
+ // the -- of `herdr agent start`) for model, permissionMode and the trust of Codex and Antigravity. Calling it again is fine. resume is the id
+ // of an agent session to resume: the arguments resume it, and resumed is true, when kind is one of resumableKinds and this machine has
+ // that session as one that ran in dir; otherwise they are those without resume, and resumed is false.
  // describeRepos: the README of each repository, cloned when missing, up to 4000 characters, for the control plane to describe the project
  // from; a repository that cannot be cloned or has no README is left out, and it fails only when none is left.
  prepareWorkspace:{params:Timed<{project:WorkspaceProject,topicId:string,branch?:string}>,result:{dir:string}},
  removeWorkspace:{params:Timed<{project:WorkspaceProject,topicId:string,branch?:string}>,result:{branchKept:boolean}},
- prepareLaunch:{params:Timed<{kind:Kind,model?:string,permissionMode?:PermissionMode,allowedCommands?:string[],dir:string}>,result:{args:string[]}},
+ prepareLaunch:{params:Timed<{kind:Kind,model?:string,permissionMode?:PermissionMode,allowedCommands?:string[],dir:string,resume?:string}>,result:{args:string[],resumed:boolean}},
  describeRepos:{params:Timed<{repos:string[]}>,result:{readmes:{name:string,text:string}[]}},
  placeSkills:{params:Timed<{store:string,skills:SkillFiles[],dir:string,as:'link'|'copy',cwd:string}>,result:string[]},
  stockSkill:{params:Timed<{store:string,skill:SkillFiles}>,result:string},

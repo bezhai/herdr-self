@@ -10,8 +10,9 @@ const env={...process.env,LC_ALL:'C',GIT_CONFIG_GLOBAL:path.join(root,'gitconfig
 fs.writeFileSync(env.GIT_CONFIG_GLOBAL,'[user]\n name = t\n email = t@example.com\n[init]\n defaultBranch = main\n');
 const git=(cwd:string,...args:string[])=>execFileSync('git',args,{cwd,env,encoding:'utf8'}).trim();
 const client=methods({herdr:'unused',env});
-type Launch={kind:Kind,model?:string,permissionMode?:PermissionMode,allowedCommands?:string[],dir:string};
-const launch=async(p:Launch,c=client)=>(await c.prepareLaunch({...p,timeoutMs:20000})).args;
+type Launch={kind:Kind,model?:string,permissionMode?:PermissionMode,allowedCommands?:string[],dir:string,resume?:string};
+const prepare=(p:Launch,c=client)=>c.prepareLaunch({...p,timeoutMs:20000});
+const launch=async(p:Launch,c=client)=>(await prepare(p,c)).args;
 const claudeJson=path.join(home,'.claude.json'),readJson=(f=claudeJson)=>JSON.parse(fs.readFileSync(f,'utf8'));
 const dir=(name:string)=>{const d=path.join(root,name);fs.mkdirSync(d,{recursive:true});return d;};
 // A repository with one commit and a linked worktree of it, both in a directory of this test.
@@ -117,4 +118,58 @@ test('the params are checked: the kind, a model or a command that could be taken
  const bad:[Partial<Launch>,string][]=[[{kind:'bash' as Kind},'kind'],[{model:'-x'},'model'],[{model:'a b'},'model'],[{model:''},'model'],[{permissionMode:'yolo' as PermissionMode},'permissionMode'],[{allowedCommands:['but ler']},'command'],
   [{allowedCommands:['butler;x']},'command'],[{allowedCommands:['-x']},'command'],[{allowedCommands:['']},'command'],[{allowedCommands:'butler' as unknown as string[]},'commands'],[{kind:'codex',allowedCommands:['butler']},'codex'],[{kind:'agy',allowedCommands:['butler']},'agy'],[{dir:'relative/dir'},'dir']];
  for(const [p,what] of bad)await assert.rejects(launch({kind:'claude',dir:d,...p} as Launch),(e:{code?:string})=>e.code==='invalid_params',what+' '+JSON.stringify(p));
+});
+// The transcript of Claude session id that ran in directory real, where Claude keeps it under config (see claudeHas in launch.ts).
+const claudeKey=(real:string)=>real.replace(/[^a-zA-Z0-9]/g,'-');
+function claudeSession(real:string,id:string,{config=path.join(home,'.claude'),key=claudeKey(real)}={}){
+ const d=path.join(config,'projects',key);fs.mkdirSync(d,{recursive:true});fs.writeFileSync(path.join(d,id+'.jsonl'),JSON.stringify({type:'user',sessionId:id,cwd:real})+'\n');
+}
+// The rollout of Codex session id that ran in directory cwd, as Codex keeps it under its home (see codexHas in launch.ts): its first line is
+// the session's meta, long like that of Codex (about 29 KB of base instructions), and more lines follow.
+function codexSession(cwd:string,id:string,{codexHome=path.join(home,'.codex'),day='2026/11/23'}={}){
+ const d=path.join(codexHome,'sessions',day);fs.mkdirSync(d,{recursive:true});
+ const meta={timestamp:'2026-11-23T09:36:15.349Z',type:'session_meta',payload:{session_id:id,id,cwd,originator:'codex-tui',base_instructions:{text:'说明 '.repeat(10000)}}};
+ fs.writeFileSync(path.join(d,`rollout-2026-11-23T17-36-12-${id}.jsonl`),JSON.stringify(meta)+'\n'+JSON.stringify({type:'response_item',payload:{cwd:'/elsewhere'}})+'\n');
+}
+const sessionId=(n:number)=>`0b1c2d3e-0000-4000-8000-${String(n).padStart(12,'0')}`;
+test('Claude resumes the session to resume when its transcript is under the key of the real path of the directory, with the permission mode and the rest of the configuration as they are now; otherwise it starts as without one, and says so',async()=>{
+ const real=dir('resume-claude'),link=path.join(root,'resume-claude-link');fs.symlinkSync(real,link);
+ const id=sessionId(1);claudeSession(real,id);
+ assert.deepEqual(await prepare({kind:'claude',permissionMode:'bypassPermissions',model:'sonnet',dir:link,resume:id}),
+  {args:['--permission-mode','bypassPermissions','--model','sonnet','--settings','{"availableModels":["sonnet"]}','--resume',id],resumed:true});
+ // Nothing to resume, a session that is not there, and one that ran in another directory, which Claude would resume here all the same.
+ assert.deepEqual(await prepare({kind:'claude',permissionMode:'auto',dir:real}),{args:['--permission-mode','auto'],resumed:false});
+ assert.deepEqual(await prepare({kind:'claude',permissionMode:'auto',dir:real,resume:sessionId(2)}),{args:['--permission-mode','auto'],resumed:false});
+ const other=dir('resume-claude-other');claudeSession(other,sessionId(3));
+ assert.deepEqual(await prepare({kind:'claude',dir:real,resume:sessionId(3)}),{args:['--permission-mode','default'],resumed:false});
+ // Past 200 characters Claude keeps the first 200 of the key and a hash of the path.
+ const long=dir('l'.repeat(120)+'/'+'o'.repeat(120)),key=claudeKey(long);assert.ok(key.length>200);
+ claudeSession(long,sessionId(4),{key:key.slice(0,200)+'-1x2y3z'});claudeSession(long,sessionId(5),{key:key.slice(0,200)});
+ assert.equal((await prepare({kind:'claude',dir:long,resume:sessionId(4)})).resumed,true);assert.equal((await prepare({kind:'claude',dir:long,resume:sessionId(5)})).resumed,false);
+ // Where the configuration directory of Claude is set, its projects are in it.
+ const config=dir('resume-claude-config'),elsewhere=methods({herdr:'unused',env:{...env,CLAUDE_CONFIG_DIR:config}});claudeSession(real,sessionId(6),{config});
+ assert.equal((await prepare({kind:'claude',dir:real,resume:sessionId(6)},elsewhere)).resumed,true);assert.equal((await prepare({kind:'claude',dir:real,resume:id},elsewhere)).resumed,false);
+});
+test('Codex resumes the session to resume with its resume command before its options when its rollout says it ran in the real path of the directory; otherwise it starts as without one; Antigravity never resumes',async()=>{
+ const real=dir('resume-codex'),link=path.join(root,'resume-codex-link');fs.symlinkSync(real,link);
+ const base=['--no-daemon','-c','sandbox_workspace_write.network_access=true','--dangerously-bypass-hook-trust','-c','check_for_update_on_startup=false','-m','gpt-5.5','-c',`projects={${JSON.stringify(real)}={trust_level="trusted"}}`];
+ const id=sessionId(11);codexSession(real,id);
+ assert.deepEqual(await prepare({kind:'codex',model:'gpt-5.5',dir:link,resume:id}),{args:['resume',...base,id],resumed:true});
+ assert.deepEqual(await prepare({kind:'codex',model:'gpt-5.5',dir:real}),{args:base,resumed:false});
+ // A session that is not there, one of another directory (the directory of a later line does not count), and one in another day's folder.
+ codexSession(dir('resume-codex-other'),sessionId(12));codexSession(real,sessionId(13),{day:'2026/10/01'});
+ for(const [resume,resumed] of [[sessionId(14),false],[sessionId(12),false],[sessionId(13),true]] as const)assert.equal((await prepare({kind:'codex',model:'gpt-5.5',dir:real,resume})).resumed,resumed,resume);
+ // Where the home of Codex is set, its sessions are in it.
+ const codexHome=dir('resume-codex-home'),elsewhere=methods({herdr:'unused',env:{...env,CODEX_HOME:codexHome}});codexSession(real,sessionId(15),{codexHome});
+ assert.equal((await prepare({kind:'codex',dir:real,resume:sessionId(15)},elsewhere)).resumed,true);assert.equal((await prepare({kind:'codex',dir:real,resume:id},elsewhere)).resumed,false);
+ const agy=dir('resume-agy');
+ assert.deepEqual(await prepare({kind:'agy',dir:agy,resume:sessionId(16)}),{args:['--settings',JSON.stringify({trustedWorkspaces:[agy],toolPermission:'always-proceed'})],resumed:false});
+});
+test('a session to resume is looked up only as a UUID, which no option and no path can be taken for: another string is a session this machine does not have, which Herdr may report as an agent likes; anything else is refused',async()=>{
+ const d=dir('resume-checked'),escape=dir('resume-checked-escape');claudeSession(d,'../x');claudeSession(d,'-x');
+ for(const resume of ['-x','../x','a b','','0b1c2d3e-0000-4000-8000-00000000001/','x'.repeat(36)]){
+  assert.deepEqual(await prepare({kind:'claude',dir:d,resume}),{args:['--permission-mode','default'],resumed:false},JSON.stringify(resume));
+  assert.deepEqual((await prepare({kind:'codex',dir:escape,resume})).resumed,false,JSON.stringify(resume));
+ }
+ for(const resume of [5,null,{}] as unknown as string[])await assert.rejects(async()=>prepare({kind:'claude',dir:d,resume}),(e:{code?:string})=>e.code==='invalid_params',JSON.stringify(resume));
 });
