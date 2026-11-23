@@ -4444,7 +4444,10 @@ test('without BRIDGE_CLIENT_SOCKET the client and bridge-schedule find the socke
   first.kill();await first.exited;await until(()=>f.clients.status('m').state==='offline','the first client is gone');
   const long=path.join(dir,'s'.repeat(120),'client.sock'),second=bridgeClient(config,{BRIDGE_CLIENT_SOCKET:long});started.push(second);
   await until(()=>f.clients.status('m').state==='online','the second client is online');
-  assert.ok(second.log.includes(`bridge-client: 没能打开 bridge-schedule、bridge-skill 和 bridge-message 用的 socket ${long}：`),second.log);
+  // The control plane counts the client online once it answers the hello, which races with the client failing to open its socket and
+  // with its stderr reaching this process: the line is waited for, and the client is still online after it.
+  await until(()=>second.log.includes(`bridge-client: 没能打开 bridge-schedule、bridge-skill 和 bridge-message 用的 socket ${long}：`),'the second client logs why it has no socket');
+  assert.equal(f.clients.status('m').state,'online');
  }finally{await stopClients(f,started);fs.rmSync(dir,{recursive:true});}
 });
 test('a machine\'s client gets in with the token that the console generates and the state keeps only as a hash; the console shows it online with its host, refused with the reason of a version mismatch, or offline; a newer client of the machine replaces the older, which exits; a new token drops the client of the old one, which is refused from then on; the client reconnects after the control plane restarts, and removing the machine drops it',async()=>{
