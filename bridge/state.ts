@@ -48,11 +48,18 @@ export type EndRequest={outcome:Outcome,reason:string,stateSeq:number|null};
 // card of each delivery that the thread shows, by delivery id. endRequest is the end that its agent asked for with bridge-task, until the agent's turn has ended (see Topics.sync).
 // A topic that a caller opened through the API with an idempotency key keeps it as openKey, which answers a repeated request (see ApiTopics).
 // A topic that Bridge started keeps session, the agent session that its agent last reported (the agent's kind and the session's id; see
-// Topics.sync), which the next start of the topic resumes when it can (see Topics.open); a topic of before it has none.
+// Topics.sync), which the next start of the topic resumes when it can (see Topics.open); a topic of before it has none. A ready topic that a
+// trusted caller handed digests of Feishu messages keeps digests until its agent is free to get them (see Topics.hold).
 export type Topic={id:string,bindingId:string,appId:string,chatId:string,rootId:string,machineId:string,workspaceId:string,tabId:string,paneId:string,agentName:string,title:string,
  state:'starting'|'ready'|'failed'|'closed'|'choosing',error:string,messageIds:string[],replySeq:number,reactions:Reaction[],cards:RequestCard[],createdAt:number,
  adopted?:{picker?:string,kind?:string,session?:string},task?:{messageId:string,content:string,resources?:ResourceDescriptor[]},projectId?:string,agentConfigId?:string,branch?:string,cwd?:string,routed?:true,startCard?:string,endedAt?:number,swept?:true,
- scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number,taskId?:string,endRequest?:EndRequest,deliveryCards?:Record<string,string>,openKey?:string,session?:{agent:string,id:string}};
+ scheduled?:{id:string,n:number,messageAt?:number},cot?:TopicCot,proposal?:Proposal,attachmentDir?:string,blockedSeq?:number,taskId?:string,endRequest?:EndRequest,deliveryCards?:Record<string,string>,openKey?:string,session?:{agent:string,id:string},digests?:TopicDigests};
+// What a trusted caller, butler, handed the agent of a topic (see Topics.hold): pending, the digests that wait for the agent to be free, in
+// the order they came; dropped, how many older ones the cap took away since the agent last got any, which it is told; and keys, those of
+// the latest digests accepted, which answer a repeated request.
+export type TopicDigests={pending:Digest[],dropped:number,keys:string[]};
+// One digest: the key of its request, its text and when Bridge accepted it.
+export type Digest={key:string,text:string,at:number};
 // A Feishu chat as open-lark, the owner's Feishu client, reads it (see open-lark.ts), with open-lark's id, which is not the open platform's
 // id of the bot: chatName is the group's name, or the other person's for a direct chat (p2p).
 export type OwnerChat={chatId:string,chatName:string,chatType:'p2p'|'group'};

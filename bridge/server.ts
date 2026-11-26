@@ -11,6 +11,7 @@ import {Topics} from './topics.ts';
 import {Skills,requestLimit} from './skills.ts';
 import {Schedules} from './schedules.ts';
 import {ApiTopics} from './api-topics.ts';
+import {ApiDigests} from './api-digests.ts';
 import {Messages,ownerSink,sinkName} from './messages.ts';import {Outbox} from './outbox.ts';
 import {Tasks} from './task-core.ts';
 import {threadSink,threadSinkName} from './thread-sink.ts';
@@ -61,11 +62,11 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 }});
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
-const apiTopics=new ApiTopics(store,{topics,send:(...args)=>platforms.send(...args),chatName:(...args)=>platforms.chatName(...args)});
+const apiTopics=new ApiTopics(store,{topics,send:(...args)=>platforms.send(...args),chatName:(...args)=>platforms.chatName(...args)}),apiDigests=new ApiDigests(store,{topics,tasks});
 const messages=new Messages(store,{tasks,topics,app:id=>platforms.app(id),owner,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),outbox});
 const agentTasks=new AgentTasks(store,{topics,tasks,app:id=>platforms.app(id)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
-function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,taskId,deliveryCards,sources,drafts,...t}:Topic&{sources?:unknown,drafts?:unknown})=>t),logs:store.data.logs.slice(-60)};}
+function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,taskId,deliveryCards,sources,drafts,digests,...t}:Topic&{sources?:unknown,drafts?:unknown})=>t),logs:store.data.logs.slice(-60)};}
 // Whether the Host of a request is one the console answers to; the clients' WebSocket checks it too (see Clients). A client passes on the
 // requests of bridge-schedule and bridge-skill on its machine (see client.ts), which are answered for the machine of its connection: the
 // schedules of its agents, and reads of the skills of the platform alone (see Skills.answer). What the agent reads of a refusal goes through
@@ -77,7 +78,9 @@ const conversions=new Map<string,Promise<unknown>>();
 const serviceCalls=new ServiceCalls({offers:()=>clients.offers(),call,log:(...args)=>store.log(...args)});
 const clients=new Clients(store,{allowedHost,joined:m=>{if(m.enabled)refresh(m);void skills.align(m);enqueue(conversions,'adopted',()=>convertAdopted(store,m,ops.inspectDirectory));},methods:{schedules:(m,{op,body})=>agentSchedules.call(m,op,body).catch(refusal),skills:(m,{op,body})=>skills.answer(m,op,body).catch(refusal),messages:(m,{op,body})=>messages.call(m,op,body).catch(refusal),tasks:(m,{op,body})=>agentTasks.call(m,op,body).catch(refusal),services:(m,{op,body})=>serviceCalls.call(m,op,body).catch(refusal)}});
 function equal(a:string|undefined,b:string){const x=Buffer.from(a||''),y=Buffer.from(b||'');return x.length===y.length&&crypto.timingSafeEqual(x,y);}
-function authorized(req:http.IncomingMessage){if(equal(req.headers.authorization?.replace(/^Bearer /,''),key))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
+// Whether a request carries the access key, which a program sends; authorized also takes the session of the console.
+const bearer=(req:http.IncomingMessage)=>equal(req.headers.authorization?.replace(/^Bearer /,''),key);
+function authorized(req:http.IncomingMessage){if(bearer(req))return true;return (auth.get(req.headers.cookie?.match(/(?:^|; )bridge_session=([^;]+)/)?.[1])||0)>Date.now();}
 function json(res:http.ServerResponse,code:number,data:unknown){res.writeHead(code,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));}
 // The JSON object that is the body of a request of at most limit characters, read as UTF-8 also when a piece ends inside a character. It is the
 // console's, as it arrives: what reads it checks what it needs.
@@ -94,6 +97,14 @@ const server=http.createServer(async(req,res)=>{try{
  if(req.method==='POST'&&!req.headers.authorization&&req.headers.origin!=='http://'+req.headers.host&&req.headers.origin!=='https://'+req.headers.host)return json(res,403,{error:'跨站请求已拒绝'});
  if(p==='/api/login'&&req.method==='POST'){const ip=req.socket.remoteAddress,now=Date.now();let a=attempts.get(ip);if(!a||now-a.at>60000)a={at:now,n:0};attempts.set(ip,a);if(++a.n>20)return json(res,429,{error:'请稍后重试'});const b=await body(req);if(!equal(b.key,key))return json(res,401,{error:'访问密钥不正确'});const id=crypto.randomBytes(32).toString('hex');auth.set(id,now+12*3600000);res.setHeader('Set-Cookie',`bridge_session=${id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`);return json(res,200,{ok:true});}
  if(!authorized(req))return json(res,401,{error:'请先登录'});
+ // What butler reads of the ready topics and hands to their agents (see ApiDigests), with the access key only: the console never needs it,
+ // and the context names the owner's chats and holds what others wrote in them.
+ if(p==='/api/topics/context'||p==='/api/topics/digest'){
+  if(!bearer(req))return json(res,401,{error:'这个接口只接受访问密钥'});
+  if(p==='/api/topics/context'&&req.method==='GET')return json(res,200,apiDigests.context());
+  if(p==='/api/topics/digest'&&req.method==='POST'){const {status,body:answer}=apiDigests.answer(await body(req));return json(res,status,answer);}
+  return json(res,404,{error:'接口不存在'});
+ }
  if(p==='/api/state'&&req.method==='GET')return json(res,200,state());
  if(p==='/api/apps/avatar'&&req.method==='GET'){const avatar=await platforms.avatar(url.searchParams.get('id'));if(!avatar)return json(res,404,{error:'没有头像'});res.writeHead(200,{'Content-Type':avatar.type,'Cache-Control':'private, max-age=300'});return res.end(avatar.body);}
  // A skill with its files, which the console edits and bridge-skill exports; the state has only the index of the skills.
