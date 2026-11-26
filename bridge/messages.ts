@@ -18,19 +18,20 @@ import type {CardActionResponse} from '@larksuite/channel';
 // past the agent. The thread shows all this as an observer of the task's journal (thread-cards): the source cards and the draft cards are drawn
 // from the records, and clicks turn into decisions of the core. The requests come through the client of the agent's machine like those of
 // bridge-schedule, and the topic is that of the agent's pane (see Topics.caller). Every message sent, and every send that failed, is logged as 消息.
+// The agent can take back (withdraw) a draft of its topic that still waits for the owner, which ends it as the owner's 不发 does.
 
-const ops=['attach','reply','send'] as const;
+const ops=['attach','reply','send','withdraw'] as const;
 type Op=typeof ops[number];
 // The sink of the owner's messages, as the task core names it, and the prefix of the ref of an input that is a message of open-lark.
 export const sinkName='as-owner';
 const refPrefix='open-lark:';
 // A request of bridge-message as the client of the agent's machine passes it on: the agent's pane and session, whatever the op; attach and
 // reply name a message by its open-lark id (messageId; that of reply is an input of the topic's task), send a chat (chatId), and reply and send
-// carry the text, with @<name> in it for each of mentions.
-export type MessageRequest={pane?:string,session?:string,messageId?:string,chatId?:string,text?:string,mentions?:Mention[]};
+// carry the text, with @<name> in it for each of mentions. withdraw names a draft by its delivery's id or a unique start of it (draftId).
+export type MessageRequest={pane?:string,session?:string,messageId?:string,chatId?:string,text?:string,mentions?:Mention[],draftId?:string};
 // What each op resolves to, for bridge-message to print (see message-command.ts): the input it added, whose body is the message as read, or the
-// delivery whose card it posted.
-export type Answers={attach:{input:Input&{body:OwnerMessage}},reply:{delivery:Delivery},send:{delivery:Delivery}};
+// delivery whose card it posted or that it withdrew.
+export type Answers={attach:{input:Input&{body:OwnerMessage}},reply:{delivery:Delivery},send:{delivery:Delivery},withdraw:{delivery:Delivery}};
 export type MessageOps={[K in Op]:{request:MessageRequest,answer:Answers[K]}};
 // tasks is the task core, whose only sink is that of ownerSink; topics are those of the bindings (see topics.ts); app(id) returns an app or
 // throws; owner() is the machine whose client reaches open-lark, or null when none is set or it is gone; call reaches the client of a machine
@@ -63,11 +64,13 @@ export function ownerSink({owner,call}:Pick<Deps,'owner'|'call'>):Sink{
  }};
 }
 // The deps stay in deps: reply and call are also names of ops and of the method that dispatches them.
+// editing holds the deliveries whose card shows the form of 修改, which withdraw leaves alone. It is not saved: after a restart a withdraw can
+// replace an open form, whose submission then finds the draft not sent.
 export class Messages{
- declare store:Store;declare deps:Required<Deps>;declare renders:number;declare refused:Map<string,string>;
+ declare store:Store;declare deps:Required<Deps>;declare renders:number;declare refused:Map<string,string>;declare editing:Set<string>;
  // Starts the observer thread-cards, which shows the tasks of topics in their threads.
  constructor(store:Store,{now=Date.now,...deps}:Deps){
-  this.store=store;this.deps={...deps,now};this.renders=0;this.refused=new Map();
+  this.store=store;this.deps={...deps,now};this.renders=0;this.refused=new Map();this.editing=new Set();
   deps.tasks.observe('thread-cards',r=>this.view(r));
  }
  // Request op of the agent in pane pane of Herdr session session (default) on machine m, the machine whose client passed the request on:
@@ -82,6 +85,7 @@ export class Messages{
    case 'attach':return this.deps.topics.queue(t,()=>this.attach(t,request as MessageRequest,owner));
    case 'reply':return this.deps.topics.queue(t,()=>this.reply(t,request as MessageRequest));
    case 'send':return this.deps.topics.queue(t,()=>this.send(t,request as MessageRequest,owner));
+   case 'withdraw':return this.deps.topics.queue(t,()=>this.withdraw(t,request as MessageRequest));
   }
  }
  // Brings message messageId into the task of topic t: reads it through the owner's channel and adds it as an input, whose ref is its id. The
@@ -104,6 +108,21 @@ export class Messages{
   const task=this.deps.topics.task(t),chatId=this.id(request.chatId,'聊天'),{text,mentions}=this.checked(request);let chat;
   try{chat=await this.deps.call(owner,'openLarkChat',{chatId});}catch(e){throw Error(failure(owner,e));}
   return {delivery:await this.draft(task,chat,{text,mentions})};
+ }
+ // Takes back draft draftId of the task of topic t while it waits for the owner and the owner is not changing its text. Its card is redrawn
+ // from the journal, which records the decision as withdrawn. A draft that was sent, is being sent, failed after the owner's 发送, or was not
+ // sent is refused with what the agent can do instead.
+ async withdraw(t:Topic,request:MessageRequest):Promise<Answers['withdraw']>{
+  const task=this.deps.topics.task(t),id=this.id(request.draftId,'草稿');
+  const found=this.deps.tasks.get(task).deliveries.filter(d=>'sink' in d.target&&d.target.sink===sinkName&&d.id.startsWith(id));
+  if(found.length>1)throw Error(`有多个草稿的 ID 以 ${id} 开头，请写完整的 ID`);
+  const d=found[0];if(!d)throw Error(`本话题没有 ID 以 ${id} 开头的草稿：只能撤回这个话题里起草的草稿，ID 见 reply 或 send 的输出`);
+  if(d.state==='sending')throw Error('这份草稿正在发送，不能撤回');
+  if(d.state==='delivered')throw Error('这份草稿已经发出，不能撤回');
+  if(d.state==='failed')throw Error('主人点过「发送」但没有发出去，不能撤回：由主人在卡片上重试或者点「不发」');
+  if(d.state==='rejected')throw Error('这份草稿已经不发了，不用撤回');
+  if(this.editing.has(d.id))throw Error('主人正在修改这份草稿，不能撤回：等主人改完发送或者取消修改');
+  const delivery=this.deps.tasks.withdraw(d.id);await this.deps.tasks.settled();return {delivery};
  }
  // The message that input messageId of task is, if it is one.
  quoted(task:string,messageId:string):OwnerMessage|undefined{return this.deps.tasks.get(task).inputs.find(i=>i.ref===refPrefix+messageId)?.body as OwnerMessage|undefined;}
@@ -142,6 +161,7 @@ export class Messages{
   // A card that an earlier topic of the task posted stays in its own thread, which is where it is redrawn; a new one goes to the latest topic.
   const t=this.store.data.topics.find(x=>x.taskId===r.task&&x.deliveryCards?.[d.id])??latest;
   const to=d.target.to as Address,{text}=d.body as Body;
+  if(r.type==='delivery.delivered'||r.type==='delivery.rejected')this.editing.delete(d.id);
   if(r.type==='delivery.awaiting'){
    if(t.deliveryCards?.[d.id])return this.draw(t,d,'pending');
    const quoted=this.quoted(r.task,to.replyTo??'');
@@ -156,7 +176,7 @@ export class Messages{
    this.store.log('消息',`以 ${(d.receipt as Sent).owner} 的身份发到 ${to.chatName}：${clip(text,40)}`);await this.draw(t,d,'sent');
   }else if(r.type==='delivery.failed'){
    this.store.log('消息',`未能发到 ${to.chatName}：${d.error}`,'error');await this.draw(t,d,'pending');
-  }else if(r.type==='delivery.rejected')await this.draw(t,d,'dropped');
+  }else if(r.type==='delivery.rejected')await this.draw(t,d,r.data.decision==='withdrawn'?'withdrawn':'dropped');
  }
  // Replaces the card of delivery d in the thread of t as view, with failure above its text when given. A delivery that has no card yet is not
  // drawn. A failed replacement is only logged: in particular, it never turns a successful send into a retry.
@@ -184,7 +204,8 @@ export class Messages{
   if(d.state==='sending')return toast('info','正在发送，请稍候');
   if(d.state==='delivered')return toast('info','这条消息已经发送');
   if(d.state==='rejected')return toast('info','这条消息已取消发送');
-  if(v.draft==='edit'){void this.draw(topic,d,'editing');return toast('info','请修改正文');}
+  if(v.draft==='edit'){this.editing.add(d.id);void this.draw(topic,d,'editing');return toast('info','请修改正文');}
+  this.editing.delete(d.id);
   if(v.draft==='cancel'){void this.draw(topic,d,'pending');return toast('info','已取消修改');}
   void this.settle(topic,d,v.draft==='send',evt.action.formValue?.text);return toast('info',v.draft==='send'?'正在发送':'已取消发送');
  }

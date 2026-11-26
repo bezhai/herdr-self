@@ -3,7 +3,7 @@ import {sourceLine} from './outbound-cards.ts';
 import type {Output} from './client.ts';
 import type {MessageOps,MessageRequest} from './messages.ts';
 // bridge-message, the command line through which the agent of a Feishu topic brings a Feishu message into its topic and drafts messages
-// that the owner sends as themselves after a click on the draft's card (see Messages). Like bridge-schedule (see schedule-command.ts), it
+// that the owner sends as themselves after a click on the draft's card, or takes back such a draft (see Messages). Like bridge-schedule (see schedule-command.ts), it
 // sends each request to the Bridge client of the machine it runs on, which passes it on to the control plane, with the agent's pane
 // (HERDR_PANE_ID) and Herdr session (HERDR_SESSION); it runs on Node alone, like the client, and prints text for the agent, or with --json
 // Bridge's answer. Its help is complete on its own: the skill that tells agents when to use it leaves the details of the command to it.
@@ -11,9 +11,10 @@ export const usage=`用法：
   bridge-message attach <消息 ID>
   bridge-message reply <消息 ID> --text <正文> [--mention <用户 ID>=<名字>]...
   bridge-message send <聊天 ID> --text <正文> [--mention <用户 ID>=<名字>]...
+  bridge-message withdraw <草稿 ID>
 
-由 Bridge 开的飞书话题里的 Agent 运行，把一条飞书消息放进这个话题作为来源，或者起草以主人身份发出的飞书消息。命令只连本机的
-Bridge 客户端，由客户端转给 Bridge。消息 ID 和聊天 ID 都是 open-lark 的 ID，不是机器人开放平台的 om_…、oc_… ID；用 butler
+由 Bridge 开的飞书话题里的 Agent 运行，把一条飞书消息放进这个话题作为来源，起草以主人身份发出的飞书消息，或者撤回还在等主人
+确认的草稿。命令只连本机的 Bridge 客户端，由客户端转给 Bridge。消息 ID 和聊天 ID 都是 open-lark 的 ID，不是机器人开放平台的 om_…、oc_… ID；用 butler
 查消息和聊天，具体看 butler --help。
 
 操作：
@@ -21,7 +22,9 @@ Bridge 客户端，由客户端转给 Bridge。消息 ID 和聊天 ID 都是 ope
   reply   起草一条引用回复。<消息 ID> 必须是已经 attach 到本话题的来源；回复发到那条来源所在的聊天，正文里引用的就是这条消息。
   send    起草一条发到 <聊天 ID> 的新消息。聊天名和私聊或群聊都由 open-lark 读出，不采用 Agent 自己填写的名称。
   reply 和 send 只发确认卡片，不直接发飞书消息。主人点「发送」后才会发出；可以点「修改」改正文，或者点「不发」。
-  命令输出「已发出确认卡片」不等于消息已经发出，也不要请主人在对话里回复「确认」来代替点卡片。
+  命令输出「已发出确认卡片」和草稿 ID（前 8 位），不等于消息已经发出，也不要请主人在对话里回复「确认」来代替点卡片。
+  withdraw 撤回本话题里还在等主人确认的草稿，<草稿 ID> 是 reply 或 send 输出的 ID，写开头几位也行，只要不和别的草稿重复。
+          撤回后卡片写「Agent 已撤回」，不再有按钮。草稿不需要了（内容过时、换了说法、主人说不用发）就自己撤回，不要请主人点「不发」。
 
 选项：
   --text <正文>         reply 和 send 必填。去掉首尾空白后不能为空；每个 --mention 的 <名字> 都要在正文里写成 @<名字>。
@@ -46,6 +49,10 @@ Bridge 客户端，由客户端转给 Bridge。消息 ID 和聊天 ID 都是 ope
   这条消息不在本话题的来源里，先用 attach 放进来：先 attach 这条消息，再用它返回的来源做 reply；不要直接猜来源。
   正文去掉首尾空白后不能为空：补上真正要发的正文。正文里没有 @<名字>：在正文里按 --mention 的名字写出 @<名字>，或者去掉这个 mention。
   正文太长，确认卡片放不下：缩短正文后重新提交。确认卡片没有发出去：稍后重试，不要把它当成已经起草或已经发送。
+  本话题没有 ID 以 … 开头的草稿：核对 reply 或 send 输出的草稿 ID；只能撤回这个话题里起草的草稿。有多个草稿的 ID 以 … 开头：写完整的 ID。
+  这份草稿正在发送，不能撤回；这份草稿已经发出，不能撤回：消息已经或正在以主人身份发出，告诉主人。
+  主人点过「发送」但没有发出去，不能撤回：由主人在卡片上重试或者点「不发」。这份草稿已经不发了，不用撤回：什么都不用做。
+  主人正在修改这份草稿，不能撤回：等主人改完发送或者取消修改，不要反复重试。
   Bridge 没有配置 open-lark 所在的机器：告诉主人需要在控制面设置 BRIDGE_OPEN_LARK_MACHINE，Agent 不能自己绕过。
   <机器名> 的 Bridge 客户端不在线：告诉主人检查那台机器的客户端。<机器名> 的 Bridge 客户端没有配置 open-lark：告诉主人检查那台机器的 client.json。
   open-lark 没有响应：告诉主人检查 open-lark；确认恢复后再试。open-lark 拒绝了这次请求或发送：按它给的说明处理，不要反复重试。
@@ -54,7 +61,9 @@ Bridge 客户端，由客户端转给 Bridge。消息 ID 和聊天 ID 都是 ope
 `;
 type Op=keyof MessageOps;
 type Parsed=MessageRequest&{op?:string,id?:string,json:boolean,help?:boolean};
-const ops:Op[]=['attach','reply','send'];
+const ops:Op[]=['attach','reply','send','withdraw'];
+// The start of a draft's id that the command prints and withdraw accepts, as bridge-schedule shortens the ids of schedules.
+const short=(id:string)=>id.slice(0,8);
 // Whether v is an operation. The command loads only its own modules and the client's, so it does without oneOf of core.ts.
 const isOp=(v:unknown):v is Op=>ops.includes(v as Op);
 const usageError=(message:string)=>Object.assign(Error(message),{usage:true});
@@ -87,14 +96,17 @@ export async function main(argv:string[],{env=process.env,stdout=process.stdout,
   if(o.help){stdout.write(usage);return 0;}
   if(!isOp(o.op))throw usageError(o.op?'未知的操作：'+o.op:'缺少操作');
   const op=o.op,{json,help,id,pane:requestedPane,session:requestedSession,...fields}=o;
-  if(!id)throw usageError(op==='send'?'缺少聊天 ID':'缺少消息 ID');
-  if(op==='attach'&&fields.text!==undefined)throw usageError('--text 只用于 reply 和 send');
-  if(op==='attach'&&fields.mentions!==undefined)throw usageError('--mention 只用于 reply 和 send');
-  if(op!=='attach'&&fields.text===undefined)throw usageError(op+' 需要 --text');
+  if(!id)throw usageError(op==='send'?'缺少聊天 ID':op==='withdraw'?'缺少草稿 ID':'缺少消息 ID');
+  const drafts=op==='reply'||op==='send';
+  if(!drafts&&fields.text!==undefined)throw usageError('--text 只用于 reply 和 send');
+  if(!drafts&&fields.mentions!==undefined)throw usageError('--mention 只用于 reply 和 send');
+  if(drafts&&fields.text===undefined)throw usageError(op+' 需要 --text');
   const pane=requestedPane??env.HERDR_PANE_ID,session=requestedSession??env.HERDR_SESSION;
-  const body:MessageRequest={...op==='send'?{chatId:id}:{messageId:id},...op!=='attach'&&{text:fields.text,mentions:fields.mentions??[]},...pane&&{pane},...session&&{session}};
+  const target=op==='send'?{chatId:id}:op==='withdraw'?{draftId:id}:{messageId:id};
+  const body:MessageRequest={...target,...drafts&&{text:fields.text,mentions:fields.mentions??[]},...pane&&{pane},...session&&{session}};
   const r=await send(clientSocket(env),`/messages/${op}`,body);
-  const text='input' in r?`已放进话题：${sourceLine(r.input.body,Date.now())}`:'已发出确认卡片，主人点「发送」后才会发出';
+  const text='input' in r?`已放进话题：${sourceLine(r.input.body,Date.now())}`:op==='withdraw'?`已撤回草稿 ${short(r.delivery.id)}，卡片上写着「Agent 已撤回」`
+   :`已发出确认卡片，草稿 ID ${short(r.delivery.id)}，主人点「发送」后才会发出`;
   stdout.write((json?JSON.stringify(r,null,2):text)+'\n');return 0;
  }catch(e){stderr.write(`bridge-message: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
 }

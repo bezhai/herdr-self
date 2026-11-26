@@ -112,6 +112,13 @@ export class Tasks{
   if(body!==undefined&&!same(body,d.body)){d.body=body;d.key=randomUUID();}
   return this.#transmit(this.#enter(d,'sending',data));
  }
+ // Take back a delivery that awaits approval, for the task that made it: it ends rejected, as a rejecting decision leaves it, so that there
+ // is one state of an output that was not handed over, and the journal records the decision as withdrawn.
+ withdraw(deliveryId:string,note?:string):Delivery{
+  const d=this.#delivery(deliveryId);this.#open(d.task);
+  if(d.state!=='awaiting')throw fail('bad_state','这个交付不在等待批准：'+d.state);
+  return this.#enter(d,'rejected',{decision:'withdrawn',...note!==undefined&&{note}});
+ }
  // Try a failed delivery again with its key, through the policy.
  async retry(deliveryId:string):Promise<Delivery>{
   const d=this.#delivery(deliveryId),task=this.#open(d.task);

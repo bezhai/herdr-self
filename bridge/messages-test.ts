@@ -161,6 +161,41 @@ test('drop rejects the delivery and a later stale send click does not send it',a
  const updates=f.updates.length;assert.deepEqual(f.messages.click(app,click(d,'send')),toast('这条消息已取消发送'));await f.flush();
  assert.equal(f.calls.some(c=>c.method==='openLarkSend'),false);assert.equal(f.updates.length,updates);
 });
+test('withdraw takes back an awaiting draft of the topic by a unique prefix of its id: the card says the agent withdrew it and a stale click sends nothing',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]});
+ const {delivery:w}=await invoke(f,'withdraw',{pane:'pane',draftId:' '+d.id.slice(0,8)+' '});
+ assert.equal(w.id,d.id);assert.equal(w.state,'rejected');assert.equal(f.tasks.journal(f.topic.taskId!).at(-1)!.data.decision,'withdrawn');
+ await f.flush();assert.deepEqual(f.updates.at(-1),{app,messageId:'om_card_1',card:draftCard(current(f,d),'withdrawn',{render:2,now})});
+ assert.deepEqual(f.messages.click(app,click(d,'send')),toast('这条消息已取消发送'));await f.flush();
+ assert.equal(f.calls.some(c=>c.method==='openLarkSend'),false);assert.equal(f.updates.length,1);
+});
+test('withdraw refuses a missing id, a draft of another task, an ambiguous prefix, and a draft that is sending, sent, failed, not sent or being edited',async t=>{
+ const f=fixture();t.after(f.close);const draft=async()=>(await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[]})).delivery;
+ const withdraw=(draftId:unknown)=>invoke(f,'withdraw',{pane:'pane',draftId});
+ await assert.rejects(withdraw(undefined),/^Error: 缺少草稿 ID$/);await assert.rejects(withdraw('  '),/缺少草稿 ID/);
+ const other=f.tasks.create('别的话题'),elsewhere=await f.tasks.deliver(f.tasks.addOutput(other.id,{text:'别处',mentions:[]}).id,{sink:'as-owner',to:chat});
+ await assert.rejects(withdraw(elsewhere.id),(e:Error)=>e.message===`本话题没有 ID 以 ${elsewhere.id} 开头的草稿：只能撤回这个话题里起草的草稿，ID 见 reply 或 send 的输出`);
+ assert.equal(f.tasks.get(other.id).deliveries[0].state,'awaiting');
+ // Of 17 drafts, two share the first hexadecimal digit of their ids.
+ const many=[];for(let i=0;i<17;i++)many.push(await draft());
+ const shared=many.map(d=>d.id[0]).find((c,i,all)=>all.indexOf(c)!==i)!;
+ await assert.rejects(withdraw(shared),(e:Error)=>e.message===`有多个草稿的 ID 以 ${shared} 开头，请写完整的 ID`);
+ // The owner channel answers sends as answer does and reads chats as usual.
+ const sends=(answer:()=>unknown)=>f.respond(method=>method==='openLarkChat'?chat:method==='openLarkSend'?answer():sent);
+ let resolve!:(value:Sent)=>void;const sending=await draft();sends(()=>new Promise<Sent>(r=>{resolve=r;}));
+ f.messages.click(app,click(sending,'send'));await new Promise<void>(r=>setImmediate(r));
+ await assert.rejects(withdraw(sending.id),(e:Error)=>e.message==='这份草稿正在发送，不能撤回');
+ resolve(sent);await f.flush();await assert.rejects(withdraw(sending.id),(e:Error)=>e.message==='这份草稿已经发出，不能撤回');
+ const failed=await draft();sends(()=>{throw Object.assign(Error('x'),{code:'channel_unreachable'});});
+ f.messages.click(app,click(failed,'send'));await f.flush();assert.equal(current(f,failed).state,'failed');
+ await assert.rejects(withdraw(failed.id),(e:Error)=>e.message==='主人点过「发送」但没有发出去，不能撤回：由主人在卡片上重试或者点「不发」');
+ const dropped=await draft();f.messages.click(app,click(dropped,'drop'));await f.flush();
+ await assert.rejects(withdraw(dropped.id),(e:Error)=>e.message==='这份草稿已经不发了，不用撤回');
+ const edited=await draft();f.messages.click(app,click(edited,'edit'));await f.flush();
+ await assert.rejects(withdraw(edited.id),(e:Error)=>e.message==='主人正在修改这份草稿，不能撤回：等主人改完发送或者取消修改');
+ f.messages.click(app,click(edited,'cancel'));await f.flush();assert.equal((await withdraw(edited.id)).delivery.state,'rejected');
+ await assert.rejects(withdraw(edited.id),(e:Error)=>e.message==='这份草稿已经不发了，不用撤回');
+});
 test('edit draws the form and cancel restores the pending card without changing the delivery',async t=>{
  const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'原正文',mentions:[]});
  assert.deepEqual(f.messages.click(app,click(d,'edit')),toast('请修改正文'));await f.flush();

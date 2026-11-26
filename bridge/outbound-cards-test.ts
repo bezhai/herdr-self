@@ -91,7 +91,7 @@ test('an editing draft is a form with a multiline text input prefilled verbatim 
  assert.deepEqual(form.elements[2],{tag:'button',text:{tag:'plain_text',content:'取消'},type:'default',behaviors:[{type:'callback',value:{draft:'cancel',deliveryId:privateDraft.id,render:9}}]});
 });
 
-test('sent and dropped drafts retain their destination and text, show their outcome and have no buttons',()=>{
+test('sent, dropped and withdrawn drafts retain their destination and text, show their outcome and have no buttons',()=>{
  const sent=delivery('draft-group',{chatId:groupSource.chatId,chatName:groupSource.chatName,chatType:'group'},groupDraft.body as Body,{state:'delivered',receipt:{messageId:'sent-message',at:old,owner:'主人'}});
  const sentTitle='发到 GEO 小分队';
  assert.deepEqual(draftCard(sent,'sent',{render:10,now}),untitled(sentTitle,[
@@ -101,6 +101,9 @@ test('sent and dropped drafts retain their destination and text, show their outc
  const droppedTitle='回复 孙栎倩';
  assert.deepEqual(draftCard(dropped,'dropped',{render:11,now}),untitled(droppedTitle,[
   heading(droppedTitle),grey('发到你和 孙栎倩 的私聊，以你的身份发送'),quote(textOf(dropped)),plain('未发送'),
+ ],true));
+ assert.deepEqual(draftCard(dropped,'withdrawn',{render:12,now}),untitled(droppedTitle,[
+  heading(droppedTitle),grey('发到你和 孙栎倩 的私聊，以你的身份发送'),quote(textOf(dropped)),plain('Agent 已撤回'),
  ],true));
 });
 
@@ -134,7 +137,7 @@ test('no outbound card uses a tag that the other Bridge cards do not use',()=>{
  const message:OwnerMessage={...privateSource,text:'原消息'};
  const sent:Delivery={...privateDraft,state:'delivered',receipt:{messageId:'s',at:now,owner:'主人'}};
  const dropped:Delivery={...privateDraft,state:'rejected'};
- const cards=[sourceCard(message,now),...(['pending','editing'] as const).flatMap(view=>[draftCard(privateDraft,view,{render:1,now}),draftCard(groupDraft,view,{render:2,now,quoted:groupSource}),draftCard({...privateDraft,state:'failed',error:'失败'},view,{render:3,now})]),draftCard(sent,'sent',{render:4,now}),draftCard(dropped,'dropped',{render:5,now})];
+ const cards=[sourceCard(message,now),...(['pending','editing'] as const).flatMap(view=>[draftCard(privateDraft,view,{render:1,now}),draftCard(groupDraft,view,{render:2,now,quoted:groupSource}),draftCard({...privateDraft,state:'failed',error:'失败'},view,{render:3,now})]),draftCard(sent,'sent',{render:4,now}),draftCard(dropped,'dropped',{render:5,now}),draftCard(dropped,'withdrawn',{render:6,now})];
  for(const card of cards)visit(card);
  assert.deepEqual([...tags].filter(tag=>!knownTags.has(tag)),[]);
 });

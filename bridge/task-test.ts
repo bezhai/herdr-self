@@ -76,6 +76,19 @@ test('approve waits for decide; approving sends, rejecting records the decision 
  assert.deepEqual(tasks.journal(t.id).at(-1)!.data.note,'not this');assert.equal(tasks.journal(t.id).at(-1)!.data.decision,'rejected');
 });
 
+test('withdraw takes back an awaiting delivery as rejected, journals it as withdrawn and refuses any other state', async()=>{
+ const {tasks,s1,policy}=fixture();policy.deliveries.s1='approve';
+ const t=tasks.create('g'),o=tasks.addOutput(t.id,'x'),d=await tasks.deliver(o.id,{sink:'s1',to:'r'});
+ const w=tasks.withdraw(d.id,'obsolete');
+ assert.equal(w.state,'rejected');assert.equal(tasks.get(t.id).deliveries[0]!.state,'rejected');assert.equal(s1.calls.length,0);
+ const r=tasks.journal(t.id).at(-1)!;assert.equal(r.type,'delivery.rejected');assert.deepEqual(r.data,{delivery:d.id,output:o.id,target:{sink:'s1',to:'r'},decision:'withdrawn',note:'obsolete'});
+ assert.throws(()=>tasks.withdraw(d.id),code('bad_state'));assert.throws(()=>tasks.withdraw('nope'),code('not_found'));
+ policy.deliveries.s1='allow';const sent=await tasks.deliver(tasks.addOutput(t.id,'y').id,{sink:'s1',to:'r'});assert.throws(()=>tasks.withdraw(sent.id),code('bad_state'));
+ s1.fail='down';const failed=await tasks.deliver(tasks.addOutput(t.id,'z').id,{sink:'s1',to:'r'});assert.throws(()=>tasks.withdraw(failed.id),code('bad_state'));
+ policy.deliveries.s1='approve';const late=await tasks.deliver(tasks.addOutput(t.id,'w').id,{sink:'s1',to:'r'});tasks.end(t.id,'dropped','no');
+ assert.throws(()=>tasks.withdraw(late.id),code('ended'));
+});
+
 test('approving with a changed body replaces the body and the key; the same body keeps the key', async()=>{
  const {tasks,s1,policy}=fixture();policy.deliveries.s1='approve';
  const t=tasks.create('g'),o=tasks.addOutput(t.id,{text:'draft'});

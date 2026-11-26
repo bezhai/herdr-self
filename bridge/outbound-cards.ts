@@ -43,13 +43,13 @@ export function sourceCard(m:OwnerMessage,now:number):object{
  const line=sourceLine(m,now);
  return untitled(line,[grey(line),plain(m.text),...m.link?[{tag:'button',text:{tag:'plain_text',content:'查看原消息'},type:'default',behaviors:[{type:'open_url',default_url:m.link}]}]:[]],m.link?{update_multi:true}:undefined);
 }
-// How the card of a draft shows it: as its delivery's state has it (pending while awaiting or failed, sent, dropped), or editing while the owner
-// changes its text.
-export type DraftView='pending'|'sent'|'dropped'|'editing';
+// How the card of a draft shows it: as its delivery's state has it (pending while awaiting or failed, sent, dropped when the owner did not send
+// it, withdrawn when the agent took it back), or editing while the owner changes its text.
+export type DraftView='pending'|'sent'|'dropped'|'withdrawn'|'editing';
 // The card of delivery d, a message for the owner's channel, as view, where quoted is the message that a reply quotes. pending: where it goes and
 // as whom, the text, 发送, 修改 and 不发, and 发送失败：<failure> above the text when the last attempt failed (failure, else the delivery's error).
-// editing: a form whose input, named text, holds the text, with 发送, which submits it, and 取消. sent and dropped keep the text but have no
-// buttons. Every button carries {draft:<its action>,deliveryId:d.id,render}: every drawing of a card that can be clicked needs its own render
+// editing: a form whose input, named text, holds the text, with 发送, which submits it, and 取消. sent, dropped and withdrawn keep the text but
+// have no buttons. Every button carries {draft:<its action>,deliveryId:d.id,render}: every drawing of a card that can be clicked needs its own render
 // number (see pending in request-cards.ts).
 export function draftCard(d:Delivery,view:DraftView,{render,now,quoted,failure=d.error??undefined}:{render:number,now:number,quoted?:OwnerMessage,failure?:string}):object{
  const to=(d.target as {to:Address}).to,{text}=d.body as Body,deliveryId=d.id;
@@ -66,5 +66,6 @@ export function draftCard(d:Delivery,view:DraftView,{render,now,quoted,failure=d
  if(view==='pending')elements.push({tag:'column_set',horizontal_spacing:'8px',columns:[column('发送','primary',send),column('修改','default',{draft:'edit',deliveryId,render}),column('不发','default',{draft:'drop',deliveryId,render})]});
  if(view==='sent')elements.push(plain(`已发送给 ${to.chatName} · ${time((d.receipt as {at:number}).at,now)}`));
  if(view==='dropped')elements.push(plain('未发送'));
+ if(view==='withdrawn')elements.push(plain('Agent 已撤回'));
  return untitled(title,elements,{update_multi:true});
 }
