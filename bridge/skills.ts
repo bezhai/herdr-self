@@ -9,9 +9,9 @@ import type {SkillFiles} from './link.ts';
 
 // The skills of the platform, which the console's Skills page manages. Each is a directory named after it under skills/ in the state
 // directory, with its SKILL.md and any other files. The state file holds only their index, the collection skills: the name, the description
-// of the frontmatter of SKILL.md, preload, whether it is loaded by default (placed in the working directory of every topic before its agent
-// starts, see place) or read on demand, and the digest of its files. The state file is written whole on almost every event and the console
-// polls it every few seconds, so the files stay out of it: they are read when a skill is edited, read or placed.
+// of the frontmatter of SKILL.md, preload, whether it is loaded by default (placed in the global skill directories of every machine, which
+// every agent session there reads, see sync) or read on demand, and the digest of its files. The state file is written whole on almost every
+// event and the console polls it every few seconds, so the files stay out of it: they are read when a skill is edited, read or placed.
 
 // Where each machine keeps the skills that it got, one directory per skill (see placeSkills in machine.ts). No agent reads it as a global
 // skill directory, unlike ~/.agents/skills, which Codex reads.
@@ -21,6 +21,10 @@ const syncMs=120000;
 // Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
 // which Claude and Codex follow, or as a copy, since Antigravity follows no link.
 const places:Record<Kind,{dir:string,as:'link'|'copy'}>={claude:{dir:'.claude/skills',as:'link'},codex:{dir:'.agents/skills',as:'link'},agy:{dir:'.agents/skills',as:'copy'}};
+// The global skill directories of a machine, under its home directory, which every agent session there reads whoever started it, and how a
+// skill goes there, as in places: Claude reads ~/.claude/skills, Codex ~/.agents/skills and Antigravity ~/.gemini/config/skills. Codex reads
+// ~/.codex/skills as well, which gets none (none) and so loses those that Bridge placed there, so that a skill does not load twice.
+const globalPlaces:{dir:string,as:'link'|'copy',none?:true}[]=[{dir:'.claude/skills',as:'link'},{dir:'.agents/skills',as:'link'},{dir:'.gemini/config/skills',as:'copy'},{dir:'.codex/skills',as:'link',none:true}];
 
 // A name of the Agent Skills format: lowercase letters and digits with single hyphens between them, at most 64 characters, like its
 // directory; its description at most 1024 characters.
@@ -30,7 +34,7 @@ const validName=(n:unknown):n is string=>typeof n==='string'&&n.length<=64&&/^[a
 // them. A skill of 32 MiB is ~43 MB as base64 in JSON, under the 128 MiB that Node's WebSocket takes per message on the client (the ws
 // package of the control plane takes 100 MiB, and only small messages come that way); the client's socket for bridge-skill takes small
 // requests only, since a skill goes to the machine from the control plane. A message carries one skill (see sync), but placeSkills
-// carries all that a topic loads, so a few skills near the limit loaded by default together would not fit one.
+// carries all the skills loaded by default, so a few near the limit loaded by default together would not fit one.
 export const skillLimit=32<<20,requestLimit=Math.ceil(skillLimit/3)*4+65536;
 // The top-level fields of the YAML frontmatter that opens text, between two --- lines, or null without one. It reads YAML as far as skills
 // write it there: `key: value` lines whose value is plain, single- or double-quoted, and may go on in more indented lines, or is a block (|
@@ -115,10 +119,10 @@ export class Skills{
   this.entry(name);fs.rmSync(path.join(this.dir,name),{recursive:true,force:true});
   this.store.data.skills=this.store.data.skills.filter(x=>x.name!==name);this.store.save();this.store.log('skill','删除了 skill '+name);this.push();
  }
- // Sets whether skill name is loaded by default (see place).
+ // Sets whether skill name is loaded by default, which every machine follows at once (see sync).
  flag(name:string,preload:unknown){
   const s=this.entry(name);s.preload=Boolean(preload);this.store.save();
-  this.store.log('skill',`skill ${name} 已设为${s.preload?'默认加载':'按需读取'}，之后新开的话题生效`);return s;
+  this.store.log('skill',`skill ${name} 已设为${s.preload?'默认加载，每台机器上之后启动的 Agent 会话都会加载它':'按需读取，Agent 需要时用 bridge-skill 读取'}`);this.push();return s;
  }
  // The entries of the skills whose name, description or SKILL.md hold every word of query, in any case: those with them in the name or
  // the description first, each part in the order of the names.
@@ -128,22 +132,28 @@ export class Skills{
   const named=this.list().filter(s=>has(about(s)));
   return [...named,...this.list().filter(s=>!named.includes(s)&&has(about(s)+'\n'+this.text(s.name)))];
  }
- // Places the skills loaded by default and those named in extra (the skills of the topic's project), as they are when the placement runs,
- // where the agent of binding kind kind reads project skills in working directory cwd on machine m, whose leading ~/ is that machine's
- // home, and takes away those that Bridge placed there before and that are no longer wanted: the request placeSkills to the client of m,
- // with the skills as data. A name of extra that is no skill of the platform any more is left out. Resolves to the paths of same-name
- // skills that are not Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after
- // another, since they share its store.
- place(m:Machine,cwd:string,kind:Kind,extra:string[]=[]){
-  const skills=():SkillFiles[]=>this.list().filter(s=>s.preload||extra.includes(s.name)).map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});
-  return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:skills(),...places[kind],cwd}));
+ // Entries of the index with their files, as skills go to a machine.
+ withFiles(skills:Skill[]):SkillFiles[]{return skills.map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});}
+ // Places the skills named in names (the skills of the topic's project) other than those loaded by default, which every session of the
+ // machine has from its global skill directories (see sync), as they are when the placement runs, where the agent of binding kind kind
+ // reads project skills in working directory cwd on machine m, whose leading ~/ is that machine's home, and takes away those that Bridge
+ // placed there before and that are no longer wanted, those loaded by default among them: the request placeSkills to the client of m, with
+ // the skills as data. A name that is no skill of the platform any more is left out. Resolves to the paths of same-name skills that are not
+ // Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after another, since they
+ // share its store.
+ place(m:Machine,cwd:string,kind:Kind,names:string[]=[]){
+  return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:this.withFiles(this.list().filter(s=>!s.preload&&names.includes(s.name))),...places[kind],cwd}));
  }
- // Brings the store of machine m in line with the platform: sends the client the list of the skills with their digests, which names those
- // it lacks or holds in another version (compareSkills), sends it those one at a time (stockSkill), then lets it take away the skills of
- // Bridge's that are not on the list (pruneSkills). Only what changed travels: the whole platform is tens of MB and one edit touches one
- // skill. It runs in the queue of m, after the placements and syncs queued before, since they share the store; the list and each skill are
- // read when their turn comes, and a skill that went from the platform meanwhile is skipped (the sync of its removal follows). Resolves to
- // how many skills it updated and took away, and rejects with what failed.
+ // Brings the store and the global skill directories of machine m in line with the platform. The store: sends the client the list of the
+ // skills with their digests, which names those it lacks or holds in another version (compareSkills), sends it those one at a time
+ // (stockSkill), then lets it take away the skills of Bridge's that are not on the list (pruneSkills). Only what changed travels there: the
+ // whole platform is tens of MB and one edit touches one skill. The global skill directories (see globalPlaces): one placeSkills each, under
+ // the home directory of m, with the skills loaded by default as they are then and their files, which the client writes only where their
+ // content changed; Bridge's skills that are not among them go, there as in a working directory. It runs in the queue of m, after the
+ // placements and syncs queued before, since they share the store; the list and each skill are read when their turn comes, and a skill that
+ // went from the platform meanwhile is skipped (the sync of its removal follows). Resolves to how many skills it updated and took away in
+ // the store and the paths of same-name skills in the global skill directories that are not Bridge's, which the client left alone, and
+ // rejects with what failed.
  sync(m:Machine){
   return enqueue(this.queues,m.id,async()=>{
    const list=this.list().map(({name,digest})=>({name,digest})),options={timeoutMs:syncMs};
@@ -153,18 +163,23 @@ export class Skills{
     const {digest,files}=this.read(name);await this.call(m,'stockSkill',{store:machineStore,skill:{name,digest,files}},options);updated++;
    }
    const {removed}=await this.call(m,'pruneSkills',{store:machineStore,names:list.map(s=>s.name)},options);
-   return {updated,removed:removed.length};
+   const loaded=this.withFiles(this.list().filter(s=>s.preload)),theirs:string[]=[];
+   for(const {none,...at} of globalPlaces)theirs.push(...await this.call(m,'placeSkills',{store:machineStore,skills:none?[]:loaded,...at,cwd:'~/'},options));
+   return {updated,removed:removed.length,theirs};
   });
  }
- // sync for the log, for a machine in use: what it did is one line unless nothing changed, and what failed is an error with its reason. It
- // never rejects: the client that joins and the change that is pushed go on, and the next alignment makes up for a failed one. A machine
- // whose client is offline is skipped without a word, since it is aligned when its client joins.
+ // sync for the log, for a machine in use: what it did to the store is one line unless nothing changed, each same-name skill of others in
+ // a global skill directory is one, and what failed is an error with its reason. It never rejects: the client that joins and the change
+ // that is pushed go on, and the next alignment makes up for a failed one. A machine whose client is offline is skipped without a word,
+ // since it is aligned when its client joins.
  async align(m:Machine){
   if(!m.enabled)return;
-  try{const {updated,removed}=await this.sync(m);if(updated||removed)this.store.log('skill',`${m.name}：skill 副本已和平台一致，更新 ${updated} 个，删除 ${removed} 个`);}
-  catch(e){if(e.code!=='client_offline')this.store.log('skill',`${m.name}：未能更新 skill 副本，${e.message}`,'error');}
+  try{
+   const {updated,removed,theirs}=await this.sync(m);if(updated||removed)this.store.log('skill',`${m.name}：skill 副本已和平台一致，更新 ${updated} 个，删除 ${removed} 个`);
+   for(const p of theirs)this.store.log('skill',`${m.name}：${p} 已存在同名 skill，不是 Bridge 写入的，未改动`);
+  }catch(e){if(e.code!=='client_offline')this.store.log('skill',`${m.name}：未能更新 skill 副本，${e.message}`,'error');}
  }
- // Aligns every machine after a change of the platform (see write and remove); the changes of the flag alone do not need it. It does not wait.
+ // Aligns every machine after a change of the platform (see write, remove and flag). It does not wait.
  push(){for(const m of this.store.data.machines)void this.align(m);}
  // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
  // the entries that match body.query; read, skill body.name with the text of its SKILL.md and the paths of its other files, which the

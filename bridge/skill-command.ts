@@ -139,7 +139,7 @@ async function manage(op:Exclude<Op,Read>,[first,second]:string[],env:NodeJS.Pro
    for(const [p,b] of Object.entries(files)){await fs.promises.mkdir(path.dirname(path.join(target,p)),{recursive:true});await fs.promises.writeFile(path.join(target,p),Buffer.from(b,'base64'));}
    return `已导出到 ${target}。`;
   }
-  case 'preload':await api('skills/preload',{name:first,preload:second==='on'});return `已把 skill ${first} 设为${second==='on'?'默认加载':'按需读取'}，之后新开的话题生效。`;
+  case 'preload':await api('skills/preload',{name:first,preload:second==='on'});return `已把 skill ${first} 设为${second==='on'?'默认加载，每台机器上之后启动的 Agent 会话都会加载它':'按需读取，Agent 需要时用 bridge-skill 读取'}。`;
   default:await api('skills/remove',{name:first});return `已删除 skill ${first}。`;
  }
 }

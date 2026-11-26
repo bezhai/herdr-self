@@ -136,18 +136,18 @@ export function methods({herdr,env,openLark,services={}}:{herdr:string,env:NodeJ
    const origin=await git(real,['config','--get','remote.origin.url'],timeoutMs);
    return {origin:origin.code===0&&origin.stdout.trim()||null};
   },
-  // Places skills ([{name, digest, files}], files as {relative path: base64}) where an agent reads project skills, directory dir under
-  // working directory cwd, and takes away the skills that Bridge placed there before and that skills no longer has. The store, a directory
-  // of this machine that no agent reads as a global skill directory, holds each skill as the control plane has it (see stock). A skill of
-  // the working directory is Bridge's when it is a link to the store or a directory with Bridge's marker, which holds the digest of the
-  // skill it was copied from; so are the links and copies of the one skill that earlier versions of Bridge carried, which had the store
-  // in the same place, and marked their copies the same way. As link, a skill becomes a link to the store, which Claude and Codex follow;
-  // as copy, a copy, since Antigravity follows no link: a copy is written again when the digest changed, and a link of Bridge's that a
-  // copy has to replace is replaced. Anything else of a name of skills is someone else's: it stays as it is and its path is in what this
-  // resolves to. In a Git repository each skill placed goes into the info/exclude of the repository that holds where it actually is, which
-  // a link in the path such as .claude/skills -> ../.agents/skills can change, as its path from the top level of that repository; linked
-  // worktrees share that file, so a skill taken away keeps its line, which another worktree may need. Without skills, a working directory
-  // without dir does not get one. Rejects on the first step that fails.
+  // Places skills ([{name, digest, files}], files as {relative path: base64}) where an agent reads skills, directory dir under cwd: a
+  // working directory for project skills, or the home directory for global ones (see Skills.sync), and takes away the skills that Bridge
+  // placed there before and that skills no longer has. The store, a directory of this machine that no agent reads as a global skill
+  // directory, holds each skill as the control plane has it (see stock). A skill of dir is Bridge's when it is a link to the store or a
+  // directory with Bridge's marker, which holds the digest of the skill it was copied from; so are the links and copies of the one skill
+  // that earlier versions of Bridge carried, which had the store in the same place, and marked their copies the same way. As link, a skill
+  // becomes a link to the store, which Claude and Codex follow; as copy, a copy, since Antigravity follows no link: a copy is written again
+  // when the digest changed, and a link of Bridge's that a copy has to replace is replaced. Anything else of a name of skills is someone
+  // else's: it stays as it is and its path is in what this resolves to. In a Git repository each skill placed goes into the info/exclude of
+  // the repository that holds where it actually is, which a link in the path such as .claude/skills -> ../.agents/skills can change, as its
+  // path from the top level of that repository; linked worktrees share that file, so a skill taken away keeps its line, which another
+  // worktree may need. Without skills, a cwd without dir does not get one. Rejects on the first step that fails.
   async placeSkills({store,skills,dir:under,as,cwd,timeoutMs}){
    const kept=local(store,'store'),dir=path.join(local(cwd,'cwd'),inside(under,'dir')),names=skillsOf(skills).map(s=>s.name);if(!['link','copy'].includes(as))throw invalid('as');
    for(const s of skills)await stock(kept,s);

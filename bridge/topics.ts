@@ -84,7 +84,7 @@ export class Topics{
  // writes a file and resolves to its absolute path, and removeDirectory(m,dir) removes such a directory; askModel(prompt)
  // asks the model (see routing.ts); prepareWorkspace, removeWorkspace and prepareLaunch take the params of their ClientApi entry (see
  // link.ts). Each rejects with the code client_offline while the client of m is offline. placeSkills(m,cwd,kind,skills)
- // places the skills loaded by default and those of a project, named in skills, where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
+ // places the skills of a project, named in skills, other than those loaded by default, where an agent of binding kind kind reads them in directory cwd on machine m, takes away those
  // that Bridge placed there before and that are no longer wanted, and resolves to the paths of same-name skills of others (see Skills.place). machine(id) and app(id) return a machine or an app, or throw; reply(app,chatId,rootId,{card})
  // answers in the topic thread with a card and resolves to the message id; updateCard(app,messageId,card) replaces a card sent that way;
  // react(app,messageId,emojiType) resolves to a reaction id for unreact(app,messageId,reactionId); request(app,options) calls a Feishu OpenAPI
@@ -447,9 +447,10 @@ export class Topics{
    else this.update(t,{startCard:await this.reply(a,t.chatId,t.rootId,{card})});
   }catch(e){this.store.log('话题通知',`${a.name}：话题的第一张卡片未发出，${brief(e)}`,'error');}
  }
- // Places the skills loaded by default and those of the project, named in skills, for the agent of kind kind in its working directory cwd on
- // machine m, which exists by then, right before the agent starts and loads them (see Skills.place). Same-name skills of others are left
- // alone and logged. Never rejects: a failure is only logged, and the agent starts without the skills.
+ // Places the skills of the project, named in skills, for the agent of kind kind in its working directory cwd on machine m, which exists
+ // by then, right before the agent starts and loads them, with those loaded by default, which it has from the global skill directories of
+ // the machine (see Skills.place). Same-name skills of others are left alone and logged. Never rejects: a failure is only logged, and the
+ // agent starts without the skills.
  async place(m:Machine,b:Binding,kind:Kind,cwd:string,skills:string[]){
   try{for(const p of await this.placeSkills(m,cwd,kind,skills))this.store.log('skill',`${b.name}：${p} 已存在同名 skill，不是 Bridge 写入的，未改动`);}
   catch(e){this.store.log('skill',`${b.name}：未能在 ${cwd} 放置 skill，${brief(e)}`,'error');}
