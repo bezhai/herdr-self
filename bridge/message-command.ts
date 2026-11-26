@@ -1,5 +1,7 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import {clientSocket,send} from './client.ts';
-import {sourceLine} from './outbound-cards.ts';
+import {sourceLine,oversized} from './outbound-cards.ts';
 import type {Output} from './client.ts';
 import type {MessageOps,MessageRequest} from './messages.ts';
 // bridge-message, the command line through which the agent of a Feishu topic brings a Feishu message into its topic and drafts messages
@@ -9,8 +11,8 @@ import type {MessageOps,MessageRequest} from './messages.ts';
 // Bridge's answer. Its help is complete on its own: the skill that tells agents when to use it leaves the details of the command to it.
 export const usage=`用法：
   bridge-message attach <消息 ID>
-  bridge-message reply <消息 ID> --text <正文> [--mention <用户 ID>=<名字>]...
-  bridge-message send <聊天 ID> --text <正文> [--mention <用户 ID>=<名字>]...
+  bridge-message reply <消息 ID> --text <正文> [--mention <用户 ID>=<名字>]... [--image <路径>]... [--file <路径>]... [--doc-access view|edit]
+  bridge-message send <聊天 ID> --text <正文> [--mention <用户 ID>=<名字>]... [--image <路径>]... [--file <路径>]... [--doc-access view|edit]
   bridge-message withdraw <草稿 ID>
 
 由 Bridge 开的飞书话题里的 Agent 运行，把一条飞书消息放进这个话题作为来源，起草以主人身份发出的飞书消息，或者撤回还在等主人
@@ -35,6 +37,12 @@ export const usage=`用法：
                         )" 传。正文长到确认卡片放不下时 Bridge 会拒绝，缩短后重新提交。
   --mention <ID>=<名字>  @一个人；reply 和 send 可以重复给出，每个 mention 一次。<ID> 是 open-lark 的用户 ID，<名字> 是正文里
                         @ 后面显示的名字，例如 --mention u_123=陈帆，正文里写 @陈帆。名字里有 = 时只有第一个 = 是分隔符。
+  --image <路径>         reply 和 send 可以重复给出：正文之后把这张图片单独发成一条消息。PNG、JPEG、GIF、WebP 或 BMP，最大 7.5 MB。
+  --file <路径>          reply 和 send 可以重复给出：正文之后把这个文件单独发成一条消息，最大 20 MB。图片和文件按命令行里的先后
+                        顺序发出，每份草稿加起来最大 50 MB；起草时在这台机器上读取，卡片列出每个的名字和大小，主人点一次「发送」
+                        全部发出。回复的附件和正文发在同一个地方：引用同一条消息，或者发在同一个话题里。
+  --doc-access view|edit 正文发出后，给这个聊天开放正文里链接的文档的查看（view）或编辑（edit）权限，用在文档还没有共享给对方时。
+                        只开放 open-lark 在发出的消息里认出的文档；开放失败不影响已经发出的消息，卡片上写明哪些没有开放和原因。
   --json                输出 Bridge 返回的 JSON，而不是给 Agent 读的文字。
   --pane <pane>         Agent 所在的 Herdr pane，默认取 HERDR_PANE_ID。
   --session <名称>      Agent 所在的 Herdr session，默认取 HERDR_SESSION，都没有时是 default。
@@ -54,6 +62,9 @@ export const usage=`用法：
   这份草稿正在发送，不能撤回；这份草稿已经发出，不能撤回：消息已经或正在以主人身份发出，告诉主人。
   主人点过「发送」但没有发出去，不能撤回：由主人在卡片上重试或者点「不发」。这份草稿已经不发了，不用撤回：什么都不用做。
   主人正在修改这份草稿，不能撤回：等主人改完发送或者取消修改，不要反复重试。
+  读不到 <路径>、<路径> 不是文件：核对路径。超过每个附件 20 MB 的上限、附件加起来超过每份草稿 50 MB 的上限：压缩、拆开，或者改发文档链接。
+  图片 … 超过 7.5 MB、… 不是 PNG、JPEG、GIF、WebP 或 BMP 图片：改用 --file 发送。
+  正文里没有链接，没有可以开放权限的文档：在正文里写上文档链接，或者去掉 --doc-access。
   Bridge 没有配置 open-lark 所在的机器：告诉主人需要在控制面设置 BRIDGE_OPEN_LARK_MACHINE，Agent 不能自己绕过。
   <机器名> 的 Bridge 客户端不在线：告诉主人检查那台机器的客户端。<机器名> 的 Bridge 客户端没有配置 open-lark：告诉主人检查那台机器的 client.json。
   open-lark 没有响应：告诉主人检查 open-lark；确认恢复后再试。open-lark 拒绝了这次请求或发送：按它给的说明处理，不要反复重试。
@@ -61,7 +72,9 @@ export const usage=`用法：
   其他拒绝：按 Bridge 输出的原因改正后再试；原因保持不变时不要反复提交。
 `;
 type Op=keyof MessageOps;
-type Parsed=MessageRequest&{op?:string,id?:string,json:boolean,help?:boolean};
+// An --image or --file as given: its kind and its path on this machine.
+type Given={kind:'image'|'file',path:string};
+type Parsed=Omit<MessageRequest,'attachments'|'docAccess'>&{op?:string,id?:string,json:boolean,help?:boolean,files?:Given[],docAccess?:string};
 const ops:Op[]=['attach','reply','send','withdraw'];
 // The start of a draft's id that the command prints and withdraw accepts, as bridge-schedule shortens the ids of schedules.
 const short=(id:string)=>id.slice(0,8);
@@ -69,16 +82,18 @@ const short=(id:string)=>id.slice(0,8);
 const isOp=(v:unknown):v is Op=>ops.includes(v as Op);
 const usageError=(message:string)=>Object.assign(Error(message),{usage:true});
 // The operation, id and options of args: an option takes the next argument, or what follows its =, whatever it looks like. A mention splits
-// at its first = so that a person's displayed name may itself contain one.
+// at its first = so that a person's displayed name may itself contain one. Images and files keep the order in which they are given.
 function parse(args:string[]):Parsed{
  const out:Parsed={json:false},positional:string[]=[];
  for(let i=0;i<args.length;i++){
   const a=args[i],eq=a.startsWith('--')?a.indexOf('='):-1,flag=eq>0?a.slice(0,eq):a;
   if(a==='--json'){out.json=true;continue;}
   if(a==='--help'||a==='-h'){out.help=true;continue;}
-  if(['--text','--pane','--session','--mention'].includes(flag)){
+  if(['--text','--pane','--session','--mention','--image','--file','--doc-access'].includes(flag)){
    const value=eq>0?a.slice(eq+1):args[++i];if(value==null)throw usageError(flag+' 缺少值');
-   if(flag==='--mention'){
+   if(flag==='--image'||flag==='--file')(out.files??=[]).push({kind:flag==='--image'?'image':'file',path:value});
+   else if(flag==='--doc-access')out.docAccess=value;
+   else if(flag==='--mention'){
     const split=value.indexOf('=');if(split<=0||split===value.length-1)throw usageError('--mention 要写成 <用户 ID>=<名字>');
     (out.mentions??=[]).push({id:value.slice(0,split),name:value.slice(split+1)});
    }else out[flag.slice(2) as 'text'|'pane'|'session']=value;
@@ -89,6 +104,17 @@ function parse(args:string[]):Parsed{
  }
  if(positional.length>2)throw usageError('多余的参数：'+positional.slice(2).join(' '));
  const [op,id]=positional;return {...op!=null&&{op},...id!=null&&{id},...out};
+}
+// The images and files as Bridge takes them: each read on this machine, named by its file name, as base64. Sizes are checked before anything
+// is read, with the limits that Bridge checks again.
+function attachments(files:Given[]){
+ const found=files.map(f=>{
+  let stat;try{stat=fs.statSync(f.path);}catch(e){throw Error(`读不到 ${f.path}：${e.code||e.message}`);}
+  if(!stat.isFile())throw Error(`${f.path} 不是文件`);
+  return {...f,name:path.basename(f.path),size:stat.size};
+ });
+ const refused=oversized(found);if(refused)throw Error(refused);
+ return found.map(f=>{let data;try{data=fs.readFileSync(f.path).toString('base64');}catch(e){throw Error(`读不到 ${f.path}：${e.code||e.message}`);}return {kind:f.kind,name:f.name,data};});
 }
 // Runs bridge-message with argv, printing to stdout and stderr; resolves to the exit code. It reaches the client at clientSocket(env).
 export async function main(argv:string[],{env=process.env,stdout=process.stdout,stderr=process.stderr}:{env?:NodeJS.ProcessEnv,stdout?:Output,stderr?:Output}={}):Promise<number>{
@@ -101,10 +127,15 @@ export async function main(argv:string[],{env=process.env,stdout=process.stdout,
   const drafts=op==='reply'||op==='send';
   if(!drafts&&fields.text!==undefined)throw usageError('--text 只用于 reply 和 send');
   if(!drafts&&fields.mentions!==undefined)throw usageError('--mention 只用于 reply 和 send');
+  if(!drafts&&fields.files?.some(f=>f.kind==='image'))throw usageError('--image 只用于 reply 和 send');
+  if(!drafts&&fields.files!==undefined)throw usageError('--file 只用于 reply 和 send');
+  if(!drafts&&fields.docAccess!==undefined)throw usageError('--doc-access 只用于 reply 和 send');
+  if(fields.docAccess!==undefined&&fields.docAccess!=='view'&&fields.docAccess!=='edit')throw usageError('--doc-access 只能是 view 或 edit');
   if(drafts&&fields.text===undefined)throw usageError(op+' 需要 --text');
   const pane=requestedPane??env.HERDR_PANE_ID,session=requestedSession??env.HERDR_SESSION;
   const target=op==='send'?{chatId:id}:op==='withdraw'?{draftId:id}:{messageId:id};
-  const body:MessageRequest={...target,...drafts&&{text:fields.text,mentions:fields.mentions??[]},...pane&&{pane},...session&&{session}};
+  const {docAccess}=fields,carried={...fields.files&&{attachments:attachments(fields.files)},...docAccess&&{docAccess:docAccess as 'view'|'edit'}};
+  const body:MessageRequest={...target,...drafts&&{text:fields.text,mentions:fields.mentions??[],...carried},...pane&&{pane},...session&&{session}};
   const r=await send(clientSocket(env),`/messages/${op}`,body);
   const text='input' in r?`已放进话题：${sourceLine(r.input.body,Date.now())}`:op==='withdraw'?`已撤回草稿 ${short(r.delivery.id)}，卡片上写着「Agent 已撤回」`
    :`已发出确认卡片，草稿 ID ${short(r.delivery.id)}，主人点「发送」后才会发出`;

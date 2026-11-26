@@ -130,6 +130,45 @@ test('all fixed wording avoids 他 and 她, and message and draft bodies stay in
  assert.ok(texts.includes(message.text));assert.ok(texts.includes(textOf(privateDraft)));
 });
 
+// A group draft with an image and a file after its text and edit access for the docs it links, before and after it went out.
+const ids=['00000000-0000-4000-8000-00000000000a','00000000-0000-4000-8000-00000000000b'];
+const attached=delivery('draft-files',{chatId:groupSource.chatId,chatName:groupSource.chatName,chatType:'group'},{text:'方案见 https://example.feishu.cn/docx/abc 和 https://example.feishu.cn/sheets/def。',mentions:[],
+ attachments:[{kind:'image',name:'截图.png',size:900,id:ids[0]},{kind:'file',name:'季度报告.pdf',size:3.25*1024*1024,id:ids[1]}],docAccess:'edit'});
+const files=plain('正文之后发送：\n图片 截图.png · 900 B\n文件 季度报告.pdf · 3.3 MB');
+const access=plain('发出后给这个聊天开放文档的编辑权限：\nhttps://example.feishu.cn/docx/abc\nhttps://example.feishu.cn/sheets/def');
+const attachedSent=(docs:object)=>({...attached,state:'delivered' as const,receipt:{messageId:'s1',at:old,owner:'主人',attachments:['s2',null],...docs}});
+
+test('a draft with attachments and doc access lists every attachment with its size and the links whose access opens, while pending and while edited',()=>{
+ const title='发到 GEO 小分队';
+ assert.deepEqual(draftCard(attached,'pending',{render:3,now}),untitled(title,[heading(title),grey('以你的身份发送'),quote(textOf(attached)),files,access,actions(attached,3)],true));
+ const editing=(draftCard(attached,'editing',{render:4,now}) as any).body.elements;
+ assert.deepEqual(editing.slice(0,4),[heading(title),grey('以你的身份发送'),files,access]);assert.equal(editing[4].tag,'form');
+ const unlinked=delivery('d',{chatId:'c',chatName:'群',chatType:'group'},{text:'链接被改掉了',mentions:[],docAccess:'view'});
+ assert.deepEqual((draftCard(unlinked,'pending',{render:5,now}) as any).body.elements[3],plain('发出后给这个聊天开放文档的查看权限：\n正文里没有链接'));
+ assert.equal(JSON.stringify(draftCard(privateDraft,'pending',{render:6,now})).includes('正文之后发送'),false);
+});
+
+test('a sent draft with doc access says how many docs got access and which did not and why, or that none were found or the request failed',()=>{
+ const title='发到 GEO 小分队',top=[heading(title),grey('以你的身份发送'),quote(textOf(attached)),files,access,plain('已发送给 GEO 小分队 · 1月2日 10:49')];
+ const shown=(docs:object)=>draftCard(attachedSent(docs),'sent',{render:7,now});
+ const doc=(title:string,granted:boolean,reason?:string)=>({url:'https://example.feishu.cn/'+title,title,granted,...reason&&{reason}});
+ assert.deepEqual(shown({docs:[doc('方案',true),doc('表格',true)]}),untitled(title,[...top,plain('已给这个聊天开放 2 个文档的编辑权限')],true));
+ assert.deepEqual(shown({docs:[doc('方案',true),doc('表格',false,'只能开放查看权限')]}),untitled(title,[...top,plain('已给这个聊天开放 1 个文档的编辑权限\n没有开放：表格：只能开放查看权限')],true));
+ assert.deepEqual(shown({docs:[doc('',false,'不能开放编辑权限')]}),untitled(title,[...top,plain('没有开放：https://example.feishu.cn/：不能开放编辑权限')],true));
+ assert.deepEqual(shown({docs:[]}),untitled(title,[...top,plain('没有找到可以开放权限的文档')],true));
+ assert.deepEqual(shown({docs:[],docsError:'open-lark 没有响应'}),untitled(title,[...top,plain('文档权限没有开放：open-lark 没有响应')],true));
+});
+
+test('once the text of a draft went out, its pending card has no 修改 and its dropped card says what went out',()=>{
+ const failed:Delivery={...attached,state:'failed',error:'正文和前 1 个附件已发出，文件 季度报告.pdf 没有发出去：open-lark 没有响应'};
+ const progress={text:{messageId:'s1',at:old,owner:'主人'},attachments:{[ids[0]]:'s2'}},title='发到 GEO 小分队';
+ assert.deepEqual(draftCard(failed,'pending',{render:8,now,progress}),untitled(title,[heading(title),grey('以你的身份发送'),plain('发送失败：'+failed.error),quote(textOf(attached)),files,access,
+  {tag:'column_set',horizontal_spacing:'8px',columns:[callbackButton('发送','primary',{draft:'send',deliveryId:failed.id,render:8}),callbackButton('不发','default',{draft:'drop',deliveryId:failed.id,render:8})]}],true));
+ assert.deepEqual((draftCard({...failed,state:'rejected'},'dropped',{render:9,now,progress}) as any).body.elements.at(-1),plain('已发出正文和 1 个附件，其余未发送'));
+ assert.deepEqual((draftCard({...failed,state:'rejected'},'dropped',{render:9,now,progress:{...progress,attachments:{}}}) as any).body.elements.at(-1),plain('已发出正文，其余未发送'));
+ assert.deepEqual((draftCard({...failed,state:'rejected'},'dropped',{render:9,now,progress:{attachments:{}}}) as any).body.elements.at(-1),plain('未发送'));
+});
+
 // The tags of the cards that Bridge already posts elsewhere (message-cards.ts, request-cards.ts, schedule-cards.ts), which Feishu has accepted.
 const knownTags=new Set(['button','column','column_set','div','form','input','markdown','multi_select_static','plain_text','select_static']);
 test('no outbound card uses a tag that the other Bridge cards do not use',()=>{
@@ -144,7 +183,7 @@ test('no outbound card uses a tag that the other Bridge cards do not use',()=>{
  const message:OwnerMessage={...privateSource,text:'原消息'};
  const sent:Delivery={...privateDraft,state:'delivered',receipt:{messageId:'s',at:now,owner:'主人'}};
  const dropped:Delivery={...privateDraft,state:'rejected'};
- const cards=[sourceCard(message,now),...(['pending','editing'] as const).flatMap(view=>[draftCard(privateDraft,view,{render:1,now}),draftCard(groupDraft,view,{render:2,now,quoted:groupSource}),draftCard({...privateDraft,state:'failed',error:'失败'},view,{render:3,now})]),draftCard(sent,'sent',{render:4,now}),draftCard(dropped,'dropped',{render:5,now}),draftCard(dropped,'withdrawn',{render:6,now})];
+ const cards=[sourceCard(message,now),...(['pending','editing'] as const).flatMap(view=>[draftCard(privateDraft,view,{render:1,now}),draftCard(groupDraft,view,{render:2,now,quoted:groupSource}),draftCard({...privateDraft,state:'failed',error:'失败'},view,{render:3,now})]),draftCard(sent,'sent',{render:4,now}),draftCard(dropped,'dropped',{render:5,now}),draftCard(dropped,'withdrawn',{render:6,now}),draftCard(attached,'pending',{render:7,now}),draftCard(attachedSent({docs:[]}),'sent',{render:8,now})];
  for(const card of cards)visit(card);
  assert.deepEqual([...tags].filter(tag=>!knownTags.has(tag)),[]);
 });

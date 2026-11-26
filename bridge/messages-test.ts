@@ -1,6 +1,6 @@
 // Tests of messages.ts (see package.json); run with node --test.
 import {test} from 'node:test';import strictAssert from 'node:assert/strict';import fs from 'node:fs';import os from 'node:os';import path from 'node:path';
-import {Messages,ownerSink} from './messages.ts';import {notice} from './message-cards.ts';import {Store} from './core.ts';import {Tasks} from './task-core.ts';import {sourceCard,draftCard} from './outbound-cards.ts';import {clip} from './request-cards.ts';
+import {Messages,ownerSink} from './messages.ts';import {Outbox} from './outbox.ts';import {notice} from './message-cards.ts';import {Store} from './core.ts';import {Tasks} from './task-core.ts';import {sourceCard,draftCard} from './outbound-cards.ts';import {clip} from './request-cards.ts';
 import type {Call} from './core.ts';import type {App,Machine,Topic} from './state.ts';import type {ClientApi,OwnerMessage,Sent} from './link.ts';import type {Click} from './request-cards.ts';import type {MessageOps} from './messages.ts';import type {Body} from './outbound-cards.ts';
 import type {Delivery,Policy} from './task-types.ts';
 // The assertions of node:assert/strict without narrowing what they check: the state of a delivery changes after an assertion.
@@ -21,6 +21,12 @@ const app:App={id:'a',name:'机器人',appId:'cli_test',appSecret:'test',domain:
 const message:OwnerMessage={chatId:'chat-1',chatName:'GEO 小分队',chatType:'group',messageId:'message-1',sender:{id:'u1',name:'陈帆'},at:now-1000,text:'原消息',link:'https://example.test/message'};
 const chat={chatId:'chat-2',chatName:'产品讨论',chatType:'group'} as const;
 const sent:Sent={messageId:'sent-1',at:now+1000,owner:'主人'};
+// A doc that open-lark found in a sent message and gave the chat access to.
+const doc={url:'https://example.feishu.cn/docx/abc',title:'方案',granted:true};
+// An image and a file as bridge-message sends them, and a text that links the doc.
+const png=Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2]),pdf=Buffer.from('%PDF-1.7 报告');
+const files=[{kind:'image',name:'截图.png',data:png.toString('base64')},{kind:'file',name:'季度报告.pdf',data:pdf.toString('base64')}];
+const linked='方案见 https://example.feishu.cn/docx/abc';
 // The policy of server.ts: what goes out as the owner needs approval, nothing else does.
 const policy:Policy={deliver:(_t,_o,target)=>'sink' in target&&target.sink==='as-owner'?'approve':'allow',end:()=>'allow'};
 // A ready topic with only the fields Messages reads; it has no task yet.
@@ -29,19 +35,26 @@ function makeTopic():Topic{return {id:'t',bindingId:'b',appId:'a',chatId:'oc_top
 function fixture(options:{caller?:Deps['topics']['caller'],owner?:Machine|null}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-messages-')),store=new Store(dir),topic=makeTopic(),calls:CallRecord[]=[],replies:ReplyRecord[]=[],updates:UpdateRecord[]=[];
  let owner=options.owner===undefined?ownerMachine:options.owner,rejectReply:Error|null=null,rejectUpdate:Error|null=null;
- let handler:Handler=method=>{if(method==='openLarkMessage')return message;if(method==='openLarkChat')return chat;if(method==='openLarkReply'||method==='openLarkSend')return sent;throw Error('未预料的调用：'+method);};
+ let handler:Handler=method=>{
+  if(method==='openLarkMessage')return message;if(method==='openLarkChat')return chat;if(method==='openLarkReply'||method==='openLarkSend')return sent;
+  if(method==='openLarkImage')return {messageId:'img-1'};if(method==='openLarkFile')return {messageId:'file-1'};if(method==='openLarkDocAccess')return {docs:[doc]};
+  throw Error('未预料的调用：'+method);
+ };
  const caller=options.caller??(async()=>topic),queue:Deps['topics']['queue']=<T>(_t:Topic,task:()=>T|Promise<T>)=>Promise.resolve(task());
  const call=fakeCall(async(machine,method,params)=>{calls.push({machine,method,params});return handler(method,params);});
  const reply:Deps['reply']=async(a,chatId,rootId,{card})=>{if(rejectReply)throw rejectReply;replies.push({app:a,chatId,rootId,card});return 'om_card_'+replies.length;};
  const updateCard:Deps['updateCard']=async(a,messageId,card)=>{if(rejectUpdate)throw rejectUpdate;updates.push({app:a,messageId,card});};
  store.data.topics.push(topic);store.save();
- const tasks=new Tasks(':memory:',{sinks:{'as-owner':ownerSink({owner:()=>owner,call})},policy,now:()=>now});
+ const outbox=new Outbox(path.join(dir,'outbox'));
+ const tasks=new Tasks(':memory:',{sinks:{'as-owner':ownerSink({owner:()=>owner,call,outbox})},policy,now:()=>now});
  // The topic's task is made when something first needs it, as Topics.task does.
  const task:Deps['topics']['task']=t=>{if(!t.taskId){t.taskId=tasks.create(t.task?.content||t.title).id;store.save();}return t.taskId;};
- const messages=new Messages(store,{tasks,topics:{caller,queue,task},app:()=>app,owner:()=>owner,call,reply,updateCard,now:()=>now});
+ const messages=new Messages(store,{tasks,topics:{caller,queue,task},app:()=>app,owner:()=>owner,call,reply,updateCard,outbox,now:()=>now});
  // Wait for the observers of the task core and for the asynchronous work that a click deliberately does not make Feishu's callback wait for.
  const flush=async()=>{for(let i=0;i<4;i++){await new Promise<void>(resolve=>setImmediate(resolve));await tasks.settled();}};
- return {dir,store,topic,tasks,messages,calls,replies,updates,flush,
+ return {dir,store,topic,tasks,messages,calls,replies,updates,flush,outbox,
+  // The names in the outbox: the bytes of attachments and the progress of sends.
+  kept:()=>fs.readdirSync(path.join(dir,'outbox')).sort(),
   deliveries:():Delivery[]=>topic.taskId?tasks.get(topic.taskId).deliveries:[],
   respond(next:Handler){handler=next;},setOwner(next:Machine|null){owner=next;},failReply(e:Error|null){rejectReply=e;},failUpdate(e:Error|null){rejectUpdate=e;},
   async close(){await tasks.close();fs.rmSync(dir,{recursive:true});}};
@@ -331,4 +344,113 @@ test('a draft that is made after the task moved to a later topic is drawn in tha
  assert.deepEqual(f.replies.map(r=>r.rootId),['om_root2']);assert.deepEqual(Object.keys(second.deliveryCards??{}),[d.id]);
  delete second.deliveryCards![d.id];f.messages.click(app,click(d,'edit',undefined,'om_early'));await f.flush();
  assert.equal(second.deliveryCards![d.id],'om_early');assert.equal(f.topic.deliveryCards?.[d.id],undefined);
+});
+
+// The attachments of a draft as its body has them, given the ids the outbox gave their bytes.
+const metadata=(ids:string[])=>[{kind:'image',name:'截图.png',size:png.length,id:ids[0]},{kind:'file',name:'季度报告.pdf',size:pdf.length,id:ids[1]}];
+const idsOf=(d:Delivery)=>(bodyOf(d).attachments??[]).map(a=>a.id);
+test('a draft keeps the bytes of its images and files in the outbox and only their names and sizes in its body, and its card lists them',async t=>{
+ const f=fixture();t.after(f.close);
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:linked,mentions:[],attachments:files,docAccess:'edit'});
+ const ids=idsOf(d);assert.equal(ids.length,2);for(const id of ids)assert.match(id,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+ assert.deepEqual(d.body,{text:linked,mentions:[],attachments:metadata(ids),docAccess:'edit'});
+ assert.deepEqual(f.kept(),[...ids].sort());assert.deepEqual(f.outbox.read(ids[0]),png);assert.deepEqual(f.outbox.read(ids[1]),pdf);
+ assert.equal(fs.statSync(f.outbox.dir).mode&0o777,0o700);for(const id of ids)assert.equal(fs.statSync(path.join(f.outbox.dir,id)).mode&0o777,0o600);
+ assert.deepEqual(f.replies[0].card,draftCard(d,'pending',{render:1,now}));assert.equal(f.calls.some(c=>c.method==='openLarkImage'||c.method==='openLarkFile'),false);
+});
+test('attachments and doc access that cannot go out are refused before anything is stored or drafted',async t=>{
+ const f=fixture();t.after(f.close);
+ const image=(name:string,bytes:Buffer)=>({kind:'image',name,data:bytes.toString('base64')}),file=(name:string,size:number)=>({kind:'file',name,data:Buffer.alloc(size,1).toString('base64')});
+ const cases:[object,string][]=[
+  [{attachments:'截图.png'},'附件无效'],[{attachments:[{kind:'video',name:'a.mp4',data:'AAAA'}]},'附件只能是图片（image）或文件（file）'],
+  [{attachments:[{kind:'file',name:' ',data:'AAAA'}]},'附件缺少文件名'],[{attachments:[{kind:'file',name:'长'.repeat(256),data:'AAAA'}]},'文件名不能超过 255 个字'],
+  [{attachments:[{kind:'file',name:'a.pdf',data:'不是 base64'}]},'a.pdf 的内容不是 base64'],[{attachments:[{kind:'file',name:'空.txt',data:''}]},'空.txt 是空的'],
+  [{attachments:[image('假图.png',pdf)]},'假图.png 不是 PNG、JPEG、GIF、WebP 或 BMP 图片'],
+  [{attachments:[image('大图.png',Buffer.concat([png,Buffer.alloc(7.5*1024*1024-png.length+1)]))]},'图片 大图.png 超过 7.5 MB：open-lark 发不了这么大的图片，改用 --file 发送'],
+  [{attachments:[file('大文件.zip',20*1024*1024+1)]},'大文件.zip 超过每个附件 20 MB 的上限'],
+  [{attachments:[file('1.bin',18*1024*1024),file('2.bin',18*1024*1024),file('3.bin',18*1024*1024)]},'附件加起来超过每份草稿 50 MB 的上限'],
+  [{docAccess:'read'},'文档权限只能是 view（查看）或 edit（编辑）'],[{text:'没有链接的正文',docAccess:'view'},'正文里没有链接，没有可以开放权限的文档'],
+ ];
+ for(const [fields,error] of cases){
+  await assert.rejects(invoke(f,'send',{pane:'pane',chatId:'chat-2',text:linked,mentions:[],...fields}),(e:Error)=>e.message===error,error);
+  assert.equal(f.deliveries().length,0,error);assert.deepEqual(f.kept(),[],error);
+ }
+ assert.equal(f.replies.length,0);
+});
+test('after 发送 the text goes first, then each attachment in its order where the text went, then the doc access, and the bytes leave the outbox',async t=>{
+ const f=fixture();t.after(f.close);const threaded:OwnerMessage={...message,inThread:true};
+ f.respond(method=>method==='openLarkMessage'?threaded:method==='openLarkReply'?{...sent,threadRoot:'root-1'}:method==='openLarkImage'?{messageId:'img-1'}:method==='openLarkFile'?{messageId:null}:{docs:[doc]});
+ await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
+ const {delivery:d}=await invoke(f,'reply',{pane:'pane',messageId:'message-1',text:linked,mentions:[],attachments:files,docAccess:'edit'}),ids=idsOf(d);
+ f.calls.length=0;f.messages.click(app,click(d,'send'));await f.flush();
+ assert.deepEqual(f.calls.map(c=>[c.method,c.params]),[
+  ['openLarkReply',{messageId:'message-1',clientId:d.key,text:linked,mentions:[],thread:true}],
+  ['openLarkImage',{chatId:'chat-1',clientId:ids[0],name:'截图.png',mimeType:'image/png',data:png.toString('base64'),replyTo:'message-1',thread:true}],
+  ['openLarkFile',{chatId:'chat-1',clientId:ids[1],name:'季度报告.pdf',data:pdf.toString('base64'),replyTo:'message-1',threadRoot:'root-1'}],
+  ['openLarkDocAccess',{messageId:'sent-1',role:'edit'}],
+ ]);
+ const after=current(f,d);assert.equal(after.state,'delivered');assert.deepEqual(after.receipt,{...sent,threadRoot:'root-1',attachments:['img-1',null],docs:[doc]});
+ assert.deepEqual(f.updates.at(-1)!.card,draftCard(after,'sent',{render:2,now,quoted:threaded}));assert.deepEqual(f.kept(),[]);
+});
+test('attachments of a new message go to its chat, and those of a quote reply quote the same message',async t=>{
+ const f=fixture();t.after(f.close);await invoke(f,'attach',{pane:'pane',messageId:'message-1'});
+ const {delivery:s}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[],attachments:files});
+ const {delivery:r}=await invoke(f,'reply',{pane:'pane',messageId:'message-1',text:'回复',mentions:[],attachments:files});
+ for(const d of [s,r]){f.calls.length=0;f.messages.click(app,click(d,'send'));await f.flush();
+  const where=d===s?{chatId:'chat-2'}:{chatId:'chat-1',replyTo:'message-1'},ids=idsOf(d);
+  assert.deepEqual(f.calls.slice(1).map(c=>[c.method,c.params]),[
+   ['openLarkImage',{...where,clientId:ids[0],name:'截图.png',mimeType:'image/png',data:png.toString('base64')}],['openLarkFile',{...where,clientId:ids[1],name:'季度报告.pdf',data:pdf.toString('base64')}]]);
+  assert.deepEqual(current(f,d).receipt,{...sent,attachments:['img-1','file-1']});
+ }
+});
+test('an attachment that fails fails the delivery with what already went out; 发送 then sends only the rest, and 修改 is gone meanwhile',async t=>{
+ const f=fixture();t.after(f.close);let down=true;
+ f.respond(method=>{if(method==='openLarkChat')return chat;if(method==='openLarkImage')return {messageId:'img-1'};if(method==='openLarkFile'){if(down)throw Object.assign(Error('x'),{code:'channel_unreachable'});return {messageId:'file-1'};}if(method==='openLarkDocAccess')return {docs:[doc]};return sent;});
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:linked,mentions:[],attachments:files,docAccess:'view'}),ids=idsOf(d);
+ f.messages.click(app,click(d,'send'));await f.flush();
+ const failed=current(f,d),progress=f.outbox.progress(d.key);
+ assert.equal(failed.state,'failed');assert.equal(failed.error,'正文和前 1 个附件已发出，文件 季度报告.pdf 没有发出去：open-lark 没有响应');
+ assert.deepEqual(progress,{text:sent,attachments:{[ids[0]]:'img-1'}});
+ assert.deepEqual(f.updates.at(-1)!.card,draftCard(failed,'pending',{render:2,now,progress}));
+ const updates=f.updates.length;assert.deepEqual(f.messages.click(app,click(d,'edit')),toast('正文已经发出，不能再修改'));await f.flush();assert.equal(f.updates.length,updates);
+ assert.deepEqual(f.kept(),[...ids,d.key+'.json'].sort());
+ down=false;f.calls.length=0;f.messages.click(app,click(d,'send'));await f.flush();
+ assert.deepEqual(f.calls.map(c=>c.method),['openLarkFile','openLarkDocAccess']);
+ assert.equal(current(f,d).state,'delivered');assert.deepEqual(current(f,d).receipt,{...sent,attachments:['img-1','file-1'],docs:[doc]});assert.deepEqual(f.kept(),[]);
+});
+test('不发 after a partial send says on the card what went out and removes the bytes and the progress',async t=>{
+ const f=fixture();t.after(f.close);
+ f.respond(method=>{if(method==='openLarkChat')return chat;if(method==='openLarkImage')throw Object.assign(Error('图片太大'),{code:'channel_refused'});return sent;});
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[],attachments:files});
+ f.messages.click(app,click(d,'send'));await f.flush();assert.equal(current(f,d).error,'正文已发出，图片 截图.png 没有发出去：open-lark 拒绝了这次发送：图片太大');
+ f.messages.click(app,click(d,'drop'));await f.flush();
+ assert.deepEqual(f.updates.at(-1)!.card,draftCard(current(f,d),'dropped',{render:3,now,progress:{text:sent,attachments:{}}}));assert.deepEqual(f.kept(),[]);
+});
+test('doc access that fails does not undo the sent message: the delivery is delivered and the card says why access was not opened',async t=>{
+ const f=fixture();t.after(f.close);
+ f.respond(method=>{if(method==='openLarkChat')return chat;if(method==='openLarkDocAccess')throw Object.assign(Error('MESSAGE_DOC_PERMISSION_REFUSED：无权限'),{code:'channel_refused'});return sent;});
+ const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:linked,mentions:[],docAccess:'edit'});
+ f.messages.click(app,click(d,'send'));await f.flush();
+ const after=current(f,d);assert.equal(after.state,'delivered');assert.deepEqual(after.receipt,{...sent,docs:[],docsError:'open-lark 拒绝了这次发送：MESSAGE_DOC_PERMISSION_REFUSED：无权限'});
+ assert.deepEqual(f.updates.at(-1)!.card,draftCard(after,'sent',{render:2,now}));
+ const partly=[doc,{url:'https://example.feishu.cn/sheets/def',title:'表格',granted:false,reason:'只能开放查看权限'}];
+ f.respond(method=>method==='openLarkChat'?chat:method==='openLarkDocAccess'?{docs:partly}:sent);
+ const {delivery:e}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:linked,mentions:[],docAccess:'edit'});
+ f.messages.click(app,click(e,'send'));await f.flush();assert.deepEqual(current(f,e).receipt,{...sent,docs:partly});
+});
+test('the bytes of a draft go once it is not sent, withdrawn, its card is refused or its task has ended, and stay while it waits or failed in an open task',async t=>{
+ const f=fixture();t.after(f.close);const draft=async()=>(await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[],attachments:files})).delivery;
+ const dropped=await draft();f.messages.click(app,click(dropped,'drop'));await f.flush();
+ const withdrawn=await draft();await invoke(f,'withdraw',{pane:'pane',draftId:withdrawn.id});await f.flush();assert.deepEqual(f.kept(),[]);
+ f.failReply(Error('invalid card'));await assert.rejects(draft(),/确认卡片没有发出去/);await f.flush();assert.deepEqual(f.kept(),[]);f.failReply(null);
+ const waiting=await draft(),failing=await draft();f.respond(method=>{if(method==='openLarkChat')return chat;throw Object.assign(Error('x'),{code:'client_offline'});});
+ f.messages.click(app,click(failing,'send'));await f.flush();assert.equal(current(f,failing).state,'failed');
+ assert.deepEqual(f.kept(),[...idsOf(waiting),...idsOf(failing)].sort());
+ f.tasks.end(f.topic.taskId!,'dropped','不用了');await f.flush();assert.deepEqual(f.kept(),[]);
+ await assert.rejects(invoke(f,'send',{pane:'pane',chatId:'chat-2',text:'正文',mentions:[],attachments:files}),/这个任务已经结束/);assert.deepEqual(f.kept(),[]);
+});
+test('an edited text keeps the attachments and the doc access of the draft',async t=>{
+ const f=fixture();t.after(f.close);const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text:linked,mentions:[],attachments:files,docAccess:'view'});
+ f.messages.click(app,click(d,'send','改过的 https://example.feishu.cn/docx/abc'));await f.flush();
+ assert.deepEqual(current(f,d).body,{text:'改过的 https://example.feishu.cn/docx/abc',mentions:[],attachments:metadata(idsOf(d)),docAccess:'view'});assert.equal(current(f,d).state,'delivered');
 });

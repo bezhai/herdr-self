@@ -62,6 +62,10 @@ export const clientSocket=(env=process.env)=>env.BRIDGE_CLIENT_SOCKET||path.join
 // How long the client waits for the control plane to answer a request of a command; the command waits a little longer for the client.
 export const forwardMs=60000;
 const notConnected='本机的 Bridge 客户端没有连上控制面：请稍后重试，一直这样时请主人查看这台机器上客户端的日志';
+// The most that a request of a command may carry, in characters: one of bridge-message carries the images and files of a draft as base64,
+// up to 50 MiB of them (see draftLimits in outbound-cards.ts), which stays under the 100 MiB that the control plane takes in one frame; the
+// others carry short text only.
+const requestLimit=(kind:string)=>kind==='messages'?72*1024*1024:100000;
 // Takes the requests of bridge-schedule, bridge-skill, bridge-message and bridge-task on socket, which only this user may open, in a directory that it
 // creates 0700: POST /schedules/<op>, /skills/<op>, /messages/<op>, /tasks/<op> and /services/<op> with a JSON body. While the client is connected (peer() returns the
 // link of its connection, else null), each goes to the control plane as the request schedules, skills, messages, tasks or services {op, body}, which the
@@ -74,8 +78,8 @@ export async function serve(socket:string,peer:()=>Peer<ControlApi>|null){
  const server=http.createServer(async(req,res)=>{
   // A request that a server received has its url.
   const [,method,op]=req.method==='POST'&&/^\/(schedules|skills|messages|tasks|services)\/([a-z]+)$/.exec(new URL(req.url!,'http://localhost').pathname)||[];if(!op)return answer(res,404,{error:'接口不存在'});
-  let s='',body;req.setEncoding('utf8');for await(const b of req)if(s.length<=100000)s+=b;
-  if(s.length>100000)return answer(res,400,{error:'请求内容过大'});
+  const limit=requestLimit(method);let s='',body;req.setEncoding('utf8');for await(const b of req)if(s.length<=limit)s+=b;
+  if(s.length>limit)return answer(res,400,{error:'请求内容过大'});
   try{body=JSON.parse(s||'{}');}catch{return answer(res,400,{error:'请求内容不是 JSON'});}
   const p=peer();if(!p)return answer(res,503,{error:notConnected});
   // The pattern of the path lets only these five through.

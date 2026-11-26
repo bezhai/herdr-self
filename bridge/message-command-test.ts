@@ -71,10 +71,42 @@ test('bridge-message reports malformed command lines with the complete usage and
    [['send','c1','--text','正文','--mention','陈帆'],/--mention 要写成 <用户 ID>=<名字>/],
    [['send','c1','--text','正文','--mention','=陈帆'],/--mention 要写成 <用户 ID>=<名字>/],
    [['send','c1','--text','正文','--mention','u1='],/--mention 要写成 <用户 ID>=<名字>/],
+   [['attach','m1','--image','a.png'],/--image 只用于 reply 和 send/],[['withdraw','d1','--file','a.pdf'],/--file 只用于 reply 和 send/],
+   [['attach','m1','--doc-access','view'],/--doc-access 只用于 reply 和 send/],[['send','c1','--text','正文','--doc-access','read'],/--doc-access 只能是 view 或 edit/],
+   [['send','c1','--text','正文','--image'],/--image 缺少值/],
   ];
   for(const [args,error] of cases){const result=await run(client.socket,args);assert.equal(result.code,2,args.join(' '));assert.equal(result.out,'');assert.match(result.err,error,args.join(' '));assert.ok(result.err.endsWith(usage),args.join(' '));}
   assert.deepEqual(client.calls,[]);
  }finally{await client.close();}
+});
+
+test('reply and send read each --image and --file on this machine and send them in the order given, with --doc-access',async()=>{
+ const client=await fakeClient(),files=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-message-files-'));try{
+  const write=(name:string,bytes:Buffer)=>{const file=path.join(files,name);fs.writeFileSync(file,bytes);return file;};
+  const png=write('截图.png',Buffer.from([0x89,0x50,0x4e,0x47,1,2,3])),pdf=write('季度报告.pdf',Buffer.from('%PDF-1.7')),gif=write('动图.gif',Buffer.from('GIF89a'));
+  assert.deepEqual(await run(client.socket,['reply','m1','--text','见附件 https://example.feishu.cn/docx/abc','--image',png,'--file',pdf,'--image='+gif,'--doc-access','edit']),{code:0,out:drafted,err:''});
+  assert.deepEqual(client.calls.at(-1)![1],{op:'reply',body:{messageId:'m1',text:'见附件 https://example.feishu.cn/docx/abc',mentions:[],attachments:[
+   {kind:'image',name:'截图.png',data:Buffer.from([0x89,0x50,0x4e,0x47,1,2,3]).toString('base64')},{kind:'file',name:'季度报告.pdf',data:Buffer.from('%PDF-1.7').toString('base64')},
+   {kind:'image',name:'动图.gif',data:Buffer.from('GIF89a').toString('base64')},
+  ],docAccess:'edit',pane:'w1:p1'}});
+  assert.deepEqual(await run(client.socket,['send','c1','--text','正文','--doc-access=view']),{code:0,out:drafted,err:''});
+  assert.deepEqual(client.calls.at(-1)![1],{op:'send',body:{chatId:'c1',text:'正文',mentions:[],docAccess:'view',pane:'w1:p1'}});
+ }finally{await client.close();fs.rmSync(files,{recursive:true});}
+});
+
+test('a file that cannot be read, is no file or is over the limits is refused with status 1 before anything goes to Bridge',async()=>{
+ const client=await fakeClient(),files=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-message-files-'));try{
+  // Sparse files of the sizes the limits need, which take no disk space and are refused before they are read.
+  const sized=(name:string,size:number)=>{const file=path.join(files,name);fs.writeFileSync(file,'');fs.truncateSync(file,size);return file;};
+  const missing=path.join(files,'没有.pdf'),big=sized('大文件.zip',20*1024*1024+1),parts=[1,2,3].map(n=>sized(`part${n}.bin`,18*1024*1024));
+  const refused=async(args:string[],message:string)=>assert.deepEqual(await run(client.socket,['send','c1','--text','正文',...args]),{code:1,out:'',err:`bridge-message: ${message}
+`});
+  await refused(['--file',missing],`读不到 ${missing}：ENOENT`);
+  await refused(['--file',files],`${files} 不是文件`);
+  await refused(['--file',big],'大文件.zip 超过每个附件 20 MB 的上限');
+  await refused(parts.flatMap(p=>['--file',p]),'附件加起来超过每份草稿 50 MB 的上限');
+  assert.deepEqual(client.calls,[]);
+ }finally{await client.close();fs.rmSync(files,{recursive:true});}
 });
 
 test('bridge-message prints why Bridge refused and exits 1, and explains a client that is disconnected or absent',async()=>{
@@ -89,7 +121,7 @@ test('bridge-message --help is complete on its own and does not call Bridge',asy
  const client=await fakeClient();try{
   for(const flag of ['--help','-h'])assert.deepEqual(await run(client.socket,[flag]),{code:0,out:usage,err:''});
   for(const op of ['attach','reply','send','withdraw'])assert.ok(usage.includes(`  bridge-message ${op} `),op);
-  for(const fact of ['--text','--mention','--json','--pane','--session','HERDR_PANE_ID','HERDR_SESSION','多行','退出码','确认卡片','主人点「发送」后才会发出','连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','不属于任何进行中的飞书话题','这条消息不在本话题的来源里','正文里没有 @','没有配置 open-lark','open-lark 没有响应','草稿 ID','Agent 已撤回','不要请主人点「不发」','发在话题里','本话题没有 ID 以','正在发送，不能撤回','已经发出，不能撤回','主人正在修改这份草稿'])assert.ok(usage.includes(fact),fact);
+  for(const fact of ['--text','--mention','--json','--pane','--session','HERDR_PANE_ID','HERDR_SESSION','多行','退出码','确认卡片','主人点「发送」后才会发出','连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','不属于任何进行中的飞书话题','这条消息不在本话题的来源里','正文里没有 @','没有配置 open-lark','open-lark 没有响应','草稿 ID','Agent 已撤回','不要请主人点「不发」','--image','--file','--doc-access','20 MB','50 MB','发在话题里','本话题没有 ID 以','正在发送，不能撤回','已经发出，不能撤回','主人正在修改这份草稿'])assert.ok(usage.includes(fact),fact);
   assert.deepEqual(client.calls,[]);
  }finally{await client.close();}
 });

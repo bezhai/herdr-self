@@ -11,7 +11,7 @@ import {Topics} from './topics.ts';
 import {Skills,requestLimit} from './skills.ts';
 import {Schedules} from './schedules.ts';
 import {ApiTopics} from './api-topics.ts';
-import {Messages,ownerSink,sinkName} from './messages.ts';
+import {Messages,ownerSink,sinkName} from './messages.ts';import {Outbox} from './outbox.ts';
 import {Tasks} from './task-core.ts';
 import {threadSink,threadSinkName} from './thread-sink.ts';
 import {AgentSchedules} from './agent-schedules.ts';
@@ -46,10 +46,12 @@ async function refresh(m:Machine){if(refreshes.has(m.id))return refreshes.get(m.
  }catch(e){live.set(m.id,{state:'error',checkedAt:Date.now(),error:publicText(e.message),agents:[],panes:[]});if(previous?.error!==e.message)store.log('机器连接',m.name+'：'+e.message,'error');}finally{refreshes.delete(m.id);}})();refreshes.set(m.id,p);return p;}
 // The owner's channel is open-lark on the machine that BRIDGE_OPEN_LARK_MACHINE names, whose client has it in its config (see open-lark.ts).
 const ownerMachine=process.env.BRIDGE_OPEN_LARK_MACHINE,owner=()=>store.data.machines.find(m=>m.name===ownerMachine)||null;
+// The images and files of drafts, in outbox of the state directory, until the owner sent them or did not (see outbox.ts).
+const outbox=new Outbox(path.join(dir,'outbox'));
 // The task core, in tasks.db of the state directory. Its only sink sends as the owner, and what goes there needs the owner's approval; every
 // other delivery and every end goes ahead.
 const taskPolicy:Policy={deliver:(_task,_output,target)=>'sink' in target&&target.sink===sinkName?'approve':'allow',end:()=>'allow'};
-const tasks=new Tasks(path.join(dir,'tasks.db'),{sinks:{[sinkName]:ownerSink({owner,call}),[threadSinkName]:threadSink({store,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args)})},policy:taskPolicy,now:Date.now});
+const tasks=new Tasks(path.join(dir,'tasks.db'),{sinks:{[sinkName]:ownerSink({owner,call,outbox}),[threadSinkName]:threadSink({store,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args)})},policy:taskPolicy,now:Date.now});
 const topics=new Topics(store,{...ops,tasks,askModel,placeSkills:(...args)=>skills.place(...args),download:(...args)=>platforms.download(...args),machine,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),react:(...args)=>platforms.react(...args),unreact:(...args)=>platforms.unreact(...args),request:(...args)=>platforms.request(...args)}),chatBindings=new ChatBindings(store,{reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),chatName:(...args)=>platforms.chatName(...args),askModel,handle:(...args)=>topics.handle(...args)});
 const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args),onUnbound:(...args)=>chatBindings.open(...args),onCardAction:(a,evt)=>(evt.action?.value?.bind?chatBindings:evt.action?.value?.schedule?agentSchedules:evt.action?.value?.draft?messages:topics).click(a,evt)}),registrations=new Registrations(store,{connect:async a=>{
  if(!a.allowedUsers.length)return false;
@@ -60,7 +62,7 @@ const platforms=new Platforms(store,{onMessage:(...args)=>topics.handle(...args)
 // Its first check comes one interval after the start, once the apps have had time to connect.
 const schedules=new Schedules(store,{topics,app:id=>platforms.app(id),send:(...args)=>platforms.send(...args),reply:(...args)=>platforms.reply(...args)});
 const apiTopics=new ApiTopics(store,{topics,send:(...args)=>platforms.send(...args),chatName:(...args)=>platforms.chatName(...args)});
-const messages=new Messages(store,{tasks,topics,app:id=>platforms.app(id),owner,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
+const messages=new Messages(store,{tasks,topics,app:id=>platforms.app(id),owner,call,reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args),outbox});
 const agentTasks=new AgentTasks(store,{topics,tasks,app:id=>platforms.app(id)});
 const agentSchedules=new AgentSchedules(store,{topics,schedules,app:id=>platforms.app(id),reply:(...args)=>platforms.reply(...args),updateCard:(...args)=>platforms.updateCard(...args)});
 function state():ConsoleState{return {host:os.hostname(),version:'0.1.0',registration:registrations.status(),machines:store.data.machines.map(({tokenHash,...m})=>({...m,hasToken:Boolean(tokenHash),client:clients.status(m.id),...herdrStatus(m)})),apps:store.data.apps.map(a=>platforms.status(a)),projects:store.data.projects.map(({adopted,...p})=>({...p,adopted:Boolean(adopted)})),agentConfigs:store.data.agentConfigs,bindings:store.data.bindings.map(({workspaces,...b})=>b),skills:skills.list(),topics:store.data.topics.map(({messageIds,task,reactions,cards,cot,proposal,taskId,deliveryCards,sources,drafts,...t}:Topic&{sources?:unknown,drafts?:unknown})=>t),logs:store.data.logs.slice(-60)};}

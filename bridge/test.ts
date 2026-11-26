@@ -3,7 +3,7 @@ import {spawn,spawnSync,execFileSync} from 'node:child_process';import net from 
 import {Readable} from 'node:stream';
 import {normalizeMachine,migrateMachines,operations,Store,publicText} from './core.ts';
 import {gitRunner} from './machine-tools.ts';import {Skills,frontmatter,skillLimit} from './skills.ts';import {nameTask} from './routing.ts';import {modelFrom} from './model.ts';import type {AskModel} from './model.ts';
-import {namingPrompt,parseBranch,validBranch,branchOf,branchFromText,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';import {threadSink,threadSinkName} from './thread-sink.ts';import {Tasks} from './task-core.ts';import {Messages} from './messages.ts';
+import {namingPrompt,parseBranch,validBranch,branchOf,branchFromText,randomBranch,continueBranch,worktreePath} from './worktree-branch.mjs';import {normalizeApp,normalizeBinding,addBinding,changeBinding,bindingTarget,routable,supported,forwardable,Platforms,channelCache} from './platform.ts';import {Topics} from './topics.ts';import {threadSink,threadSinkName} from './thread-sink.ts';import {Tasks} from './task-core.ts';import {Messages} from './messages.ts';import {Outbox} from './outbox.ts';
 import {attachmentsOf,promptOf,fileName,titleOf,limits} from './attachments.ts';
 import {migrateBindings,convertAdopted} from './migration.ts';import type {BindingFields} from './platform.ts';import {normalizeAgentConfig,configName,saveAgentConfig,removeAgentConfig} from './agent-configs.ts';import {normalizeProject,repoKey,repoName,uniqueName,saveProject,removeProject,fillDescription} from './projects.ts';
 import {ChatBindings} from './chat-bindings.ts';import {AgentTasks} from './agent-tasks.ts';import {ApiTopics} from './api-topics.ts';
@@ -1964,7 +1964,7 @@ test('the thread sink rejects for a task that no topic has',async()=>{
 test('what the agent attaches and drafts through bridge-message lands in the same task as the conversation',async()=>{
  const f=await readyTopic();try{
   f.m.session='default';const owner=f.m,call=loose<Call>(async(_m,method)=>method==='openLarkMessage'?{chatId:'oc_x',chatName:'群',chatType:'group',messageId:'om_x',sender:{id:'u',name:'某人'},at:1,text:'原文',link:'l'}:{});
-  const messages=new Messages(f.store,{tasks:f.tasks,topics:f.topics,app:f.deps.app,owner:()=>owner,call,reply:f.deps.reply,updateCard:f.deps.updateCard});
+  const messages=new Messages(f.store,{tasks:f.tasks,topics:f.topics,app:f.deps.app,owner:()=>owner,call,reply:f.deps.reply,updateCard:f.deps.updateCard,outbox:new Outbox(path.join(f.store.dir,'outbox'))});
   await messages.call(f.m,'attach',{pane:'w1:p1',messageId:'om_x'});
   assert.equal(f.tasks.list().length,1);assert.deepEqual(taskView(f).inputs.map(i=>i.ref),['feishu:om_1','open-lark:om_x']);
  }finally{f.close();}
@@ -4187,7 +4187,7 @@ test('with a real Bridge and the real client of a machine, its store of skills f
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-skill-sync-'))),state=path.join(dir,'state'),home=path.join(dir,'home'),socket=path.join(dir,'client.sock'),port=await freePort(),origin=`http://127.0.0.1:${port}`;
  fs.mkdirSync(home);const kept=path.join(home,'.local/share/herdr-bridge/skills'),server=await bridgeServer(state,port,{BRIDGE_URL:''});let client:ClientProcess|undefined;
  try{
-  assert.equal(protocol,11);
+  assert.equal(protocol,12);
   const key=fs.readFileSync(path.join(state,'access-key'),'utf8').trim(),api=async(p:string,body?:object):Promise<Json>=>(await fetch(`${origin}/api/${p}`,{method:body?'POST':'GET',headers:{authorization:'Bearer '+key},body:body&&JSON.stringify(body)})).json();
   const logs=async()=>((await api('state')).logs as Log[]).filter(l=>l.kind==='skill').map(l=>l.message);
   const {id}=await api('machines/save',{name:'cpu2',session:'default',enabled:true}),{config}=await api('machines/token',{id});
@@ -4454,6 +4454,9 @@ test('the client answers bridge-schedule and bridge-skill on its socket, 0600 in
   for(const [method,p] of [['GET','/schedules/list'],['POST','/schedules/'],['POST','/schedules/LIST'],['POST','/run'],['POST','/schedules/list/x'],['GET','/skills/list'],['POST','/skills/'],['POST','/skill/list'],['POST','/skills/list/x']])
    assert.deepEqual(await raw(method,p,'{}'),[404,{error:'接口不存在'}],method+' '+p);
   assert.deepEqual(await raw('POST','/schedules/list','not json'),[400,{error:'请求内容不是 JSON'}]);assert.deepEqual(await raw('POST','/schedules/list','x'.repeat(100001)),[400,{error:'请求内容过大'}]);
+  // bridge-message carries up to 50 MiB of images and files as base64, so its requests may be larger than the others, up to their own limit.
+  answer=()=>({ok:true});assert.deepEqual(await raw('POST','/messages/reply',JSON.stringify({data:'x'.repeat(70*1024*1024)})),[200,{ok:true}]);assert.equal((calls.pop() as [string,{body:{data:string}}])[1].body.data.length,70*1024*1024);
+  assert.deepEqual(await raw('POST','/messages/reply','x'.repeat(72*1024*1024+1)),[400,{error:'请求内容过大'}]);
   assert.equal(calls.length,4);
   // A body that arrives in pieces, one of them ending inside a character, is read as the text it is.
   answer=()=>({});const text=Buffer.from(JSON.stringify({task:'定时任务'}));

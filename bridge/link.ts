@@ -18,7 +18,10 @@ import type {Kind,PermissionMode,WorkMode,OwnerChat,Mention} from './state.ts';
 // 10: a client offers the local HTTP services of its config by name (its hello names them) and performs a request of one for an agent
 // (callService), and every client passes the requests of bridge-call on (services). 11: prepareLaunch takes the session of a finished topic
 // to resume (resume) and answers whether its arguments resume it (resumed), which a client of 10 would ignore and start a new session.
-export const protocol=11;
+// 12: the owner's channel sends images and files (openLarkImage, openLarkFile) and opens docs to a chat (openLarkDocAccess), reads whether a
+// message is inside a thread (inThread) and replies into it (thread, threadRoot), which a client of 11 lacks or ignores; the client passes on
+// requests of bridge-message of up to 72 MiB, which carry the images and files of a draft.
+export const protocol=12;
 // The kinds of agent whose sessions prepareLaunch can resume (see ClientApi), and so the only ones whose sessions a topic records (see
 // Topics.keepSession). Antigravity is not one: agy --conversation <id> takes an id, but one it lacks starts a new conversation with only a
 // warning on the screen, and where a conversation ran is in the binary records of its database alone, so no client can tell that it ran in
@@ -45,8 +48,12 @@ export type WorkspaceProject={id:string,repos:string[],workMode:WorkMode,adopted
 // text, where what is not text is written as [图片] or [文件] <file name>, link, a link that opens it in Feishu, when open-lark gives one, and
 // inThread, true for a reply inside a thread (in a topic group, inside a topic); the root of a thread is not inside it.
 export type OwnerMessage=OwnerChat&{messageId:string,sender:{id:string,name:string},at:number,text:string,link?:string,inThread?:boolean};
-// A message that went out as the owner: its open-lark id, when it was sent, in ms, and owner, the name of the Feishu account it went out as.
-export type Sent={messageId:string,at:number,owner:string};
+// A message that went out as the owner: its open-lark id, when it was sent, in ms, owner, the name of the Feishu account it went out as, and
+// threadRoot, the open-lark id of the root of the thread that a reply went into.
+export type Sent={messageId:string,at:number,owner:string,threadRoot?:string};
+// What became of the access asked for one doc that open-lark found in a sent message: its url and title, and granted, whether the chat has the
+// role now (also when it had it before), else reason, why not.
+export type DocGrant={url:string,title:string,granted:boolean,reason?:string};
 // A request of an agent to a service of a machine (see services.ts): service, the name of the service; method; path, relative to the root of the
 // service, with no query or fragment; query, its pairs; body, the JSON text of a POST, PUT or PATCH (the client sends {} when there is none); and
 // headers, the request headers that the service lets an agent pass, by lower-case name. It carries no credential: the client of the machine that
@@ -108,6 +115,15 @@ export type ClientApi={
  openLarkChat:{params:Timed<{chatId:string}>,result:OwnerChat},
  openLarkReply:{params:Timed<{messageId:string,clientId:string,text:string,mentions:Mention[],thread?:boolean}>,result:Sent},
  openLarkSend:{params:Timed<{chatId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
+ // openLarkImage sends an image (data, base64 of at most 10 MiB characters, of type mimeType) and openLarkFile a file (data, base64) to chat
+ // chatId as the owner, as a reply to message replyTo when given: an image goes where a text reply would go (inside the thread of replyTo
+ // when thread is true), a file inside the thread whose root is threadRoot when given, else as a quote reply. clientId is a UUID; open-lark
+ // sends an image of one clientId once, but a file again on every request. messageId is null when open-lark did not name the file's message.
+ // openLarkDocAccess gives chat of message messageId, a message the owner sent, the role on each doc that open-lark finds in it, one doc
+ // at a time, and resolves to what became of each (see DocGrant); it rejects only when it could not list them.
+ openLarkImage:{params:Timed<{chatId:string,clientId:string,name:string,mimeType:string,data:string,replyTo?:string,thread?:boolean}>,result:{messageId:string}},
+ openLarkFile:{params:Timed<{chatId:string,clientId:string,name:string,data:string,replyTo?:string,threadRoot?:string}>,result:{messageId:string|null}},
+ openLarkDocAccess:{params:Timed<{messageId:string,role:'view'|'edit'}>,result:{docs:DocGrant[]}},
 // callService makes one request of the service request.service of the client's config with that service's token, and resolves to its answer,
 // also when the status is an error. It rejects with code service_unknown for a name that the config lacks; method_not_allowed and
 // header_not_allowed for a method or header that the service's config does not allow; invalid_params for a request that is not as
