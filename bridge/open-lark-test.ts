@@ -70,6 +70,24 @@ test('the four methods use the agent API, project messages and chats, and send a
  assert.equal(f.seen.filter(r=>r.path==='/agent/v1/me').length,1);
 });
 
+test('a message that is a reply inside a thread reads as in a thread, and a reply into a thread uses replyMode thread',async t=>{
+ const item=(id:string,threadMessageType?:string)=>({id,feedId:'feed-group',senderId:'u2',senderName:'评审机器人',createdAt:'2026-11-10T01:02:03.000Z',parts:[{kind:'text',text:'结论'}],...threadMessageType&&{threadMessageType}});
+ const f=await fixture(t,(req,res)=>{
+  const read=/^\/agent\/v1\/messages\/(m-[a-z]+)$/.exec(req.url??'')?.[1];
+  if(read&&req.method==='GET')return answer(res,200,{item:item(read,{'m-reply':'reply','m-root':'root','m-none':'none'}[read])});
+  if(req.url==='/agent/v1/conversations/feed-group')return answer(res,200,{feedId:'feed-group',name:'研发群',chatMode:'group'});
+  if(req.url?.endsWith('/link'))return answer(res,404,{error:{code:'NOT_FOUND',message:'no link'}});
+  if(req.url==='/agent/v1/me')return answer(res,200,{userId:'owner-id',displayName:'主人账号'});
+  if(req.url==='/agent/v1/messages/m-reply/replies')return answer(res,202,{messageId:'sent-3',feedId:'feed-group',replyToMessageId:'m-reply',threadRootMessageId:'m-root'});
+  answer(res,404,{error:{code:'NOT_FOUND',message:'unknown fake route'}});
+ });
+ const api=openLarkMethods(f.config);
+ assert.equal((await api.openLarkMessage({messageId:'m-reply'})).inThread,true);
+ for(const id of ['m-root','m-none','m-plain'])assert.equal('inThread' in await api.openLarkMessage({messageId:id}),false,id);
+ await api.openLarkReply({...replyParams,messageId:'m-reply',thread:true});
+ assert.deepEqual(f.seen.at(-1)!.body,{text:replyParams.text,mentions:[{userId:'u1',name:'小明'}],clientId:replyParams.clientId,expectedSenderId:'owner-id',replyMode:'thread'});
+});
+
 test('a send refused with SENDER_CHANGED drops the cached account so the next send reads /me again',async t=>{
  let lookups=0,sends=0;
  const f=await fixture(t,(req,res)=>{

@@ -89,7 +89,7 @@ test('bridge-message --help is complete on its own and does not call Bridge',asy
  const client=await fakeClient();try{
   for(const flag of ['--help','-h'])assert.deepEqual(await run(client.socket,[flag]),{code:0,out:usage,err:''});
   for(const op of ['attach','reply','send','withdraw'])assert.ok(usage.includes(`  bridge-message ${op} `),op);
-  for(const fact of ['--text','--mention','--json','--pane','--session','HERDR_PANE_ID','HERDR_SESSION','多行','退出码','确认卡片','主人点「发送」后才会发出','连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','不属于任何进行中的飞书话题','这条消息不在本话题的来源里','正文里没有 @','没有配置 open-lark','open-lark 没有响应','草稿 ID','Agent 已撤回','不要请主人点「不发」','本话题没有 ID 以','正在发送，不能撤回','已经发出，不能撤回','主人正在修改这份草稿'])assert.ok(usage.includes(fact),fact);
+  for(const fact of ['--text','--mention','--json','--pane','--session','HERDR_PANE_ID','HERDR_SESSION','多行','退出码','确认卡片','主人点「发送」后才会发出','连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','不属于任何进行中的飞书话题','这条消息不在本话题的来源里','正文里没有 @','没有配置 open-lark','open-lark 没有响应','草稿 ID','Agent 已撤回','不要请主人点「不发」','发在话题里','本话题没有 ID 以','正在发送，不能撤回','已经发出，不能撤回','主人正在修改这份草稿'])assert.ok(usage.includes(fact),fact);
   assert.deepEqual(client.calls,[]);
  }finally{await client.close();}
 });

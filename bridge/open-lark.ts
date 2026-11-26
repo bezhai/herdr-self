@@ -13,14 +13,15 @@ export type OpenLark={url:string,token:string};
 type OwnerMethods=Pick<Methods<ClientApi>,'openLarkMessage'|'openLarkChat'|'openLarkReply'|'openLarkSend'>;
 // The part of open-lark's stored message that the owner's channel reads. Other parts keep their text; files name themselves in text.
 type Part={kind:string,text?:string};
-// The fields of open-lark's message, conversation and current-account responses used here.
-type Item={id:string,feedId:string,senderId:string,senderName:string,createdAt:string,parts:Part[],textPreview?:string};
+// The fields of open-lark's message, conversation and current-account responses used here. threadMessageType is reply for a reply inside a
+// thread (or a topic), root for the root of one, and none or missing otherwise.
+type Item={id:string,feedId:string,senderId:string,senderName:string,createdAt:string,parts:Part[],textPreview?:string,threadMessageType?:string};
 type Conversation={feedId:string,name:string,chatMode:'direct'|'group'|'topic'};
 type Me={userId:string,displayName:string};
 // A send is acknowledged by its real message id. Current open-lark has no timestamp here; accept its ISO createdAt or sentAt when it has one.
 type SendAnswer={messageId:string,createdAt?:string,sentAt?:string};
 // The outgoing fields as the ClientApi receives them, before mentions take open-lark's userId spelling.
-type Outgoing={clientId:string,text:string,mentions:{id:string,name:string}[]};
+type Outgoing={clientId:string,text:string,mentions:{id:string,name:string}[],thread?:boolean};
 // An error whose code crosses the client link, with no response body or credential copied into it.
 const coded=(code:string,message:string)=>Object.assign(Error(message),{code});
 // A connection failure and a timeout deliberately look alike to the caller: after either, a send may or may not have gone out.
@@ -69,11 +70,13 @@ export function openLarkMethods(config:OpenLark|undefined):OwnerMethods{
  const me=(timeoutMs?:number)=>{
   account??=request<Me>(config,'GET','/me',undefined,timeoutMs).catch(e=>{account=undefined;throw e;});return account;
  };
- // Send or directly quote-reply as the account just read. Use its acknowledged timestamp when supplied, otherwise the response-arrival time.
+ // Send or quote-reply as the account just read. Use its acknowledged timestamp when supplied, otherwise the response-arrival time. A reply into
+ // a thread asks for replyMode thread: for a reply inside a thread open-lark sends what it sends for direct (it quotes the message inside its
+ // thread), but where it cannot find the thread's root, thread refuses with THREAD_ROOT_UNRESOLVED and direct quietly posts to the chat.
  const deliver=async(path:string,p:Outgoing,timeoutMs:number|undefined,reply:boolean)=>{
   const {text,mentions,clientId}=outgoing(p),owner=await me(timeoutMs);
   // A refusal with SENDER_CHANGED means the cached account is stale: drop it so the caller's retry reads /me again. It is not retried here.
-  const result=await request<SendAnswer>(config,'POST',path,{text,mentions,clientId,expectedSenderId:owner.userId,...reply&&{replyMode:'direct'}},timeoutMs).catch(e=>{
+  const result=await request<SendAnswer>(config,'POST',path,{text,mentions,clientId,expectedSenderId:owner.userId,...reply&&{replyMode:p.thread===true?'thread':'direct'}},timeoutMs).catch(e=>{
    if(typeof e?.message==='string'&&e.message.startsWith('SENDER_CHANGED：'))account=undefined;throw e;
   });
   const stamp=result.createdAt??result.sentAt;return {messageId:result.messageId,at:stamp?Date.parse(stamp):Date.now(),owner:owner.displayName};
@@ -85,7 +88,7 @@ export function openLarkMethods(config:OpenLark|undefined):OwnerMethods{
    // A permalink is useful but incidental: neither a refusal nor an unreachable link endpoint may hide a message already read.
    const link=await request<{url:string}>(config,'POST',`/messages/${id}/link`,{},timeoutMs).then(r=>r.url).catch(()=>undefined);
    const text=item.parts.map(p=>p.kind==='image'?'[图片]':p.kind==='file'?`[文件] ${p.text??''}`:p.text??'').join('')||item.textPreview||'';
-   return {...chat,messageId:item.id,sender:{id:item.senderId,name:item.senderName},at:Date.parse(item.createdAt),text,...link?{link}:{}};
+   return {...chat,messageId:item.id,sender:{id:item.senderId,name:item.senderName},at:Date.parse(item.createdAt),text,...link?{link}:{},...item.threadMessageType==='reply'&&{inThread:true}};
   },
   async openLarkChat({chatId,timeoutMs}){
    const id=encodeURIComponent(string(chatId,'chatId'));return ownerChat(await request<Conversation>(config,'GET',`/conversations/${id}`,undefined,timeoutMs));

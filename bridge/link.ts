@@ -42,8 +42,9 @@ export type SkillDigest={name:string,digest:string};
 // without any), how its topics share their directory, and the directory that the project adopted on this machine, if it did.
 export type WorkspaceProject={id:string,repos:string[],workMode:WorkMode,adoptedDir?:string};
 // A Feishu message as open-lark, the owner's Feishu client, reads it (see open-lark.ts): a chat, an open-lark id, the sender, when it was sent (ms) and what it says as
-// text, where what is not text is written as [图片] or [文件] <file name>, and link, a link that opens it in Feishu, when open-lark gives one.
-export type OwnerMessage=OwnerChat&{messageId:string,sender:{id:string,name:string},at:number,text:string,link?:string};
+// text, where what is not text is written as [图片] or [文件] <file name>, link, a link that opens it in Feishu, when open-lark gives one, and
+// inThread, true for a reply inside a thread (in a topic group, inside a topic); the root of a thread is not inside it.
+export type OwnerMessage=OwnerChat&{messageId:string,sender:{id:string,name:string},at:number,text:string,link?:string,inThread?:boolean};
 // A message that went out as the owner: its open-lark id, when it was sent, in ms, and owner, the name of the Feishu account it went out as.
 export type Sent={messageId:string,at:number,owner:string};
 // A request of an agent to a service of a machine (see services.ts): service, the name of the service; method; path, relative to the root of the
@@ -98,14 +99,14 @@ export type ClientApi={
  pruneSkills:{params:Timed<{store:string,names:string[]}>,result:{removed:string[]}},
  // The owner's channel: open-lark, on the machine that runs it (see open-lark.ts), with its ids, which are not those of the open platform.
  // openLarkMessage reads message messageId, and openLarkChat chat chatId. openLarkReply sends a reply that quotes message messageId in its
- // chat, and openLarkSend a message to chat chatId: text as the owner, with @<name> in it for each of mentions, under clientId, a UUID with
+ // chat, inside the thread of that message when thread is true, and openLarkSend a message to chat chatId: text as the owner, with @<name> in it for each of mentions, under clientId, a UUID with
  // which open-lark sends one message at most however often it is asked, keeping the text of the first request. They reject with code
  // channel_unconfigured on a machine whose client has no open-lark in its config, which is not one that is offline; channel_unreachable when
  // open-lark could not be reached or did not answer within timeoutMs, when a send may or may not have gone out; channel_refused when it
  // answered with an error, whose explanation is the message; invalid_params for params that are not as here.
  openLarkMessage:{params:Timed<{messageId:string}>,result:OwnerMessage},
  openLarkChat:{params:Timed<{chatId:string}>,result:OwnerChat},
- openLarkReply:{params:Timed<{messageId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
+ openLarkReply:{params:Timed<{messageId:string,clientId:string,text:string,mentions:Mention[],thread?:boolean}>,result:Sent},
  openLarkSend:{params:Timed<{chatId:string,clientId:string,text:string,mentions:Mention[]}>,result:Sent},
 // callService makes one request of the service request.service of the client's config with that service's token, and resolves to its answer,
 // also when the status is an error. It rejects with code service_unknown for a name that the config lacks; method_not_allowed and

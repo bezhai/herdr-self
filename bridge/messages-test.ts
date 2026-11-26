@@ -137,6 +137,17 @@ test('reply uses the chat of its input and quotes it, then sends through openLar
  const after=current(f,d);assert.equal(after.state,'delivered');assert.deepEqual(after.receipt,sent);
  assert.deepEqual(f.updates.at(-1),{app,messageId:'om_card_2',card:draftCard(after,'sent',{render:2,now,quoted:message})});
 });
+test('a reply to a message inside a thread goes into that thread, and its card says so',async t=>{
+ const f=fixture();t.after(f.close);const threaded:OwnerMessage={...message,inThread:true};
+ f.respond(method=>method==='openLarkMessage'?threaded:sent);
+ const {input}=await invoke(f,'attach',{pane:'pane',messageId:'message-1'});assert.equal(input.body.inThread,true);
+ const {delivery:d}=await invoke(f,'reply',{pane:'pane',messageId:'message-1',text:'跟进',mentions:[]});
+ assert.deepEqual(d.target,{sink:'as-owner',to:{chatId:'chat-1',chatName:'GEO 小分队',chatType:'group',replyTo:'message-1',thread:true}});
+ assert.deepEqual(f.replies[1].card,draftCard(d,'pending',{render:1,now,quoted:threaded}));assert.match(JSON.stringify(f.replies[1].card),/，发在话题里/);
+ f.messages.click(app,click(d,'send'));await f.flush();
+ assert.deepEqual(f.calls.at(-1),{machine:ownerMachine,method:'openLarkReply',params:{messageId:'message-1',clientId:d.key,text:'跟进',mentions:[],thread:true}});
+ assert.equal(current(f,d).state,'delivered');
+});
 test('a successful send logs the owner, chat and clipped text and redraws the card as sent',async t=>{
  const f=fixture();t.after(f.close);const text='一'.repeat(50)+'末尾';
  const {delivery:d}=await invoke(f,'send',{pane:'pane',chatId:'chat-2',text,mentions:[]});

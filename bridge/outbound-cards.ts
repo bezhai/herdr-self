@@ -25,8 +25,9 @@ const quote=(content:string)=>({tag:'column_set',background_style:'grey',columns
 const click=(content:string,type:string,value:ButtonValue)=>({tag:'button',text:{tag:'plain_text',content},type,behaviors:[{type:'callback',value}]});
 // An action in the row under a pending draft.
 const column=(content:string,type:string,value:ButtonValue)=>({tag:'column',width:'auto',elements:[click(content,type,value)]});
-// Where a message that the owner sends goes: a chat, and the message it replies to when it quotes one (the id open-lark gave it).
-export type Address=OwnerChat&{replyTo?:string};
+// Where a message that the owner sends goes: a chat, the message it replies to when it quotes one (the id open-lark gave it), and thread, true
+// when that message is inside a thread, where the reply goes too.
+export type Address=OwnerChat&{replyTo?:string,thread?:boolean};
 // What a message that the owner sends says: its text, which holds @<name> for each of the mentions.
 export type Body={text:string,mentions:Mention[]};
 // The local wall time of at, with its month and day when now falls on another local day.
@@ -47,7 +48,7 @@ export function sourceCard(m:OwnerMessage,now:number):object{
 // it, withdrawn when the agent took it back), or editing while the owner changes its text.
 export type DraftView='pending'|'sent'|'dropped'|'withdrawn'|'editing';
 // The card of delivery d, a message for the owner's channel, as view, where quoted is the message that a reply quotes. pending: where it goes and
-// as whom, the text, 发送, 修改 and 不发, and 发送失败：<failure> above the text when the last attempt failed (failure, else the delivery's error).
+// as whom (with 发在话题里 for a reply into a thread), the text, 发送, 修改 and 不发, and 发送失败：<failure> above the text when the last attempt failed (failure, else the delivery's error).
 // editing: a form whose input, named text, holds the text, with 发送, which submits it, and 取消. sent, dropped and withdrawn keep the text but
 // have no buttons. Every button carries {draft:<its action>,deliveryId:d.id,render}: every drawing of a card that can be clicked needs its own render
 // number (see pending in request-cards.ts).
@@ -55,7 +56,7 @@ export function draftCard(d:Delivery,view:DraftView,{render,now,quoted,failure=d
  const to=(d.target as {to:Address}).to,{text}=d.body as Body,deliveryId=d.id;
  const title=to.chatType==='p2p'?`回复 ${to.chatName}`:`发到 ${to.chatName}`;
  const destination=to.chatType==='p2p'?`发到你和 ${to.chatName} 的私聊，以你的身份发送`:'以你的身份发送';
- const about=destination+(quoted?`，引用 ${quoted.sender.name} ${time(quoted.at,now)} 的消息`:'');
+ const about=destination+(quoted?`，引用 ${quoted.sender.name} ${time(quoted.at,now)} 的消息`:'')+(to.thread?'，发在话题里':'');
  const send:ButtonValue={draft:'send',deliveryId,render};
  if(view==='editing'){
   const form=submitForm('draft',[{tag:'input',name:'text',input_type:'multiline_text',width:'fill',default_value:text}],'发送',send);

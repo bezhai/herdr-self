@@ -50,8 +50,8 @@ function failure(owner:Machine|null,e:any){
  if(e?.code==='channel_refused')return 'open-lark 拒绝了这次发送：'+publicText(e?.message);
  return brief(e)||'未知错误';
 }
-// The sink as-owner of the task core: sends a body to an address as the owner through open-lark, as a reply when the address has replyTo, else
-// to its chat. The delivery's key is open-lark's client id, which sends the message of a client id at most once. It resolves to the receipt
+// The sink as-owner of the task core: sends a body to an address as the owner through open-lark, as a reply when the address has replyTo (inside
+// the thread of the message it replies to when the address has thread), else to its chat. The delivery's key is open-lark's client id, which sends the message of a client id at most once. It resolves to the receipt
 // (messageId, at, owner) and rejects with the explanation of failure.
 export function ownerSink({owner,call}:Pick<Deps,'owner'|'call'>):Sink{
  return {async send(to,body,key){
@@ -59,7 +59,7 @@ export function ownerSink({owner,call}:Pick<Deps,'owner'|'call'>):Sink{
   if(!m)throw Error(failure(null,null));
   try{
    const params={clientId:key,text,mentions};
-   return await (address.replyTo?call(m,'openLarkReply',{messageId:address.replyTo,...params}):call(m,'openLarkSend',{chatId:address.chatId,...params})) as Sent;
+   return await (address.replyTo?call(m,'openLarkReply',{messageId:address.replyTo,...params,...address.thread&&{thread:true}}):call(m,'openLarkSend',{chatId:address.chatId,...params})) as Sent;
   }catch(e){throw Error(failure(m,e));}
  }};
 }
@@ -96,12 +96,12 @@ export class Messages{
   const input=this.deps.tasks.addInput(task,m,refPrefix+messageId) as Answers['attach']['input'];
   await this.deps.tasks.settled();return {input};
  }
- // Drafts a reply to input messageId of the task of topic t, in the chat of that message.
+ // Drafts a reply to input messageId of the task of topic t, in the chat of that message, and inside its thread when it is a reply in one.
  async reply(t:Topic,request:MessageRequest):Promise<Answers['reply']>{
   const task=this.deps.topics.task(t),messageId=this.id(request.messageId,'消息'),quoted=this.quoted(task,messageId);
   if(!quoted)throw Error('这条消息不在本话题的来源里，先用 attach 放进来');
-  const {text,mentions}=this.checked(request),{chatId,chatName,chatType}=quoted;
-  return {delivery:await this.draft(task,{chatId,chatName,chatType,replyTo:messageId},{text,mentions},quoted)};
+  const {text,mentions}=this.checked(request),{chatId,chatName,chatType,inThread}=quoted;
+  return {delivery:await this.draft(task,{chatId,chatName,chatType,replyTo:messageId,...inThread&&{thread:true}},{text,mentions},quoted)};
  }
  // Drafts a message to chat chatId, which it reads through the owner's channel.
  async send(t:Topic,request:MessageRequest,owner:Machine):Promise<Answers['send']>{

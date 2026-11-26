@@ -78,6 +78,13 @@ test('a pending group draft adds a failure above its text and describes the quot
  ],true));
 });
 
+test('a reply that goes into the thread of its source says so after the quoted source, also while it is edited',()=>{
+ const d=delivery('draft-thread',{chatId:groupSource.chatId,chatName:groupSource.chatName,chatType:'group',replyTo:groupSource.messageId,thread:true},{text:'跟进一下',mentions:[]});
+ const title='发到 GEO 小分队',about='以你的身份发送，引用 陈帆 1月2日 10:49 的消息，发在话题里';
+ assert.deepEqual(draftCard(d,'pending',{render:4,now,quoted:groupSource}),untitled(title,[heading(title),grey(about),quote('跟进一下'),actions(d,4)],true));
+ assert.deepEqual((draftCard(d,'editing',{render:5,now,quoted:groupSource}) as any).body.elements[1],grey(about));
+});
+
 test('an editing draft is a form with a multiline text input prefilled verbatim and submit and cancel callbacks',()=>{
  const title='回复 孙栎倩',about='发到你和 孙栎倩 的私聊，以你的身份发送';
  const card=draftCard(privateDraft,'editing',{render:9,now}) as ReturnType<typeof untitled>&{body:{elements:any[]}};
