@@ -3,10 +3,12 @@ import {methods} from './machine.ts';
 import {denial} from './command-guard.ts';
 import type {Kind,PermissionMode} from './state.ts';
 // The launch preparation of the client (see launch.ts) and the hook that restricts the commands of Claude (see command-guard.ts). The client
-// reads the home directory from the environment of the process, so the tests set HOME once, before any of them runs.
+// reads the home directory from the environment of the process, so the tests set HOME once, before any of them runs. The environment of
+// the client has none of the developer's CLAUDE_CONFIG_DIR and CODEX_HOME, which would lead it past that home to their Claude and Codex.
 const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'bridge-launch-'))),home=path.join(root,'home');
 fs.mkdirSync(home);process.env.HOME=home;
-const env={...process.env,LC_ALL:'C',GIT_CONFIG_GLOBAL:path.join(root,'gitconfig'),GIT_CONFIG_SYSTEM:'/dev/null'};
+const {CLAUDE_CONFIG_DIR:_claude,CODEX_HOME:_codex,...inherited}=process.env;
+const env={...inherited,LC_ALL:'C',GIT_CONFIG_GLOBAL:path.join(root,'gitconfig'),GIT_CONFIG_SYSTEM:'/dev/null'};
 fs.writeFileSync(env.GIT_CONFIG_GLOBAL,'[user]\n name = t\n email = t@example.com\n[init]\n defaultBranch = main\n');
 const git=(cwd:string,...args:string[])=>execFileSync('git',args,{cwd,env,encoding:'utf8'}).trim();
 const client=methods({herdr:'unused',env});

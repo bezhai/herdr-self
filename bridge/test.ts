@@ -4193,13 +4193,17 @@ function framesOf(ws:{addEventListener(type:'message',listener:(e:{data:Json})=>
 const hello=(ws:WebSocket,params:object)=>ws.send(JSON.stringify({id:1,method:'hello',params}));
 // A config file of the client with mode.
 const configFile=(dir:string,name:string,text:string,mode=0o600)=>{const file=path.join(dir,name);fs.writeFileSync(file,text,{mode});fs.chmodSync(file,mode);return file;};
-// The environment of a client process: none of the test's Bridge, Herdr or proxy variables, then every proxy variable pointing at a closed port.
-const clientEnv=(env:Record<string,string>)=>({...Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(BRIDGE_|HERDR_)|proxy$/i.test(k))),...Object.fromEntries(['http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','all_proxy'].map(k=>[k,'http://127.0.0.1:9'])),...env});
-// A client process (bin/bridge-client.ts) with the config file given and env, which names a socket of its own with BRIDGE_CLIENT_SOCKET
-// or HOME: the default one may belong to the client of this machine. log collects its stderr and exited resolves to its exit code.
+// The environment of a client process: none of the test's Bridge, Herdr or proxy variables, nor its CLAUDE_CONFIG_DIR and CODEX_HOME, which
+// would lead the client past its home to the developer's Claude and Codex (see launch.ts), then every proxy variable pointing at a closed port.
+const clientEnv=(env:Record<string,string>)=>({...Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(BRIDGE_|HERDR_)|proxy$|^(CLAUDE_CONFIG_DIR|CODEX_HOME)$/i.test(k))),...Object.fromEntries(['http_proxy','https_proxy','HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','all_proxy'].map(k=>[k,'http://127.0.0.1:9'])),...env});
+// A client process (bin/bridge-client.ts) with the config file given and env. Its home is the HOME of env, or else a new temporary
+// directory that goes once it exits, never the home of the developer: the control plane writes and prunes under ~/ of a client, and that
+// home holds the skill store and the socket of the client of this machine, whose skills the agents here link to. Its socket is the
+// BRIDGE_CLIENT_SOCKET of env, or else the default one under its home. log collects its stderr and exited resolves to its exit code.
 function bridgeClient(config:string,env:Record<string,string>){
- assert.ok(env?.BRIDGE_CLIENT_SOCKET||env?.HOME,'a client of a test needs a socket of its own');
- const p=Object.assign(spawn(process.execPath,[path.join(bridgeDir,'bin','bridge-client.ts')],{env:clientEnv({BRIDGE_CLIENT_CONFIG:config,...env}),stdio:['ignore','ignore','pipe']}),{log:''});
+ const home=env.HOME??fs.mkdtempSync(path.join(os.tmpdir(),'bridge-client-home-'));
+ const p=Object.assign(spawn(process.execPath,[path.join(bridgeDir,'bin','bridge-client.ts')],{env:clientEnv({BRIDGE_CLIENT_CONFIG:config,HOME:home,...env}),stdio:['ignore','ignore','pipe']}),{log:''});
+ if(!env.HOME)p.once('exit',()=>fs.rmSync(home,{recursive:true,force:true}));
  p.stderr.on('data',d=>{p.log+=d;});return Object.assign(p,{exited:new Promise<number|null>(r=>p.once('exit',code=>r(code)))});
 }
 type ClientProcess=ReturnType<typeof bridgeClient>;
@@ -4526,15 +4530,27 @@ function fakeHerdrBinary(dir:string){
  return bin;
 }
 test('Herdr commands run through the client of the machine with the Herdr of its config in the session of the machine, keep Herdr error codes, honor per-call timeouts and expand ~/ only in path arguments',async()=>{
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-herdr-')),f=await machineFixture({herdr:fakeHerdrBinary(dir)}),{herdr}=f.ops,m=f.m;
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-herdr-')),home=path.join(dir,'home');fs.mkdirSync(home);
+ const f=await machineFixture({herdr:fakeHerdrBinary(dir),env:{HOME:home}}),{herdr}=f.ops,m=f.m;
  try{
   assert.deepEqual(await herdr(m,['agent','list']),{type:'agent_list',agents:[]});
   await assert.rejects(herdr(m,['blocked']),(e:Thrown)=>e.code==='agent_blocked'&&e.message==='agent w1:p1 is blocked');
   await assert.rejects(herdr(m,['usage']),(e:Thrown)=>e.code===undefined&&/requires text/.test(e.message));
   await assert.rejects(herdr(m,['slow'],{timeoutMs:100}),(e:Thrown)=>e.timedOut===true&&e.message==='herdr 在 0.1 秒内没有结束，已终止');assert.deepEqual(await herdr(m,['slow'],{timeoutMs:5000}),{type:'ok'});
-  assert.deepEqual(await herdr(m,['cwd','--cwd',{path:'~/work'},'~/work']),{cwd:os.homedir()+'/work',text:'~/work'});
+  assert.deepEqual(await herdr(m,['cwd','--cwd',{path:'~/work'},'~/work']),{cwd:home+'/work',text:'~/work'});
   await assert.rejects(herdr(m,['text']),/^Error: 远程服务未返回有效 JSON$/);
  }finally{await f.close();fs.rmSync(dir,{recursive:true});}
+});
+test('a client that a test starts without a HOME runs in a temporary home of its own, removed once it exits, and without the CLAUDE_CONFIG_DIR and CODEX_HOME of the test: the control plane writes and prunes under ~/ of a client, and the home of the developer holds the skill store of the client of this machine, which the agents here link to',async()=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-home-')),herdr=path.join(dir,'herdr');
+ // A Herdr that prints the path argument as the client expanded it and the variables it runs with.
+ fs.writeFileSync(herdr,['#!/bin/sh','printf \'{"result":{"work":"%s","home":"%s","claude":"%s","codex":"%s"}}\' "$3" "$HOME" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME"',''].join('\n'),{mode:0o700});
+ const f=await machineFixture({herdr});let home='';
+ try{
+  const seen=await f.ops.herdr(f.m,[{path:'~/work'}]) as {work:string,home:string,claude:string,codex:string};home=path.dirname(seen.work);
+  assert.notEqual(home,os.homedir());assert.equal(seen.home,home);assert.ok(fs.statSync(home).isDirectory());assert.deepEqual([seen.claude,seen.codex],['','']);
+ }finally{await f.close();fs.rmSync(dir,{recursive:true});}
+ assert.equal(fs.existsSync(home),false);
 });
 test('a command that runs past the timeout the control plane gave it is killed by the client with the processes it started, and the request fails as timed out; the control plane waits for an answer a little longer than that timeout',async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bridge-timeout-')),f=await machineFixture({herdr:fakeHerdrBinary(dir)});
