@@ -43,9 +43,7 @@ const offline=(e:Error,after:string)=>`${brief(e)}。${after}`;
 // so a ready topic is linked to the agent of its pane for as long as the agent reports it.
 const linked=(t:Topic,agents:Agent[])=>agents.find(x=>x.pane_id===t.paneId&&x.remote_answers===true);
 const remoteAnswers=(pane:string,on:boolean)=>['pane','remote-answers',pane,on?'on':'off'];
-// The line that starts what an adopted topic prompts: the agent was started in a terminal and cannot tell that the owner now writes from Feishu.
-// A text that starts with / goes without it, so that the agent still takes it as one of its commands (/compact and the like).
-const fromFeishu='（来自飞书话题）',endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
+const endedNotice='该话题所在的 Agent 会话已退出，请发起新话题',continuable='该话题所在的 Agent 会话已退出，在话题里回复即可恢复会话',adoptedGone='被接管的 Agent 已退出、已被替换或所在 pane 已关闭，话题已结束接管',unchosen='请选择要接管的 Agent';
 const unsupportedNotice='暂不支持这类消息，目前只能转发文字、图片和文件';
 // What a topic that starts again says when it could not resume the agent session it recorded (see open), and when a live agent outside it
 // holds that session (see heldElsewhere).
@@ -245,8 +243,7 @@ export class Topics{
   if(!agent&&!await this.open(a,b,t))return;
   // An adopted topic that gets here is ready, with its agent.
   const text=await this.attach(a,t,msg,t.adopted?agent!.foreground_cwd||agent!.cwd:t.cwd);
-  const prompt=t.adopted&&!text.startsWith('/')?fromFeishu+'\n'+text:text;
-  let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,prompt]);}
+  let r;try{r=await this.herdr(this.target(t),['agent','prompt',t.paneId,text]);}
   catch(e){if(e.code!=='agent_blocked')throw e;await this.notify(a,t,'Agent 正在等待确认，请到 Herdr 中处理后重发这条消息');return this.noticed(t);}
   this.store.log('消息投递',`${a.name} → ${b.name}：已发送到 ${t.agentName}`);return r.agent;
  }
