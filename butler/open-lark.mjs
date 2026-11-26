@@ -63,6 +63,8 @@ export class OpenLark{
  syncStatus(){return this.#request('GET','/sync/status');}
  conversations({scope,limit=100,cursor}){return this.#request('GET','/conversations',{query:{scope,limit,cursor}});}
  conversation(feedId){return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}`);}
+ // The conversation entry (with its feedId) of a group I am in, by its Open Platform chat id (oc_…), which Bridge knows chats by.
+ openChat(openChatId){return this.#request('GET',`/conversations/open-chat/${encodeURIComponent(openChatId)}`);}
  // What a new group shows besides its conversation entry: settings (labels, owner, announcement), chat tabs and the
  // bots in it (each with when it joined).
  settings(feedId){return this.#request('GET',`/conversations/${encodeURIComponent(feedId)}/settings`);}

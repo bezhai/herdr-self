@@ -43,3 +43,12 @@ test('an unreachable Bridge says where',async t=>{
  const bridge=await start(t);const url=bridge.url;await bridge.close();
  await assert.rejects(()=>new Bridge({url,key:KEY}).state(),/连不上 Bridge/);
 });
+
+test('topicContext reads the live topics; giveDigest hands one a digest and returns the answer, and a refusal is an error with its code',async t=>{
+ const bridge=await start(t),b=client(bridge);bridge.topics=[{id:'T1',title:'火山发文',chatId:'oc_1'}];
+ assert.deepEqual(await b.topicContext(),[{id:'T1',title:'火山发文',chatId:'oc_1'}]);
+ assert.deepEqual(await b.giveDigest({topicId:'T1',key:'butler-route:1',text:'陈帆：好了'}),{topicId:'T1',key:'butler-route:1',created:true,pending:1});
+ assert.deepEqual(bridge.digests(),[{topicId:'T1',key:'butler-route:1',text:'陈帆：好了'}]);
+ await assert.rejects(()=>b.giveDigest({topicId:'gone',key:'k',text:'x'}),e=>e.status===404&&e.code==='unknown_topic');
+ assert.equal(bridge.requests.at(-1).authorization,`Bearer ${KEY}`);
+});

@@ -23,6 +23,7 @@ export const CATALOG = [
  'GET /agent/v1/messages/:messageId/reactions','POST /agent/v1/messages/:messageId/reactions','DELETE /agent/v1/messages/:messageId/reactions/:key',
  'POST /agent/v1/messages/:messageId/replies','GET /agent/v1/threads/feed','POST /agent/v1/search/mention-history',
  'GET /agent/v1/conversations/:feedId/settings','GET /agent/v1/conversations/:feedId/chat-tabs','GET /agent/v1/conversations/:feedId/bots','POST /agent/v1/conversations/:feedId/bots',
+ 'GET /agent/v1/conversations/open-chat/:openChatId',
 ].map(r=>{const [method,path]=r.split(' ');return {method,path};});
 const READ_POSTS=new Set(['/agent/v1/search/mention-history']);
 
@@ -198,6 +199,11 @@ export class FakeOpenLark{
    case 'GET /agent/v1/me':return send(200,{userId:this.me,accountId:this.me,displayName:'我'});
    case 'GET /agent/v1/sync/status':return send(200,{...this.syncState,backlog:0,lastConnectedAt:null,lastPacketAt:null,reconnectCount:0,database:{conversations:this.conversations.size,messages:this.messages.size}});
    case 'GET /agent/v1/conversations':return send(200,this.#conversations(q));
+   // A joined group by its Open Platform id, which the test sets on the conversation entry (openChatId).
+   case 'GET /agent/v1/conversations/open-chat/:openChatId':{
+    if(!/^oc_[0-9a-f]{32}$/.test(parts[2]))return error(400,'INVALID_OPEN_CHAT_ID','Expected an Open Platform chat id such as oc_…');
+    const c=[...this.conversations.values()].find(x=>x.openChatId===parts[2]);return c?send(200,{...this.conversationView(c),openChatId:c.openChatId}):error(404,'CONVERSATION_NOT_FOUND','Conversation not found');
+   }
    case 'GET /agent/v1/conversations/:feedId':{const c=this.conversations.get(parts[1]);return c?send(200,this.conversationView(c)):error(404,'CONVERSATION_NOT_FOUND','Conversation not found');}
    case 'GET /agent/v1/conversations/:feedId/messages':{const c=this.conversations.get(parts[1]);if(!c)return send(500,{statusCode:500,error:'Internal Server Error',message:'Conversation not found'});return send(200,this.#page(c,q));}
    case 'GET /agent/v1/conversations/:feedId/pins':return send(200,{items:[]});
