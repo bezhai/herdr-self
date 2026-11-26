@@ -3714,9 +3714,10 @@ test('bridge-skill --help is complete on its own, since the entry skill that tel
  const {code,out,err}=await skill({socket:'/nonexistent'},['--help']);assert.deepEqual([code,err],[0,'']);assert.equal(out,skillUsage);
  for(const op of ['list','search','read','import','export','preload','remove']){assert.ok(out.includes('  bridge-skill '+op),op);assert.match(out,new RegExp(`^  ${op} +\\S`,'m'),op);}
  for(const fact of ['--json','-h, --help','BRIDGE_URL','BRIDGE_ACCESS_KEY','access-key','默认加载','按需读取','~/.local/share/herdr-bridge/skills/<名称>','相对路径','frontmatter','软链接','退出码',
-  '连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','skill 不存在'])assert.ok(out.includes(fact),fact);
- // Bridge has no projects: the two kinds of skill are 默认加载 and 按需读取.
- assert.doesNotMatch(out,/项目|everywhere/);
+  '连不上本机的 Bridge 客户端','本机的 Bridge 客户端没有连上控制面','没有权限连接本机的 Bridge 客户端','skill 不存在','~/.claude/skills','~/.agents/skills','~/.gemini/config/skills'])assert.ok(out.includes(fact),fact);
+ // The two kinds of skill are 默认加载, in the global skill directories of every machine and so in every agent session, and 按需读取; the
+ // skills of projects are the console's business, and no skill of either kind is placed in the working directory of a topic.
+ assert.doesNotMatch(out,/项目|工作目录|everywhere/);
 });
 const minutes=(n:number)=>n*60000;
 test('BRIDGE_URL must be an http(s) origin; a trailing slash is dropped',()=>{

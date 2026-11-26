@@ -12,9 +12,9 @@ type Props = PageProps & { openSkill: (skill: SkillWithFiles) => void };
 // How a skill reaches agents, as the card names it.
 const loading = (preload: boolean) => (preload ? '默认加载' : '按需读取');
 
-// A skill of the platform, loaded by default (preload) or read on demand. One loaded by default is placed in the working directory of each
-// topic's agent before it starts; agents read the others when they need them. Only a skill read on demand can be removed, so that a click
-// cannot take one away from every topic. Editing reads the skill with its files first (see SkillDialog).
+// A skill of the platform, loaded by default (preload) or read on demand. One loaded by default is placed in the global skill directories
+// of every machine, which every agent session there reads; agents read the others when they need them. Only a skill read on demand can be
+// removed, so that a click cannot take one away from every session. Editing reads the skill with its files first (see SkillDialog).
 function SkillCard({ skill: s, refresh, toast, openSkill }: Omit<Props, 'state'> & { skill: Skill }) {
   async function act(path: string, body: unknown, message?: string) {
     await request(path, body);

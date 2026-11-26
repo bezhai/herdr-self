@@ -22,16 +22,17 @@ export const usage=`用法：
   bridge-skill remove <名称>
 
 查找、阅读和管理 Bridge 平台上的 skill。平台上的 skill 由主人在 Bridge 管理台的 Skills 页或者用这个命令维护，分两种：「默认加载」的，
-Bridge 在开话题时放进 Agent 的工作目录，Agent 启动时就能看到；「按需读取」的不放，Agent 需要时用这个命令查找和阅读。
+Bridge 放进每台机器的全局 skill 目录（~/.claude/skills、~/.agents/skills、~/.gemini/config/skills），机器上的 Agent 会话不管是
+Bridge 还是人在终端里启动的，一启动就能看到；「按需读取」的不放，Agent 需要时用这个命令查找和阅读。
 
 读（list、search、read）只连本机的 Bridge 客户端，由客户端转给 Bridge，不需要密钥，这台机器上的 Agent 都可以运行。
 管理（import、export、preload、remove）直接连 Bridge 的管理台，要设置两个环境变量：
   BRIDGE_URL         管理台的地址，例如 http://<控制面>:8080。
   BRIDGE_ACCESS_KEY  管理台的访问密钥，在控制面状态目录的 access-key 文件里。
-平台上的 skill 会进入之后所有 Agent 的工作目录或上下文，由主人管理：Agent 只在主人明确要求时运行管理操作。
+平台上的 skill 会进入每台机器的全局 skill 目录和之后所有 Agent 会话的上下文，由主人管理：Agent 只在主人明确要求时运行管理操作。
 
 操作：
-  list        平台上所有的 skill：名称、默认加载还是按需读取、描述。默认加载的已经在 Agent 的工作目录里，不用再 read。
+  list        平台上所有的 skill：名称、默认加载还是按需读取、描述。默认加载的已经在每个 Agent 会话里，不用再 read。
   search      名称、描述或 SKILL.md 正文里包含所有这些词的 skill，不分大小写，名称或描述里包含的排在前面。
   read        输出一个 skill 的 SKILL.md 全文。skill 带有其他文件（脚本、参考文档等）时，客户端先把它们放进这台机器的
               ~/.local/share/herdr-bridge/skills/<名称> 目录，命令在正文前写出这个目录和文件列表；SKILL.md 里提到的相对路径都相对
@@ -41,9 +42,9 @@ Bridge 在开话题时放进 Agent 的工作目录，Agent 启动时就能看到
               目录里的 .venv、node_modules 和缓存目录不会导入，依赖由使用的机器自己安装。文件合计超过上限（32 MiB）时 Bridge
               拒绝。已有同名 skill 时整个替换它的文件，是否默认加载不变。
   export      把一个 skill 的文件写到 <目录>/<名称>，不给目录时写到当前目录；<目录>/<名称> 已经存在时拒绝，不覆盖。
-  preload     on：设为默认加载，之后新开的话题，Bridge 都会把它放进 Agent 的工作目录；off：设为按需读取，之后新开话题时 Bridge
-              把它从工作目录里移走。已经开着的话题不受影响。
-  remove      删除一个 skill。默认加载的 skill 删除后，Bridge 在之后新开话题时也把它从工作目录里移走。
+  preload     on：设为默认加载，Bridge 马上把它放进每台机器的全局 skill 目录，之后启动的 Agent 会话都会加载它；off：设为按需读取，
+              Bridge 马上把它从这些目录里移走。目录里同名、但不是 Bridge 放的 skill 不动。客户端没有连上的机器在连上时补上。
+  remove      删除一个 skill。默认加载的 skill 删除后，Bridge 也把它从每台机器的全局 skill 目录里移走。
 
 选项：
   --json      list、search 和 read 输出 Bridge 返回的 JSON，而不是给人读的文字。
