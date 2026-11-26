@@ -3,14 +3,16 @@
 // how the agent I talk to butler through (see cards.mjs AGENT_GROUP) works butler, over ssh: it shows the status, what
 // was collected, a chat's messages, the matters made of it, the daily read's topics, 关于TA and my notes; sets chat
 // levels and has the model grade chats; closes and reopens matters; keeps my notes, my corrections of the daily read
-// and the ignored-sender list; and creates and updates the bot's Feishu app. Every
+// and the ignored-sender list; shows what routing my new messages to Bridge's topics would hand over, and what it did; and
+// creates and updates the bot's Feishu app. Every
 // command that reads prints the store's records as JSON with --json, and every one that writes prints what it changed,
 // before and after, in words or with --json as JSON: the agent reads the one and tells me the other.
 import {parseArgs} from 'node:util';
-import {loadConfig,saveConfig,requireToken,requireModel,requireBridge,newChatSetup,storeFile} from './config.mjs';
+import {loadConfig,saveConfig,requireToken,requireModel,requireBridge,newChatSetup,requireRouting,routingSetup,storeFile} from './config.mjs';
 import {OpenLark,addBotOnly} from './open-lark.mjs';
 import {Bridge} from './bridge-client.mjs';
 import {NewChats} from './newchat.mjs';
+import {Router} from './route.mjs';
 import {bytedcliMeego,describeMaterial} from './newchat-material.mjs';
 import {CATEGORIES,LEVELS,LEVEL_NAMES} from './rules.mjs';
 import {Matters} from './matters.mjs';
@@ -76,8 +78,9 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
   process [--once]                 运行加工端（常驻）：每 10 分钟把新消息交给模型整理成事项，每天根据我发的消息
                                    写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍，在另一条模型通道上
                                    给活跃的聊天分级，每天早上 6 点把前一天每日和即时的聊天读一遍、拆成话题存下；
-                                   配置了机器人时也运行机器人：定时汇总、分级的卡片；--once 只运行一轮（处理完积压，
-                                   到了时间也写「关于TA」、整理事项）就退出，不运行机器人，不分级，不读
+                                   配置了机器人时也运行机器人：定时汇总、分级的卡片；BUTLER_ROUTING 是 dry-run 或 on 时
+                                   每 5 分钟把新消息转给 Bridge 里进行中的话题（dry-run 只记下会转什么）；--once 只运行一轮
+                                   （处理完积压，到了时间也转交、写「关于TA」、整理事项）就退出，不运行机器人，不分级，不读
   matters [list] [--all] [--json]  未结束的事项，紧急的在前；--all 连同已结束的
   matters close <编号> [--reason 文字] [--json]
                                    由我关掉一个未结束的事项，和卡片上的「完成」一样记为我关掉的；--reason 是我的理由，
@@ -97,6 +100,13 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
                                    什么都不发、不写、不记。需要 Bridge 的地址和密钥（配置里的 BUTLER_BRIDGE_URL 和
                                    BUTLER_BRIDGE_KEY，也可以只放在这条命令的环境变量里）。加工端自己会判断没见过的群，
                                    配置了机器人和「新需求群」的四项配置时才运行
+  route --dry-run [--since 时间] [--json]
+                                   干跑：现在把新消息转给 Bridge 里进行中的话题会怎么转：从加工端上一轮转到的地方（或 --since）
+                                   起的新消息、进行中的话题、模型给每个话题写的摘要。只运行模型，什么都不发、不写、不记。需要
+                                   BUTLER_BRIDGE_URL、BUTLER_BRIDGE_KEY（也可以只放在这条命令的环境变量里）和 BUTLER_BRIDGE_BOT_ID
+  route log [--since 时间] [--limit 条数] [--json]
+                                   加工端转给各个话题的摘要，新的在前：时间、状态（干跑、等着交、已交给 Bridge、Bridge 没收下）、
+                                   话题、消息和摘要；默认最近 7 天，最多 50 份
   bot create [--name 名称]          通过飞书的官方流程创建管家机器人的应用，凭证写进配置文件
   bot update                       通过飞书的官方流程给已经配置的应用加上它还没有的权限和回调（卡片上的按钮要用的回调）
 
@@ -279,6 +289,12 @@ function pick(items,query,{key,noun,missing,line}=GROUPS){
  throw new UsageError(`“${query}”对应多个${noun}，请用完整名称或 id：\n${found.map(line).join('\n')}`);
 }
 
+// A row of route log: when, what became of it, the topic, its messages and the digest.
+const ROUTED={dry:'干跑',pending:'等着交',given:'已交给 Bridge',dropped:'Bridge 没收下'};
+function printRouted(r){
+ console.log(`${time(r.at)}  ${ROUTED[r.status]??r.status}  话题「${r.title}」  ${r.messageIds.length} 条消息${r.error?`  （${r.error}）`:''}\n  ${r.text.replaceAll('\n','\n  ')}`);
+}
+
 // The model as herdr reaches it on the model machine (see herdr-model.mjs).
 const herdrModel=config=>new HerdrModel({machine:requireModel(config),cwd:config.modelCwd,name:config.modelName,effort:config.modelEffort,command:[config.herdr],log:m=>console.error(m)});
 
@@ -295,7 +311,7 @@ async function main(argv){
  process.umask(0o077);
  const {values,positionals}=parseArgs({args:argv,allowPositionals:true,options:{config:{type:'string'},json:{type:'boolean'},once:{type:'boolean'},all:{type:'boolean'},category:{type:'string'},
   since:{type:'string'},until:{type:'string'},day:{type:'string'},limit:{type:'string'},search:{type:'string'},picked:{type:'boolean'},'not-picked':{type:'boolean'},
-  name:{type:'string'},reason:{type:'string'},help:{type:'boolean',short:'h'}}});
+  'dry-run':{type:'boolean'},name:{type:'string'},reason:{type:'string'},help:{type:'boolean',short:'h'}}});
  const [command,...rest]=positionals;
  if(values.help||!command){console.log(HELP);return 0;}
  // A reason given where none is kept would be lost without a word.
@@ -467,6 +483,31 @@ async function main(argv){
     console.log(r.card?`\n== 会发给我的卡片（没有发） ==\n${JSON.stringify(r.card,null,1)}`:'\n== 卡片 ==\n这个判断不交给 Agent，不会发卡片');
     return 0;
    }
+   // Routing my new messages to topics: what a round would hand over now (the dry run, which keeps nothing), and what the
+   // processor's rounds did.
+   case 'route':{
+    const [action]=rest,usage='用法：butler route --dry-run [--since 时间] [--json]，或 butler route log [--since 时间] [--limit 条数] [--json]';
+    if(action==='log'){
+     const list=new Router({store,matters}).log({since:parseTime(values.since,'--since')??Date.now()-7*86400e3,limit:limitOf(values.limit,50)});
+     if(values.json){json(list);return 0;}
+     if(!list.length)console.log('这段时间没有转交过（加工端的 BUTLER_ROUTING 是 dry-run 或 on 时才转）');
+     for(const r of list)printRouted(r);
+     return 0;
+    }
+    if(action!==undefined||!values['dry-run'])throw new UsageError(usage);
+    const need=requireRouting(config);
+    const router=new Router({store,matters,lark:openLark(),bridge:new Bridge({url:need.bridgeUrl,key:need.bridgeKey}),model:herdrModel(config),botId:need.botId,ownBotId:need.ownBotId,mode:'dry-run'});
+    const p=await router.preview({since:parseTime(values.since,'--since')});
+    const routed=new Set(p.digests.flatMap(d=>d.messageIds)),unrouted=p.messages.filter(m=>!routed.has(m.id)).length;
+    if(values.json){json({from:p.from,until:p.until,messages:p.messages.length,unrouted,topics:p.topics,digests:p.digests,problems:p.problems,runs:p.runs,...p.error&&{error:p.error}});return p.error?1:0;}
+    console.log(`${time(p.from)} 到 ${time(p.until)}：${p.messages.length} 条新消息，${p.topics.length} 个进行中的话题${p.topics.length?`（${p.topics.map(t=>`「${t.title}」`).join('、')}）`:''}，模型运行 ${p.runs} 次`);
+    for(const d of p.digests)console.log(`\n== 话题「${d.title}」：${d.messageIds.length} 条消息 ==\n${d.text}`);
+    console.log(`\n没有转给任何话题的消息：${unrouted} 条`);
+    for(const problem of p.problems)console.log(`没有采纳：${problem}`);
+    if(p.error)console.log(`没有做完：${p.error}`);
+    console.log('干跑：什么都没有发，也没有记下');
+    return p.error?1:0;
+   }
    case 'groups':{
     await refreshGroups(store,openLark());
     const levels=new Map(store.levels().map(l=>[l.feedId,l])),groups=values.search?find(store.groups(),values.search,'feedId'):store.groups();
@@ -564,18 +605,22 @@ async function processCommand(config,once){
  if(config.bot&&!once){const {Bot}=await feishu();bot=new Bot({store,...config.bot,log:m=>console.log(m)});}
  if(setup&&bot)newChats=new NewChats({store,matters,lark:new OpenLark({url:config.openLarkUrl,token:requireToken(config),gapMs:0}),
   adder:new OpenLark({url:config.openLarkUrl,token:setup.writeToken,gapMs:0,guard:addBotOnly}),bridge:new Bridge({url:setup.bridgeUrl,key:setup.bridgeKey}),bot,model,botId:setup.botId,meego:bytedcliMeego(config.bytedcli)});
+ // Routing my new messages to Bridge's topics, when BUTLER_ROUTING is dry-run or on (see config.mjs routingSetup); it needs no bot.
+ const routing=routingSetup(config);
+ const router=routing&&new Router({store,matters,lark:new OpenLark({url:config.openLarkUrl,token:requireToken(config),gapMs:0}),bridge:new Bridge({url:routing.bridgeUrl,key:routing.bridgeKey}),
+  model,botId:routing.botId,ownBotId:routing.ownBotId,mode:routing.mode});
  const options={...config.reviewEveryMs&&{reviewEveryMs:config.reviewEveryMs},...config.profileEveryMs&&{profileEveryMs:config.profileEveryMs}};
  // The latest digest follows the matters: whatever a batch, a review or the command line changes refreshes it. What the
  // model newly inferred about me when it wrote 关于TA goes to me (see levels.mjs).
  let digests,levels;
- const processor=new Processor({store,matters,model,options,log:m=>console.log(m),onMattersChanged:()=>digests?.refresh(),onProfile:p=>levels?.inferred(p),newChats});
+ const processor=new Processor({store,matters,model,options,log:m=>console.log(m),onMattersChanged:()=>digests?.refresh(),onProfile:p=>levels?.inferred(p),newChats,router});
  if(once){
   try{
    await processor.start({periodic:false});const r=await processor.runOnce();await processor.stop();
    const p=r.profile,profiled=!p?'':p.error?`「关于TA」没有写成：${p.error}；`:`写了「关于TA」（${p.text.length} 字）；`;
    const v=r.review,reviewed=!v?'':v.error?`整理没有完成：${v.error}；`:`整理了 ${v.reviewed} 个未结束的事项，关掉 ${v.closed} 个；`;
    console.log(`加工完成：模型运行 ${r.runs} 次，失败 ${r.failures} 次；${profiled}${reviewed}待加工 ${matters.pendingCount()} 条，未结束的事项 ${matters.list().length} 个`);
-   return r.failures||p?.error||v?.error?1:0;
+   return r.failures||p?.error||v?.error||r.route?.error?1:0;
   }finally{store.close();}
  }
  // Grading and the daily read run beside the batches, the reviews and 关于TA, never behind them: a pass or a read of

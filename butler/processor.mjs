@@ -8,7 +8,8 @@
 // one within seconds (see checkOwner). Once a day, and whenever my notes change, a round's batches are followed by a
 // new 关于TA (see profile.mjs and #profile), and every few hours, or when 关于TA or my notes have changed, a round ends
 // with a review of all open matters (see review.mjs and #review). Batches and reviews are told 关于TA, my notes and
-// the matters I marked as not mine.
+// the matters I marked as not mine. When butler routes my new messages to Bridge's topics (see route.mjs), a round's
+// batches are followed by a routing round, every few minutes, before 关于TA and the review.
 // Whoever shows the matters is told when a batch or a review has changed them, and when the command line has (see
 // checkMark): onMattersChanged. Whoever tells me of 关于TA is told when one has been written (onProfile).
 import {composePrompt,readReply} from './prompt.mjs';
@@ -50,10 +51,11 @@ export class Processor{
  // once the command line has closed or reopened some (see checkMark).
  // onProfile({text, added, at}): called once 关于TA has been written, with what the model says it newly inferred
  // compared with the last one (a list, possibly empty). newChats: {judgeNew({about})}, which a round ends with (see
- // #newChats), none when butler is not set up to start work in groups. What either throws or rejects with is recorded and changes
- // nothing else.
- constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now,onMattersChanged=()=>{},onProfile=()=>{},newChats}){
-  this.store=store;this.matters=matters;this.model=model;this.newChats=newChats;this.options={...DEFAULTS,...options};this.log=log;this.pid=pid;this.now=now;
+ // #newChats), none when butler is not set up to start work in groups. router: {due(), route()}, which hands my new messages to
+ // Bridge's topics (see route.mjs and #route), none when routing is off. What any of them throws or rejects with is recorded and
+ // changes nothing else.
+ constructor({store,matters,model,options={},log=()=>{},pid=process.pid,now=Date.now,onMattersChanged=()=>{},onProfile=()=>{},newChats,router}){
+  this.store=store;this.matters=matters;this.model=model;this.newChats=newChats;this.router=router;this.options={...DEFAULTS,...options};this.log=log;this.pid=pid;this.now=now;
   this.onMattersChanged=onMattersChanged;this.onProfile=onProfile;this.#limit=this.options.maxMessages;
  }
 
@@ -136,13 +138,24 @@ export class Processor{
   }
   // A round that ended on a failure leaves the profile and the review for later: the model is not there.
   const go=()=>!this.#halting&&!failed;
+  const route=this.router&&go()&&this.router.due()?await this.#route():undefined;
   const profile=go()&&this.#profileDue()?await this.#profile():undefined;
-  const result={runs,failures,profile,review:go()&&this.#reviewDue()?await this.#review():undefined};
+  const result={runs,failures,...route&&{route},profile,review:go()&&this.#reviewDue()?await this.#review():undefined};
   // The groups butler sees for the first time are judged last: nothing waits for the model behind them.
   if(this.newChats&&go())result.newChats=await this.#newChats();
   this.#failed=failures>0||Boolean(profile?.error||result.review?.error);
   this.#beat({lastRoundAt:this.now()});
   return result;
+ }
+ // A routing round (see Router.route), after the batches: what the matters made of the messages does not change what a topic
+ // needs to know, and the topics hear of them minutes sooner than after 关于TA and the review. A failure of its own (the model,
+ // Bridge) is recorded by the router and holds up nothing else; one it did not expect is recorded here.
+ async #route(){
+  try{
+   const r=await this.router.route();
+   if(r.messages)this.log(`转交${r.mode==='dry-run'?'（干跑）':''}：${r.messages} 条新消息，${r.digests} 份摘要${r.mode==='on'?`，交给 Bridge ${r.given} 份，被拒 ${r.dropped} 份`:''}${r.error?`；没有完成：${r.error}`:''}`);
+   return r;
+  }catch(e){this.store.addError('转交',`转交新消息没有完成，下一轮再试：${message(e)}`);return {error:message(e)};}
  }
  // What batches and reviews are told of me (see aboutOf).
  #about(){return aboutOf(this.store,this.matters,this.options.notMine);}

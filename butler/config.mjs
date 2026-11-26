@@ -31,6 +31,13 @@ function bot(v,file){
  const domain=v.BUTLER_BOT_DOMAIN||'feishu';if(!['feishu','lark'].includes(domain))throw Error(`BUTLER_BOT_DOMAIN 只能是 feishu 或 lark：${domain}`);
  return {appId:v.BUTLER_BOT_APP_ID,appSecret:v.BUTLER_BOT_APP_SECRET,owner:v.BUTLER_BOT_OWNER,domain};
 }
+// Whether butler hands my new messages to Bridge's topics (see route.mjs): off, dry-run (decides and keeps what it would hand
+// over, sends nothing) or on.
+const ROUTING=['off','dry-run','on'];
+function routing(value){
+ if(value&&!ROUTING.includes(value))throw Error(`BUTLER_ROUTING 只能是 off、dry-run 或 on：${value}`);
+ return value||'off';
+}
 function effort(value){
  if(value&&!EFFORTS.includes(value))throw Error(`BUTLER_MODEL_EFFORT 是 claude 的推理强度，只能是 ${EFFORTS.slice(0,-1).join('、')} 或 ${EFFORTS.at(-1)}：${value}`);
  return value||undefined;
@@ -46,6 +53,9 @@ export function loadConfig(file=process.env.BUTLER_CONFIG||defaultConfigPath()){
  const bridgeUrl=process.env.BUTLER_BRIDGE_URL||v.BUTLER_BRIDGE_URL,bridgeKey=process.env.BUTLER_BRIDGE_KEY||v.BUTLER_BRIDGE_KEY;
  return {file,token:v.BUTLER_OPEN_LARK_TOKEN||undefined,bot:bot(v,file),
   newChat:{bridgeUrl:bridgeUrl?httpUrl(bridgeUrl,'BUTLER_BRIDGE_URL'):undefined,bridgeKey:bridgeKey||undefined,writeToken:v.BUTLER_OPEN_LARK_WRITE_TOKEN||undefined,botId:v.BUTLER_BRIDGE_BOT_ID||undefined},
+  // Routing my new messages to topics: the mode, and butler's own bot as open-lark knows it (its messages are not news to a topic),
+  // when it has one. It uses Bridge's address, key and bot of newChat.
+  routing:routing(v.BUTLER_ROUTING),ownBotId:v.BUTLER_BOT_LARK_ID||undefined,
   bytedcli:home(v.BUTLER_BYTEDCLI||'bytedcli'),
   schedule:readSchedule({days:v.BUTLER_DIGEST_DAYS||undefined,hours:v.BUTLER_DIGEST_HOURS||undefined,every:v.BUTLER_DIGEST_EVERY||undefined,
    offHoursNew:v.BUTLER_DIGEST_OFF_HOURS_NEW||undefined,offHoursGap:v.BUTLER_DIGEST_OFF_HOURS_GAP||undefined}),
@@ -71,14 +81,28 @@ export function requireBridge(config){
  if(!bridgeUrl||!bridgeKey)throw Error(`配置文件 ${config.file} 没有 BUTLER_BRIDGE_URL 和 BUTLER_BRIDGE_KEY（Bridge 控制面的地址和访问密钥；干跑时也可以放在这条命令的环境变量里）`);
  return {url:bridgeUrl,key:bridgeKey};
 }
-// The settings for starting work in new groups: all four keys, or undefined when none is set (the feature is off). Some but
-// not all is an error that names what is missing.
+// The settings for starting work in new groups: all four keys, or undefined when the open-lark token that may add a bot, its own
+// key, is not set (the feature is off): routing my new messages uses Bridge's three as well. The token without all three is an
+// error that names what is missing.
 export function newChatSetup(config){
  const keys={BUTLER_BRIDGE_URL:'bridgeUrl',BUTLER_BRIDGE_KEY:'bridgeKey',BUTLER_OPEN_LARK_WRITE_TOKEN:'writeToken',BUTLER_BRIDGE_BOT_ID:'botId'};
+ if(!config.newChat.writeToken)return undefined;
  const missing=Object.entries(keys).filter(([,k])=>!config.newChat[k]).map(([key])=>key);
- if(missing.length===Object.keys(keys).length)return undefined;
  if(missing.length)throw Error(`配置文件 ${config.file} 里「新需求群」的配置不全，缺少 ${missing.join('、')}`);
  return config.newChat;
+}
+// What routing my new messages to topics needs, whatever the mode: Bridge's address and key and its bot's id, and butler's own
+// bot's id when there is one. Missing keys are an error that names them.
+export function requireRouting(config){
+ const {bridgeUrl,bridgeKey,botId}=config.newChat;
+ const missing=Object.entries({BUTLER_BRIDGE_URL:bridgeUrl,BUTLER_BRIDGE_KEY:bridgeKey,BUTLER_BRIDGE_BOT_ID:botId}).filter(([,v])=>!v).map(([k])=>k);
+ if(missing.length)throw Error(`配置文件 ${config.file} 里「转交新消息」的配置不全，缺少 ${missing.join('、')}（Bridge 的地址和访问密钥在干跑时也可以放在这条命令的环境变量里）`);
+ return {bridgeUrl,bridgeKey,botId,ownBotId:config.ownBotId};
+}
+// The settings of routing: undefined when BUTLER_ROUTING is off, else the mode with what requireRouting finds.
+export function routingSetup(config){
+ if(config.routing==='off')return undefined;
+ return {mode:config.routing,...requireRouting(config)};
 }
 export function requireModel(config){
  if(!config.modelMachine)throw Error(`配置文件 ${config.file} 没有 BUTLER_MODEL_MACHINE（herdr 里保存的模型机器的名称，见 butler/README.md）`);

@@ -319,7 +319,7 @@ BUTLER_BRIDGE_URL=http://<cpu1 的地址>:8080 BUTLER_BRIDGE_KEY=<访问密钥> 
 
 ### 配置
 
-前四项要么都有，要么都没有（都没有时这个功能关闭，加工端照旧）；有了还要配置管家机器人，卡片要发给我：
+有 `BUTLER_OPEN_LARK_WRITE_TOKEN` 时这个功能打开，前四项都要有；没有它时这个功能关闭，加工端照旧（前一、二、四项转交新消息也用，见「转交新消息」）。打开了还要配置管家机器人，卡片要发给我：
 
 | 键 | 用途 |
 | --- | --- |
@@ -330,6 +330,60 @@ BUTLER_BRIDGE_URL=http://<cpu1 的地址>:8080 BUTLER_BRIDGE_KEY=<访问密钥> 
 | `BUTLER_BYTEDCLI` | 可选，默认 `bytedcli`；systemd 用户服务的 PATH 里没有它时写完整路径（读 Meego 要用，机器上要登录过） |
 
 这些手工部署，不进 git。部署顺序：先 Bridge（两台机器同步，重启 cpu1 的控制面），再 butler（同步到 cpu2，改配置，重启 `butler-processor`）；重启会中断一次进行中的模型运行，下一轮重做。
+
+## 转交新消息
+
+Bridge 里每个进行中的话题都有一个 Agent 在替我做一件事，飞书上别人说的话常常和它有关：评审群回复了它替我发的消息，产品群追问了它放进话题的那条消息，需求群里有人更新了文档。加工端每 5 分钟把这段时间的新消息交给模型，让它给每个话题挑出这件事需要知道的消息，写成一段简短的摘要，交给 Bridge；Bridge 等那个话题的 Agent 空闲了再交给它（见 `bridge/README.md` 的「管家转交的飞书消息」）。代码在 `route.mjs`。
+
+事项、整理、「关于TA」、新需求群和每日读取都照旧，转交是另外一步：在一轮的批次之后、「关于TA」之前。
+
+### 哪些消息
+
+上一轮转到的地方（`meta` 里 `routing` 的 `cursor`：最后一条消息被收下的时间和 id）以后收下的全部消息，不分类别，只存下的（`stored`）也算：一条消息和哪个话题有关，看的是话题在做什么，不是消息和我有没有关系。代码只去掉三种：
+
+- Bridge 的机器人（`BUTLER_BRIDGE_BOT_ID`）和管家机器人（`BUTLER_BOT_LARK_ID`）发的：它们自己的输出，对哪个话题都不是新消息。
+- 我在 Bridge 话题 thread 里的消息：thread 的根消息是 Bridge 的机器人发的，或者 thread 里有它发的消息。Bridge 自己把这些交给那个话题的 Agent。同一个 thread 里别人的消息照样交给模型，带着「在话题所在的群里的一个 Bridge 话题 thread 里」这个事实。
+- 发出超过一天的消息：晚收下的历史（刚加入的群）不是新消息。
+
+收下不到 1 分钟的消息等下一轮：正在写进存储的消息不会被跳过，我在和 Bridge 机器人的聊天里开的话题到那时已经有机器人的回复，按上面第二条去掉。一轮最多 1500 条，多出的下一轮接着转。
+
+### 模型看到什么，决定什么
+
+每次运行给模型一个 JSON：现在的时间，进行中的话题（标题、交给它的事、所在的群、最近几轮我和 Agent 在话题里说的话、Agent 放进话题的飞书消息、Agent 替我起草的消息和它们发出去没有、最近转给它的摘要），和新消息（聊天、发送人、是不是机器人、是不是我发的、时间、正文的前 500 字、回复的那条和 thread 的第一条）。话题来自 Bridge 的 `GET /api/topics/context`。
+
+代码只查事实，写在消息的 `links` 里，按话题列出：回复了话题发出的消息、在话题发出的消息所在的 thread 里、回复了话题的来源消息、在话题来源消息所在的 thread 里、在话题的来源或草稿所在的聊天里、在话题所在的群里、在话题所在的群里的一个 Bridge 话题 thread 里。话题所在的群按 Bridge 给的 `oc_` 开头的 chat id 经 open-lark 的 `GET /conversations/open-chat/:openChatId` 找到 feedId，找到的记在 `meta` 的 `routing.openChats` 里；找不到的（比如私聊）没有「在话题所在的群里」，一小时以后再问。
+
+哪条消息转给哪个话题、怎么写摘要，由模型决定：一条消息可以转给几个话题，也可以哪个都不转；每个话题最多一段 1 到 3 行的摘要，写清谁、在哪个聊天、什么时间说了什么。系统提示词在 `route.mjs` 的 `routeSystemPrompt`。消息和话题在提示里是编号（`m1`、`t1`），代码把摘要里的消息编号换成消息 id（「消息 7xxx」），摘要没提到的消息把 id 补在末尾，Agent 用 `ol` 读原消息。模型的回复里引用了不存在的话题或消息、摘要是空的或者没有可用的消息，这部分不采纳，记一条错误（来源是「转交」）。一轮的新消息多于一个提示放得下的（300 条或 100 KB），分几次运行，同一个话题这一轮的几段合成一份摘要。
+
+### 交给 Bridge
+
+每份摘要经 `POST /api/topics/digest` 交给 Bridge，`key` 是 `butler-route:<编号>`，重复交不会重复收。Bridge 说话题不存在、已经没有运行中的 Agent 会话或者请求不对时，这份摘要不再交，记为「Bridge 没收下」；连不上 Bridge 或者别的错误时留着，下一轮先交它。
+
+### 失败时
+
+模型没有回复时这一轮停下，转到的地方停在这次运行之前，下一轮重做；前面几次运行写出的摘要照样交。模型回复了但不能用（不是要的 JSON）时跳过这部分消息，记一条错误：同样的消息下一轮还会这样。连不上 Bridge 时转到的地方不动。错误都记在 `butler status` 的错误里，来源是「转交」。
+
+### 开关
+
+`BUTLER_ROUTING`：
+
+- `off`（默认）：不转交。
+- `dry-run`：照样每 5 分钟让模型判断，摘要记下来（`butler route log` 看得到，状态是「干跑」），什么都不交给 Bridge。
+- `on`：判断，交给 Bridge。
+
+转交需要 `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY` 和 `BUTLER_BRIDGE_BOT_ID`，和新需求群的同名配置是同一份；`BUTLER_BOT_LARK_ID` 可选，是管家机器人在 open-lark 里的 id（管家机器人的私聊通常不收，有了它，它发在别处的消息也不交给模型）。
+
+### 干跑
+
+```bash
+BUTLER_BRIDGE_URL=http://<Bridge 控制面的地址> BUTLER_BRIDGE_KEY=<访问密钥> ./cli.mjs route --dry-run [--since 2h] [--json]
+```
+
+现在算一轮会怎么转：从加工端上一轮转到的地方（还没有转过时是 10 分钟前，或者 `--since`）起的新消息、进行中的话题、每个话题会收到的摘要、没有转给任何话题的消息数和模型回复里没有采纳的部分。只运行模型，什么都不发、不写：不交给 Bridge，不建表，不动转到的地方，不记模型运行，不记找到的群。
+
+### 记下什么
+
+`routed` 表，第一次转交时建：每轮每个话题一行，消息 id、摘要、状态（`dry` 干跑、`pending` 等着交、`given` 已交给 Bridge、`dropped` Bridge 没收下和原因）和时间；`model_runs` 里的运行 `kind` 是 `route`；`meta` 的 `routing` 是转到的地方、上一轮的时间、模式和结果。`butler route log` 列出最近的摘要。
 
 ## 管家机器人
 
@@ -477,7 +531,9 @@ grep '^OPEN_LARK_AGENT_READ_TOKEN=' ~/.config/open-lark/app.env | sed 's/^OPEN_L
 | `BUTLER_HERDR` | `herdr` | 本机 herdr 可执行文件。systemd 用户服务的 PATH 里通常没有 `~/.local/bin`，服务里写完整路径 |
 | `BUTLER_BOT_APP_ID`、`BUTLER_BOT_APP_SECRET`、`BUTLER_BOT_OWNER` | 无 | 管家机器人的应用和主人的 open_id，由 `bot create` 写入；三个要么都有，要么都没有 |
 | `BUTLER_BOT_DOMAIN` | `feishu` | `feishu`（open.feishu.cn）或 `lark`（open.larksuite.com），由 `bot create` 写入 |
-| `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY`、`BUTLER_OPEN_LARK_WRITE_TOKEN`、`BUTLER_BRIDGE_BOT_ID`、`BUTLER_BYTEDCLI` | 无 | 新需求群（见「新需求群」）；前四项要么都有，要么都没有 |
+| `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY`、`BUTLER_OPEN_LARK_WRITE_TOKEN`、`BUTLER_BRIDGE_BOT_ID`、`BUTLER_BYTEDCLI` | 无 | 新需求群（见「新需求群」）；有 `BUTLER_OPEN_LARK_WRITE_TOKEN` 时前四项都要有 |
+| `BUTLER_ROUTING` | `off` | 转交新消息：`off`、`dry-run` 或 `on`（见「转交新消息」）；不是 `off` 时要有 `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY`、`BUTLER_BRIDGE_BOT_ID` |
+| `BUTLER_BOT_LARK_ID` | 无 | 管家机器人在 open-lark 里的 id，它的消息不转交 |
 | `BUTLER_DIGEST_DAYS` | `1-5` | 汇总的工作日，1 是周一，7 是周日，可以写 `1-5`、`1,3,5`、`1-3,6` |
 | `BUTLER_DIGEST_HOURS` | `10:00-20:00` | 汇总的工作时间 |
 | `BUTLER_DIGEST_EVERY` | `1h` | 工作时间内汇总的间隔，如 `30m`、`2h` |
@@ -486,7 +542,7 @@ grep '^OPEN_LARK_AGENT_READ_TOKEN=' ~/.config/open-lark/app.env | sed 's/^OPEN_L
 | `BUTLER_REVIEW_EVERY` | `3h` | 整理未结束事项的间隔，如 `30m`、`2h`（见上面「整理」） |
 | `BUTLER_PROFILE_EVERY` | `24h` | 重写「关于TA」的间隔，如 `12h`；说明有变化时不等这个间隔（见上面「关于TA 和说明」） |
 
-数据是数据目录里的一个 SQLite 文件 `butler.db`（WAL 模式，旁边还有 `butler.db-wal` 和 `butler.db-shm`），目录权限 700，文件权限 600。里面有消息和它们的类别、表情回复和我的表情回复、每个聊天的名称、读取位置和级别、跟踪的话题、待补取的 @我、收集器状态和最近 100 条错误，加工端的忽略名单、我的说明、处理记录、事项、模型运行记录、整理状态（上次完成的整理和之后的失败）、「关于TA」（最新的一版和之后的失败）和分级状态（上次分级，和上次看到的说明），以及机器人的连接状态、汇总状态（上次发出的时间和时间点）和命令行改事项的记号（`meta` 里的 `matters`，见「汇总」）。除了忽略的聊天，收集器存下全部推送来的消息，按以前的量估算每天约多 40 MB（大头是机器人卡片的原始结构）。本阶段不做清理，存储会持续增长；`butler status` 显示文件大小，也可以用 `du -sh ~/.local/share/butler` 查看。
+数据是数据目录里的一个 SQLite 文件 `butler.db`（WAL 模式，旁边还有 `butler.db-wal` 和 `butler.db-shm`），目录权限 700，文件权限 600。里面有消息和它们的类别、表情回复和我的表情回复、每个聊天的名称、读取位置和级别、跟踪的话题、待补取的 @我、收集器状态和最近 100 条错误，加工端的忽略名单、我的说明、处理记录、事项、模型运行记录、整理状态（上次完成的整理和之后的失败）、「关于TA」（最新的一版和之后的失败）和分级状态（上次分级，和上次看到的说明），机器人的连接状态、汇总状态（上次发出的时间和时间点）和命令行改事项的记号（`meta` 里的 `matters`，见「汇总」），以及转交新消息的记录（`routed` 表和 `meta` 里的 `routing`，见「转交新消息」）。除了忽略的聊天，收集器存下全部推送来的消息，按以前的量估算每天约多 40 MB（大头是机器人卡片的原始结构）。本阶段不做清理，存储会持续增长；`butler status` 显示文件大小，也可以用 `du -sh ~/.local/share/butler` 查看。
 
 ## 运行
 
@@ -511,6 +567,8 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 ./cli.mjs messages <聊天名或 id> [--day 2026-11-06] [--since 2h] [--until 2026-11-06T18:00] [--search 文字] [--limit 100] [--json]
 ./cli.mjs topics [<聊天名或 id>] [--day 2026-11-06] [--since 7d] [--until 2026-11-06] [--search 文字] [--picked | --not-picked] [--limit 50] [--json]
 ./cli.mjs newchat judge <群的 feedId> [--json]
+./cli.mjs route --dry-run [--since 2h] [--json]
+./cli.mjs route log [--since 7d] [--limit 50] [--json]
 ./cli.mjs corrections [list] [--json]
 ./cli.mjs corrections pick|unpick <话题编号> <我的原话> [--json]
 ./cli.mjs corrections missed <聊天名或 id> <日期> <我的原话> [--json]
@@ -540,7 +598,7 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 
 命令行也是和管家说话的 agent 的工具（见「和管家说话」），所以输出分两种，规则对每个命令都一样：
 
-- 读的命令（`status`、`list`、`messages`、`topics`、`corrections [list]`、`groups`、`level [list]`、`level history`、`matters [list]`、`notes [list]`、`profile`、`ignore [list]`）打印给人看的文字；加 `--json` 时输出存储里的记录（JSON），形状见下表。
+- 读的命令（`status`、`list`、`messages`、`topics`、`corrections [list]`、`groups`、`level [list]`、`level history`、`matters [list]`、`notes [list]`、`profile`、`ignore [list]`、`route log`）打印给人看的文字；加 `--json` 时输出存储里的记录（JSON），形状见下表。
 - 写的命令（`level set`、`level clear`、`level grade`、`matters close`、`matters reopen`、`notes add`、`notes remove`、`corrections pick`、`corrections unpick`、`corrections missed`、`corrections remove`、`ignore add`、`ignore remove`）打印改了什么，每项一行，写成「原来 → 现在」；加 `--json` 时输出同样的内容：每个改动的 `before` 和 `after`，没有的一边是 `null`。要改的已经是那个样子时（关掉已经结束的事项、加一条已经有的说明、再定一次我定的同一个级别、再记一条同样的纠正）什么都不改，照样输出，`before` 和 `after` 相同，退出码是 0。找不到要改的（编号不存在、名称没有对应或对应多个）、参数不对时什么都不改，原因写在标准错误里，退出码是 1。
 - 我的话（`--reason` 的理由、`notes add` 的说明、`corrections` 的原话）里的空白合成一个空格，不能是空的，最长 200 字：它们要放进每个交给模型的提示，截断了就不是我的原话，所以更长的拒绝，不截断。`--reason` 只用于 `level set` 和 `matters close`，带在别的命令上会报错，免得理由不声不响地丢掉。
 - 事项、说明、话题和纠正的编号写 `12` 或 `#12`。
@@ -560,6 +618,8 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 | `notes [list]` | 说明的数组，旧的在前：`id`、`text`、`at` |
 | `profile` | `{profile, notes}`：`profile` 是存储里的「关于TA」（`text`、`at`、`notes`、`messages`、`added`，之后写失败了还有 `failedAt`、`error`），还没有时是 `null`；`notes` 同 `notes --json` |
 | `ignore [list]` | 忽略名单的数组：`senderId`、`name`、`since` |
+| `route --dry-run` | `{from, until, messages, unrouted, topics, digests, problems, runs, error}`：时间段、新消息数、没有转给任何话题的消息数、进行中的话题（`id`、`title`、`feedId`）、每个话题会收到的摘要（`topicId`、`title`、`messageIds`、`text`）、没有采纳的部分、模型运行次数和没做完时的错误（没有时不出现）；没做完时退出码是 1 |
+| `route log` | 摘要的数组，新的在前：`id`、`at`、`status`（`dry`、`pending`、`given` 或 `dropped`）、`topicId`、`title`、`messageIds`、`text`、`sentAt`、`error` |
 | `level set` | 数组，每个聊天一项：`feedId`、`name`、`chatMode`、`before`、`after`（级别记录，同 `level list` 的一项，但没有名称等聊天的信息；没有级别时是 `null`）；定为即时的是话题群时还有 `warning` |
 | `level clear` | 同 `level set`，没有 `warning`；取消以后没有模型的级别时 `after` 是 `null` |
 | `level grade` | `{chats, runs, graded, left, error}`：交给模型的聊天数、模型运行次数、分成的聊天（每个 `feedId`、`name`、`before`、`after`，级别记录）、没分成的聊天（每个 `feedId`、`name`）和最后的错误（没有时不出现）；有没分成的聊天时退出码是 1 |
@@ -585,7 +645,7 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 - `level history [--since 时间]`：级别的改动（见「聊天级别」），新的在前，默认最近 7 天：时间、聊天、原来和现在的级别（我定的写「我定的」）、我改的还是模型改的、理由。最后一行数一下：一共几次改动，我改了几次、其中纠正几次，模型改了几次。`--since` 的写法和 `list` 的一样。
 - `level grade [<聊天名或 id>...]`：让模型现在给这些聊天分级，不写聊天时是最近 7 天有消息、级别不是我定的全部聊天（见「给聊天分级」）。不等样本，也不管它们到没到时间。它在命令行的进程里经 herdr 直接问模型，不经过加工端，所以要配置好模型机器；加工端自己的分级正好在跑时，模型机器上会多一个 claude。聊天按名称或 id 在存储里找，规则和 `level set` 一样，但不从 open-lark 读：存储里没有消息的聊天也没有可分的。我定了级别的聊天拒绝，要先 `level clear`。每个聊天打印原来的级别、现在的级别和模型的理由；有聊天没分成时列出它们和原因，退出码是 1。
 - `status` 还显示加工端最近一轮和最近成功的时间、待加工的消息数（包括等着交给模型的我的表情回复）、跳过的消息数（见上面「失败时」）和未结束的事项数；加工端的错误记在同一个错误列表里，来源是「加工」。另一行是整理：上次完成的时间、整理了多少个事项、关掉了多少个，以及下一次在什么时间之后；之后的整理失败了时，显示失败的时间和原因（下一轮再试）。再一行是「关于TA」：写的时间、多少字、根据多少条我发的消息和几条说明，以及下一次在什么时间之后；之后写失败了时，显示失败的时间和原因。还有一行是分级：上次分级的时间、几个聊天、分成了几个（没分完时带上错误），然后是现在有几个聊天等着分级（刚有聊天没分成时写几点以后再分）、开始全收不满 2 天时什么时候开始，或者下一次在什么时间之后，最后是模型定了级别的聊天数；分级的错误来源是「分级」。再一行是每日读取：最近读完的一天、读完的时间、几个聊天、挑出和没挑的话题数、交给批次的消息数和放弃了的聊天；之后没读完时显示哪一天、错误和几点以后再试，否则显示现在要读的日子，或者下一次读哪一天、在什么时间之后；停机以后没补读的日子也列出来；读取的错误来源是「读取」。
-- `process`：运行加工端（常驻），常驻时也给聊天分级（见「给聊天分级」），每天早上读一遍前一天的聊天（见「每日读取」）。`--once` 只运行一轮就退出，不分级，不读，和常驻时的一轮一样：把积压处理完，到了时间也写「关于TA」、整理一次（上一次已经超过间隔，或者还没有过，或者「关于TA」或说明变了）；批次、「关于TA」或整理有失败时退出码是 1。
+- `process`：运行加工端（常驻），常驻时也给聊天分级（见「给聊天分级」），每天早上读一遍前一天的聊天（见「每日读取」）。`--once` 只运行一轮就退出，不分级，不读，和常驻时的一轮一样：把积压处理完，到了时间也写「关于TA」、整理一次（上一次已经超过间隔，或者还没有过，或者「关于TA」或说明变了）；配置了 `BUTLER_ROUTING` 时也转交一轮；批次、转交、「关于TA」或整理有失败时退出码是 1。
 - `profile`：「关于TA」的全文、写的时间和根据，以及我的说明（编号、原话、记下的时间）；`--json` 输出存储里的原样。
 - `matters`（或 `matters list`）：未结束的事项，紧急的在前，每个带编号、紧急程度、标题、谁、要我做什么、期限、来源消息数、所在聊天和链接；`--all` 连同已结束的事项和结束理由。
 - `matters close <编号> [--reason 文字]`：由我关掉一个未结束的事项，和卡片上的「完成」走同一条路：记为我关掉的（`closedBy` 是 `owner`），理由是我给的，不给时为空（汇总里写「你关掉的」）。理由正好是「不归我」时和卡片上的「不归我」一样，之后模型会把它当作我说过不归我的事（见「关于TA 和说明」）。打印「#12 标题：未结束 → 已结束：你关掉的：理由」；事项已经结束时什么都不改。
@@ -593,6 +653,7 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 - `notes`（或 `notes list`）：我的说明，编号、原话和记下的时间。`notes add <文字>`：把参数按我的原话记成一条说明（几个参数用空格连起来）；同样的话已经记过时不再记。`notes remove <编号>`：按编号删掉一条，编号不会再给别的说明。说明存在存储里，加工端和分级自己去读：加工端下一轮按新的说明重写「关于TA」，再把未结束的事项整理一遍；说明一小时内不再变时，分级的模型按它重新给聊天分级（见「关于TA 和说明」和「给聊天分级」）。
 - `ignore`（或 `ignore list`）：忽略名单，每个发送方带着从什么时候起忽略。`ignore add`：按完整名称、id 或名称中唯一的一段文字把发送方加入忽略名单，只能是发过要交给模型的消息的发送方（我自己除外；消息都只是存下的发送方不在其中），对应多个时列出它们并拒绝；已经在名单上的什么都不改。`ignore remove` 移出名单，之后的新消息照常交给模型。改动直接写进存储，加工端下一批就按新名单处理。
 - `newchat judge <feedId>`：干跑，让模型现在判断这个群，打印材料摘要、判断和卡片，什么都不发不写，见「新需求群」。
+- `route --dry-run [--since 时间]`：干跑，现在算一轮转交会给每个话题什么，打印每个话题的摘要和没有转给任何话题的消息数，什么都不发不写，见「转交新消息」。`route log [--since 时间]`：加工端转给各个话题的摘要，新的在前，默认最近 7 天、最多 50 份：时间、状态、话题、消息数、Bridge 没收下的原因和摘要。
 - `bot create`：创建管家机器人的飞书应用，见上面「创建应用」。`bot update`：给已经配置的应用加上新应用有、它还没有的权限和回调，见上面「给已有的应用加上卡片回调」。
 - `status` 还显示机器人的连接状态（已连接、正在重连、连接失败和原因；加工端没在运行时显示未运行）、上一份汇总的时间，以及有要发的内容时下一份汇总的时间和其中新事项、结束事项的数量。
 

@@ -60,13 +60,14 @@ test('newchat judge: prints the material, the verdict and the card, and writes a
  r=await run(config,{BUTLER_BRIDGE_URL:bridge.url,BUTLER_BRIDGE_KEY:KEY},'newchat','judge');assert.equal(r.code,1);assert.match(r.stderr,/用法/);
 });
 
-test('config: the four keys of 新需求群 are all there or none; Bridge\'s url and key may come from the environment',()=>{
+test('config: 新需求群 is on with the write token, and then needs the other three keys; Bridge\'s keys alone are routing\'s, not 新需求群; Bridge\'s url and key may come from the environment',()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'butler-cfg-'));
  const file=(extra)=>{const f=path.join(dir,'butler.env');fs.writeFileSync(f,`BUTLER_OPEN_LARK_TOKEN=r\nBUTLER_BOT_APP_ID=a\nBUTLER_BOT_APP_SECRET=s\nBUTLER_BOT_OWNER=o\n${extra}`,{mode:0o600});return f;};
  const all='BUTLER_BRIDGE_URL=http://10.0.0.1:8080/\nBUTLER_BRIDGE_KEY=k\nBUTLER_OPEN_LARK_WRITE_TOKEN=w\nBUTLER_BRIDGE_BOT_ID=cli_x\n';
  assert.equal(newChatSetup(loadConfig(file(''))),undefined,'none: the feature is off');
  assert.deepEqual(newChatSetup(loadConfig(file(all))),{bridgeUrl:'http://10.0.0.1:8080',bridgeKey:'k',writeToken:'w',botId:'cli_x'});
- assert.throws(()=>newChatSetup(loadConfig(file('BUTLER_BRIDGE_URL=http://10.0.0.1:8080\nBUTLER_BRIDGE_KEY=k\n'))),/「新需求群」的配置不全.*(BUTLER_OPEN_LARK_WRITE_TOKEN.*BUTLER_BRIDGE_BOT_ID|BUTLER_BRIDGE_BOT_ID.*BUTLER_OPEN_LARK_WRITE_TOKEN)/);
+ assert.equal(newChatSetup(loadConfig(file('BUTLER_BRIDGE_URL=http://127.0.0.1:9\nBUTLER_BRIDGE_KEY=k\nBUTLER_BRIDGE_BOT_ID=cli_x\n'))),undefined,'routing uses these three too');
+ assert.throws(()=>newChatSetup(loadConfig(file('BUTLER_BRIDGE_URL=http://127.0.0.1:9\nBUTLER_OPEN_LARK_WRITE_TOKEN=w\n'))),/「新需求群」的配置不全.*BUTLER_BRIDGE_KEY、BUTLER_BRIDGE_BOT_ID/);
  assert.throws(()=>loadConfig(file('BUTLER_BRIDGE_URL=nope\n')),/BUTLER_BRIDGE_URL/);
  process.env.BUTLER_BRIDGE_URL='http://127.0.0.1:9';process.env.BUTLER_BRIDGE_KEY='from-env';
  try{const c=loadConfig(file(all));assert.equal(c.newChat.bridgeUrl,'http://127.0.0.1:9');assert.equal(c.newChat.bridgeKey,'from-env');}
