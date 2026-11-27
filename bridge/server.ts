@@ -337,11 +337,16 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true });
     }
     if (!authorized(req)) return json(res, 401, { error: '请先登录' });
-    // What butler reads of the ready topics and hands to their agents (see ApiDigests), with the access key only: the console never needs it,
+    // What butler reads of the live topics and hands to their agents (see ApiDigests), with the access key only: the console never needs it,
     // and the context names the owner's chats and holds what others wrote in them.
     if (p === '/api/topics/context' || p === '/api/topics/digest') {
       if (!bearer(req)) return json(res, 401, { error: '这个接口只接受访问密钥' });
-      if (p === '/api/topics/context' && req.method === 'GET') return json(res, 200, apiDigests.context());
+      if (p === '/api/topics/context' && req.method === 'GET') {
+        const topicId = url.searchParams.get('topicId');
+        if (topicId === null) return json(res, 200, apiDigests.context());
+        const { status, body: answer } = apiDigests.topic(topicId);
+        return json(res, status, answer);
+      }
       if (p === '/api/topics/digest' && req.method === 'POST') {
         const { status, body: answer } = apiDigests.answer(await body(req));
         return json(res, status, answer);

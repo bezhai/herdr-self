@@ -10759,6 +10759,183 @@ test('the context keeps the latest 6 exchanges, 10 sources and 10 drafts of a to
     f.close();
   }
 });
+// Fills the task of the context fixture with n exchanges of the owner and the agent, n sources and n drafts sent as the owner, each text
+// long ones last, so that the cut and the cap of a form show.
+async function longConversation(f: ReturnType<typeof contextFixture>, n: number) {
+  const { tasks, task } = f;
+  for (let i = 1; i <= n; i++) {
+    const last = i === n;
+    f.tick(100 * i);
+    tasks.addInput(task.id, { text: last ? '问'.repeat(2500) : '问题 ' + i }, 'feishu:om_' + i);
+    f.tick(100 * i + 1);
+    const reply = tasks.addOutput(task.id, { text: last ? '答'.repeat(2500) : '答 ' + i });
+    await tasks.deliver(reply.id, { sink: 'thread', to: task.id });
+    tasks.addInput(
+      task.id,
+      {
+        chatId: '7001',
+        chatName: '群',
+        chatType: 'group',
+        messageId: '73' + i,
+        sender: { id: 'u', name: '某人' },
+        at: i,
+        text: last ? '源'.repeat(600) : '源 ' + i,
+      },
+      'open-lark:73' + i,
+    );
+    f.tick(100 * i + 2);
+    const draft = tasks.addOutput(task.id, { text: last ? '稿'.repeat(600) : '稿 ' + i, mentions: [] });
+    await tasks.deliver(draft.id, { sink: 'as-owner', to: { chatId: '7001', chatName: '群', chatType: 'group' } });
+  }
+}
+test('one live topic is read with a longer stretch of its recent conversation than the list shows: the latest 20 exchanges of up to 2000 characters, and the latest 20 sources and drafts of up to 500', async () => {
+  const f = contextFixture();
+  try {
+    await longConversation(f, 12);
+    const digests = new ApiDigests(f.store, { topics: {} as Topics, tasks: f.tasks }),
+      answer: Answer = digests.topic('t1');
+    assert.equal(answer.status, 200);
+    const topic = answer.body.topic;
+    assert.deepEqual(
+      [topic.id, topic.title, topic.goal, topic.chatName, topic.pending],
+      ['t1', '改接口', '帮我改一下火山发文的接口', '火山发文平台映射 - [需求同步群]', 0],
+    );
+    assert.deepEqual(
+      topic.exchanges.slice(0, 2).map((e: Json) => [e.from, e.text]),
+      [
+        ['owner', '问题 3'],
+        ['agent', '答 3'],
+      ],
+    );
+    assert.equal(topic.exchanges.length, 20);
+    assert.deepEqual(
+      topic.exchanges.slice(-2).map((e: Json) => [e.text.length, e.text.at(-1)]),
+      [
+        [2000, '…'],
+        [2000, '…'],
+      ],
+    );
+    assert.deepEqual([topic.sources.length, topic.sources[0].text, topic.sources[11].text.length], [12, '源 1', 500]);
+    assert.deepEqual([topic.drafts.length, topic.drafts[0].text, topic.drafts[11].text.length], [12, '稿 1', 500]);
+    const [listed] = digests.context().topics;
+    assert.deepEqual(
+      [listed.exchanges.length, listed.exchanges[5].text.length, listed.sources.length, listed.sources[9].text.length],
+      [6, 300, 10, 200],
+      'the list keeps its short form',
+    );
+  } finally {
+    f.close();
+  }
+});
+test('one topic of more than 20 sources and drafts shows the latest 20 of each', async () => {
+  const f = contextFixture();
+  try {
+    await longConversation(f, 23);
+    const { body }: Answer = new ApiDigests(f.store, { topics: {} as Topics, tasks: f.tasks }).topic('t1'),
+      { topic } = body;
+    assert.deepEqual(
+      [topic.sources.length, topic.sources[0].messageId, topic.drafts.length, topic.drafts[0].text],
+      [20, '734', 20, '稿 4'],
+    );
+  } finally {
+    f.close();
+  }
+});
+test('reading one topic refuses what is not a live topic: 404 unknown_topic, 409 topic_not_live for one that ended, 400 invalid_request without an id; a topic without a task is read without making one', () => {
+  const f = contextFixture();
+  try {
+    const digests = new ApiDigests(f.store, { topics: {} as Topics, tasks: f.tasks }),
+      before = f.tasks.list().length;
+    assert.deepEqual(digests.topic('gone'), { status: 404, body: { error: '话题不存在', code: 'unknown_topic' } });
+    assert.deepEqual(digests.topic('t2'), {
+      status: 409,
+      body: { error: '话题当前没有运行中的 Agent 会话', code: 'topic_not_live' },
+    });
+    for (const id of ['', undefined, 7])
+      assert.deepEqual(
+        digests.topic(id),
+        { status: 400, body: { error: 'topicId 应为话题的 ID', code: 'invalid_request' } },
+        String(id),
+      );
+    const { body }: Answer = digests.topic('t3'),
+      { topic } = body;
+    assert.deepEqual(
+      [topic.id, topic.adopted, topic.pending, topic.exchanges, topic.sources, topic.drafts],
+      ['t3', true, 1, [], [], []],
+    );
+    assert.equal(f.tasks.list().length, before);
+  } finally {
+    f.close();
+  }
+});
+test('GET /api/topics/context?topicId= answers one topic to the access key only: 200 with {topic}, 404 and 409 for a topic that is not live, 400 without an id', async () => {
+  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-server-'))),
+    state = path.join(dir, 'state'),
+    port = await freePort(),
+    origin = `http://127.0.0.1:${port}`;
+  fs.mkdirSync(state);
+  const topic = (id: string, fields: Json) => ({
+    id,
+    bindingId: 'b',
+    appId: 'a',
+    chatId: 'oc_1',
+    rootId: 'om_' + id,
+    machineId: 'm',
+    workspaceId: 'w1',
+    tabId: 'w1:t1',
+    paneId: 'w1:p1',
+    agentName: 'feishu-' + id,
+    title: '改接口',
+    state: 'ready',
+    error: '',
+    messageIds: [],
+    replySeq: 0,
+    reactions: [],
+    cards: [],
+    createdAt: 1,
+    ...fields,
+  });
+  fs.writeFileSync(
+    path.join(state, 'state.json'),
+    JSON.stringify({
+      machines: [{ id: 'm', name: 'cpu2', session: 'default', enabled: true }],
+      bindings: [route],
+      topics: [topic('t', {}), topic('ended', { state: 'closed' })],
+    }),
+  );
+  const server = await bridgeServer(state, port, { BRIDGE_URL: '' });
+  try {
+    const key = fs.readFileSync(path.join(state, 'access-key'), 'utf8').trim(),
+      bearer = { authorization: 'Bearer ' + key };
+    const read = async (query: string, headers: Record<string, string>): Promise<Answer> => {
+      const r = await fetch(`${origin}/api/topics/context?${query}`, { headers });
+      return { status: r.status, body: await r.json() };
+    };
+    const one = await read('topicId=t', bearer);
+    assert.deepEqual(
+      [one.status, one.body.topic.id, one.body.topic.title, one.body.topic.chatName],
+      [200, 't', '改接口', '个人助手'],
+    );
+    assert.deepEqual(await read('topicId=t', { origin }), { status: 401, body: { error: '请先登录' } });
+    assert.deepEqual(await read('topicId=gone', bearer), {
+      status: 404,
+      body: { error: '话题不存在', code: 'unknown_topic' },
+    });
+    assert.deepEqual((await read('topicId=ended', bearer)).status, 409);
+    assert.deepEqual(await read('topicId=', bearer), {
+      status: 400,
+      body: { error: 'topicId 应为话题的 ID', code: 'invalid_request' },
+    });
+    assert.deepEqual(
+      (await read('', bearer)).body.topics.map((t: Json) => t.id),
+      ['t'],
+      'without topicId it is the list',
+    );
+  } finally {
+    await server.stop();
+    fs.rmSync(dir, { recursive: true });
+  }
+});
 test('GET /api/topics/context and POST /api/topics/digest answer the access key only, not a console session; /api/state shows no digests', async () => {
   const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-server-'))),
     state = path.join(dir, 'state'),
