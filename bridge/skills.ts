@@ -1,11 +1,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import {enqueue,isRecord,oneOf} from './core.ts';
-import type {Store,Call} from './core.ts';
-import {skillMark} from './machine.ts';
-import type {Machine,Skill,Kind} from './state.ts';
-import type {SkillFiles} from './link.ts';
+import { enqueue, isRecord, oneOf } from './core.ts';
+import type { Store, Call } from './core.ts';
+import { skillMark } from './machine.ts';
+import type { Machine, Skill, Kind } from './state.ts';
+import type { SkillFiles } from './link.ts';
 
 // The skills of the platform, which the console's Skills page manages. Each is a directory named after it under skills/ in the state
 // directory, with its SKILL.md and any other files. The state file holds only their index, the collection skills: the name, the description
@@ -15,185 +15,339 @@ import type {SkillFiles} from './link.ts';
 
 // Where each machine keeps the skills that it got, one directory per skill (see placeSkills in machine.ts). No agent reads it as a global
 // skill directory, unlike ~/.agents/skills, which Codex reads.
-const machineStore='~/.local/share/herdr-bridge/skills';
+const machineStore = '~/.local/share/herdr-bridge/skills';
 // How long the client of a machine gets for one step of a sync: a skill of 32 MiB is written there as one request.
-const syncMs=120000;
+const syncMs = 120000;
 // Where the agent of each binding kind reads project skills, under its working directory, and how a skill goes there: as a link to the store,
 // which Claude and Codex follow, or as a copy, since Antigravity follows no link.
-const places:Record<Kind,{dir:string,as:'link'|'copy'}>={claude:{dir:'.claude/skills',as:'link'},codex:{dir:'.agents/skills',as:'link'},agy:{dir:'.agents/skills',as:'copy'}};
+const places: Record<Kind, { dir: string; as: 'link' | 'copy' }> = {
+  claude: { dir: '.claude/skills', as: 'link' },
+  codex: { dir: '.agents/skills', as: 'link' },
+  agy: { dir: '.agents/skills', as: 'copy' },
+};
 // The global skill directories of a machine, under its home directory, which every agent session there reads whoever started it, and how a
 // skill goes there, as in places: Claude reads ~/.claude/skills, Codex ~/.agents/skills and Antigravity ~/.gemini/config/skills. Codex reads
 // ~/.codex/skills as well, which gets none (none) and so loses those that Bridge placed there, so that a skill does not load twice.
-const globalPlaces:{dir:string,as:'link'|'copy',none?:true}[]=[{dir:'.claude/skills',as:'link'},{dir:'.agents/skills',as:'link'},{dir:'.gemini/config/skills',as:'copy'},{dir:'.codex/skills',as:'link',none:true}];
+const globalPlaces: { dir: string; as: 'link' | 'copy'; none?: true }[] = [
+  { dir: '.claude/skills', as: 'link' },
+  { dir: '.agents/skills', as: 'link' },
+  { dir: '.gemini/config/skills', as: 'copy' },
+  { dir: '.codex/skills', as: 'link', none: true },
+];
 
 // A name of the Agent Skills format: lowercase letters and digits with single hyphens between them, at most 64 characters, like its
 // directory; its description at most 1024 characters.
-const validName=(n:unknown):n is string=>typeof n==='string'&&n.length<=64&&/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(n),descriptionMax=1024;
+const validName = (n: unknown): n is string =>
+    typeof n === 'string' && n.length <= 64 && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(n),
+  descriptionMax = 1024;
 // The most that the files of a skill hold together, in bytes, and the most that a request writing one carries: their base64 in JSON, with
 // room for the rest. Skills come with scripts, references, fonts and the like, and the 100,000 characters of other requests are too few for
 // them. A skill of 32 MiB is ~43 MB as base64 in JSON, under the 128 MiB that Node's WebSocket takes per message on the client (the ws
 // package of the control plane takes 100 MiB, and only small messages come that way); the client's socket for bridge-skill takes small
 // requests only, since a skill goes to the machine from the control plane. A message carries one skill (see sync), but placeSkills
 // carries all the skills loaded by default, so a few near the limit loaded by default together would not fit one.
-export const skillLimit=32<<20,requestLimit=Math.ceil(skillLimit/3)*4+65536;
+export const skillLimit = 32 << 20,
+  requestLimit = Math.ceil(skillLimit / 3) * 4 + 65536;
 // The top-level fields of the YAML frontmatter that opens text, between two --- lines, or null without one. It reads YAML as far as skills
 // write it there: `key: value` lines whose value is plain, single- or double-quoted, and may go on in more indented lines, or is a block (|
 // or >) of those lines; a nested map is read as the value of its key and not looked into.
-export function frontmatter(text:string){
- const m=/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);if(!m)return null;
- const lines=m[1].split(/\r?\n/),fields:Record<string,string>={};
- for(let i=0;i<lines.length;i++){
-  const f=/^([\w-]+):(?:[ \t]+(.*))?$/.exec(lines[i]);if(!f)continue;
-  const v=(f[2]??'').trim(),more=[];while(i+1<lines.length&&/^(\s|$)/.test(lines[i+1]))more.push(lines[++i].trim());
-  fields[f[1]]=/^[|>][+-]?$/.test(v)?more.join(v[0]==='|'?'\n':' ').trim():unquote([v,...more].filter(Boolean).join(' '));
- }
- return fields;
+export function frontmatter(text: string) {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text);
+  if (!m) return null;
+  const lines = m[1].split(/\r?\n/),
+    fields: Record<string, string> = {};
+  for (let i = 0; i < lines.length; i++) {
+    const f = /^([\w-]+):(?:[ \t]+(.*))?$/.exec(lines[i]);
+    if (!f) continue;
+    const v = (f[2] ?? '').trim(),
+      more = [];
+    while (i + 1 < lines.length && /^(\s|$)/.test(lines[i + 1])) more.push(lines[++i].trim());
+    fields[f[1]] = /^[|>][+-]?$/.test(v)
+      ? more.join(v[0] === '|' ? '\n' : ' ').trim()
+      : unquote([v, ...more].filter(Boolean).join(' '));
+  }
+  return fields;
 }
-function unquote(v:string):string{
- if(/^".*"$/.test(v))try{return JSON.parse(v);}catch{}
- return /^'.*'$/.test(v)?v.slice(1,-1).replaceAll("''","'"):v;
+function unquote(v: string): string {
+  if (/^".*"$/.test(v))
+    try {
+      return JSON.parse(v);
+    } catch {}
+  return /^'.*'$/.test(v) ? v.slice(1, -1).replaceAll("''", "'") : v;
 }
 // Skill name with files ({relative path: base64}) as {entries, description, digest}: its files as [path, content] in the order of their
 // paths, the description of its SKILL.md and the digest of its files, which changes with their content. Throws on what makes it no skill:
 // a name that is not one, a path that leaves its directory or takes the name of Bridge's marker on machines, content that is not base64,
 // files over skillLimit together, and a SKILL.md without a frontmatter that names the skill as its directory and describes it.
-function checked(name:unknown,files:unknown){
- if(!validName(name))throw Error(`skill 名称无效：${name}，只能用小写字母、数字和单个连字符，最多 64 个字符`);
- if(!files||typeof files!=='object'||Array.isArray(files)||!Object.values(files).every(b=>typeof b==='string'))throw Error('skill 的文件无效');
- const entries=Object.entries(files).sort(([a],[b])=>a<b?-1:a>b?1:0).map(([p,b]):[string,Buffer]=>{
-  if(path.isAbsolute(p)||p.split('/').some(s=>!s||s==='.'||s==='..')||p===skillMark)throw Error('文件路径无效：'+p);
-  if(b.length%4||!/^[A-Za-z0-9+/]*={0,2}$/.test(b))throw Error('文件内容不是 base64：'+p);
-  return [p,Buffer.from(b,'base64')];
- });
- const size=entries.reduce((n,[,c])=>n+c.length,0);if(size>skillLimit)throw Error(`skill 的文件合计 ${size} 字节，超过上限 ${skillLimit} 字节`);
- const skill=entries.find(([p])=>p==='SKILL.md');if(!skill)throw Error('skill 缺少 SKILL.md');
- const f=frontmatter(skill[1].toString('utf8'));
- if(!f)throw Error('SKILL.md 开头缺少 frontmatter，应以 --- 开头和结尾，并写明 name 和 description');
- if(f.name!==name)throw Error(`SKILL.md 的 frontmatter 里 name ${f.name?'是 '+f.name:'是空的'}，必须和 skill 名称 ${name} 一致`);
- if(!f.description||f.description.length>descriptionMax)throw Error(`SKILL.md 的 frontmatter 缺少 description，或者超过 ${descriptionMax} 个字符`);
- return {entries,description:f.description,digest:crypto.createHash('sha256').update(JSON.stringify(entries.map(([p,c])=>[p,c.toString('base64')]))).digest('hex')};
+function checked(name: unknown, files: unknown) {
+  if (!validName(name)) throw Error(`skill 名称无效：${name}，只能用小写字母、数字和单个连字符，最多 64 个字符`);
+  if (
+    !files ||
+    typeof files !== 'object' ||
+    Array.isArray(files) ||
+    !Object.values(files).every((b) => typeof b === 'string')
+  )
+    throw Error('skill 的文件无效');
+  const entries = Object.entries(files)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([p, b]): [string, Buffer] => {
+      if (path.isAbsolute(p) || p.split('/').some((s) => !s || s === '.' || s === '..') || p === skillMark)
+        throw Error('文件路径无效：' + p);
+      if (b.length % 4 || !/^[A-Za-z0-9+/]*={0,2}$/.test(b)) throw Error('文件内容不是 base64：' + p);
+      return [p, Buffer.from(b, 'base64')];
+    });
+  const size = entries.reduce((n, [, c]) => n + c.length, 0);
+  if (size > skillLimit) throw Error(`skill 的文件合计 ${size} 字节，超过上限 ${skillLimit} 字节`);
+  const skill = entries.find(([p]) => p === 'SKILL.md');
+  if (!skill) throw Error('skill 缺少 SKILL.md');
+  const f = frontmatter(skill[1].toString('utf8'));
+  if (!f) throw Error('SKILL.md 开头缺少 frontmatter，应以 --- 开头和结尾，并写明 name 和 description');
+  if (f.name !== name)
+    throw Error(
+      `SKILL.md 的 frontmatter 里 name ${f.name ? '是 ' + f.name : '是空的'}，必须和 skill 名称 ${name} 一致`,
+    );
+  if (!f.description || f.description.length > descriptionMax)
+    throw Error(`SKILL.md 的 frontmatter 缺少 description，或者超过 ${descriptionMax} 个字符`);
+  return {
+    entries,
+    description: f.description,
+    digest: crypto
+      .createHash('sha256')
+      .update(JSON.stringify(entries.map(([p, c]) => [p, c.toString('base64')])))
+      .digest('hex'),
+  };
 }
 // What bridge-skill reads through the client of its machine (see answer and skill-command.ts): the request of each read and its answer.
-export type SkillReads={list:{request:{},answer:{skills:Skill[]}},search:{request:{query:string},answer:{skills:Skill[]}},
- read:{request:{name:string},answer:{name:string,description:string,preload:boolean,text:string,files:string[],path?:string}}};
-const reads:(keyof SkillReads)[]=['list','search','read'];
-export class Skills{
- declare store:Store;declare call:Call;declare dir:string;declare queues:Map<string,Promise<unknown>>;
- // call(m,method,params,{timeoutMs}) sends a request to the client of machine m (see Clients.call).
- constructor(store:Store,call:Call){this.store=store;this.call=call;this.dir=path.join(store.dir,'skills');this.queues=new Map();}
- // The index, in the order of the names.
- list(){return this.store.data.skills;}
- // The entry of skill name; throws when there is none.
- entry(name:unknown){const s=this.store.data.skills.find(x=>x.name===name);if(!s)throw Error('skill 不存在：'+name);return s;}
- // Skill name with its files, {relative path: base64}.
- read(name:unknown){
-  const s=this.entry(name),dir=path.join(this.dir,s.name);
-  const files=fs.readdirSync(dir,{recursive:true,withFileTypes:true}).filter(e=>e.isFile()).map(e=>path.relative(dir,path.join(e.parentPath,e.name))).sort();
-  return {...s,files:Object.fromEntries(files.map(p=>[p,fs.readFileSync(path.join(dir,p),'base64')]))};
- }
- // The SKILL.md of skill name as text.
- text(name:string){return fs.readFileSync(path.join(this.dir,this.entry(name).name,'SKILL.md'),'utf8');}
- // Imports skill name with files ({relative path: base64}) as a whole: a new skill, or in place of all the files of the one of that name,
- // whose flag stays. Returns its entry.
- put(name:string,files:unknown){const s=this.write(name,files);this.store.log('skill','导入了 skill '+name);return s;}
- // Writes text as the SKILL.md of skill name: of a new skill, the only file, when create; else of the skill of that name, whose other files
- // stay. Returns its entry.
- save(name:string,text:unknown,{create=false}={}){
-  if(create&&this.store.data.skills.some(x=>x.name===name))throw Error('skill 已存在：'+name);
-  const s=this.write(name,{...!create&&this.read(name).files,'SKILL.md':Buffer.from(String(text??'')).toString('base64')});
-  this.store.log('skill',create?'新建了 skill '+name:`修改了 skill ${name} 的 SKILL.md`);return s;
- }
- // The files go into a directory beside the skill's, which then takes its place; the entry follows. Synchronous, like the state file, so
- // that two writes of a skill never interleave.
- write(name:string,files:unknown){
-  const {entries,description,digest}=checked(name,files),target=path.join(this.dir,name);
-  fs.mkdirSync(this.dir,{recursive:true,mode:0o700});const fresh=fs.mkdtempSync(path.join(this.dir,'.'+name+'-'));
-  try{
-   for(const [p,c] of entries){fs.mkdirSync(path.dirname(path.join(fresh,p)),{recursive:true});fs.writeFileSync(path.join(fresh,p),c);}
-   fs.rmSync(target,{recursive:true,force:true});fs.renameSync(fresh,target);
-  }catch(e){fs.rmSync(fresh,{recursive:true,force:true});throw e;}
-  const old=this.store.data.skills.find(x=>x.name===name),s={name,description,preload:old?.preload??false,digest};
-  this.store.data.skills=[...this.store.data.skills.filter(x=>x!==old),s].sort((a,b)=>a.name<b.name?-1:1);this.store.save();this.push();return s;
- }
- remove(name:string){
-  this.entry(name);fs.rmSync(path.join(this.dir,name),{recursive:true,force:true});
-  this.store.data.skills=this.store.data.skills.filter(x=>x.name!==name);this.store.save();this.store.log('skill','删除了 skill '+name);this.push();
- }
- // Sets whether skill name is loaded by default, which every machine follows at once (see sync).
- flag(name:string,preload:unknown){
-  const s=this.entry(name);s.preload=Boolean(preload);this.store.save();
-  this.store.log('skill',`skill ${name} 已设为${s.preload?'默认加载，每台机器上之后启动的 Agent 会话都会加载它':'按需读取，Agent 需要时用 bridge-skill 读取'}`);this.push();return s;
- }
- // The entries of the skills whose name, description or SKILL.md hold every word of query, in any case: those with them in the name or
- // the description first, each part in the order of the names.
- search(query:unknown){
-  const words=typeof query==='string'?query.toLowerCase().split(/\s+/).filter(Boolean):[];if(!words.length)throw Error('缺少要搜索的词');
-  const has=(text:string)=>{const t=text.toLowerCase();return words.every(w=>t.includes(w));},about=(s:Skill)=>s.name+'\n'+s.description;
-  const named=this.list().filter(s=>has(about(s)));
-  return [...named,...this.list().filter(s=>!named.includes(s)&&has(about(s)+'\n'+this.text(s.name)))];
- }
- // Entries of the index with their files, as skills go to a machine.
- withFiles(skills:Skill[]):SkillFiles[]{return skills.map(s=>{const {digest,files}=this.read(s.name);return {name:s.name,digest,files};});}
- // Places the skills named in names (the skills of the topic's project) other than those loaded by default, which every session of the
- // machine has from its global skill directories (see sync), as they are when the placement runs, where the agent of binding kind kind
- // reads project skills in working directory cwd on machine m, whose leading ~/ is that machine's home, and takes away those that Bridge
- // placed there before and that are no longer wanted, those loaded by default among them: the request placeSkills to the client of m, with
- // the skills as data. A name that is no skill of the platform any more is left out. Resolves to the paths of same-name skills that are not
- // Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after another, since they
- // share its store.
- place(m:Machine,cwd:string,kind:Kind,names:string[]=[]){
-  return enqueue(this.queues,m.id,()=>this.call(m,'placeSkills',{store:machineStore,skills:this.withFiles(this.list().filter(s=>!s.preload&&names.includes(s.name))),...places[kind],cwd}));
- }
- // Brings the store and the global skill directories of machine m in line with the platform. The store: sends the client the list of the
- // skills with their digests, which names those it lacks or holds in another version (compareSkills), sends it those one at a time
- // (stockSkill), then lets it take away the skills of Bridge's that are not on the list (pruneSkills). Only what changed travels there: the
- // whole platform is tens of MB and one edit touches one skill. The global skill directories (see globalPlaces): one placeSkills each, under
- // the home directory of m, with the skills loaded by default as they are then and their files, which the client writes only where their
- // content changed; Bridge's skills that are not among them go, there as in a working directory. It runs in the queue of m, after the
- // placements and syncs queued before, since they share the store; the list and each skill are read when their turn comes, and a skill that
- // went from the platform meanwhile is skipped (the sync of its removal follows). Resolves to how many skills it updated and took away in
- // the store and the paths of same-name skills in the global skill directories that are not Bridge's, which the client left alone, and
- // rejects with what failed.
- sync(m:Machine){
-  return enqueue(this.queues,m.id,async()=>{
-   const list=this.list().map(({name,digest})=>({name,digest})),options={timeoutMs:syncMs};
-   const {stale}=await this.call(m,'compareSkills',{store:machineStore,skills:list},options);let updated=0;
-   for(const name of stale){
-    if(!this.list().some(s=>s.name===name))continue;
-    const {digest,files}=this.read(name);await this.call(m,'stockSkill',{store:machineStore,skill:{name,digest,files}},options);updated++;
-   }
-   const {removed}=await this.call(m,'pruneSkills',{store:machineStore,names:list.map(s=>s.name)},options);
-   const loaded=this.withFiles(this.list().filter(s=>s.preload)),theirs:string[]=[];
-   for(const {none,...at} of globalPlaces)theirs.push(...await this.call(m,'placeSkills',{store:machineStore,skills:none?[]:loaded,...at,cwd:'~/'},options));
-   return {updated,removed:removed.length,theirs};
-  });
- }
- // sync for the log, for a machine in use: what it did to the store is one line unless nothing changed, each same-name skill of others in
- // a global skill directory is one, and what failed is an error with its reason. It never rejects: the client that joins and the change
- // that is pushed go on, and the next alignment makes up for a failed one. A machine whose client is offline is skipped without a word,
- // since it is aligned when its client joins.
- async align(m:Machine){
-  if(!m.enabled)return;
-  try{
-   const {updated,removed,theirs}=await this.sync(m);if(updated||removed)this.store.log('skill',`${m.name}：skill 副本已和平台一致，更新 ${updated} 个，删除 ${removed} 个`);
-   for(const p of theirs)this.store.log('skill',`${m.name}：${p} 已存在同名 skill，不是 Bridge 写入的，未改动`);
-  }catch(e){if(e.code!=='client_offline')this.store.log('skill',`${m.name}：未能更新 skill 副本，${e.message}`,'error');}
- }
- // Aligns every machine after a change of the platform (see write, remove and flag). It does not wait.
- push(){for(const m of this.store.data.machines)void this.align(m);}
- // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
- // the entries that match body.query; read, skill body.name with the text of its SKILL.md and the paths of its other files, which the
- // client of m puts into its store first, after the placements queued there, so that the answer also has their directory there, path. The
- // socket of that client takes the commands of any agent of m, and what the platform holds goes into every later agent: nothing else is
- // answered, writes least of all, and nothing on a machine that Bridge does not use.
- async answer(m:Machine,op:string,body:unknown):Promise<SkillReads[keyof SkillReads]['answer']>{
-  if(!oneOf(reads,op))throw Error('未知的操作：'+op);
-  if(!isRecord(body))throw Error('请求内容无效');
-  if(!m.enabled)throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
-  if(op==='list')return {skills:this.list()};
-  if(op==='search')return {skills:this.search(body.query)};
-  const {name,description,preload,digest,files}=this.read(body.name),text=Buffer.from(files['SKILL.md'],'base64').toString('utf8'),others=Object.keys(files).filter(p=>p!=='SKILL.md');
-  const read:SkillReads['read']['answer']={name,description,preload,text,files:others};if(!others.length)return read;
-  return {...read,path:await enqueue(this.queues,m.id,()=>this.call(m,'stockSkill',{store:machineStore,skill:{name,digest,files}}))};
- }
+export type SkillReads = {
+  list: { request: {}; answer: { skills: Skill[] } };
+  search: { request: { query: string }; answer: { skills: Skill[] } };
+  read: {
+    request: { name: string };
+    answer: { name: string; description: string; preload: boolean; text: string; files: string[]; path?: string };
+  };
+};
+const reads: (keyof SkillReads)[] = ['list', 'search', 'read'];
+export class Skills {
+  declare store: Store;
+  declare call: Call;
+  declare dir: string;
+  declare queues: Map<string, Promise<unknown>>;
+  // call(m,method,params,{timeoutMs}) sends a request to the client of machine m (see Clients.call).
+  constructor(store: Store, call: Call) {
+    this.store = store;
+    this.call = call;
+    this.dir = path.join(store.dir, 'skills');
+    this.queues = new Map();
+  }
+  // The index, in the order of the names.
+  list() {
+    return this.store.data.skills;
+  }
+  // The entry of skill name; throws when there is none.
+  entry(name: unknown) {
+    const s = this.store.data.skills.find((x) => x.name === name);
+    if (!s) throw Error('skill 不存在：' + name);
+    return s;
+  }
+  // Skill name with its files, {relative path: base64}.
+  read(name: unknown) {
+    const s = this.entry(name),
+      dir = path.join(this.dir, s.name);
+    const files = fs
+      .readdirSync(dir, { recursive: true, withFileTypes: true })
+      .filter((e) => e.isFile())
+      .map((e) => path.relative(dir, path.join(e.parentPath, e.name)))
+      .sort();
+    return { ...s, files: Object.fromEntries(files.map((p) => [p, fs.readFileSync(path.join(dir, p), 'base64')])) };
+  }
+  // The SKILL.md of skill name as text.
+  text(name: string) {
+    return fs.readFileSync(path.join(this.dir, this.entry(name).name, 'SKILL.md'), 'utf8');
+  }
+  // Imports skill name with files ({relative path: base64}) as a whole: a new skill, or in place of all the files of the one of that name,
+  // whose flag stays. Returns its entry.
+  put(name: string, files: unknown) {
+    const s = this.write(name, files);
+    this.store.log('skill', '导入了 skill ' + name);
+    return s;
+  }
+  // Writes text as the SKILL.md of skill name: of a new skill, the only file, when create; else of the skill of that name, whose other files
+  // stay. Returns its entry.
+  save(name: string, text: unknown, { create = false } = {}) {
+    if (create && this.store.data.skills.some((x) => x.name === name)) throw Error('skill 已存在：' + name);
+    const s = this.write(name, {
+      ...(!create && this.read(name).files),
+      'SKILL.md': Buffer.from(String(text ?? '')).toString('base64'),
+    });
+    this.store.log('skill', create ? '新建了 skill ' + name : `修改了 skill ${name} 的 SKILL.md`);
+    return s;
+  }
+  // The files go into a directory beside the skill's, which then takes its place; the entry follows. Synchronous, like the state file, so
+  // that two writes of a skill never interleave.
+  write(name: string, files: unknown) {
+    const { entries, description, digest } = checked(name, files),
+      target = path.join(this.dir, name);
+    fs.mkdirSync(this.dir, { recursive: true, mode: 0o700 });
+    const fresh = fs.mkdtempSync(path.join(this.dir, '.' + name + '-'));
+    try {
+      for (const [p, c] of entries) {
+        fs.mkdirSync(path.dirname(path.join(fresh, p)), { recursive: true });
+        fs.writeFileSync(path.join(fresh, p), c);
+      }
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.renameSync(fresh, target);
+    } catch (e) {
+      fs.rmSync(fresh, { recursive: true, force: true });
+      throw e;
+    }
+    const old = this.store.data.skills.find((x) => x.name === name),
+      s = { name, description, preload: old?.preload ?? false, digest };
+    this.store.data.skills = [...this.store.data.skills.filter((x) => x !== old), s].sort((a, b) =>
+      a.name < b.name ? -1 : 1,
+    );
+    this.store.save();
+    this.push();
+    return s;
+  }
+  remove(name: string) {
+    this.entry(name);
+    fs.rmSync(path.join(this.dir, name), { recursive: true, force: true });
+    this.store.data.skills = this.store.data.skills.filter((x) => x.name !== name);
+    this.store.save();
+    this.store.log('skill', '删除了 skill ' + name);
+    this.push();
+  }
+  // Sets whether skill name is loaded by default, which every machine follows at once (see sync).
+  flag(name: string, preload: unknown) {
+    const s = this.entry(name);
+    s.preload = Boolean(preload);
+    this.store.save();
+    this.store.log(
+      'skill',
+      `skill ${name} 已设为${s.preload ? '默认加载，每台机器上之后启动的 Agent 会话都会加载它' : '按需读取，Agent 需要时用 bridge-skill 读取'}`,
+    );
+    this.push();
+    return s;
+  }
+  // The entries of the skills whose name, description or SKILL.md hold every word of query, in any case: those with them in the name or
+  // the description first, each part in the order of the names.
+  search(query: unknown) {
+    const words = typeof query === 'string' ? query.toLowerCase().split(/\s+/).filter(Boolean) : [];
+    if (!words.length) throw Error('缺少要搜索的词');
+    const has = (text: string) => {
+        const t = text.toLowerCase();
+        return words.every((w) => t.includes(w));
+      },
+      about = (s: Skill) => s.name + '\n' + s.description;
+    const named = this.list().filter((s) => has(about(s)));
+    return [...named, ...this.list().filter((s) => !named.includes(s) && has(about(s) + '\n' + this.text(s.name)))];
+  }
+  // Entries of the index with their files, as skills go to a machine.
+  withFiles(skills: Skill[]): SkillFiles[] {
+    return skills.map((s) => {
+      const { digest, files } = this.read(s.name);
+      return { name: s.name, digest, files };
+    });
+  }
+  // Places the skills named in names (the skills of the topic's project) other than those loaded by default, which every session of the
+  // machine has from its global skill directories (see sync), as they are when the placement runs, where the agent of binding kind kind
+  // reads project skills in working directory cwd on machine m, whose leading ~/ is that machine's home, and takes away those that Bridge
+  // placed there before and that are no longer wanted, those loaded by default among them: the request placeSkills to the client of m, with
+  // the skills as data. A name that is no skill of the platform any more is left out. Resolves to the paths of same-name skills that are not
+  // Bridge's, which the client left alone, and rejects when the placement fails. Placements on one machine run one after another, since they
+  // share its store.
+  place(m: Machine, cwd: string, kind: Kind, names: string[] = []) {
+    return enqueue(this.queues, m.id, () =>
+      this.call(m, 'placeSkills', {
+        store: machineStore,
+        skills: this.withFiles(this.list().filter((s) => !s.preload && names.includes(s.name))),
+        ...places[kind],
+        cwd,
+      }),
+    );
+  }
+  // Brings the store and the global skill directories of machine m in line with the platform. The store: sends the client the list of the
+  // skills with their digests, which names those it lacks or holds in another version (compareSkills), sends it those one at a time
+  // (stockSkill), then lets it take away the skills of Bridge's that are not on the list (pruneSkills). Only what changed travels there: the
+  // whole platform is tens of MB and one edit touches one skill. The global skill directories (see globalPlaces): one placeSkills each, under
+  // the home directory of m, with the skills loaded by default as they are then and their files, which the client writes only where their
+  // content changed; Bridge's skills that are not among them go, there as in a working directory. It runs in the queue of m, after the
+  // placements and syncs queued before, since they share the store; the list and each skill are read when their turn comes, and a skill that
+  // went from the platform meanwhile is skipped (the sync of its removal follows). Resolves to how many skills it updated and took away in
+  // the store and the paths of same-name skills in the global skill directories that are not Bridge's, which the client left alone, and
+  // rejects with what failed.
+  sync(m: Machine) {
+    return enqueue(this.queues, m.id, async () => {
+      const list = this.list().map(({ name, digest }) => ({ name, digest })),
+        options = { timeoutMs: syncMs };
+      const { stale } = await this.call(m, 'compareSkills', { store: machineStore, skills: list }, options);
+      let updated = 0;
+      for (const name of stale) {
+        if (!this.list().some((s) => s.name === name)) continue;
+        const { digest, files } = this.read(name);
+        await this.call(m, 'stockSkill', { store: machineStore, skill: { name, digest, files } }, options);
+        updated++;
+      }
+      const { removed } = await this.call(
+        m,
+        'pruneSkills',
+        { store: machineStore, names: list.map((s) => s.name) },
+        options,
+      );
+      const loaded = this.withFiles(this.list().filter((s) => s.preload)),
+        theirs: string[] = [];
+      for (const { none, ...at } of globalPlaces)
+        theirs.push(
+          ...(await this.call(
+            m,
+            'placeSkills',
+            { store: machineStore, skills: none ? [] : loaded, ...at, cwd: '~/' },
+            options,
+          )),
+        );
+      return { updated, removed: removed.length, theirs };
+    });
+  }
+  // sync for the log, for a machine in use: what it did to the store is one line unless nothing changed, each same-name skill of others in
+  // a global skill directory is one, and what failed is an error with its reason. It never rejects: the client that joins and the change
+  // that is pushed go on, and the next alignment makes up for a failed one. A machine whose client is offline is skipped without a word,
+  // since it is aligned when its client joins.
+  async align(m: Machine) {
+    if (!m.enabled) return;
+    try {
+      const { updated, removed, theirs } = await this.sync(m);
+      if (updated || removed)
+        this.store.log('skill', `${m.name}：skill 副本已和平台一致，更新 ${updated} 个，删除 ${removed} 个`);
+      for (const p of theirs) this.store.log('skill', `${m.name}：${p} 已存在同名 skill，不是 Bridge 写入的，未改动`);
+    } catch (e) {
+      if (e.code !== 'client_offline') this.store.log('skill', `${m.name}：未能更新 skill 副本，${e.message}`, 'error');
+    }
+  }
+  // Aligns every machine after a change of the platform (see write, remove and flag). It does not wait.
+  push() {
+    for (const m of this.store.data.machines) void this.align(m);
+  }
+  // Answers request op with body of bridge-skill on machine m, which comes through the client of m (see Clients): list, the index; search,
+  // the entries that match body.query; read, skill body.name with the text of its SKILL.md and the paths of its other files, which the
+  // client of m puts into its store first, after the placements queued there, so that the answer also has their directory there, path. The
+  // socket of that client takes the commands of any agent of m, and what the platform holds goes into every later agent: nothing else is
+  // answered, writes least of all, and nothing on a machine that Bridge does not use.
+  async answer(m: Machine, op: string, body: unknown): Promise<SkillReads[keyof SkillReads]['answer']> {
+    if (!oneOf(reads, op)) throw Error('未知的操作：' + op);
+    if (!isRecord(body)) throw Error('请求内容无效');
+    if (!m.enabled) throw Error(`Bridge 已断开机器 ${m.name} 的桥接`);
+    if (op === 'list') return { skills: this.list() };
+    if (op === 'search') return { skills: this.search(body.query) };
+    const { name, description, preload, digest, files } = this.read(body.name),
+      text = Buffer.from(files['SKILL.md'], 'base64').toString('utf8'),
+      others = Object.keys(files).filter((p) => p !== 'SKILL.md');
+    const read: SkillReads['read']['answer'] = { name, description, preload, text, files: others };
+    if (!others.length) return read;
+    return {
+      ...read,
+      path: await enqueue(this.queues, m.id, () =>
+        this.call(m, 'stockSkill', { store: machineStore, skill: { name, digest, files } }),
+      ),
+    };
+  }
 }

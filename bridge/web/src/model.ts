@@ -15,13 +15,26 @@ export type Tone = 'ok' | 'warn' | 'error' | 'neutral';
 type Badges = { [state: string]: [Tone, string] };
 
 const statusLabels: { [status: string]: string } = {
-  connected: '已连接', disabled: '已停用', offline: '离线', idle: '未连接', error: '连接失败', failed: '连接失败', connecting: '连接中', reconnecting: '重连中',
+  connected: '已连接',
+  disabled: '已停用',
+  offline: '离线',
+  idle: '未连接',
+  error: '连接失败',
+  failed: '连接失败',
+  connecting: '连接中',
+  reconnecting: '重连中',
 };
 
 // Label of a machine's Herdr status or a platform connection status. A machine is offline while its client is not connected.
 export const statusLabel = (status: string) => statusLabels[status] || status;
 
-const agentStatusLabels: { [status: string]: string } = { idle: '空闲', working: '运行中', blocked: '等待确认', done: '已完成', unknown: '未知' };
+const agentStatusLabels: { [status: string]: string } = {
+  idle: '空闲',
+  working: '运行中',
+  blocked: '等待确认',
+  done: '已完成',
+  unknown: '未知',
+};
 
 // Label of a Herdr agent_status. Its tone comes from statusTone like every other status.
 export const agentStatusLabel = (status: string) => agentStatusLabels[status] || status;
@@ -34,7 +47,11 @@ export function statusTone(status: string) {
   return 'neutral';
 }
 
-const clientStates: Badges = { online: ['ok', '客户端在线'], refused: ['error', '客户端被拒绝'], offline: ['neutral', '客户端离线'] };
+const clientStates: Badges = {
+  online: ['ok', '客户端在线'],
+  refused: ['error', '客户端被拒绝'],
+  offline: ['neutral', '客户端离线'],
+};
 
 // Badge of the connection of a machine's client: online, refused (its last hello failed, for a reason the card shows) or offline.
 export function clientStatus(client: ClientStatus) {
@@ -44,7 +61,8 @@ export function clientStatus(client: ClientStatus) {
 
 // Enabled machines whose client is connected. Bridge reaches a machine's Herdr only through its client,
 // so only these report agents and can take a binding.
-export const onlineMachines = (state: BridgeState) => state.machines.filter((m) => m.enabled && m.client?.state === 'online');
+export const onlineMachines = (state: BridgeState) =>
+  state.machines.filter((m) => m.enabled && m.client?.state === 'online');
 
 export function metrics(state: BridgeState) {
   const online = onlineMachines(state);
@@ -60,7 +78,7 @@ export function metrics(state: BridgeState) {
 }
 
 // A binding is usable while its platform app is connected and the machine of its default agent configuration is online.
-export function bindingStatus(binding: ConsoleBinding, state: BridgeState): { tone: Tone, label: string } {
+export function bindingStatus(binding: ConsoleBinding, state: BridgeState): { tone: Tone; label: string } {
   const app = state.apps.find((a) => a.id === binding.appId);
   if (app?.connection !== 'connected') return { tone: 'neutral', label: '等待平台连接' };
   const config = state.agentConfigs.find((c) => c.id === binding.defaultAgentConfigId);
@@ -69,31 +87,50 @@ export function bindingStatus(binding: ConsoleBinding, state: BridgeState): { to
 }
 
 // The agent kinds of a configuration, named as the control plane names them in Feishu (see kinds in adoption.ts, which a browser cannot load).
-export const agentKinds: { id: Kind, name: string }[] = [{ id: 'claude', name: 'Claude' }, { id: 'codex', name: 'Codex' }, { id: 'agy', name: 'Antigravity' }];
+export const agentKinds: { id: Kind; name: string }[] = [
+  { id: 'claude', name: 'Claude' },
+  { id: 'codex', name: 'Codex' },
+  { id: 'agy', name: 'Antigravity' },
+];
 
 // What an agent configuration is called unless it is named: machine, kind and model, like configName in agent-configs.ts.
-export const configName = (machine: { name: string } | undefined, kind: Kind, model: string) => (
-  [machine?.name, agentKinds.find((k) => k.id === kind)?.name, model].filter(Boolean).join(' · ')
-);
+export const configName = (machine: { name: string } | undefined, kind: Kind, model: string) =>
+  [machine?.name, agentKinds.find((k) => k.id === kind)?.name, model].filter(Boolean).join(' · ');
 
 // Claude permission modes a configuration starts its agent with, and what each does.
-export const permissionModes: { id: PermissionMode, note: string }[] = [
+export const permissionModes: { id: PermissionMode; note: string }[] = [
   { id: 'default', note: '需要确认的操作在飞书里发确认卡片' },
   { id: 'auto', note: '由 Claude 自动决定，很少需要确认' },
   { id: 'bypassPermissions', note: '所有操作直接执行，不发确认卡片' },
 ];
 
 // How the topics of a project share its directory.
-export const workModes: { id: WorkMode, name: string }[] = [{ id: 'isolated', name: '每个话题独立' }, { id: 'shared', name: '所有话题共用' }];
+export const workModes: { id: WorkMode; name: string }[] = [
+  { id: 'isolated', name: '每个话题独立' },
+  { id: 'shared', name: '所有话题共用' },
+];
 
 // The name of a repository: the last part of its address, such as genvi for an ssh address ending in growth/genvi.git.
-export const repoName = (url: string) => url.trim().replace(/\/+$/, '').replace(/\.git$/, '').split(/[/:]/).at(-1)!;
+export const repoName = (url: string) =>
+  url
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\.git$/, '')
+    .split(/[/:]/)
+    .at(-1)!;
 
 // The SKILL.md of a skill as /api/skills/read returns it, with its files in base64, as text.
-export const skillText = (skill: Pick<SkillWithFiles, 'files'>) => new TextDecoder().decode(Uint8Array.from(atob(skill.files['SKILL.md'] || ''), (c) => c.charCodeAt(0)));
+export const skillText = (skill: Pick<SkillWithFiles, 'files'>) =>
+  new TextDecoder().decode(Uint8Array.from(atob(skill.files['SKILL.md'] || ''), (c) => c.charCodeAt(0)));
 
 // choosing: a topic opened by /adopt that waits for an agent to be picked in Feishu.
-const topicStates: Badges = { starting: ['warn', '启动中'], choosing: ['warn', '待选择'], ready: ['ok', '运行中'], failed: ['error', '失败'], closed: ['neutral', '已结束'] };
+const topicStates: Badges = {
+  starting: ['warn', '启动中'],
+  choosing: ['warn', '待选择'],
+  ready: ['ok', '运行中'],
+  failed: ['error', '失败'],
+  closed: ['neutral', '已结束'],
+};
 
 // Badge of a topic session state.
 export function topicStatus(state: string) {
@@ -105,24 +142,39 @@ export function topicStatus(state: string) {
 export const chatTypeLabel = (type: string) => (type === 'p2p' ? '私聊' : '群聊');
 
 // Address of an app's bot avatar, or null without one. The update time busts the browser cache after a new download.
-export const avatarUrl = (app: Pick<ConsoleApp, 'id' | 'avatar'> | undefined) => (app?.avatar ? `/api/apps/avatar?id=${encodeURIComponent(app.id)}&v=${app.avatar.updatedAt}` : null);
+export const avatarUrl = (app: Pick<ConsoleApp, 'id' | 'avatar'> | undefined) =>
+  app?.avatar ? `/api/apps/avatar?id=${encodeURIComponent(app.id)}&v=${app.avatar.updatedAt}` : null;
 
-export const formatDateTime = (time: number) => new Date(time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+export const formatDateTime = (time: number) =>
+  new Date(time).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 
-export const formatTime = (time: number) => new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+export const formatTime = (time: number) =>
+  new Date(time).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 const registrationMessages: { [status: string]: string } = {
-  starting: '正在打开飞书…', pending: '等待飞书确认', connecting: '正在连接…', completed: '已准备就绪', expired: '二维码已过期',
-  denied: '未完成授权', cancelled: '请重新添加', error: '暂时无法连接飞书', connection_error: '应用已添加，连接未成功', needs_owner: '请设置可操作用户',
+  starting: '正在打开飞书…',
+  pending: '等待飞书确认',
+  connecting: '正在连接…',
+  completed: '已准备就绪',
+  expired: '二维码已过期',
+  denied: '未完成授权',
+  cancelled: '请重新添加',
+  error: '暂时无法连接飞书',
+  connection_error: '应用已添加，连接未成功',
+  needs_owner: '请设置可操作用户',
 };
 
 // What the "add Feishu" dialog keeps itself; previousId is null or undefined without a registration before.
-type RegistrationLocal = { opening: boolean, previousId?: string | null, scanning: boolean };
+type RegistrationLocal = { opening: boolean; previousId?: string | null; scanning: boolean };
 
 // View of the "add Feishu" dialog.
 // local.opening: the dialog was just opened; the registration that existed before (local.previousId) is ignored
 // until a new flow appears or the flow is active. The returned `opening` is the value to keep for the next render.
-export function registrationView(registration: ConsoleState['registration'], apps: ConsoleApp[], { opening, previousId, scanning }: RegistrationLocal) {
+export function registrationView(
+  registration: ConsoleState['registration'],
+  apps: ConsoleApp[],
+  { opening, previousId, scanning }: RegistrationLocal,
+) {
   let r = registration;
   let stillOpening = opening;
   if (opening) {

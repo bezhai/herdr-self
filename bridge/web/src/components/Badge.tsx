@@ -3,7 +3,7 @@ import { statusLabel, statusTone } from '../model.ts';
 import type { Tone } from '../model.ts';
 
 // tone: ok | warn | error | neutral (see statusTone).
-export function Badge({ tone, children }: { tone: Tone, children: ReactNode }) {
+export function Badge({ tone, children }: { tone: Tone; children: ReactNode }) {
   return <span className={tone === 'ok' ? 'badge' : `badge ${tone}`}>{children}</span>;
 }
 

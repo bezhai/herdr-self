@@ -19,22 +19,38 @@ function ProjectCard({ project: p, refresh, toast, openProject }: Omit<Props, 's
   return (
     <article className="card">
       <div className="card-head">
-        <span className="card-icon"><Icon name="folder" /></span>
+        <span className="card-icon">
+          <Icon name="folder" />
+        </span>
         <div className="card-title">
           <strong>{p.name}</strong>
-          {p.repos.length > 0 && <p>{p.repos.map((url) => <span key={url}>{repoName(url)}</span>)}</p>}
+          {p.repos.length > 0 && (
+            <p>
+              {p.repos.map((url) => (
+                <span key={url}>{repoName(url)}</span>
+              ))}
+            </p>
+          )}
         </div>
         <Badge tone="neutral">{workModes.find((m) => m.id === p.workMode)?.name}</Badge>
         <div className="card-actions">
-          <button type="button" className="secondary" onClick={() => openProject(p)}>编辑</button>
-          <ActionButton className="text-button danger" run={remove} onError={toast}>删除</ActionButton>
+          <button type="button" className="secondary" onClick={() => openProject(p)}>
+            编辑
+          </button>
+          <ActionButton className="text-button danger" run={remove} onError={toast}>
+            删除
+          </ActionButton>
         </div>
       </div>
       <div className="card-detail">
         <span>{p.description}</span>
         <span className="facts">
-          <span><b>{p.repos.length}</b>个仓库</span>
-          <span><b>{p.skills.length}</b>个 skill</span>
+          <span>
+            <b>{p.repos.length}</b>个仓库
+          </span>
+          <span>
+            <b>{p.skills.length}</b>个 skill
+          </span>
         </span>
       </div>
     </article>
@@ -44,11 +60,17 @@ function ProjectCard({ project: p, refresh, toast, openProject }: Omit<Props, 's
 export function ProjectsPage({ state, refresh, toast, openProject }: Props) {
   return (
     <section className="page">
-      <div className="section-heading"><h2>项目列表</h2></div>
+      <div className="section-heading">
+        <h2>项目列表</h2>
+      </div>
       <div className="stack">
-        {state.projects.length
-          ? state.projects.map((p) => <ProjectCard key={p.id} project={p} refresh={refresh} toast={toast} openProject={openProject} />)
-          : <EmptyState icon="folder" title="暂无项目" />}
+        {state.projects.length ? (
+          state.projects.map((p) => (
+            <ProjectCard key={p.id} project={p} refresh={refresh} toast={toast} openProject={openProject} />
+          ))
+        ) : (
+          <EmptyState icon="folder" title="暂无项目" />
+        )}
       </div>
     </section>
   );

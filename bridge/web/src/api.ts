@@ -9,7 +9,10 @@ export function onUnauthorized(listener: () => void): () => void {
 // Raw call to /api: GET without a body, POST with a JSON body. Returns the fetch Response.
 export function callApi(path: string, body?: unknown) {
   const headers = { 'Content-Type': 'application/json' };
-  return fetch(`/api${path}`, body === undefined ? { headers } : { method: 'POST', headers, body: JSON.stringify(body) });
+  return fetch(
+    `/api${path}`,
+    body === undefined ? { headers } : { method: 'POST', headers, body: JSON.stringify(body) },
+  );
 }
 
 // Request used by the console: notifies 401 listeners and throws the server's error message.

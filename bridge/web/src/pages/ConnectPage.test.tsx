@@ -29,7 +29,11 @@ test('polls once a second and redirects to an allowed Feishu URL once the regist
 });
 
 test('refuses to redirect outside the Feishu hosts or without https', async () => {
-  for (const url of ['https://attacker.example/x', 'http://open.feishu.cn/x', 'https://open.feishu.cn.attacker.example/x']) {
+  for (const url of [
+    'https://attacker.example/x',
+    'http://open.feishu.cn/x',
+    'https://open.feishu.cn.attacker.example/x',
+  ]) {
     stubFetch({ '/api/apps/registration/start': { id: 'r1', status: 'pending', url } });
     const view = render(<ConnectPage />);
     expect(await screen.findByText('创建链接不可用')).toBeTruthy();
@@ -50,7 +54,10 @@ test('a 401 returns to the console before the response is parsed', async () => {
 test('other request failures show a generic message; retry starts the flow again', async () => {
   let fail = true;
   stubFetch({
-    '/api/apps/registration/start': () => (fail ? reply({ error: 'internal detail' }, 400) : { id: 'r2', status: 'pending', url: 'https://open.larksuite.com/x' }),
+    '/api/apps/registration/start': () =>
+      fail
+        ? reply({ error: 'internal detail' }, 400)
+        : { id: 'r2', status: 'pending', url: 'https://open.larksuite.com/x' },
   });
   const user = userEvent.setup();
   render(<ConnectPage />);

@@ -3,7 +3,9 @@ import { Icon } from './Icon.tsx';
 
 declare global {
   // Set by public/theme.js: current() is light, dark or system, and choose(theme) applies and stores one.
-  interface Window { bridgeTheme: { current(): string, choose(theme: string): void } }
+  interface Window {
+    bridgeTheme: { current(): string; choose(theme: string): void };
+  }
 }
 
 // In the order the button cycles through them.

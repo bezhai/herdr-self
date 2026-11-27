@@ -16,9 +16,13 @@ import { base64, bodyOf, deferred, reply, sampleState, stubFetch } from '../test
 
 // In these tests, ! after a DOM query marks an element that the test has just rendered.
 
-const optionLabels = (label: string) => [...screen.getByLabelText<HTMLSelectElement>(label).options].map((option) => option.textContent);
+const optionLabels = (label: string) =>
+  [...screen.getByLabelText<HTMLSelectElement>(label).options].map((option) => option.textContent);
 // Paragraphs in the open dialog other than the error line: forms carry no captions or explanations.
-const prose = () => [...document.querySelectorAll('dialog p')].filter((p) => p.getAttribute('role') !== 'alert').map((p) => p.textContent);
+const prose = () =>
+  [...document.querySelectorAll('dialog p')]
+    .filter((p) => p.getAttribute('role') !== 'alert')
+    .map((p) => p.textContent);
 
 test('form dialogs head with their title next to the close button and hold no explanatory text', () => {
   const state = sampleState();
@@ -26,12 +30,39 @@ test('form dialogs head with their title next to the close button and hold no ex
     [<AppDialog onClose={vi.fn()} onSaved={vi.fn()} />, '应用配置'],
     [<MachineDialog onClose={vi.fn()} onSaved={vi.fn()} />, '添加机器'],
     [<ProjectDialog skills={state.skills} onClose={vi.fn()} onSaved={vi.fn()} />, '新建项目'],
-    [<ProjectDialog project={state.projects[0]} skills={state.skills} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑项目'],
+    [
+      <ProjectDialog project={state.projects[0]} skills={state.skills} onClose={vi.fn()} onSaved={vi.fn()} />,
+      '编辑项目',
+    ],
     [<AgentConfigDialog machines={state.machines} onClose={vi.fn()} onSaved={vi.fn()} />, '新建 Agent 配置'],
-    [<AgentConfigDialog config={state.agentConfigs[0]} machines={state.machines} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑 Agent 配置'],
-    [<BindingDialog binding={state.bindings[0]} projects={state.projects} agentConfigs={state.agentConfigs} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑会话绑定'],
+    [
+      <AgentConfigDialog
+        config={state.agentConfigs[0]}
+        machines={state.machines}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+      '编辑 Agent 配置',
+    ],
+    [
+      <BindingDialog
+        binding={state.bindings[0]}
+        projects={state.projects}
+        agentConfigs={state.agentConfigs}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+      '编辑会话绑定',
+    ],
     [<SkillDialog onClose={vi.fn()} onSaved={vi.fn()} />, '新建 skill'],
-    [<SkillDialog skill={{ ...state.skills[1], files: { 'SKILL.md': base64('---\n'), 'run.sh': base64('') } }} onClose={vi.fn()} onSaved={vi.fn()} />, '编辑 deploy-notes'],
+    [
+      <SkillDialog
+        skill={{ ...state.skills[1], files: { 'SKILL.md': base64('---\n'), 'run.sh': base64('') } }}
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+      '编辑 deploy-notes',
+    ],
   ];
   for (const [element, title] of forms) {
     const view = render(element);
@@ -51,7 +82,10 @@ test('machine form asks only for the name and the Herdr session, starts from ses
   const user = userEvent.setup();
   render(<MachineDialog onClose={vi.fn()} onSaved={onSaved} />);
   expect(screen.getByRole('heading', { name: '添加机器' })).toBeTruthy();
-  expect([...document.querySelectorAll('dialog label')].map((label) => label.textContent)).toEqual(['机器名称', 'Herdr Session']);
+  expect([...document.querySelectorAll('dialog label')].map((label) => label.textContent)).toEqual([
+    '机器名称',
+    'Herdr Session',
+  ]);
   expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(2);
   expect(screen.getByLabelText<HTMLInputElement>('Herdr Session').value).toBe('default');
 
@@ -131,7 +165,14 @@ test('app form defaults to Feishu, splits allowed users and clears the secret af
   await user.type(screen.getByLabelText('允许操作的用户 open_id'), 'ou_a, ou_b{Enter}ou_c');
   await user.click(screen.getByRole('button', { name: '保存应用' }));
   expect(await screen.findByText('该应用已添加')).toBeTruthy();
-  expect(bodyOf(fetch, '/api/apps/save')).toEqual({ id: 'app-2', name: '备用应用', appId: 'cli_spare', appSecret: 'new-secret', domain: 'lark', allowedUsers: ['ou_a', 'ou_b', 'ou_c'] });
+  expect(bodyOf(fetch, '/api/apps/save')).toEqual({
+    id: 'app-2',
+    name: '备用应用',
+    appId: 'cli_spare',
+    appSecret: 'new-secret',
+    domain: 'lark',
+    allowedUsers: ['ou_a', 'ou_b', 'ou_c'],
+  });
   expect(screen.getByLabelText<HTMLInputElement>('App Secret').value).toBe('');
 });
 
@@ -144,7 +185,10 @@ async function replaceText(user: UserEvent, field: HTMLElement, text: string) {
 
 // The captions of the fields in the open dialog: labels, and the legends of groups of fields. A select inside a label has the text of its
 // options in it, so the caption is the text before the field, except for a checkbox, whose caption follows it.
-const captions = () => [...document.querySelectorAll('dialog label, dialog legend')].map((label) => (label.classList.contains('checkbox') ? label.textContent : label.firstChild!.textContent));
+const captions = () =>
+  [...document.querySelectorAll('dialog label, dialog legend')].map((label) =>
+    label.classList.contains('checkbox') ? label.textContent : label.firstChild!.textContent,
+  );
 
 test('project form asks for the name, description, repositories one per line, the topic directory and the on-demand skills, and saves a new project as isolated', async () => {
   const fetch = stubFetch({ '/api/projects/save': { id: 'p-9' } });
@@ -157,12 +201,20 @@ test('project form asks for the name, description, repositories one per line, th
   expect(screen.getByLabelText<HTMLTextAreaElement>('仓库').placeholder).toBe('每行一个地址');
 
   await user.type(screen.getByLabelText('项目名称'), 'promoter');
-  await replaceText(user, screen.getByLabelText('仓库'), 'git@code.example:growth/promoter.git\n\n https://github.example/a/b.git \n');
+  await replaceText(
+    user,
+    screen.getByLabelText('仓库'),
+    'git@code.example:growth/promoter.git\n\n https://github.example/a/b.git \n',
+  );
   await user.click(screen.getByLabelText('deploy-notes'));
   await user.click(screen.getByRole('button', { name: '保存' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
   expect(bodyOf(fetch, '/api/projects/save')).toEqual({
-    name: 'promoter', description: '', repos: ['git@code.example:growth/promoter.git', 'https://github.example/a/b.git'], workMode: 'isolated', skills: ['deploy-notes'],
+    name: 'promoter',
+    description: '',
+    repos: ['git@code.example:growth/promoter.git', 'https://github.example/a/b.git'],
+    workMode: 'isolated',
+    skills: ['deploy-notes'],
   });
 });
 
@@ -183,7 +235,12 @@ test('project form edits a project by its id from what it holds; a skill loaded 
   await user.click(screen.getByRole('button', { name: '保存' }));
   expect(await screen.findByText('已有同名的项目')).toBeTruthy();
   expect(bodyOf(fetch, '/api/projects/save')).toEqual({
-    id: 'p-1', name: 'genvi', description: '增长相关的服务', repos: ['git@code.example:growth/genvi.git'], workMode: 'isolated', skills: [],
+    id: 'p-1',
+    name: 'genvi',
+    description: '增长相关的服务',
+    repos: ['git@code.example:growth/genvi.git'],
+    workMode: 'isolated',
+    skills: [],
   });
 });
 
@@ -200,7 +257,11 @@ test('agent configuration form names a new configuration after machine, type and
   expect(captions()).toEqual(['配置名称', '机器', 'Agent 类型', '模型', '权限模式', '只允许执行的命令']);
   expect(optionLabels('机器')).toEqual(['cpu2', 'gpu1', 'laptop', 'cpu3', 'gpu2']);
   expect(optionLabels('Agent 类型')).toEqual(['Claude', 'Codex', 'Antigravity']);
-  expect(optionLabels('权限模式')).toEqual(['default：需要确认的操作在飞书里发确认卡片', 'auto：由 Claude 自动决定，很少需要确认', 'bypassPermissions：所有操作直接执行，不发确认卡片']);
+  expect(optionLabels('权限模式')).toEqual([
+    'default：需要确认的操作在飞书里发确认卡片',
+    'auto：由 Claude 自动决定，很少需要确认',
+    'bypassPermissions：所有操作直接执行，不发确认卡片',
+  ]);
   const name = () => screen.getByLabelText<HTMLInputElement>('配置名称').value;
   expect(name()).toBe('cpu2 · Claude');
 
@@ -213,7 +274,12 @@ test('agent configuration form names a new configuration after machine, type and
   await user.click(screen.getByRole('button', { name: '保存' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
   expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({
-    name: 'gpu1 · Claude · Seed', machineId: 'm-2', kind: 'claude', model: 'Seed', permissionMode: 'auto', allowedCommands: ['butler', 'git'],
+    name: 'gpu1 · Claude · Seed',
+    machineId: 'm-2',
+    kind: 'claude',
+    model: 'Seed',
+    permissionMode: 'auto',
+    allowedCommands: ['butler', 'git'],
   });
 });
 
@@ -228,7 +294,12 @@ test('agent configuration form keeps a name that was edited, and leaves out what
   expect(captions()).toEqual(['配置名称', '机器', 'Agent 类型', '模型']);
   await user.click(screen.getByRole('button', { name: '保存' }));
   await waitFor(() => expect(bodyOf(fetch, '/api/agent-configs/save')).toBeTruthy());
-  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({ name: '我的配置', machineId: 'm-1', kind: 'codex', model: 'gpt-5.1-codex' });
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({
+    name: '我的配置',
+    machineId: 'm-1',
+    kind: 'codex',
+    model: 'gpt-5.1-codex',
+  });
 });
 
 test('agent configuration form edits a configuration by its id from what it holds; a refusal stays in the dialog', async () => {
@@ -246,7 +317,13 @@ test('agent configuration form edits a configuration by its id from what it hold
   await user.click(screen.getByRole('button', { name: '保存' }));
   expect(await screen.findByText('已有同名的 Agent 配置')).toBeTruthy();
   expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({
-    id: 'c-1', name: 'cpu2 · Claude', machineId: 'm-1', kind: 'claude', model: 'Seed', permissionMode: 'default', allowedCommands: [],
+    id: 'c-1',
+    name: 'cpu2 · Claude',
+    machineId: 'm-1',
+    kind: 'claude',
+    model: 'Seed',
+    permissionMode: 'default',
+    allowedCommands: [],
   });
 });
 
@@ -255,7 +332,15 @@ test('binding form shows the name from Feishu as it is, and changes the default 
   const onSaved = vi.fn();
   const user = userEvent.setup();
   const state = sampleState();
-  render(<BindingDialog binding={state.bindings[0]} projects={state.projects} agentConfigs={state.agentConfigs} onClose={vi.fn()} onSaved={onSaved} />);
+  render(
+    <BindingDialog
+      binding={state.bindings[0]}
+      projects={state.projects}
+      agentConfigs={state.agentConfigs}
+      onClose={vi.fn()}
+      onSaved={onSaved}
+    />,
+  );
   expect(captions()).toEqual(['名称', '默认项目', '默认 Agent 配置', '需要 @ 机器人']);
   const name = screen.getByLabelText<HTMLInputElement>('名称');
   expect([name.value, name.readOnly]).toEqual(['个人助手', true]);
@@ -269,15 +354,37 @@ test('binding form shows the name from Feishu as it is, and changes the default 
   await user.click(screen.getByLabelText('需要 @ 机器人'));
   await user.click(screen.getByRole('button', { name: '保存' }));
   await waitFor(() => expect(onSaved).toHaveBeenCalled());
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ id: 'b-1', defaultProjectId: 'p-2', defaultAgentConfigId: 'c-2', requireMention: false });
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({
+    id: 'b-1',
+    defaultProjectId: 'p-2',
+    defaultAgentConfigId: 'c-2',
+    requireMention: false,
+  });
 });
 
 test('binding form of a direct chat leaves the project to each task and has no mention to require', async () => {
   const fetch = stubFetch({ '/api/bindings/save': { ok: true } });
   const user = userEvent.setup();
   const state = sampleState();
-  const direct = { id: 'b-2', name: '私聊', appId: 'app-1', chatId: 'oc_2', chatType: 'p2p' as const, requireMention: false, enabled: true, defaultAgentConfigId: 'c-1' };
-  render(<BindingDialog binding={direct} projects={state.projects} agentConfigs={state.agentConfigs} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const direct = {
+    id: 'b-2',
+    name: '私聊',
+    appId: 'app-1',
+    chatId: 'oc_2',
+    chatType: 'p2p' as const,
+    requireMention: false,
+    enabled: true,
+    defaultAgentConfigId: 'c-1',
+  };
+  render(
+    <BindingDialog
+      binding={direct}
+      projects={state.projects}
+      agentConfigs={state.agentConfigs}
+      onClose={vi.fn()}
+      onSaved={vi.fn()}
+    />,
+  );
   expect(captions()).toEqual(['名称', '默认项目', '默认 Agent 配置']);
   const project = screen.getByLabelText<HTMLInputElement>('默认项目');
   expect([project.value, project.readOnly]).toEqual(['按任务自动选择', true]);
@@ -317,12 +424,22 @@ test('skill form for an existing skill edits its SKILL.md alone: the title names
   const onSaved = vi.fn();
   const user = userEvent.setup();
   const text = '---\nname: deploy-notes\ndescription: 部署前后要检查的事项。\n---\n先看 CI。\n';
-  const skill = { ...sampleState().skills[1], files: { 'SKILL.md': base64(text), 'references/checklist.md': base64('- CI\n'), 'scripts/check.sh': base64('echo\n') } };
+  const skill = {
+    ...sampleState().skills[1],
+    files: {
+      'SKILL.md': base64(text),
+      'references/checklist.md': base64('- CI\n'),
+      'scripts/check.sh': base64('echo\n'),
+    },
+  };
   render(<SkillDialog skill={skill} onClose={vi.fn()} onSaved={onSaved} />);
   expect(screen.queryByLabelText('skill 名称')).toBeNull();
   expect(screen.getByLabelText<HTMLTextAreaElement>('SKILL.md').value).toBe(text);
   const files = screen.getByRole('group', { name: '其他文件' });
-  expect([...files.querySelectorAll('li')].map((li) => li.textContent)).toEqual(['references/checklist.md', 'scripts/check.sh']);
+  expect([...files.querySelectorAll('li')].map((li) => li.textContent)).toEqual([
+    'references/checklist.md',
+    'scripts/check.sh',
+  ]);
   expect(document.querySelectorAll('dialog input, dialog select, dialog textarea')).toHaveLength(1);
 
   const changed = text.replace('先看 CI。', '先看 CI，再看告警。');
@@ -334,12 +451,22 @@ test('skill form for an existing skill edits its SKILL.md alone: the title names
 
 // as: the registrations below hold only what the dialog reads.
 type Registration = NonNullable<ConsoleState['registration']>;
-const registrationProps = () => ({ apps: sampleState().apps, previousId: 'r0', onRetry: vi.fn(), onDone: vi.fn(), onConfigure: vi.fn(), onManual: vi.fn(), onClose: vi.fn() });
+const registrationProps = () => ({
+  apps: sampleState().apps,
+  previousId: 'r0',
+  onRetry: vi.fn(),
+  onDone: vi.fn(),
+  onConfigure: vi.fn(),
+  onManual: vi.fn(),
+  onClose: vi.fn(),
+});
 
 test('registration dialog shows 完成 once the flow completes', async () => {
   const props = registrationProps();
   const user = userEvent.setup();
-  render(<RegistrationDialog registration={{ id: 'r1', status: 'completed', appId: 'app-1' } as Registration} {...props} />);
+  render(
+    <RegistrationDialog registration={{ id: 'r1', status: 'completed', appId: 'app-1' } as Registration} {...props} />,
+  );
   expect(screen.getByRole('heading', { name: '飞书已连接' })).toBeTruthy();
   expect(screen.getByText('工作助手')).toBeTruthy();
   expect(screen.queryByRole('button', { name: '手动接入' })).toBeNull();
@@ -350,7 +477,12 @@ test('registration dialog shows 完成 once the flow completes', async () => {
 test('registration dialog links to Feishu and switches to the QR code for phones', async () => {
   const props = registrationProps();
   const user = userEvent.setup();
-  const registration = { id: 'r1', status: 'pending', url: 'https://open.feishu.cn/page/x', qr: 'data:image/png;base64,qr' } as Registration;
+  const registration = {
+    id: 'r1',
+    status: 'pending',
+    url: 'https://open.feishu.cn/page/x',
+    qr: 'data:image/png;base64,qr',
+  } as Registration;
   render(<RegistrationDialog registration={registration} {...props} />);
   expect(prose()).toEqual(['等待飞书确认']);
   const link = screen.getByRole('link', { name: '前往飞书 ↗' });

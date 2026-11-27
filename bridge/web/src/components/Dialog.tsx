@@ -4,7 +4,17 @@ import { Icon } from './Icon.tsx';
 
 // Native modal <dialog>. `open` drives showModal()/close(). When the browser closes the dialog
 // itself (Esc), onClose tells the owner, which then removes or closes it.
-export function Dialog({ open, onClose, className, children }: { open: boolean, onClose: () => void, className?: string, children: ReactNode }) {
+export function Dialog({
+  open,
+  onClose,
+  className,
+  children,
+}: {
+  open: boolean;
+  onClose: () => void;
+  className?: string;
+  children: ReactNode;
+}) {
   const ref = useRef<HTMLDialogElement>(null);
   const openRef = useRef(open);
   openRef.current = open;
@@ -19,10 +29,14 @@ export function Dialog({ open, onClose, className, children }: { open: boolean, 
     if (openRef.current) onClose();
   }
 
-  return <dialog ref={ref} className={className} onClose={closed}>{children}</dialog>;
+  return (
+    <dialog ref={ref} className={className} onClose={closed}>
+      {children}
+    </dialog>
+  );
 }
 
-export function CloseButton({ className = 'icon', onClick }: { className?: string, onClick: () => void }) {
+export function CloseButton({ className = 'icon', onClick }: { className?: string; onClick: () => void }) {
   return (
     <button type="button" className={className} aria-label="关闭" onClick={onClick}>
       <Icon name="close" />

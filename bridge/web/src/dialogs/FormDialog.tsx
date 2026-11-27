@@ -14,14 +14,27 @@ export function useFields<T extends { [key: string]: string | boolean }>(initial
   return {
     values,
     set,
-    field: (key: KeysOf<T, string>) => ({ value: values[key], onChange: (e: ChangeEvent<FieldElement>) => set(key, e.target.value) }),
-    checkbox: (key: KeysOf<T, boolean>) => ({ checked: values[key], onChange: (e: ChangeEvent<HTMLInputElement>) => set(key, e.target.checked) }),
+    field: (key: KeysOf<T, string>) => ({
+      value: values[key],
+      onChange: (e: ChangeEvent<FieldElement>) => set(key, e.target.value),
+    }),
+    checkbox: (key: KeysOf<T, boolean>) => ({
+      checked: values[key],
+      onChange: (e: ChangeEvent<HTMLInputElement>) => set(key, e.target.checked),
+    }),
   };
 }
 
 // Dialog with a form. The primary button is disabled while onSubmit runs; a failure is shown inside the dialog.
 // onSubmit resolves after the owner has handled success (usually: close and refresh). className goes to the dialog, for its width.
-type FormDialogProps = { title: string, submitLabel: string, onSubmit: () => Promise<void>, onClose: () => void, className?: string, children: ReactNode };
+type FormDialogProps = {
+  title: string;
+  submitLabel: string;
+  onSubmit: () => Promise<void>;
+  onClose: () => void;
+  className?: string;
+  children: ReactNode;
+};
 export function FormDialog({ title, submitLabel, onSubmit, onClose, className, children }: FormDialogProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -41,12 +54,21 @@ export function FormDialog({ title, submitLabel, onSubmit, onClose, className, c
   return (
     <Dialog open className={className} onClose={onClose}>
       <form onSubmit={submit}>
-        <div className="dialog-head"><h2>{title}</h2><CloseButton onClick={onClose} /></div>
+        <div className="dialog-head">
+          <h2>{title}</h2>
+          <CloseButton onClick={onClose} />
+        </div>
         {children}
-        <p className="error" role="alert">{error}</p>
+        <p className="error" role="alert">
+          {error}
+        </p>
         <div className="dialog-actions">
-          <button type="button" className="secondary" onClick={onClose}>取消</button>
-          <button type="submit" className="primary" disabled={busy}>{submitLabel}</button>
+          <button type="button" className="secondary" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="primary" disabled={busy}>
+            {submitLabel}
+          </button>
         </div>
       </form>
     </Dialog>

@@ -8,15 +8,26 @@ const key = 'herdr-bridge-theme';
 const root = document.documentElement;
 const toggle = () => screen.getByRole('button', { name: /^主题：/ });
 // The button's accessible name, title and icon (!: the button holds an icon).
-const shown = () => [toggle().getAttribute('aria-label'), toggle().title, toggle().querySelector('use')!.getAttribute('href')];
+const shown = () => [
+  toggle().getAttribute('aria-label'),
+  toggle().title,
+  toggle().querySelector('use')!.getAttribute('href'),
+];
 
 // Like a browser that blocks site data: reading window.localStorage throws.
-const blockStorage = () => vi.spyOn(window, 'localStorage', 'get').mockImplementation(() => {
-  throw new DOMException('Access is denied for this document.', 'SecurityError');
-});
+const blockStorage = () =>
+  vi.spyOn(window, 'localStorage', 'get').mockImplementation(() => {
+    throw new DOMException('Access is denied for this document.', 'SecurityError');
+  });
 
 test('the theme script applies a stored light or dark choice to <html> and follows the system otherwise', () => {
-  for (const [stored, applied] of [['light', 'light'], ['dark', 'dark'], ['system', null], ['sepia', null], [null, null]]) {
+  for (const [stored, applied] of [
+    ['light', 'light'],
+    ['dark', 'dark'],
+    ['system', null],
+    ['sepia', null],
+    [null, null],
+  ]) {
     localStorage.clear();
     if (stored) localStorage.setItem(key, stored);
     root.setAttribute('data-theme', 'stale');

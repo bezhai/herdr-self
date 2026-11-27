@@ -8,10 +8,25 @@ import type { ConsoleApp } from '../model.ts';
 // previousId is the registration that existed before this open and is ignored until a new flow shows up.
 // onRetry must open /connect synchronously in the click handler (popup blocking).
 type RegistrationDialogProps = {
-  registration: ConsoleState['registration'], apps: ConsoleApp[], previousId?: string,
-  onRetry: () => void, onDone: () => void, onConfigure: () => void, onManual: () => void, onClose: () => void,
+  registration: ConsoleState['registration'];
+  apps: ConsoleApp[];
+  previousId?: string;
+  onRetry: () => void;
+  onDone: () => void;
+  onConfigure: () => void;
+  onManual: () => void;
+  onClose: () => void;
 };
-export function RegistrationDialog({ registration, apps, previousId, onRetry, onDone, onConfigure, onManual, onClose }: RegistrationDialogProps) {
+export function RegistrationDialog({
+  registration,
+  apps,
+  previousId,
+  onRetry,
+  onDone,
+  onConfigure,
+  onManual,
+  onClose,
+}: RegistrationDialogProps) {
   const [opening, setOpening] = useState(true);
   const [scanning, setScanning] = useState(false);
   const view = registrationView(registration, apps, { opening, previousId, scanning });
@@ -24,22 +39,60 @@ export function RegistrationDialog({ registration, apps, previousId, onRetry, on
     <Dialog open onClose={onClose} className="connect-dialog">
       <div className="dialog-body">
         <CloseButton className="icon dialog-close" onClick={onClose} />
-        <div className="feishu-mark" aria-hidden="true"><svg><use href="#i-feishu" /></svg></div>
+        <div className="feishu-mark" aria-hidden="true">
+          <svg>
+            <use href="#i-feishu" />
+          </svg>
+        </div>
         <h2>{view.title}</h2>
         {view.subtitle && <p className="connect-subtitle">{view.subtitle}</p>}
         <div className="connect-visual">
           {view.spinner && <span className="spinner" />}
-          {view.result && <span className={view.result === 'success' ? 'result-icon success' : 'result-icon'}>{view.result === 'success' ? '✓' : '!'}</span>}
-          {view.qr && <div className="qr"><img id="registration-qr" src={view.qr} alt="飞书扫码" width="220" height="220" /></div>}
+          {view.result && (
+            <span className={view.result === 'success' ? 'result-icon success' : 'result-icon'}>
+              {view.result === 'success' ? '✓' : '!'}
+            </span>
+          )}
+          {view.qr && (
+            <div className="qr">
+              <img id="registration-qr" src={view.qr} alt="飞书扫码" width="220" height="220" />
+            </div>
+          )}
         </div>
-        <p className="connect-status" aria-live="polite">{view.message}</p>
-        {view.link && <a className="primary connect-primary" href={view.link} target="_blank" rel="noopener noreferrer">前往飞书 ↗</a>}
-        {view.retry && <button type="button" className="primary connect-primary" onClick={onRetry}>重试</button>}
-        {view.done && <button type="button" className="primary connect-primary" onClick={onDone}>完成</button>}
-        {view.configure && <button type="button" className="primary connect-primary" onClick={onConfigure}>查看应用</button>}
+        <p className="connect-status" aria-live="polite">
+          {view.message}
+        </p>
+        {view.link && (
+          <a className="primary connect-primary" href={view.link} target="_blank" rel="noopener noreferrer">
+            前往飞书 ↗
+          </a>
+        )}
+        {view.retry && (
+          <button type="button" className="primary connect-primary" onClick={onRetry}>
+            重试
+          </button>
+        )}
+        {view.done && (
+          <button type="button" className="primary connect-primary" onClick={onDone}>
+            完成
+          </button>
+        )}
+        {view.configure && (
+          <button type="button" className="primary connect-primary" onClick={onConfigure}>
+            查看应用
+          </button>
+        )}
         <div className="connect-footer">
-          {view.scan && <button type="button" className="text-button" onClick={() => setScanning((s) => !s)}>{view.scanLabel}</button>}
-          {view.manual && <button type="button" className="text-button" onClick={onManual}>手动接入</button>}
+          {view.scan && (
+            <button type="button" className="text-button" onClick={() => setScanning((s) => !s)}>
+              {view.scanLabel}
+            </button>
+          )}
+          {view.manual && (
+            <button type="button" className="text-button" onClick={onManual}>
+              手动接入
+            </button>
+          )}
         </div>
       </div>
     </Dialog>

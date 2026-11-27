@@ -1,13 +1,13 @@
 import fs from 'node:fs';
-import {clientSocket,send} from './client.ts';
-import {serviceName} from './services.ts';
-import type {Output} from './client.ts';
-import type {ServiceRequest} from './link.ts';
+import { clientSocket, send } from './client.ts';
+import { serviceName } from './services.ts';
+import type { Output } from './client.ts';
+import type { ServiceRequest } from './link.ts';
 // bridge-call, the command line through which any agent on a machine calls a local HTTP service that some machine's Bridge client offers (see
 // services.ts and ServiceCalls). Like bridge-schedule (see schedule-command.ts), it sends the request to the Bridge client of the machine it
 // runs on, which passes it on to the control plane, which sends it to the client that offers the service; the token of the service stays in
 // that client's config. It runs on Node alone, like the client, and prints what the service answers. Its help is complete on its own.
-export const usage=`用法：
+export const usage = `用法：
   bridge-call <服务> <方法> <路径> [JSON | @文件] [--url-query <名>=<值>]... [-H '<名>: <值>']... [-o <文件>]
   bridge-call --list
 
@@ -38,73 +38,145 @@ export const usage=`用法：
   不允许 <方法> 请求、不允许传请求头：服务的配置不允许，换成允许的方法，不要绕过。
   服务没有响应：告诉主人检查那台机器上的服务；确认恢复后再试。服务的回答超过 20 MB：缩小范围，或者按服务的接口分页。
 `;
-type Parsed={service?:string,method?:string,path?:string,body?:string,query:[string,string][],headers:Record<string,string>,output?:string,list:boolean,help:boolean};
-const usageError=(message:string)=>Object.assign(Error(message),{usage:true});
-const methods=['GET','HEAD','POST','PUT','PATCH','DELETE'];
+type Parsed = {
+  service?: string;
+  method?: string;
+  path?: string;
+  body?: string;
+  query: [string, string][];
+  headers: Record<string, string>;
+  output?: string;
+  list: boolean;
+  help: boolean;
+};
+const usageError = (message: string) => Object.assign(Error(message), { usage: true });
+const methods = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'];
 // The options and the positional arguments of args: an option takes the next argument, or what follows its =, whatever it looks like.
-function parse(args:string[]):Parsed{
- const out:Parsed={query:[],headers:{},list:false,help:false},positional:string[]=[];
- for(let i=0;i<args.length;i++){
-  const a=args[i],eq=a.startsWith('--')?a.indexOf('='):-1,flag=eq>0?a.slice(0,eq):a;
-  if(a==='--help'||a==='-h'){out.help=true;continue;}
-  if(a==='--list'){out.list=true;continue;}
-  if(['--url-query','--header','-H','-o'].includes(flag)){
-   const value=eq>0?a.slice(eq+1):args[++i];if(value==null)throw usageError(flag+' 缺少值');
-   if(flag==='--url-query'){
-    const split=value.indexOf('=');if(split<=0)throw usageError('--url-query 要写成 <名>=<值>');
-    out.query.push([value.slice(0,split),value.slice(split+1)]);
-   }else if(flag==='-o')out.output=value;
-   else{
-    const split=value.indexOf(':'),name=value.slice(0,split).trim().toLowerCase();
-    if(split<=0||!name)throw usageError("-H 要写成 '<名>: <值>'");
-    out.headers[name]=value.slice(split+1).trim();
-   }
-   continue;
+function parse(args: string[]): Parsed {
+  const out: Parsed = { query: [], headers: {}, list: false, help: false },
+    positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i],
+      eq = a.startsWith('--') ? a.indexOf('=') : -1,
+      flag = eq > 0 ? a.slice(0, eq) : a;
+    if (a === '--help' || a === '-h') {
+      out.help = true;
+      continue;
+    }
+    if (a === '--list') {
+      out.list = true;
+      continue;
+    }
+    if (['--url-query', '--header', '-H', '-o'].includes(flag)) {
+      const value = eq > 0 ? a.slice(eq + 1) : args[++i];
+      if (value == null) throw usageError(flag + ' 缺少值');
+      if (flag === '--url-query') {
+        const split = value.indexOf('=');
+        if (split <= 0) throw usageError('--url-query 要写成 <名>=<值>');
+        out.query.push([value.slice(0, split), value.slice(split + 1)]);
+      } else if (flag === '-o') out.output = value;
+      else {
+        const split = value.indexOf(':'),
+          name = value.slice(0, split).trim().toLowerCase();
+        if (split <= 0 || !name) throw usageError("-H 要写成 '<名>: <值>'");
+        out.headers[name] = value.slice(split + 1).trim();
+      }
+      continue;
+    }
+    if (a.startsWith('--') || (a.startsWith('-') && a.length > 1 && !/^-\d/.test(a)))
+      throw usageError('未知的参数：' + a);
+    positional.push(a);
   }
-  if(a.startsWith('--')||(a.startsWith('-')&&a.length>1&&!/^-\d/.test(a)))throw usageError('未知的参数：'+a);
-  positional.push(a);
- }
- if(out.list&&(positional.length||out.output||out.query.length||Object.keys(out.headers).length))throw usageError('--list 不带其他参数');
- if(positional.length>4)throw usageError('多余的参数：'+positional.slice(4).join(' '));
- const [service,method,path,body]=positional;return {...out,...service!=null&&{service},...method!=null&&{method},...path!=null&&{path},...body!=null&&{body}};
+  if (out.list && (positional.length || out.output || out.query.length || Object.keys(out.headers).length))
+    throw usageError('--list 不带其他参数');
+  if (positional.length > 4) throw usageError('多余的参数：' + positional.slice(4).join(' '));
+  const [service, method, path, body] = positional;
+  return {
+    ...out,
+    ...(service != null && { service }),
+    ...(method != null && { method }),
+    ...(path != null && { path }),
+    ...(body != null && { body }),
+  };
 }
 // The request of the parsed arguments: its path without the query string, which becomes pairs ahead of the --url-query ones, and its body, read from a file for @file.
-function requestOf(o:Parsed):ServiceRequest{
- if(!o.service)throw usageError('缺少服务名');
- if(!serviceName.test(o.service))throw usageError('服务名不合法：'+o.service);
- if(!o.method)throw usageError('缺少方法');
- const method=o.method.toUpperCase();if(!methods.includes(method))throw usageError('未知的方法：'+o.method);
- if(o.path==null)throw usageError('缺少路径');
- if(o.path.includes('#'))throw usageError('路径里不能带 #');
- const cut=o.path.indexOf('?'),path=cut<0?o.path:o.path.slice(0,cut),query:[string,string][]=[...cut<0?[]:[...new URLSearchParams(o.path.slice(cut+1))] as [string,string][],...o.query];
- let body:string|undefined;
- if(o.body!==undefined){
-  if(!['POST','PUT','PATCH'].includes(method))throw usageError(method+' 不能带请求体');
-  if(/^[{[]/.test(o.body))body=o.body;
-  else if(o.body.startsWith('@')){
-   try{body=fs.readFileSync(o.body.slice(1),'utf8');}catch(e){throw usageError(`读不到请求体文件 ${o.body.slice(1)}：${e.code||e.message}`);}
-  }else throw usageError('多余的参数：'+o.body);
- }
- return {service:o.service,method,path,...query.length&&{query},...body!==undefined&&{body},...Object.keys(o.headers).length&&{headers:o.headers}};
+function requestOf(o: Parsed): ServiceRequest {
+  if (!o.service) throw usageError('缺少服务名');
+  if (!serviceName.test(o.service)) throw usageError('服务名不合法：' + o.service);
+  if (!o.method) throw usageError('缺少方法');
+  const method = o.method.toUpperCase();
+  if (!methods.includes(method)) throw usageError('未知的方法：' + o.method);
+  if (o.path == null) throw usageError('缺少路径');
+  if (o.path.includes('#')) throw usageError('路径里不能带 #');
+  const cut = o.path.indexOf('?'),
+    path = cut < 0 ? o.path : o.path.slice(0, cut),
+    query: [string, string][] = [
+      ...(cut < 0 ? [] : ([...new URLSearchParams(o.path.slice(cut + 1))] as [string, string][])),
+      ...o.query,
+    ];
+  let body: string | undefined;
+  if (o.body !== undefined) {
+    if (!['POST', 'PUT', 'PATCH'].includes(method)) throw usageError(method + ' 不能带请求体');
+    if (/^[{[]/.test(o.body)) body = o.body;
+    else if (o.body.startsWith('@')) {
+      try {
+        body = fs.readFileSync(o.body.slice(1), 'utf8');
+      } catch (e) {
+        throw usageError(`读不到请求体文件 ${o.body.slice(1)}：${e.code || e.message}`);
+      }
+    } else throw usageError('多余的参数：' + o.body);
+  }
+  return {
+    service: o.service,
+    method,
+    path,
+    ...(query.length && { query }),
+    ...(body !== undefined && { body }),
+    ...(Object.keys(o.headers).length && { headers: o.headers }),
+  };
 }
 // Runs bridge-call with argv, printing to stdout and stderr; resolves to the exit code. It reaches the client at clientSocket(env).
-export async function main(argv:string[],{env=process.env,stdout=process.stdout,stderr=process.stderr}:{env?:NodeJS.ProcessEnv,stdout?:Output,stderr?:Output}={}):Promise<number>{
- try{
-  const o=parse(argv);
-  if(o.help){stdout.write(usage);return 0;}
-  const socket=clientSocket(env);
-  if(o.list){
-   const {services}=await send(socket,'/services/list',{});
-   if(services.length)stdout.write(services.join('\n')+'\n');else stderr.write('bridge-call: 现在没有任何服务\n');
-   return 0;
+export async function main(
+  argv: string[],
+  {
+    env = process.env,
+    stdout = process.stdout,
+    stderr = process.stderr,
+  }: { env?: NodeJS.ProcessEnv; stdout?: Output; stderr?: Output } = {},
+): Promise<number> {
+  try {
+    const o = parse(argv);
+    if (o.help) {
+      stdout.write(usage);
+      return 0;
+    }
+    const socket = clientSocket(env);
+    if (o.list) {
+      const { services } = await send(socket, '/services/list', {});
+      if (services.length) stdout.write(services.join('\n') + '\n');
+      else stderr.write('bridge-call: 现在没有任何服务\n');
+      return 0;
+    }
+    const request = requestOf(o),
+      answer = await send(socket, '/services/call', request),
+      failed = answer.status >= 400;
+    const bytes = Buffer.from(answer.body, answer.encoding === 'base64' ? 'base64' : 'utf8');
+    if (failed && answer.encoding === 'base64')
+      throw Error(`服务回答 HTTP ${answer.status}，内容不是文本（${answer.contentType || '没有 content-type'}）`);
+    if (failed) {
+      stdout.write(answer.body);
+      stderr.write(`bridge-call: HTTP ${answer.status}\n`);
+      return 1;
+    }
+    if (o.output !== undefined) fs.writeFileSync(o.output, bytes);
+    else if (answer.encoding === 'base64')
+      throw Error(
+        `回答不是文本（${answer.contentType || '没有 content-type'}，${bytes.length} 字节），用 -o <文件> 保存`,
+      );
+    else stdout.write(answer.body);
+    return 0;
+  } catch (e) {
+    stderr.write(`bridge-call: ${e.message}\n${e.usage ? usage : ''}`);
+    return e.usage ? 2 : 1;
   }
-  const request=requestOf(o),answer=await send(socket,'/services/call',request),failed=answer.status>=400;
-  const bytes=Buffer.from(answer.body,answer.encoding==='base64'?'base64':'utf8');
-  if(failed&&answer.encoding==='base64')throw Error(`服务回答 HTTP ${answer.status}，内容不是文本（${answer.contentType||'没有 content-type'}）`);
-  if(failed){stdout.write(answer.body);stderr.write(`bridge-call: HTTP ${answer.status}\n`);return 1;}
-  if(o.output!==undefined)fs.writeFileSync(o.output,bytes);
-  else if(answer.encoding==='base64')throw Error(`回答不是文本（${answer.contentType||'没有 content-type'}，${bytes.length} 字节），用 -o <文件> 保存`);
-  else stdout.write(answer.body);
-  return 0;
- }catch(e){stderr.write(`bridge-call: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
 }

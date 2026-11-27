@@ -33,9 +33,16 @@ import { useBridge } from './useBridge.ts';
 
 // The dialogs, and the props they open with (see openDialog): the machine, app, skill, project, agent configuration or binding a dialog is
 // about, or for registration the id of the registration before it. A project and an agent configuration are also created in their dialogs.
-type DialogKind = 'machine' | 'client-token' | 'app' | 'skill' | 'project' | 'agent-config' | 'binding' | 'registration';
+type DialogKind =
+  'machine' | 'client-token' | 'app' | 'skill' | 'project' | 'agent-config' | 'binding' | 'registration';
 type DialogProps = {
-  machine?: ConsoleMachine | SavedMachine, app?: ConsoleApp, skill?: SkillWithFiles, project?: ConsoleProject, agentConfig?: AgentConfig, binding?: ConsoleBinding, previousId?: string,
+  machine?: ConsoleMachine | SavedMachine;
+  app?: ConsoleApp;
+  skill?: SkillWithFiles;
+  project?: ConsoleProject;
+  agentConfig?: AgentConfig;
+  binding?: ConsoleBinding;
+  previousId?: string;
 };
 
 // Login vs. console, the current page, the one open dialog and the toast.
@@ -43,14 +50,17 @@ type DialogProps = {
 export function App() {
   const [page, setPage] = useState<Page>('platforms');
   const [menuOpen, setMenuOpen] = useState(false);
-  const [dialog, setDialog] = useState<({ kind: DialogKind, key: number } & DialogProps) | null>(null);
+  const [dialog, setDialog] = useState<({ kind: DialogKind; key: number } & DialogProps) | null>(null);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const sequence = useRef(0);
   const { state, online, authed, refresh } = useBridge({ fastPoll: dialog?.kind === 'registration' });
 
   const showToast = useCallback((text: string) => setToast({ text, id: (sequence.current += 1) }), []);
   const hideToast = useCallback(() => setToast(null), []);
-  const openDialog = useCallback((kind: DialogKind, props: DialogProps = {}) => setDialog({ kind, key: (sequence.current += 1), ...props }), []);
+  const openDialog = useCallback(
+    (kind: DialogKind, props: DialogProps = {}) => setDialog({ kind, key: (sequence.current += 1), ...props }),
+    [],
+  );
   const closeDialog = useCallback(() => setDialog(null), []);
   const saved = () => {
     setDialog(null);
@@ -59,7 +69,8 @@ export function App() {
 
   // A new machine cannot connect before its client has a token, so adding goes straight on to generating one.
   function machineSaved(machine: SavedMachine) {
-    if (dialog!.machine) saved(); // !: only the open machine dialog calls this.
+    if (dialog!.machine)
+      saved(); // !: only the open machine dialog calls this.
     else {
       openDialog('client-token', { machine });
       refresh();
@@ -122,9 +133,18 @@ export function App() {
                   openToken={(machine) => openDialog('client-token', { machine })}
                 />
               )}
-              {page === 'bindings' && <BindingsPage {...pageProps} openBinding={(binding) => openDialog('binding', { binding })} />}
-              {page === 'projects' && <ProjectsPage {...pageProps} openProject={(project) => openDialog('project', { project })} />}
-              {page === 'agentConfigs' && <AgentConfigsPage {...pageProps} openConfig={(agentConfig) => openDialog('agent-config', { agentConfig })} />}
+              {page === 'bindings' && (
+                <BindingsPage {...pageProps} openBinding={(binding) => openDialog('binding', { binding })} />
+              )}
+              {page === 'projects' && (
+                <ProjectsPage {...pageProps} openProject={(project) => openDialog('project', { project })} />
+              )}
+              {page === 'agentConfigs' && (
+                <AgentConfigsPage
+                  {...pageProps}
+                  openConfig={(agentConfig) => openDialog('agent-config', { agentConfig })}
+                />
+              )}
               {page === 'skills' && <SkillsPage {...pageProps} openSkill={(skill) => openDialog('skill', { skill })} />}
               {page === 'logs' && <LogsPage state={state} />}
             </div>
@@ -132,15 +152,44 @@ export function App() {
         </main>
       </div>
       {/* !: client-token always opens with a machine. */}
-      {dialog?.kind === 'machine' && <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={machineSaved} />}
-      {dialog?.kind === 'client-token' && <ClientTokenDialog key={dialog.key} machine={dialog.machine!} onClose={closeDialog} onIssued={refresh} />}
+      {dialog?.kind === 'machine' && (
+        <MachineDialog key={dialog.key} machine={dialog.machine} onClose={closeDialog} onSaved={machineSaved} />
+      )}
+      {dialog?.kind === 'client-token' && (
+        <ClientTokenDialog key={dialog.key} machine={dialog.machine!} onClose={closeDialog} onIssued={refresh} />
+      )}
       {dialog?.kind === 'app' && <AppDialog key={dialog.key} app={dialog.app} onClose={closeDialog} onSaved={saved} />}
-      {dialog?.kind === 'skill' && <SkillDialog key={dialog.key} skill={dialog.skill} onClose={closeDialog} onSaved={saved} />}
-      {dialog?.kind === 'project' && <ProjectDialog key={dialog.key} project={dialog.project} skills={state.skills} onClose={closeDialog} onSaved={saved} />}
-      {dialog?.kind === 'agent-config' && <AgentConfigDialog key={dialog.key} config={dialog.agentConfig} machines={state.machines} onClose={closeDialog} onSaved={saved} />}
+      {dialog?.kind === 'skill' && (
+        <SkillDialog key={dialog.key} skill={dialog.skill} onClose={closeDialog} onSaved={saved} />
+      )}
+      {dialog?.kind === 'project' && (
+        <ProjectDialog
+          key={dialog.key}
+          project={dialog.project}
+          skills={state.skills}
+          onClose={closeDialog}
+          onSaved={saved}
+        />
+      )}
+      {dialog?.kind === 'agent-config' && (
+        <AgentConfigDialog
+          key={dialog.key}
+          config={dialog.agentConfig}
+          machines={state.machines}
+          onClose={closeDialog}
+          onSaved={saved}
+        />
+      )}
       {/* !: binding always opens with a binding. */}
       {dialog?.kind === 'binding' && (
-        <BindingDialog key={dialog.key} binding={dialog.binding!} projects={state.projects} agentConfigs={state.agentConfigs} onClose={closeDialog} onSaved={saved} />
+        <BindingDialog
+          key={dialog.key}
+          binding={dialog.binding!}
+          projects={state.projects}
+          agentConfigs={state.agentConfigs}
+          onClose={closeDialog}
+          onSaved={saved}
+        />
       )}
       {dialog?.kind === 'registration' && (
         <RegistrationDialog

@@ -1,0 +1,8 @@
+node_modules
+state
+web/dist
+dist
+package-lock.json
+*.md
+*.html
+web/src/styles.css

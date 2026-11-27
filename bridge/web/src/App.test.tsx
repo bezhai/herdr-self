@@ -8,7 +8,12 @@ import { assign } from './location.ts';
 import { base64, bodyOf, callsTo, deferred, reply, sampleState, stubFetch } from './test/fixtures.ts';
 
 // Navigation is replaced; reading and clearing the query string run against jsdom's real history.
-vi.mock('./location.ts', async (importOriginal) => ({ ...(await importOriginal()), assign: vi.fn(), replace: vi.fn(), reload: vi.fn() }));
+vi.mock('./location.ts', async (importOriginal) => ({
+  ...(await importOriginal()),
+  assign: vi.fn(),
+  replace: vi.fn(),
+  reload: vi.fn(),
+}));
 
 afterEach(() => window.history.replaceState(null, '', '/'));
 
@@ -152,7 +157,10 @@ test('the sidebar groups the pages into connections, work configuration and what
   stubFetch({ '/api/state': sampleState() });
   render(<App />);
   await screen.findByRole('button', { name: '+ 添加飞书' });
-  const groups = [...document.querySelectorAll('.sidebar .nav-label')].map((label) => [label.textContent, [...label.nextElementSibling!.querySelectorAll('button')].map((b) => b.textContent)]);
+  const groups = [...document.querySelectorAll('.sidebar .nav-label')].map((label) => [
+    label.textContent,
+    [...label.nextElementSibling!.querySelectorAll('button')].map((b) => b.textContent),
+  ]);
   expect(groups).toEqual([
     ['连接管理', ['平台连接2', '机器连接5', '会话绑定1']],
     ['工作配置', ['项目2', 'Agent 配置2', 'Skills2']],
@@ -166,7 +174,12 @@ test('the breadcrumb names the sidebar group of the page', async () => {
   render(<App />);
   await screen.findByRole('button', { name: '+ 添加飞书' });
   const crumbs = () => document.querySelector('.topbar .crumbs')!.textContent;
-  for (const [button, crumb] of [['项目2', '工作配置/项目'], ['Skills2', '工作配置/Skills'], ['连接日志', '运行情况/连接日志'], ['会话绑定1', '连接管理/会话绑定']]) {
+  for (const [button, crumb] of [
+    ['项目2', '工作配置/项目'],
+    ['Skills2', '工作配置/Skills'],
+    ['连接日志', '运行情况/连接日志'],
+    ['会话绑定1', '连接管理/会话绑定'],
+  ]) {
     await user.click(within(document.querySelector<HTMLElement>('.sidebar')!).getByRole('button', { name: button }));
     expect(crumbs()).toBe(crumb);
   }
@@ -189,7 +202,10 @@ test('page and section headings hold only their titles and the page action', asy
   const user = userEvent.setup();
   render(<App />);
   await screen.findByRole('button', { name: '+ 添加飞书' });
-  const headings = () => [document.querySelector('.heading')!.textContent, document.querySelector('.section-heading')!.textContent];
+  const headings = () => [
+    document.querySelector('.heading')!.textContent,
+    document.querySelector('.section-heading')!.textContent,
+  ];
   expect(headings()).toEqual(['平台连接+ 添加飞书', '平台应用']);
   await user.click(nav('机器连接'));
   expect(headings()).toEqual(['机器连接+ 添加机器', 'Herdr 实例']);
@@ -206,7 +222,17 @@ test('page and section headings hold only their titles and the page action', asy
 });
 
 test('empty pages show only a short status', async () => {
-  const state = { ...sampleState(), apps: [], machines: [], projects: [], agentConfigs: [], bindings: [], topics: [], skills: [], logs: [] };
+  const state = {
+    ...sampleState(),
+    apps: [],
+    machines: [],
+    projects: [],
+    agentConfigs: [],
+    bindings: [],
+    topics: [],
+    skills: [],
+    logs: [],
+  };
   stubFetch({ '/api/state': state });
   const user = userEvent.setup();
   render(<App />);
@@ -256,15 +282,23 @@ test('machine cards show the Herdr session and the status Bridge polls through t
 
   const names = ['cpu2', 'gpu1', 'laptop', 'cpu3', 'gpu2'];
   expect(names.map((name) => card(name).querySelector('.card-title p')!.textContent)).toEqual([
-    'session default', 'session work', 'session default', 'session default', 'session default',
+    'session default',
+    'session work',
+    'session default',
+    'session default',
+    'session default',
   ]);
-  expect(names.map((name) => card(name).querySelector('.card-icon use')!.getAttribute('href'))).toEqual(names.map(() => '#i-server'));
+  expect(names.map((name) => card(name).querySelector('.card-icon use')!.getAttribute('href'))).toEqual(
+    names.map(() => '#i-server'),
+  );
   expect(within(card('cpu2')).getByText('已连接').className).toBe('badge');
   expect(within(card('laptop')).getByText('已停用').classList.contains('neutral')).toBe(true);
   // A refused client leaves Herdr offline: the refusal is the only error on the card.
   const cpu3 = card('cpu3');
   expect(within(cpu3).getByText('离线').classList.contains('neutral')).toBe(true);
-  expect([...cpu3.querySelectorAll('.card-error')].map((e) => e.textContent)).toEqual(['版本不一致：控制面协议 1，客户端协议 2']);
+  expect([...cpu3.querySelectorAll('.card-error')].map((e) => e.textContent)).toEqual([
+    '版本不一致：控制面协议 1，客户端协议 2',
+  ]);
   // An online client whose Herdr poll failed shows the failure.
   const gpu2 = card('gpu2');
   expect(within(gpu2).getByText('连接失败').classList.contains('error')).toBe(true);
@@ -274,8 +308,15 @@ test('machine cards show the Herdr session and the status Bridge polls through t
 });
 
 test('connecting or refreshing a machine reports whether Herdr connected, the client is still awaited, or the poll failed', async () => {
-  const results: { [id: string]: HerdrStatus } = { 'm-1': { state: 'connected', agents: [], panes: [] }, 'm-3': { state: 'offline', agents: [], panes: [] }, 'm-5': { state: 'error', error: 'herdr: session default not found', agents: [], panes: [] } };
-  const fetch = stubFetch({ '/api/state': sampleState(), '/api/machines/connect': ({ id }: Pick<Machine, 'id'>) => results[id] });
+  const results: { [id: string]: HerdrStatus } = {
+    'm-1': { state: 'connected', agents: [], panes: [] },
+    'm-3': { state: 'offline', agents: [], panes: [] },
+    'm-5': { state: 'error', error: 'herdr: session default not found', agents: [], panes: [] },
+  };
+  const fetch = stubFetch({
+    '/api/state': sampleState(),
+    '/api/machines/connect': ({ id }: Pick<Machine, 'id'>) => results[id],
+  });
   const user = userEvent.setup();
   render(<App />);
   await user.click(await screen.findByRole('button', { name: /^机器连接/ }));
@@ -296,7 +337,17 @@ test('adding a machine saves its name and session, then goes straight on to gene
   const fetch = stubFetch({
     '/api/state': () => state,
     '/api/machines/save': ({ name, session, enabled }: Pick<Machine, 'name' | 'session' | 'enabled'>) => {
-      state.machines.push({ id: 'm-6', name, session, enabled, hasToken: false, client: { state: 'offline' }, state: 'offline', panes: [], agents: [] });
+      state.machines.push({
+        id: 'm-6',
+        name,
+        session,
+        enabled,
+        hasToken: false,
+        client: { state: 'offline' },
+        state: 'offline',
+        panes: [],
+        agents: [],
+      });
       return { id: 'm-6' };
     },
     '/api/machines/token': () => {
@@ -345,7 +396,12 @@ test('editing a disabled machine saves it by its id, closes the dialog and fetch
   await user.click(screen.getByRole('button', { name: '保存并连接' }));
 
   await waitFor(() => expect(dialog()).toBeNull());
-  expect(bodyOf(fetch, '/api/machines/save')).toEqual({ id: 'm-3', name: 'laptop2', session: 'default', enabled: true });
+  expect(bodyOf(fetch, '/api/machines/save')).toEqual({
+    id: 'm-3',
+    name: 'laptop2',
+    session: 'default',
+    enabled: true,
+  });
   await waitFor(() => expect(within(card('laptop2')).getByText('离线')).toBeTruthy());
 });
 
@@ -355,7 +411,13 @@ test('machine cards show the connection of their client, online with its host, r
   const fetch = stubFetch({
     '/api/state': () => state,
     '/api/machines/token': () => {
-      state.machines[0] = { ...state.machines[0], client: { state: 'offline' }, state: 'offline', panes: [], agents: [] };
+      state.machines[0] = {
+        ...state.machines[0],
+        client: { state: 'offline' },
+        state: 'offline',
+        panes: [],
+        agents: [],
+      };
       return { config };
     },
   });
@@ -392,7 +454,16 @@ test('machine cards show the connection of their client, online with its host, r
 test('binding rows show the chat, its default project and agent configuration, and the status; a direct chat has its project chosen per task; the page holds only the bindings table', async () => {
   const state = sampleState();
   const [group] = state.bindings;
-  state.bindings.push({ id: 'b-2', name: '私聊', appId: 'app-1', chatId: 'oc_2', chatType: 'p2p', requireMention: false, enabled: true, defaultAgentConfigId: 'c-2' });
+  state.bindings.push({
+    id: 'b-2',
+    name: '私聊',
+    appId: 'app-1',
+    chatId: 'oc_2',
+    chatType: 'p2p',
+    requireMention: false,
+    enabled: true,
+    defaultAgentConfigId: 'c-2',
+  });
   stubFetch({ '/api/state': () => state });
   const user = userEvent.setup();
   render(<App />);
@@ -411,7 +482,14 @@ test('binding rows show the chat, its default project and agent configuration, a
   expect(within(direct).getByText('按任务自动选择')).toBeTruthy();
   expect(within(direct).getByText('cpu2 · Codex')).toBeTruthy();
   expect(within(direct).getByText('全部消息')).toBeTruthy();
-  expect([...document.querySelectorAll('th')].map((th) => th.textContent)).toEqual(['来源', '默认项目', '默认 Agent 配置', '触发方式', '状态', '操作']);
+  expect([...document.querySelectorAll('th')].map((th) => th.textContent)).toEqual([
+    '来源',
+    '默认项目',
+    '默认 Agent 配置',
+    '触发方式',
+    '状态',
+    '操作',
+  ]);
   expect(screen.queryByText('最近投递')).toBeNull();
 });
 
@@ -419,7 +497,15 @@ test('editing a binding changes its defaults by its id, closes the form and fetc
   const state = sampleState();
   const fetch = stubFetch({
     '/api/state': () => state,
-    '/api/bindings/save': ({ id, defaultProjectId, defaultAgentConfigId }: { id: string, defaultProjectId: string, defaultAgentConfigId: string }) => {
+    '/api/bindings/save': ({
+      id,
+      defaultProjectId,
+      defaultAgentConfigId,
+    }: {
+      id: string;
+      defaultProjectId: string;
+      defaultAgentConfigId: string;
+    }) => {
       state.bindings = state.bindings.map((b) => (b.id === id ? { ...b, defaultProjectId, defaultAgentConfigId } : b));
       return { ok: true };
     },
@@ -433,7 +519,12 @@ test('editing a binding changes its defaults by its id, closes the form and fetc
   const before = callsTo(fetch, '/api/state');
   await user.click(within(dialog()).getByRole('button', { name: '保存' }));
   await waitFor(() => expect(dialog()).toBeNull());
-  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({ id: 'b-1', defaultProjectId: 'p-2', defaultAgentConfigId: 'c-1', requireMention: true });
+  expect(bodyOf(fetch, '/api/bindings/save')).toEqual({
+    id: 'b-1',
+    defaultProjectId: 'p-2',
+    defaultAgentConfigId: 'c-1',
+    requireMention: true,
+  });
   await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
   expect(within(screen.getByText('个人助手').closest('tr')!).getByText('test')).toBeTruthy();
 });
@@ -517,7 +608,11 @@ test('agent configuration cards show the machine, type, model and permission mod
 
   const claude = card('cpu2 · Claude');
   expect(claude.querySelector('.card-icon use')!.getAttribute('href')).toBe('#i-terminal');
-  expect([...claude.querySelectorAll('.card-title p span')].map((s) => s.textContent)).toEqual(['cpu2', 'Claude', 'Seed']);
+  expect([...claude.querySelectorAll('.card-title p span')].map((s) => s.textContent)).toEqual([
+    'cpu2',
+    'Claude',
+    'Seed',
+  ]);
   expect(within(claude).getByText('default')).toBeTruthy();
   expect(within(claude).getByText('只允许执行的命令')).toBeTruthy();
   expect(within(claude).getByText('butler')).toBeTruthy();
@@ -531,7 +626,13 @@ test('agent configuration cards show the machine, type, model and permission mod
   const before = callsTo(fetch, '/api/state');
   await user.click(within(dialog()).getByRole('button', { name: '保存' }));
   await waitFor(() => expect(dialog()).toBeNull());
-  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({ name: 'gpu1 · Claude', machineId: 'm-2', kind: 'claude', permissionMode: 'default', allowedCommands: [] });
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({
+    name: 'gpu1 · Claude',
+    machineId: 'm-2',
+    kind: 'claude',
+    permissionMode: 'default',
+    allowedCommands: [],
+  });
   await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
   expect(card('gpu1 · Claude')).toBeTruthy();
 
@@ -540,7 +641,13 @@ test('agent configuration cards show the machine, type, model and permission mod
   await user.type(screen.getByLabelText('模型'), 'gpt-5');
   await user.click(within(dialog()).getByRole('button', { name: '保存' }));
   await waitFor(() => expect(dialog()).toBeNull());
-  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({ id: 'c-2', name: 'cpu2 · Codex · gpt-5', machineId: 'm-1', kind: 'codex', model: 'gpt-5' });
+  expect(bodyOf(fetch, '/api/agent-configs/save')).toEqual({
+    id: 'c-2',
+    name: 'cpu2 · Codex · gpt-5',
+    machineId: 'm-1',
+    kind: 'codex',
+    model: 'gpt-5',
+  });
 
   await user.click(within(card('cpu2 · Claude')).getByRole('button', { name: '删除' }));
   expect(bodyOf(fetch, '/api/agent-configs/remove')).toEqual({ id: 'c-1' });
@@ -583,7 +690,10 @@ test('skill cards show the name, the description and whether the skill is loaded
       state.skills = state.skills.filter((s) => s.name !== name);
       return { ok: true };
     },
-    '/api/skills/read?name=deploy-notes': { ...state.skills[1], files: { 'SKILL.md': base64(text), 'scripts/check.sh': base64('echo\n') } },
+    '/api/skills/read?name=deploy-notes': {
+      ...state.skills[1],
+      files: { 'SKILL.md': base64(text), 'scripts/check.sh': base64('echo\n') },
+    },
   });
   const user = userEvent.setup();
   render(<App />);
@@ -635,7 +745,11 @@ test('adding a skill saves it as a new one, closes the form and fetches the skil
   const before = callsTo(fetch, '/api/state');
   await user.click(within(dialog()).getByRole('button', { name: '保存' }));
   await waitFor(() => expect(dialog()).toBeNull());
-  expect(bodyOf(fetch, '/api/skills/save')).toEqual({ name: 'release-check', text: '---\nname: \ndescription: \n---\n', create: true });
+  expect(bodyOf(fetch, '/api/skills/save')).toEqual({
+    name: 'release-check',
+    text: '---\nname: \ndescription: \n---\n',
+    create: true,
+  });
   await waitFor(() => expect(callsTo(fetch, '/api/state')).toBe(before + 1));
   expect(within(card('release-check')).getByText('新的')).toBeTruthy();
 });
@@ -757,4 +871,3 @@ test('app cards show the bot avatar synced from Feishu, fall back to the Feishu 
   expect(card('备用应用').querySelector('.card-icon use')!.getAttribute('href')).toBe('#i-feishu');
   expect(card('工作助手').querySelector('.card-detail > span')!.textContent).toBe('凭证已验证');
 });
-

@@ -1,15 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import {clientSocket,send} from './client.ts';
-import {sourceLine,oversized} from './outbound-cards.ts';
-import type {Output} from './client.ts';
-import type {MessageOps,MessageRequest} from './messages.ts';
+import { clientSocket, send } from './client.ts';
+import { sourceLine, oversized } from './outbound-cards.ts';
+import type { Output } from './client.ts';
+import type { MessageOps, MessageRequest } from './messages.ts';
 // bridge-message, the command line through which the agent of a Feishu topic brings a Feishu message into its topic and drafts messages
 // that the owner sends as themselves after a click on the draft's card, or takes back such a draft (see Messages). Like bridge-schedule (see schedule-command.ts), it
 // sends each request to the Bridge client of the machine it runs on, which passes it on to the control plane, with the agent's pane
 // (HERDR_PANE_ID) and Herdr session (HERDR_SESSION); it runs on Node alone, like the client, and prints text for the agent, or with --json
 // Bridge's answer. Its help is complete on its own: the skill that tells agents when to use it leaves the details of the command to it.
-export const usage=`用法：
+export const usage = `用法：
   bridge-message attach <消息 ID>
   bridge-message reply <消息 ID> --text <正文> [--mention <用户 ID>=<名字>]... [--image <路径>]... [--file <路径>]... [--doc-access view|edit]
   bridge-message send <聊天 ID> --text <正文> [--mention <用户 ID>=<名字>]... [--image <路径>]... [--file <路径>]... [--doc-access view|edit]
@@ -71,74 +71,138 @@ export const usage=`用法：
   消息或聊天不存在、当前账号不在聊天里等 open-lark 的拒绝：用 butler 重新核对 ID 和当前账号可见的消息，不要换 ID 猜测。
   其他拒绝：按 Bridge 输出的原因改正后再试；原因保持不变时不要反复提交。
 `;
-type Op=keyof MessageOps;
+type Op = keyof MessageOps;
 // An --image or --file as given: its kind and its path on this machine.
-type Given={kind:'image'|'file',path:string};
-type Parsed=Omit<MessageRequest,'attachments'|'docAccess'>&{op?:string,id?:string,json:boolean,help?:boolean,files?:Given[],docAccess?:string};
-const ops:Op[]=['attach','reply','send','withdraw'];
+type Given = { kind: 'image' | 'file'; path: string };
+type Parsed = Omit<MessageRequest, 'attachments' | 'docAccess'> & {
+  op?: string;
+  id?: string;
+  json: boolean;
+  help?: boolean;
+  files?: Given[];
+  docAccess?: string;
+};
+const ops: Op[] = ['attach', 'reply', 'send', 'withdraw'];
 // The start of a draft's id that the command prints and withdraw accepts, as bridge-schedule shortens the ids of schedules.
-const short=(id:string)=>id.slice(0,8);
+const short = (id: string) => id.slice(0, 8);
 // Whether v is an operation. The command loads only its own modules and the client's, so it does without oneOf of core.ts.
-const isOp=(v:unknown):v is Op=>ops.includes(v as Op);
-const usageError=(message:string)=>Object.assign(Error(message),{usage:true});
+const isOp = (v: unknown): v is Op => ops.includes(v as Op);
+const usageError = (message: string) => Object.assign(Error(message), { usage: true });
 // The operation, id and options of args: an option takes the next argument, or what follows its =, whatever it looks like. A mention splits
 // at its first = so that a person's displayed name may itself contain one. Images and files keep the order in which they are given.
-function parse(args:string[]):Parsed{
- const out:Parsed={json:false},positional:string[]=[];
- for(let i=0;i<args.length;i++){
-  const a=args[i],eq=a.startsWith('--')?a.indexOf('='):-1,flag=eq>0?a.slice(0,eq):a;
-  if(a==='--json'){out.json=true;continue;}
-  if(a==='--help'||a==='-h'){out.help=true;continue;}
-  if(['--text','--pane','--session','--mention','--image','--file','--doc-access'].includes(flag)){
-   const value=eq>0?a.slice(eq+1):args[++i];if(value==null)throw usageError(flag+' 缺少值');
-   if(flag==='--image'||flag==='--file')(out.files??=[]).push({kind:flag==='--image'?'image':'file',path:value});
-   else if(flag==='--doc-access')out.docAccess=value;
-   else if(flag==='--mention'){
-    const split=value.indexOf('=');if(split<=0||split===value.length-1)throw usageError('--mention 要写成 <用户 ID>=<名字>');
-    (out.mentions??=[]).push({id:value.slice(0,split),name:value.slice(split+1)});
-   }else out[flag.slice(2) as 'text'|'pane'|'session']=value;
-   continue;
+function parse(args: string[]): Parsed {
+  const out: Parsed = { json: false },
+    positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i],
+      eq = a.startsWith('--') ? a.indexOf('=') : -1,
+      flag = eq > 0 ? a.slice(0, eq) : a;
+    if (a === '--json') {
+      out.json = true;
+      continue;
+    }
+    if (a === '--help' || a === '-h') {
+      out.help = true;
+      continue;
+    }
+    if (['--text', '--pane', '--session', '--mention', '--image', '--file', '--doc-access'].includes(flag)) {
+      const value = eq > 0 ? a.slice(eq + 1) : args[++i];
+      if (value == null) throw usageError(flag + ' 缺少值');
+      if (flag === '--image' || flag === '--file')
+        (out.files ??= []).push({ kind: flag === '--image' ? 'image' : 'file', path: value });
+      else if (flag === '--doc-access') out.docAccess = value;
+      else if (flag === '--mention') {
+        const split = value.indexOf('=');
+        if (split <= 0 || split === value.length - 1) throw usageError('--mention 要写成 <用户 ID>=<名字>');
+        (out.mentions ??= []).push({ id: value.slice(0, split), name: value.slice(split + 1) });
+      } else out[flag.slice(2) as 'text' | 'pane' | 'session'] = value;
+      continue;
+    }
+    if (a.startsWith('--')) throw usageError('未知的参数：' + a);
+    positional.push(a);
   }
-  if(a.startsWith('--'))throw usageError('未知的参数：'+a);
-  positional.push(a);
- }
- if(positional.length>2)throw usageError('多余的参数：'+positional.slice(2).join(' '));
- const [op,id]=positional;return {...op!=null&&{op},...id!=null&&{id},...out};
+  if (positional.length > 2) throw usageError('多余的参数：' + positional.slice(2).join(' '));
+  const [op, id] = positional;
+  return { ...(op != null && { op }), ...(id != null && { id }), ...out };
 }
 // The images and files as Bridge takes them: each read on this machine, named by its file name, as base64. Sizes are checked before anything
 // is read, with the limits that Bridge checks again.
-function attachments(files:Given[]){
- const found=files.map(f=>{
-  let stat;try{stat=fs.statSync(f.path);}catch(e){throw Error(`读不到 ${f.path}：${e.code||e.message}`);}
-  if(!stat.isFile())throw Error(`${f.path} 不是文件`);
-  return {...f,name:path.basename(f.path),size:stat.size};
- });
- const refused=oversized(found);if(refused)throw Error(refused);
- return found.map(f=>{let data;try{data=fs.readFileSync(f.path).toString('base64');}catch(e){throw Error(`读不到 ${f.path}：${e.code||e.message}`);}return {kind:f.kind,name:f.name,data};});
+function attachments(files: Given[]) {
+  const found = files.map((f) => {
+    let stat;
+    try {
+      stat = fs.statSync(f.path);
+    } catch (e) {
+      throw Error(`读不到 ${f.path}：${e.code || e.message}`);
+    }
+    if (!stat.isFile()) throw Error(`${f.path} 不是文件`);
+    return { ...f, name: path.basename(f.path), size: stat.size };
+  });
+  const refused = oversized(found);
+  if (refused) throw Error(refused);
+  return found.map((f) => {
+    let data;
+    try {
+      data = fs.readFileSync(f.path).toString('base64');
+    } catch (e) {
+      throw Error(`读不到 ${f.path}：${e.code || e.message}`);
+    }
+    return { kind: f.kind, name: f.name, data };
+  });
 }
 // Runs bridge-message with argv, printing to stdout and stderr; resolves to the exit code. It reaches the client at clientSocket(env).
-export async function main(argv:string[],{env=process.env,stdout=process.stdout,stderr=process.stderr}:{env?:NodeJS.ProcessEnv,stdout?:Output,stderr?:Output}={}):Promise<number>{
- try{
-  const o=parse(argv);
-  if(o.help){stdout.write(usage);return 0;}
-  if(!isOp(o.op))throw usageError(o.op?'未知的操作：'+o.op:'缺少操作');
-  const op=o.op,{json,help,id,pane:requestedPane,session:requestedSession,...fields}=o;
-  if(!id)throw usageError(op==='send'?'缺少聊天 ID':op==='withdraw'?'缺少草稿 ID':'缺少消息 ID');
-  const drafts=op==='reply'||op==='send';
-  if(!drafts&&fields.text!==undefined)throw usageError('--text 只用于 reply 和 send');
-  if(!drafts&&fields.mentions!==undefined)throw usageError('--mention 只用于 reply 和 send');
-  if(!drafts&&fields.files?.some(f=>f.kind==='image'))throw usageError('--image 只用于 reply 和 send');
-  if(!drafts&&fields.files!==undefined)throw usageError('--file 只用于 reply 和 send');
-  if(!drafts&&fields.docAccess!==undefined)throw usageError('--doc-access 只用于 reply 和 send');
-  if(fields.docAccess!==undefined&&fields.docAccess!=='view'&&fields.docAccess!=='edit')throw usageError('--doc-access 只能是 view 或 edit');
-  if(drafts&&fields.text===undefined)throw usageError(op+' 需要 --text');
-  const pane=requestedPane??env.HERDR_PANE_ID,session=requestedSession??env.HERDR_SESSION;
-  const target=op==='send'?{chatId:id}:op==='withdraw'?{draftId:id}:{messageId:id};
-  const {docAccess}=fields,carried={...fields.files&&{attachments:attachments(fields.files)},...docAccess&&{docAccess:docAccess as 'view'|'edit'}};
-  const body:MessageRequest={...target,...drafts&&{text:fields.text,mentions:fields.mentions??[],...carried},...pane&&{pane},...session&&{session}};
-  const r=await send(clientSocket(env),`/messages/${op}`,body);
-  const text='input' in r?`已放进话题：${sourceLine(r.input.body,Date.now())}`:op==='withdraw'?`已撤回草稿 ${short(r.delivery.id)}，卡片上写着「Agent 已撤回」`
-   :`已发出确认卡片，草稿 ID ${short(r.delivery.id)}，主人点「发送」后才会发出`;
-  stdout.write((json?JSON.stringify(r,null,2):text)+'\n');return 0;
- }catch(e){stderr.write(`bridge-message: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
+export async function main(
+  argv: string[],
+  {
+    env = process.env,
+    stdout = process.stdout,
+    stderr = process.stderr,
+  }: { env?: NodeJS.ProcessEnv; stdout?: Output; stderr?: Output } = {},
+): Promise<number> {
+  try {
+    const o = parse(argv);
+    if (o.help) {
+      stdout.write(usage);
+      return 0;
+    }
+    if (!isOp(o.op)) throw usageError(o.op ? '未知的操作：' + o.op : '缺少操作');
+    const op = o.op,
+      { json, help, id, pane: requestedPane, session: requestedSession, ...fields } = o;
+    if (!id) throw usageError(op === 'send' ? '缺少聊天 ID' : op === 'withdraw' ? '缺少草稿 ID' : '缺少消息 ID');
+    const drafts = op === 'reply' || op === 'send';
+    if (!drafts && fields.text !== undefined) throw usageError('--text 只用于 reply 和 send');
+    if (!drafts && fields.mentions !== undefined) throw usageError('--mention 只用于 reply 和 send');
+    if (!drafts && fields.files?.some((f) => f.kind === 'image')) throw usageError('--image 只用于 reply 和 send');
+    if (!drafts && fields.files !== undefined) throw usageError('--file 只用于 reply 和 send');
+    if (!drafts && fields.docAccess !== undefined) throw usageError('--doc-access 只用于 reply 和 send');
+    if (fields.docAccess !== undefined && fields.docAccess !== 'view' && fields.docAccess !== 'edit')
+      throw usageError('--doc-access 只能是 view 或 edit');
+    if (drafts && fields.text === undefined) throw usageError(op + ' 需要 --text');
+    const pane = requestedPane ?? env.HERDR_PANE_ID,
+      session = requestedSession ?? env.HERDR_SESSION;
+    const target = op === 'send' ? { chatId: id } : op === 'withdraw' ? { draftId: id } : { messageId: id };
+    const { docAccess } = fields,
+      carried = {
+        ...(fields.files && { attachments: attachments(fields.files) }),
+        ...(docAccess && { docAccess: docAccess as 'view' | 'edit' }),
+      };
+    const body: MessageRequest = {
+      ...target,
+      ...(drafts && { text: fields.text, mentions: fields.mentions ?? [], ...carried }),
+      ...(pane && { pane }),
+      ...(session && { session }),
+    };
+    const r = await send(clientSocket(env), `/messages/${op}`, body);
+    const text =
+      'input' in r
+        ? `已放进话题：${sourceLine(r.input.body, Date.now())}`
+        : op === 'withdraw'
+          ? `已撤回草稿 ${short(r.delivery.id)}，卡片上写着「Agent 已撤回」`
+          : `已发出确认卡片，草稿 ID ${short(r.delivery.id)}，主人点「发送」后才会发出`;
+    stdout.write((json ? JSON.stringify(r, null, 2) : text) + '\n');
+    return 0;
+  } catch (e) {
+    stderr.write(`bridge-message: ${e.message}\n${e.usage ? usage : ''}`);
+    return e.usage ? 2 : 1;
+  }
 }

@@ -9,10 +9,16 @@ const css = readFileSync(join(import.meta.dirname, 'styles.css'), 'utf8');
 function rule(selector: string) {
   const start = css.indexOf(`${selector} {`);
   const body = css.slice(css.indexOf('{', start) + 1, css.indexOf('}', start));
-  return Object.fromEntries(body.split(';').map((d) => d.trim()).filter(Boolean).map((d) => {
-    const colon = d.indexOf(':');
-    return [d.slice(0, colon).trim(), d.slice(colon + 1).trim()];
-  }));
+  return Object.fromEntries(
+    body
+      .split(';')
+      .map((d) => d.trim())
+      .filter(Boolean)
+      .map((d) => {
+        const colon = d.indexOf(':');
+        return [d.slice(0, colon).trim(), d.slice(colon + 1).trim()];
+      }),
+  );
 }
 
 const dark = rule(':root');
@@ -25,6 +31,10 @@ test('the light palette is the same whether the OS asks for it or data-theme="li
 
 test('the light palette redefines every colour token of the dark one and switches color-scheme', () => {
   const themeless = ['--sans', '--mono', '--radius', '--ease'];
-  expect(Object.keys(light).sort()).toEqual(Object.keys(dark).filter((k) => !themeless.includes(k)).sort());
+  expect(Object.keys(light).sort()).toEqual(
+    Object.keys(dark)
+      .filter((k) => !themeless.includes(k))
+      .sort(),
+  );
   expect([dark['color-scheme'], light['color-scheme']]).toEqual(['dark', 'light']);
 });

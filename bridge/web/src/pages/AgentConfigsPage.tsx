@@ -22,21 +22,39 @@ function ConfigCard({ config: c, state, refresh, toast, openConfig }: Props & { 
   return (
     <article className="card">
       <div className="card-head">
-        <span className="card-icon"><Icon name="terminal" /></span>
+        <span className="card-icon">
+          <Icon name="terminal" />
+        </span>
         <div className="card-title">
           <strong>{c.name}</strong>
-          {c.name !== configName(machine, c.kind, c.model || '') && <p>{details.map((text) => <span key={text}>{text}</span>)}</p>}
+          {c.name !== configName(machine, c.kind, c.model || '') && (
+            <p>
+              {details.map((text) => (
+                <span key={text}>{text}</span>
+              ))}
+            </p>
+          )}
         </div>
         {c.permissionMode && <Badge tone="neutral">{c.permissionMode}</Badge>}
         <div className="card-actions">
-          <button type="button" className="secondary" onClick={() => openConfig(c)}>编辑</button>
-          <ActionButton className="text-button danger" run={remove} onError={toast}>删除</ActionButton>
+          <button type="button" className="secondary" onClick={() => openConfig(c)}>
+            编辑
+          </button>
+          <ActionButton className="text-button danger" run={remove} onError={toast}>
+            删除
+          </ActionButton>
         </div>
       </div>
       {c.allowedCommands && (
         <div className="card-detail">
           <span>只允许执行的命令</span>
-          <span className="facts">{c.allowedCommands.map((command) => <span key={command}><b>{command}</b></span>)}</span>
+          <span className="facts">
+            {c.allowedCommands.map((command) => (
+              <span key={command}>
+                <b>{command}</b>
+              </span>
+            ))}
+          </span>
         </div>
       )}
     </article>
@@ -47,11 +65,15 @@ export function AgentConfigsPage(props: Props) {
   const { state } = props;
   return (
     <section className="page">
-      <div className="section-heading"><h2>Agent 配置列表</h2></div>
+      <div className="section-heading">
+        <h2>Agent 配置列表</h2>
+      </div>
       <div className="stack">
-        {state.agentConfigs.length
-          ? state.agentConfigs.map((c) => <ConfigCard key={c.id} config={c} {...props} />)
-          : <EmptyState icon="terminal" title="暂无 Agent 配置" />}
+        {state.agentConfigs.length ? (
+          state.agentConfigs.map((c) => <ConfigCard key={c.id} config={c} {...props} />)
+        ) : (
+          <EmptyState icon="terminal" title="暂无 Agent 配置" />
+        )}
       </div>
     </section>
   );

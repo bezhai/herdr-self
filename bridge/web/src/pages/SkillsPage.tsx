@@ -28,16 +28,35 @@ function SkillCard({ skill: s, refresh, toast, openSkill }: Omit<Props, 'state'>
   return (
     <article className="card">
       <div className="card-head">
-        <span className="card-icon"><Icon name="skill" /></span>
-        <div className="card-title"><strong>{s.name}</strong></div>
+        <span className="card-icon">
+          <Icon name="skill" />
+        </span>
+        <div className="card-title">
+          <strong>{s.name}</strong>
+        </div>
         <Badge tone={s.preload ? 'ok' : 'neutral'}>{loading(s.preload)}</Badge>
         <div className="card-actions">
-          <ActionButton run={() => act('/skills/preload', { name: s.name, preload: !s.preload }, `${s.name} 已设为${other}`)} onError={toast}>{`设为${other}`}</ActionButton>
-          <ActionButton run={edit} onError={toast}>编辑</ActionButton>
-          {!s.preload && <ActionButton className="text-button danger" run={() => act('/skills/remove', { name: s.name })} onError={toast}>删除</ActionButton>}
+          <ActionButton
+            run={() => act('/skills/preload', { name: s.name, preload: !s.preload }, `${s.name} 已设为${other}`)}
+            onError={toast}
+          >{`设为${other}`}</ActionButton>
+          <ActionButton run={edit} onError={toast}>
+            编辑
+          </ActionButton>
+          {!s.preload && (
+            <ActionButton
+              className="text-button danger"
+              run={() => act('/skills/remove', { name: s.name })}
+              onError={toast}
+            >
+              删除
+            </ActionButton>
+          )}
         </div>
       </div>
-      <div className="card-detail"><span>{s.description}</span></div>
+      <div className="card-detail">
+        <span>{s.description}</span>
+      </div>
     </article>
   );
 }
@@ -45,11 +64,17 @@ function SkillCard({ skill: s, refresh, toast, openSkill }: Omit<Props, 'state'>
 export function SkillsPage({ state, refresh, toast, openSkill }: Props) {
   return (
     <section className="page">
-      <div className="section-heading"><h2>Agent 的 skill</h2></div>
+      <div className="section-heading">
+        <h2>Agent 的 skill</h2>
+      </div>
       <div className="stack">
-        {state.skills.length
-          ? state.skills.map((s) => <SkillCard key={s.name} skill={s} refresh={refresh} toast={toast} openSkill={openSkill} />)
-          : <EmptyState icon="skill" title="暂无 skill" />}
+        {state.skills.length ? (
+          state.skills.map((s) => (
+            <SkillCard key={s.name} skill={s} refresh={refresh} toast={toast} openSkill={openSkill} />
+          ))
+        ) : (
+          <EmptyState icon="skill" title="暂无 skill" />
+        )}
       </div>
     </section>
   );

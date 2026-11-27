@@ -1,11 +1,11 @@
-import {clientSocket,send} from './client.ts';
-import type {Output} from './client.ts';
-import type {TaskOps,TaskRequest} from './agent-tasks.ts';
+import { clientSocket, send } from './client.ts';
+import type { Output } from './client.ts';
+import type { TaskOps, TaskRequest } from './agent-tasks.ts';
 // bridge-task, the command line through which the agent of a Feishu topic ends the task of its topic. Like bridge-message (see
 // message-command.ts), it sends each request to the Bridge client of the machine it runs on, which passes it on to the control plane, with the
 // agent's pane (HERDR_PANE_ID) and Herdr session (HERDR_SESSION); it runs on Node alone, like the client, and prints text for the agent, or
 // with --json Bridge's answer. Its help is complete on its own: the skill that tells agents when to end a task leaves the details to it.
-export const usage=`用法：
+export const usage = `用法：
   bridge-task end (--achieved | --dropped) --reason <原因>
 
 由 Bridge 开的飞书话题里的 Agent 运行，结束这个话题的任务。命令只连本机的 Bridge 客户端，由客户端转给 Bridge。
@@ -35,39 +35,77 @@ export const usage=`用法：
   任务已经结束：不用再结束。
   其他拒绝：按 Bridge 输出的原因改正后再试；原因保持不变时不要反复提交。
 `;
-type Parsed=TaskRequest&{op?:string,achieved:boolean,dropped:boolean,json:boolean,help?:boolean};
-const usageError=(message:string)=>Object.assign(Error(message),{usage:true});
+type Parsed = TaskRequest & { op?: string; achieved: boolean; dropped: boolean; json: boolean; help?: boolean };
+const usageError = (message: string) => Object.assign(Error(message), { usage: true });
 // The operation and options of args: an option takes the next argument, or what follows its =, whatever it looks like.
-function parse(args:string[]):Parsed{
- const out:Parsed={achieved:false,dropped:false,json:false},positional:string[]=[];
- for(let i=0;i<args.length;i++){
-  const a=args[i],eq=a.startsWith('--')?a.indexOf('='):-1,flag=eq>0?a.slice(0,eq):a;
-  if(a==='--json'){out.json=true;continue;}
-  if(a==='--achieved'||a==='--dropped'){out[a.slice(2) as 'achieved'|'dropped']=true;continue;}
-  if(a==='--help'||a==='-h'){out.help=true;continue;}
-  if(['--reason','--pane','--session'].includes(flag)){
-   const value=eq>0?a.slice(eq+1):args[++i];if(value==null)throw usageError(flag+' 缺少值');
-   out[flag.slice(2) as 'reason'|'pane'|'session']=value;continue;
+function parse(args: string[]): Parsed {
+  const out: Parsed = { achieved: false, dropped: false, json: false },
+    positional: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i],
+      eq = a.startsWith('--') ? a.indexOf('=') : -1,
+      flag = eq > 0 ? a.slice(0, eq) : a;
+    if (a === '--json') {
+      out.json = true;
+      continue;
+    }
+    if (a === '--achieved' || a === '--dropped') {
+      out[a.slice(2) as 'achieved' | 'dropped'] = true;
+      continue;
+    }
+    if (a === '--help' || a === '-h') {
+      out.help = true;
+      continue;
+    }
+    if (['--reason', '--pane', '--session'].includes(flag)) {
+      const value = eq > 0 ? a.slice(eq + 1) : args[++i];
+      if (value == null) throw usageError(flag + ' 缺少值');
+      out[flag.slice(2) as 'reason' | 'pane' | 'session'] = value;
+      continue;
+    }
+    if (a.startsWith('--')) throw usageError('未知的参数：' + a);
+    positional.push(a);
   }
-  if(a.startsWith('--'))throw usageError('未知的参数：'+a);
-  positional.push(a);
- }
- if(positional.length>1)throw usageError('多余的参数：'+positional.slice(1).join(' '));
- return {...positional[0]!=null&&{op:positional[0]},...out};
+  if (positional.length > 1) throw usageError('多余的参数：' + positional.slice(1).join(' '));
+  return { ...(positional[0] != null && { op: positional[0] }), ...out };
 }
 // Runs bridge-task with argv, printing to stdout and stderr; resolves to the exit code. It reaches the client at clientSocket(env).
-export async function main(argv:string[],{env=process.env,stdout=process.stdout,stderr=process.stderr}:{env?:NodeJS.ProcessEnv,stdout?:Output,stderr?:Output}={}):Promise<number>{
- try{
-  const o=parse(argv);
-  if(o.help){stdout.write(usage);return 0;}
-  if(o.op!=='end')throw usageError(o.op?'未知的操作：'+o.op:'缺少操作');
-  if(o.achieved&&o.dropped)throw usageError('--achieved 和 --dropped 只能给一个');
-  if(!o.achieved&&!o.dropped)throw usageError('end 要给出 --achieved 或 --dropped');
-  if(o.reason===undefined)throw usageError('end 需要 --reason');
-  if(!o.reason.trim())throw usageError('--reason 不能为空');
-  const pane=o.pane??env.HERDR_PANE_ID,session=o.session??env.HERDR_SESSION;
-  const body:TaskOps['end']['request']={outcome:o.achieved?'achieved':'dropped',reason:o.reason,...pane&&{pane},...session&&{session}};
-  const r=await send(clientSocket(env),'/tasks/end',body);
-  stdout.write((o.json?JSON.stringify(r,null,2):`任务会在当前这一轮结束时结束（${r.outcome==='achieved'?'已完成':'已放弃'}）：${r.reason}`)+'\n');return 0;
- }catch(e){stderr.write(`bridge-task: ${e.message}\n${e.usage?usage:''}`);return e.usage?2:1;}
+export async function main(
+  argv: string[],
+  {
+    env = process.env,
+    stdout = process.stdout,
+    stderr = process.stderr,
+  }: { env?: NodeJS.ProcessEnv; stdout?: Output; stderr?: Output } = {},
+): Promise<number> {
+  try {
+    const o = parse(argv);
+    if (o.help) {
+      stdout.write(usage);
+      return 0;
+    }
+    if (o.op !== 'end') throw usageError(o.op ? '未知的操作：' + o.op : '缺少操作');
+    if (o.achieved && o.dropped) throw usageError('--achieved 和 --dropped 只能给一个');
+    if (!o.achieved && !o.dropped) throw usageError('end 要给出 --achieved 或 --dropped');
+    if (o.reason === undefined) throw usageError('end 需要 --reason');
+    if (!o.reason.trim()) throw usageError('--reason 不能为空');
+    const pane = o.pane ?? env.HERDR_PANE_ID,
+      session = o.session ?? env.HERDR_SESSION;
+    const body: TaskOps['end']['request'] = {
+      outcome: o.achieved ? 'achieved' : 'dropped',
+      reason: o.reason,
+      ...(pane && { pane }),
+      ...(session && { session }),
+    };
+    const r = await send(clientSocket(env), '/tasks/end', body);
+    stdout.write(
+      (o.json
+        ? JSON.stringify(r, null, 2)
+        : `任务会在当前这一轮结束时结束（${r.outcome === 'achieved' ? '已完成' : '已放弃'}）：${r.reason}`) + '\n',
+    );
+    return 0;
+  } catch (e) {
+    stderr.write(`bridge-task: ${e.message}\n${e.usage ? usage : ''}`);
+    return e.usage ? 2 : 1;
+  }
 }
