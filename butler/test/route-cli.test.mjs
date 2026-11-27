@@ -223,7 +223,7 @@ test('the routing agent needs a directory of its own on the model machine: witho
 test('the processor starts the routing timer when routing is not off, and process --once does not route', async (t) => {
   const w = await world(t);
   w.windows.finish(1, '分派完了');
-  w.store.setMeta('routing', { cursor: { at: Date.now() - 20 * 60e3, id: null } });
+  w.store.setMeta('routing', { cursor: { at: Date.now() - 6 * 60e3, id: null } });
   w.store.setMeta('profile', { text: 'x', at: Date.now(), notes: [], messages: 1 });
   w.store.setMeta('review', { at: Date.now(), reviewed: 0, closed: 0, profileAt: Date.now(), notes: [] });
   let r = await run(w.config, 'process', '--once');

@@ -124,6 +124,7 @@ test('each round routes one fixed window, from where the last one ended to a min
 test('a window whose agent fails is run again as it is on the next rounds; after three failures it is skipped and recorded, and the next round goes on after it', async (t) => {
   const f = await world(t);
   say(f, 5, { text: '五分钟' });
+  say(f, 15, { text: '跳过以后的' });
   const fail = () => {
     throw Error('模型结束了这一轮，但没有回复');
   };
@@ -141,11 +142,55 @@ test('a window whose agent fails is run again as it is on the next rounds; after
     '第 1 段没有分派完，下一轮再试：模型结束了这一轮，但没有回复',
     '第 1 段试了 3 次都没有分派完，跳过：模型结束了这一轮，但没有回复',
   ]);
-  say(f, 35, { text: '跳过以后的' });
   f.clock = minute(40);
   const next = await f.rounds.tick();
-  assert.deepEqual([next.id, next.from.at, next.until, next.state], [2, minute(9), minute(39), 'done']);
+  assert.deepEqual([next.id, next.from.at, next.until, next.state], [2, minute(9), minute(19), 'done']);
   assert.deepEqual(listed(f, 2), ['跳过以后的']);
+});
+
+test('a window covers at most 10 minutes of stored time; when the rounds are further behind, they go on back to back, passing over a stretch with nothing new, until less than a window is left for the timer', async (t) => {
+  const f = await world(t);
+  f.store.setMeta('routing', { cursor: { at: T0, id: null } });
+  say(f, 2, { text: '第 2 分钟' });
+  say(f, 22, { text: '第 22 分钟' });
+  say(f, 33.5, { text: '第 33.5 分钟' });
+  f.clock = minute(35);
+  try {
+    await f.rounds.start();
+  } finally {
+    await f.rounds.stop();
+  }
+  const spans = [1, 2].map((id) => {
+    const window = f.windows.window(id);
+    return [window.from.at, window.until, window.state, listed(f, id)];
+  });
+  assert.deepEqual(spans, [
+    [T0, minute(10), 'done', ['第 2 分钟']],
+    [minute(20), minute(30), 'done', ['第 22 分钟']],
+  ]);
+  assert.equal(f.agent.asks.length, 2, 'the stretch from minute 10 to 20 had nothing new and needed no agent');
+  assert.equal(f.windows.window(3), undefined, 'the last 4 minutes wait for the timer');
+  assert.deepEqual(f.windows.cursor(), { at: minute(30), id: null });
+});
+
+test('a round whose agent fails does not go on back to back, behind or not: its window is retried on the next tick of the timer', async (t) => {
+  const f = await world(t);
+  f.store.setMeta('routing', { cursor: { at: T0, id: null } });
+  say(f, 2, { text: '第 2 分钟' });
+  say(f, 22, { text: '第 22 分钟' });
+  f.agent.steps.push(() => {
+    throw Error('超时');
+  });
+  f.clock = minute(35);
+  try {
+    await f.rounds.start();
+  } finally {
+    await f.rounds.stop();
+  }
+  const window = f.windows.window(1);
+  assert.deepEqual([window.state, window.attempts, window.until], ['open', 1, minute(10)]);
+  assert.equal(f.agent.asks.length, 1);
+  assert.equal(f.windows.window(2), undefined);
 });
 
 test('no agent starts for a stretch with nothing new or with no live topic, which is passed over; Bridge unreachable leaves it for the next round', async (t) => {

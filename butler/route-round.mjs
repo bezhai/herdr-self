@@ -8,8 +8,10 @@ import { spanText, MODE_WORDS } from './route-print.mjs';
 
 // everyMs: how often a round runs. settleMs: how long a message must have been stored before a window takes it, so that
 // one being written is not passed over. firstMs: how far back the very first window starts, when there was no router
-// before. maxAttempts: how many failed runs of its agent a window gets before it is skipped.
-export const DEFAULTS = { everyMs: 600_000, settleMs: 60_000, firstMs: 600_000, maxAttempts: 3 };
+// before. windowMs: the most stored time one window covers, so that one agent session can read it in time (a first
+// window of 77 minutes, 3308 messages, timed out twice at 15 minutes). maxAttempts: how many failed runs of its agent a
+// window gets before it is skipped.
+export const DEFAULTS = { everyMs: 600_000, settleMs: 60_000, firstMs: 600_000, windowMs: 600_000, maxAttempts: 3 };
 
 // The commands the agent may run, as claude's Bash rules (see commandsOnly in herdr-model.mjs). butler is the wrapper on
 // the agent's machine that runs butler's command line where butler lives; ol reads Feishu as me and cannot write.
@@ -35,6 +37,8 @@ const message = (e) => e?.message ?? String(e);
 export class RouteRounds {
   #timer;
   #round;
+  #catchingUp;
+  #stopped = false;
   // agent: {ask({system, prompt})}, a claude allowed only ROUTING_COMMANDS. mode: dry-run or on.
   constructor({ store, windows, bridge, agent, mode, now = Date.now, options = {}, log = () => {} }) {
     this.store = store;
@@ -47,16 +51,47 @@ export class RouteRounds {
     this.log = log;
   }
 
-  // A round now, then every everyMs.
+  // Rounds now, then every everyMs, each time back to back while the windows are behind (see #catchUp). Resolves once
+  // the first of these has caught up.
   start() {
-    this.#timer = setInterval(() => this.tick(), this.options.everyMs);
-    this.tick();
+    this.#timer = setInterval(() => this.#roundsUntilCaughtUp(), this.options.everyMs);
+    return this.#roundsUntilCaughtUp();
   }
 
   // No round starts after this; resolves once the one under way is done.
   async stop() {
+    this.#stopped = true;
     clearInterval(this.#timer);
+    await this.#catchingUp;
     await this.#round;
+  }
+
+  // At most one run of rounds at a time: the timer's tick during one joins it.
+  #roundsUntilCaughtUp() {
+    this.#catchingUp ??= this.#catchUp().finally(() => {
+      this.#catchingUp = undefined;
+    });
+    return this.#catchingUp;
+  }
+
+  // A round that finished its window, or passed over a stretch that needed no agent, is followed at once by the next one
+  // while more than a window of stored time waits after the cursor. A round whose window is to be retried, or that could
+  // not run, waits for the timer, so that a failing agent or an unreachable Bridge is not tried back to back.
+  async #catchUp() {
+    while (!this.#stopped) {
+      const cursorBefore = this.windows.cursor()?.at;
+      const window = await this.tick();
+      const movedOn = window ? window.state !== 'open' : this.windows.cursor()?.at !== cursorBefore;
+      if (!movedOn || !this.#behind()) return;
+    }
+  }
+
+  // Whether more than one window of stored time waits after the cursor.
+  #behind() {
+    const cursor = this.windows.cursor();
+    if (!cursor) return false;
+    const waiting = this.now() - this.options.settleMs - cursor.at;
+    return waiting > this.options.windowMs;
   }
 
   // One round; a tick while one runs joins it, as an agent session can outlast the interval. Resolves with the window it
@@ -87,11 +122,11 @@ export class RouteRounds {
     for (const note of this.windows.pendingNotes()) await handOver(this.windows, this.bridge, note);
   }
 
-  // The window after the last one, up to settleMs ago; a stretch with no new message or no live topic needs no agent and
-  // is passed over.
+  // The window after the last one: windowMs of stored time at most, up to settleMs ago. A stretch with no new message or
+  // no live topic needs no agent and is passed over.
   async #nextWindow() {
-    const until = this.now() - this.options.settleMs;
     const from = this.windows.cursor() ?? { at: this.now() - this.options.firstMs, id: null };
+    const until = Math.min(from.at + this.options.windowMs, this.now() - this.options.settleMs);
     if (until <= from.at) return undefined;
     const span = { from, until };
     if (!this.windows.messages(span).length) {
