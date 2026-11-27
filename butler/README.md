@@ -387,7 +387,7 @@ claude 只把不超过 30000 字节（UTF-8）的命令输出直接给 Agent 看
 
 其余的都列出，包括审批、Codebase 这类通知和我在别处发的消息。这三种是去掉而不是标出来：Agent 每次都会扔掉它们，而它们占每一段的很大一部分。
 
-`butler route topics` 列出 Bridge 里进行中的话题：8 位的短 id、标题、所在的群、开始时间、在等 Agent 空闲的摘要份数、目标（和标题不同时）和最近两条对话。`butler route topic <话题 id>` 读一个话题更长的一段近况，来自 Bridge 的 `GET /api/topics/context?topicId=`：最近 20 条我和 Agent 在话题里说的话、Agent 放进话题的飞书消息、替我起草的消息和它们的状态，以及管家最近 5 份转给它的摘要（不含预览和 Bridge 没收下的）。话题 id 写前几位就行，能认出是哪一个即可。两个命令的输出都不超过 25000 字节：`route topic` 太长时先去掉最早的对话，最新的几条说明话题现在在做什么，并在对话前面写明去掉了几条；去掉全部对话还太长时，截掉末尾，最后一行写明。`route topics` 里的目标截成一行、最多 100 字，15 个话题都写满中文也放得下，再多时截掉末尾。
+`butler route topics` 列出 Bridge 里进行中的话题：8 位的短 id、标题、所在的群、开始时间、在等 Agent 空闲的摘要份数、目标（和标题不同时）和最近两条对话。`butler route topic <话题 id>` 读一个话题更长的一段近况，来自 Bridge 的 `GET /api/topics/context?topicId=`：最近 20 条我和 Agent 在话题里说的话、Agent 放进话题的飞书消息、替我起草的消息和它们的状态，以及管家最近 5 份转给它的摘要：只算已经交给 Bridge 的和等着交的；干跑和预览的摘要、Bridge 没收下的都没有到过这个话题，不列出，免得分派 Agent 把它们当成话题已经知道的事。话题 id 写前几位就行，能认出是哪一个即可。两个命令的输出都不超过 25000 字节：`route topic` 太长时先去掉最早的对话，最新的几条说明话题现在在做什么，并在对话前面写明去掉了几条；去掉全部对话还太长时，截掉末尾，最后一行写明。`route topics` 里的目标截成一行、最多 100 字，15 个话题都写满中文也放得下，再多时截掉末尾。
 
 `butler route note <段号> <话题 id> <消息 id>... --text <摘要>` 给一个话题写一份摘要。模型抄 id 会抄错（新需求群的判断里抄错过 UUID），所以由工具检查它抄来的东西，而不是信任它：
 
@@ -663,7 +663,7 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 | `route log` | `{windows, previews, earlier}`：定时分派的段和预览的段，新的在前，每段同 `route` 的 `window`，另有 `notes`（每份摘要：`id`、`at`、`windowId`、`preview`、`topicId`、`topicTitle`、`messageIds`、`text`、`status`、`sentAt`、`error`、`key`）；`earlier` 是分段以前的摘要，形状同 `notes`，没有 `windowId` 和 `key` |
 | `route messages` | `{window, page, pages, total, after, messages}`：`after` 是这一页后面还有几条，`messages` 是这一页的消息，每条 `id`、`chatId`、`chatName`、`chatKind`、`sender`、`mine`、`bot`、`at`、`text`（前 300 字）、`recalled`、`replyTo` 和 `thread`（`{id, brief}`） |
 | `route topics` | Bridge 的 `GET /api/topics/context` 给的话题数组 |
-| `route topic` | `{topic, notes}`：Bridge 的一个话题（`GET /api/topics/context?topicId=`）和管家最近转给它的摘要 |
+| `route topic` | `{topic, notes}`：Bridge 的一个话题（`GET /api/topics/context?topicId=`）和管家最近转给它的摘要（已交给 Bridge 的和等着交的） |
 | `route note` | `{window, mode, topicId, title, status, text, messageIds}`：记下的摘要，`text` 带着附上的消息 id |
 | `level set` | 数组，每个聊天一项：`feedId`、`name`、`chatMode`、`before`、`after`（级别记录，同 `level list` 的一项，但没有名称等聊天的信息；没有级别时是 `null`）；定为即时的是话题群时还有 `warning` |
 | `level clear` | 同 `level set`，没有 `warning`；取消以后没有模型的级别时 `after` 是 `null` |

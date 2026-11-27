@@ -203,7 +203,7 @@ test('live topics are listed with short ids; one is read by a unique prefix with
       '读一个话题最近的对话：butler route topic <话题 id>',
     ].join('\n'),
   );
-  const window = tenMinutes(f);
+  const window = tenMinutes(f, 'on');
   const id = say(f, 1, { text: '接口文档更新了' });
   await f.tools.note({ windowId: window.id, topic: 'a1b2c', messageIds: [id], text: '金垠廷更新了接口文档' });
   const read = await f.tools.topic('a1b2c');
@@ -226,11 +226,36 @@ test('live topics are listed with short ids; one is read by a unique prefix with
       '11-27 09:20 评审群 · 回复 7301 · 已发出（消息 7302）：请帮忙评审接口改动',
       '',
       '== 管家最近转给它的 ==',
-      `第 1 段（干跑）：金垠廷更新了接口文档\n  涉及的消息：${id}`,
+      `第 1 段（已交给 Bridge）：金垠廷更新了接口文档\n  涉及的消息：${id}`,
     ].join('\n'),
   );
   await assert.rejects(f.tools.topic('a1b2'), refusal(/有 2 个话题的 id 以 a1b2 开头：a1b2c3d4、a1b2ffff，多写几位/));
   await assert.rejects(f.tools.topic('ffff'), refusal(/没有 id 以 ffff 开头的进行中的话题.*butler route topics/));
+});
+
+test("what butler gave a topic lately is only what Bridge took or is yet to take: a dry run's note, a preview's, the old router's dry rows and what Bridge refused never reached the topic", async (t) => {
+  const f = await world(t);
+  const id = say(f, 1, { text: '接口文档更新了' });
+  const keep = (mode, text, status) => {
+    const window = f.windows.create({ from: { at: T0, id: null }, until: minute(10), mode });
+    f.windows.addNote({ window, topicId: FIRE.id, topicTitle: FIRE.title, messageIds: [id], text, status });
+  };
+  f.store.db
+    .prepare("INSERT INTO routed(at,topic_id,topic_title,message_ids,text,status,run_ids) VALUES(?,?,?,?,?,'dry','[]')")
+    .run(minute(-5), FIRE.id, FIRE.title, JSON.stringify([id]), '旧路由干跑的');
+  keep('dry-run', '干跑的', 'dry');
+  keep('preview', '预览的', 'dry');
+  keep('on', '交给了 Bridge 的', 'given');
+  keep('on', '等着交的', 'pending');
+  keep('on', 'Bridge 没收下的', 'dropped');
+  const read = await f.tools.topic('a1b2c');
+  assert.deepEqual(
+    read.notes.map((note) => [note.text, note.status]),
+    [
+      ['交给了 Bridge 的', 'given'],
+      ['等着交的', 'pending'],
+    ],
+  );
 });
 
 test('a long topic leaves out its oldest exchanges first and says how many, so that what it prints stays within OUTPUT_BYTES', async (t) => {

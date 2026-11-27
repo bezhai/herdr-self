@@ -220,10 +220,12 @@ export class RouteWindows {
     return this.db.prepare('SELECT * FROM routed WHERE window_id=? ORDER BY id').all(windowId).map(noteOf);
   }
 
-  // What the timer's windows gave a topic lately, newest last: previews and refused notes are not what it got.
+  // What butler gave a topic lately, newest last: only notes Bridge took or is yet to take. A dry run's or a preview's
+  // note (dry) and one Bridge refused (dropped) never reached the topic, and an agent shown them as given would take them
+  // for what the topic already knows.
   recentNotes(topicId, limit) {
     const rows = this.db
-      .prepare("SELECT * FROM routed WHERE topic_id=? AND preview=0 AND status<>'dropped' ORDER BY id DESC LIMIT ?")
+      .prepare("SELECT * FROM routed WHERE topic_id=? AND status IN ('given','pending') ORDER BY id DESC LIMIT ?")
       .all(topicId, limit);
     return rows.reverse().map(noteOf);
   }
