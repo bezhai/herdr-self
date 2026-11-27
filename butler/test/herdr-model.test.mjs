@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HerdrModel } from '../herdr-model.mjs';
+import { HerdrModel, commandsOnly } from '../herdr-model.mjs';
 
 const FAKE = fileURLToPath(new URL('./fake-herdr.mjs', import.meta.url));
 const CWD = '/home/me/.local/share/butler-model';
@@ -76,6 +76,23 @@ test('each prompt goes to a fresh claude without tools in a workspace of its own
     .map((a) => a[4]);
   assert.equal(new Set(names).size, 2, 'a new agent for every prompt');
   assert.ok(names.every((n) => /^[a-z][a-z0-9_-]{0,31}$/.test(n)));
+});
+
+test('a model given commands starts claude with Bash alone, only those commands allowed and anything else refused without asking', async (t) => {
+  const tools = commandsOnly(['butler route topics', 'ol *']);
+  const { model, calls } = setup(t, { replies: [{ text: '分派完了' }] }, { tools });
+  assert.equal(await model.ask({ system: SYSTEM, prompt: PROMPT }), '分派完了');
+  assert.deepEqual(claudeArgs(calls).slice(0, 9), [
+    '--tools',
+    'Bash',
+    '--allowedTools',
+    'Bash(butler route topics)',
+    'Bash(ol *)',
+    '--permission-mode',
+    'dontAsk',
+    '--strict-mcp-config',
+    '--disable-slash-commands',
+  ]);
 });
 
 test('invisible format characters are dropped from the prompt and the system prompt; the emoji joiner, text, CJK and emoji stay', async (t) => {

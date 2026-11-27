@@ -1,12 +1,30 @@
-// The model, reached through herdr: every ask starts a fresh claude without tools in a workspace of its own, in the
-// herdr session reserved for butler on the model machine (a saved herdr machine, so the model's gateway token stays
-// there), takes its one final reply and closes the workspace. Nothing carries over from one ask to the next.
+// The model, reached through herdr: every ask starts a fresh claude in a workspace of its own, in the herdr session
+// reserved for butler on the model machine (a saved herdr machine, so the model's gateway token stays there), takes its
+// one final reply and closes the workspace. Nothing carries over from one ask to the next. By default the claude has no
+// tools; the routing agent gets a few commands (see commandsOnly and route-round.mjs).
 import { execFile } from 'node:child_process';
 
 // No built-in tools (an empty --tools list), no MCP servers (--strict-mcp-config without --mcp-config), no skills or
 // slash commands: whatever the messages say, the model can only answer. --no-session-persistence would be welcome
 // too, but claude accepts it only with --print, and herdr drives the interactive claude.
-export const CLAUDE_ARGS = ['--tools', '', '--strict-mcp-config', '--disable-slash-commands'];
+export const NO_TOOLS = ['--tools', '', '--strict-mcp-config', '--disable-slash-commands'];
+// Bash as the only built-in tool, and in it only commands that match patterns (claude's Bash rule syntax, such as
+// "ol *"). dontAsk refuses every other tool call on the spot instead of asking: nobody is there to answer, and a claude
+// waiting on a permission prompt would hold its round until the reply timeout. As with NO_TOOLS, no MCP servers, skills
+// or slash commands.
+export function commandsOnly(patterns) {
+  const allowed = patterns.map((pattern) => `Bash(${pattern})`);
+  return [
+    '--tools',
+    'Bash',
+    '--allowedTools',
+    ...allowed,
+    '--permission-mode',
+    'dontAsk',
+    '--strict-mcp-config',
+    '--disable-slash-commands',
+  ];
+}
 // The model claude is asked for, when one is named; otherwise claude's default. --model alone is not enough: on cpu1,
 // ~/.claude/settings.json allows only another model (availableModels), and claude then warns that the model is
 // restricted by the organization's settings and keeps asking for the allowed one. --settings adds a settings source
@@ -59,13 +77,14 @@ function failure(args, error, stderr) {
 export class HerdrModel {
   // machine: the saved herdr machine (label); cwd: an existing absolute directory there (herdr falls back to home for
   // anything else, silently); name: the model claude is asked for, undefined for claude's default; effort: one of
-  // EFFORTS, undefined for claude's default; command: the herdr executable and any leading arguments; label: of the
-  // workspaces.
+  // EFFORTS, undefined for claude's default; tools: what the claude may use (NO_TOOLS, or commandsOnly); command: the
+  // herdr executable and any leading arguments; label: of the workspaces.
   constructor({
     machine,
     cwd,
     name,
     effort,
+    tools = NO_TOOLS,
     command = ['herdr'],
     label = 'butler-model',
     startTimeoutMs = 90_000,
@@ -79,6 +98,7 @@ export class HerdrModel {
       cwd,
       name,
       effort,
+      tools,
       command,
       label,
       startTimeoutMs,
@@ -137,7 +157,7 @@ export class HerdrModel {
           '--timeout',
           String(this.startTimeoutMs),
           '--',
-          ...CLAUDE_ARGS,
+          ...this.tools,
           ...modelArgs(this.name),
           ...effortArgs(this.effort),
           '--system-prompt',
