@@ -211,11 +211,15 @@ function topicText({ topic, notes, leftOut }) {
   return lines.join('\n');
 }
 
+// In a dry run or a preview the note is only kept. The reply says that this is expected and the topic is done for the
+// window, because an agent once read "not handed to Bridge" as a failure and tried to force the handover.
+const KEPT_ONLY = '摘要只记下、不交给 Bridge，这是正常的；这个话题这一段已经转完了。';
+
 export function formatNote(result) {
   const where = `话题 ${shortId(result.topicId)}「${result.title}」`;
   const count = `${result.messageIds.length} 条消息`;
-  if (result.mode === 'preview') return `已记下转给${where}的摘要（${count}）；这是预览，不交给 Bridge`;
-  if (result.mode === 'dry-run') return `已记下转给${where}的摘要（${count}）；现在是干跑，不交给 Bridge`;
+  if (result.mode === 'preview') return `已记下转给${where}的摘要（${count}）。这是预览，${KEPT_ONLY}`;
+  if (result.mode === 'dry-run') return `已记下转给${where}的摘要（${count}）。现在是干跑，${KEPT_ONLY}`;
   if (result.status === 'pending') return `已记下转给${where}的摘要（${count}）；Bridge 暂时连不上，管家稍后再交`;
   return `已把摘要交给${where}（${count}），它的 Agent 空闲时会收到`;
 }

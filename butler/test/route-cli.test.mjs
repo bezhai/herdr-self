@@ -148,7 +148,7 @@ test("the routing agent's tools through the command line: the window's messages,
   assert.equal(r.code, 0, r.stderr);
   assert.equal(
     r.stdout.trim(),
-    '已记下转给话题 a1b2c3d4「火山发文平台映射」的摘要（1 条消息）；现在是干跑，不交给 Bridge',
+    '已记下转给话题 a1b2c3d4「火山发文平台映射」的摘要（1 条消息）。现在是干跑，摘要只记下、不交给 Bridge，这是正常的；这个话题这一段已经转完了。',
   );
   assert.deepEqual(
     w.windows.notesOf(1).map((n) => [n.topicId, n.status, n.text]),
