@@ -179,6 +179,22 @@ test('the workspace is closed whatever goes wrong, and the error says what', asy
   }
 });
 
+test('a workspace herdr opened outside the asked directory is closed before any claude starts in it: herdr opens the home directory for one that does not exist there', async (t) => {
+  const { model, calls, state } = setup(t, { cwd: '/home/me', replies: [{ text: 'x' }] });
+  await assert.rejects(
+    model.ask({ system: SYSTEM, prompt: 'x' }),
+    /模型机器上没有工作目录 \/home\/me\/\.local\/share\/butler-model：herdr 开在了 \/home\/me/,
+  );
+  const verbs = calls().map((a) => a.slice(2, 4).join(' '));
+  assert.deepEqual(verbs, ['workspace create', 'workspace close']);
+  assert.deepEqual(state().workspaces, {});
+});
+
+test('the asked directory as herdr reports it, with a symlink above it resolved, is the asked one', async (t) => {
+  const { model } = setup(t, { cwd: `/data00${CWD}`, replies: [{ text: 'ok' }] });
+  assert.equal(await model.ask({ system: SYSTEM, prompt: 'x' }), 'ok');
+});
+
 test('a reply that lands just after the agent settles is still taken', async (t) => {
   const { model } = setup(t, { replies: [{ text: '{"late":true}', lateMs: 300 }] });
   assert.equal(await model.ask({ system: SYSTEM, prompt: 'x' }), '{"late":true}');

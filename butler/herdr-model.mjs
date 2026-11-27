@@ -48,6 +48,14 @@ const FORMAT_CHARS = /(?!\u200D)\p{Cf}/gu;
 const visible = (text) => text.replace(FORMAT_CHARS, '');
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Whether the pane herdr opened is in the asked directory. herdr opens the home directory instead of one that does not
+// exist on its machine, silently, and claude would then work there; it reports the directory with symlinks resolved, so
+// one above the asked directory (/home → /data00/home on cpu1) makes the reported path longer, never different at its end.
+function inAskedDirectory(reported, asked) {
+  if (reported === asked) return true;
+  return asked.startsWith('/') && String(reported ?? '').endsWith(asked);
+}
+
 // A failed herdr call as the subcommand, its target, the exit status and the end of stderr. Never its arguments:
 // Node's own message for a failed command repeats the whole command line, the prompt and its message texts included,
 // and this text goes to the store's errors, to status and to the journal.
@@ -75,8 +83,8 @@ function failure(args, error, stderr) {
 }
 
 export class HerdrModel {
-  // machine: the saved herdr machine (label); cwd: an existing absolute directory there (herdr falls back to home for
-  // anything else, silently); name: the model claude is asked for, undefined for claude's default; effort: one of
+  // machine: the saved herdr machine (label); cwd: an existing absolute directory there (an ask in a workspace herdr
+  // opened anywhere else fails, see inAskedDirectory); name: the model claude is asked for, undefined for claude's default; effort: one of
   // EFFORTS, undefined for claude's default; tools: what the claude may use (NO_TOOLS, or commandsOnly); command: the
   // herdr executable and any leading arguments; label: of the workspaces.
   constructor({
@@ -144,6 +152,9 @@ export class HerdrModel {
     const workspace = created.result.workspace.workspace_id,
       pane = created.result.root_pane.pane_id;
     try {
+      const opened = created.result.root_pane.cwd;
+      if (this.cwd && !inAskedDirectory(opened, this.cwd))
+        throw Error(`模型机器上没有工作目录 ${this.cwd}：herdr 开在了 ${opened}，先在那台机器上建好这个目录`);
       const name = `butler-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
       await this.#herdr(
         [

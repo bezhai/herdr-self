@@ -251,7 +251,7 @@ open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启
 
 模型是另一台机器（cpu1）上的 claude，经 herdr 调用，claude 访问的网关 token 不离开那台机器。`BUTLER_MODEL_MACHINE` 是 herdr 保存的机器（`herdr machine list`），它指向那台机器上专给管家用的 herdr session，不是我自己用的默认 session。每一批（整理的每一部分也一样）这样运行：
 
-1. `herdr --machine <机器> workspace create --cwd <BUTLER_MODEL_CWD> --label butler-model --no-focus`；
+1. `herdr --machine <机器> workspace create --cwd <BUTLER_MODEL_CWD> --label butler-model --no-focus`；它报告的 pane 目录不是这个目录时（见下面），关掉工作区，这一批失败；
 2. 在它的第一个 pane 里 `herdr --machine <机器> agent start <名字> --kind claude -- --tools "" --strict-mcp-config --disable-slash-commands [--model <模型> --settings '{"availableModels":["<模型>"]}'] [--effort <强度>] --system-prompt <说明>`：没有内置工具，没有 MCP 服务器，没有技能和斜杠命令，模型只能回答；
 3. `agent prompt <名字> <数据> --wait`，等这一轮结束；
 4. `agent replies <名字>` 取它最后的回复（由 claude 的 Stop hook 报给 herdr，可能比状态变化晚一点到，所以最多再等 15 秒）；
@@ -280,7 +280,7 @@ herdr machine add --label cpu1-butler --remote-session butler <cpu1 的 SSH 地�
 ssh <cpu1 的 SSH 地址> 'mkdir -p -m 700 ~/.local/share/butler-model'
 ```
 
-`machine add` 需要两边的 herdr 版本兼容；它要求批准安装、更新或替换远端 herdr 时，先停下来确认。`BUTLER_MODEL_CWD` 写这个目录在模型机器上的绝对路径：herdr 对不存在的目录和 `~` 开头的路径都会悄悄换成主目录。这个目录在已信任的主目录下面，claude 启动时不会停在信任对话框上。
+`machine add` 需要两边的 herdr 版本兼容；它要求批准安装、更新或替换远端 herdr 时，先停下来确认。`BUTLER_MODEL_CWD` 写这个目录在模型机器上的绝对路径：herdr 对不存在的目录和 `~` 开头的路径都会悄悄换成主目录，claude 就会在主目录里运行。所以建好工作区以后，管家核对 herdr 报告的 pane 目录：和这个路径相同，或者以它结尾（herdr 报告的是解析了软链接的路径，cpu1 上 `/home` 是 `/data00/home` 的软链接），才启动 claude；否则关掉工作区，这次运行失败，错误是「模型机器上没有工作目录 …：herdr 开在了 …」。这个目录在已信任的主目录下面，claude 启动时不会停在信任对话框上。
 
 ## 新需求群
 

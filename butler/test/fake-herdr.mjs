@@ -2,7 +2,10 @@
 // It answers the commands butler uses with the JSON shapes of herdr 0.9.1, keeps its state (workspaces, agents and
 // their replies) in <dir>/state.json and logs every invocation to <dir>/calls.jsonl. What the "model" replies and
 // what fails comes from <dir>/script.json, written by the test:
-//   {unreachable, fail:{"agent start":{code,stderr,signal}}, replies:[{text,truncated,lateMs} | {none:true} | {timeout:true} | {blocked:true}]}
+//   {unreachable, fail:{"agent start":{code,stderr,signal}}, replies:[{text,truncated,lateMs} | {none:true} | {timeout:true} | {blocked:true}],
+//    cwd}
+// cwd is the directory a new workspace's pane reports instead of --cwd, as herdr opens the home directory for a --cwd that
+// does not exist on its machine.
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -68,7 +71,7 @@ switch (command) {
       type: 'workspace_created',
       workspace: { workspace_id: id, label: opt('--label') },
       tab: { tab_id: `${id}:t1` },
-      root_pane: { pane_id: pane, cwd: opt('--cwd'), workspace_id: id },
+      root_pane: { pane_id: pane, cwd: script.cwd ?? opt('--cwd'), workspace_id: id },
     });
   }
   case 'workspace close': {
