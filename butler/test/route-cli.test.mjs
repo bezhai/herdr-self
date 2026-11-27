@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { tempStore, post, waitFor } from './helpers.mjs';
 import { FakeBridge, KEY } from './fake-bridge.mjs';
-import { loadConfig, routingSetup } from '../config.mjs';
+import { loadConfig, routingSetup, requireRoutingCwd } from '../config.mjs';
 import { RouteWindows } from '../route-windows.mjs';
 import { commandsOnly } from '../herdr-model.mjs';
 import { ROUTING_COMMANDS, ROUTING_SYSTEM } from '../route-round.mjs';
@@ -49,8 +49,9 @@ function run(config, ...args) {
 }
 
 // A store with one message in window 1 (the 10 minutes up to a minute ago, dry-run), a fake Bridge with TOPIC live, a
-// fake herdr whose agent replies 分派完了, and a config that names them. w.herdrCalls() are the herdr commands run.
-async function world(t, routing = 'dry-run') {
+// fake herdr whose agent replies 分派完了, and a config that names them, with the routing agent's directory unless
+// routingCwd is null. w.herdrCalls() are the herdr commands run.
+async function world(t, routing = 'dry-run', { routingCwd = '/home/me/butler-routing' } = {}) {
   const { store, dir } = tempStore(t);
   const bridge = await new FakeBridge().listen();
   t.after(() => bridge.close());
@@ -83,6 +84,7 @@ async function world(t, routing = 'dry-run') {
     `BUTLER_ROUTING=${routing}`,
     'BUTLER_MODEL_MACHINE=cpu1-butler',
     'BUTLER_MODEL_CWD=/home/me/butler-model',
+    ...(routingCwd ? [`BUTLER_ROUTING_CWD=${routingCwd}`] : []),
     `BUTLER_HERDR=${herdr}`,
   ];
   fs.writeFileSync(config, `${lines.join('\n')}\n`, { mode: 0o600 });
@@ -185,7 +187,7 @@ test('route --since previews one round by hand: the agent starts with only its c
     prompt,
     /^先用 `bridge-skill read butler-routing` 读分派飞书消息的做法，然后分派第 2 段时间（\d{4}-\d\d-\d\d \d\d:\d\d–.*\d\d:\d\d）里的新消息。$/,
   );
-  assert.equal(cwd, '/home/me/butler-model');
+  assert.equal(cwd, '/home/me/butler-routing', 'its own directory, apart from the other model runs');
   assert.deepEqual(w.bridge.digests(), [], 'nothing handed over');
   r = await run(w.config, 'route', 'log');
   assert.equal(r.code, 0, r.stderr);
@@ -205,6 +207,17 @@ test('route --since previews one round by hand: the agent starts with only its c
   r = await run(w.config, 'route', 'sideways');
   assert.equal(r.code, 1);
   assert.match(r.stderr, /用法：butler route/);
+});
+
+test('the routing agent needs a directory of its own on the model machine: without BUTLER_ROUTING_CWD a preview and the processor refuse before anything starts', async (t) => {
+  const w = await world(t, 'dry-run', { routingCwd: null });
+  let r = await run(w.config, 'route', '--since', '2h');
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /没有 BUTLER_ROUTING_CWD/);
+  r = await run(w.config, 'process');
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /没有 BUTLER_ROUTING_CWD/);
+  assert.deepEqual(w.herdrCalls(), [], 'nothing ran on the model machine');
 });
 
 test('the processor starts the routing timer when routing is not off, and process --once does not route', async (t) => {
@@ -227,7 +240,7 @@ test('the processor starts the routing timer when routing is not off, and proces
   service.kill('SIGTERM');
 });
 
-test("config: BUTLER_ROUTING is off, dry-run or on, off by default; routing needs Bridge's address and key and its bot's id", () => {
+test("config: BUTLER_ROUTING is off, dry-run or on, off by default; routing needs Bridge's address and key and its bot's id, and its agent a directory apart from the other model runs", () => {
   const dir = fs.mkdtempSync(path.join(process.env.TMPDIR ?? '/tmp', 'butler-routing-')),
     file = (text) => {
       const f = path.join(dir, 'butler.env');
@@ -247,6 +260,16 @@ test("config: BUTLER_ROUTING is off, dry-run or on, off by default; routing need
     });
     assert.equal(routingSetup(loadConfig(file(`${bridge}BUTLER_ROUTING=on\n`))).mode, 'on');
     assert.throws(() => loadConfig(file('BUTLER_ROUTING=yes\n')), /BUTLER_ROUTING 只能是 off、dry-run 或 on：yes/);
+    const model = 'BUTLER_MODEL_CWD=/home/me/butler-model\n';
+    assert.equal(
+      requireRoutingCwd(loadConfig(file(`${model}BUTLER_ROUTING_CWD=/home/me/butler-routing\n`))),
+      '/home/me/butler-routing',
+    );
+    assert.throws(() => requireRoutingCwd(loadConfig(file(model))), /没有 BUTLER_ROUTING_CWD/);
+    assert.throws(
+      () => requireRoutingCwd(loadConfig(file(`${model}BUTLER_ROUTING_CWD=/home/me/butler-model/\n`))),
+      /BUTLER_ROUTING_CWD 要和 BUTLER_MODEL_CWD 不同/,
+    );
     assert.throws(
       () => routingSetup(loadConfig(file('BUTLER_ROUTING=on\nBUTLER_BRIDGE_URL=http://127.0.0.1:9\n'))),
       /转交.*BUTLER_BRIDGE_KEY、BUTLER_BRIDGE_BOT_ID/,

@@ -104,6 +104,8 @@ export function loadConfig(file = process.env.BUTLER_CONFIG || defaultConfigPath
     // the effort (undefined: claude's defaults) and the local herdr executable.
     modelMachine: v.BUTLER_MODEL_MACHINE || undefined,
     modelCwd: v.BUTLER_MODEL_CWD || undefined,
+    // The routing agent's directory on the model machine (see requireRoutingCwd).
+    routingCwd: v.BUTLER_ROUTING_CWD || undefined,
     modelName: v.BUTLER_MODEL_NAME || undefined,
     modelEffort: effort(v.BUTLER_MODEL_EFFORT),
     herdr: home(v.BUTLER_HERDR || 'herdr'),
@@ -170,6 +172,19 @@ export function requireModel(config) {
       `配置文件 ${config.file} 没有 BUTLER_MODEL_MACHINE（herdr 里保存的模型机器的名称，见 butler/README.md）`,
     );
   return config.modelMachine;
+}
+// The routing agent's directory on the model machine, one of its own: Claude Code lets it read with commands such as cat
+// and grep in its working directory and in the directory of that directory's session transcripts, so these must hold only
+// routing sessions, never the transcripts of the other model runs (see butler/README.md, 分派 Agent).
+export function requireRoutingCwd(config) {
+  if (!config.routingCwd)
+    throw Error(
+      `配置文件 ${config.file} 没有 BUTLER_ROUTING_CWD（模型机器上分派 Agent 专用的空目录，见 butler/README.md）`,
+    );
+  const withoutSlash = (dir) => dir?.replace(/\/+$/, '');
+  if (withoutSlash(config.routingCwd) === withoutSlash(config.modelCwd))
+    throw Error('BUTLER_ROUTING_CWD 要和 BUTLER_MODEL_CWD 不同：分派 Agent 要有自己的目录（见 butler/README.md）');
+  return config.routingCwd;
 }
 export const storeFile = (config) => path.join(config.dataDir, 'butler.db');
 // Sets keys in the config file: a key already there is replaced where it is, a new one is added at the end, every

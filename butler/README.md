@@ -277,8 +277,10 @@ open-lark 的 Agent 接口标为旧接口，没有稳定性承诺。收集器启
 
 ```bash
 herdr machine add --label cpu1-butler --remote-session butler <cpu1 的 SSH 地址>
-ssh <cpu1 的 SSH 地址> 'mkdir -p -m 700 ~/.local/share/butler-model'
+ssh <cpu1 的 SSH 地址> 'mkdir -p -m 700 ~/.local/share/butler-model ~/.local/share/butler-routing'
 ```
+
+第二个目录是分派 Agent 的（`BUTLER_ROUTING_CWD`，见「转交新消息」的「分派 Agent」）。
 
 `machine add` 需要两边的 herdr 版本兼容；它要求批准安装、更新或替换远端 herdr 时，先停下来确认。`BUTLER_MODEL_CWD` 写这个目录在模型机器上的绝对路径：herdr 对不存在的目录和 `~` 开头的路径都会悄悄换成主目录，claude 就会在主目录里运行。所以建好工作区以后，管家核对 herdr 报告的 pane 目录：和这个路径相同，或者以它结尾（herdr 报告的是解析了软链接的路径，cpu1 上 `/home` 是 `/data00/home` 的软链接），才启动 claude；否则关掉工作区，这次运行失败，错误是「模型机器上没有工作目录 …：herdr 开在了 …」。这个目录在已信任的主目录下面，claude 启动时不会停在信任对话框上。
 
@@ -352,11 +354,13 @@ Bridge 里每个进行中的话题都有一个 Agent 在替我做一件事，飞
 
 ### 分派 Agent
 
-每一段启动一个新的 claude，和批次一样经 herdr 在模型机器上运行（见「模型在哪里」，工作目录是 `BUTLER_MODEL_CWD`，工作区的 label 也是 `butler-model`，加工端启动时一起清理），给它的话是：
+每一段启动一个新的 claude，和批次一样经 herdr 在模型机器上运行（见「模型在哪里」，工作区的 label 也是 `butler-model`，加工端启动时一起清理），只是工作目录是它自己的 `BUTLER_ROUTING_CWD`，给它的话是：
 
 > 先用 `bridge-skill read butler-routing` 读分派飞书消息的做法，然后分派第 N 段时间（开始–结束）里的新消息。
 
 它读的是别人发的消息，所以只能运行自己的几种命令：`butler route messages`、`butler route topics`、`butler route topic`、`butler route note`、`ol`（以我的身份只读飞书）和 `bridge-skill read`。启动参数是 `--tools Bash --allowedTools 'Bash(butler route messages *)' 'Bash(butler route topics)' 'Bash(butler route topics *)' 'Bash(butler route topic *)' 'Bash(butler route note *)' 'Bash(ol *)' 'Bash(bridge-skill read *)' --permission-mode dontAsk --strict-mcp-config --disable-slash-commands`：内置工具只有 Bash，Bash 里只放行这几种命令，`dontAsk` 让别的命令和工具当场被拒绝，而不是停下来等人确认，因为没有人会来确认，Agent 会一直卡到超时。系统提示词只有一句，说它能用哪几种命令；分派的做法全在 skill 里。消息里不管写了什么，它最多能做的是给一个话题写一份摘要，而 Bridge 把摘要框成别人在飞书上说的话。
+
+只放行这几种命令还不够：`dontAsk` 下，Claude Code 仍然不经规则放行只读的命令（实测 claude 2.1.332 放行了 `cat`、`grep … | head`、`tail`、`sed -n`、`wc`、`ls` 和 `echo`），只要它们读的是工作目录里的文件，或者 `~/.claude/projects/` 下对应工作目录的那个目录，claude 在那里存会话记录，也存太长、没有直接显示的命令输出；别处的（`ls ~`、`cat /etc/hostname`、`ls ~/.claude/projects`）照样拒绝。工作目录要是 `BUTLER_MODEL_CWD`，那个目录里是每一批的会话记录，也就是交给模型的每一批消息。所以分派 Agent 用一个专门的空目录 `BUTLER_ROUTING_CWD`，这些命令能读到的只有分派会话自己的记录。这个目录要先在模型机器上建好：herdr 对不存在的目录会悄悄开在主目录里，那样主目录里的文件都能读，所以管家核对 herdr 开出的目录，不对就不启动（见「模型在哪里」）。
 
 `butler` 是模型机器上的一个包装命令，经 ssh 在管家所在的机器上运行这个命令行。工具放在管家的命令行里，而不是让 Agent 用 `bridge-*` 命令：Bridge 的这两个接口只认管理台的访问密钥，有管理台的全部权限，这样密钥只留在管家机器上的 `butler.env` 里，Agent 看不到；`bridge-*` 命令也只服务于本身就是一个话题的 Agent，分派 Agent 不是。
 
@@ -400,7 +404,7 @@ Bridge 里每个进行中的话题都有一个 Agent 在替我做一件事，飞
 - `dry-run`：照样每 10 分钟分派，摘要只记下（`butler route log` 看得到，状态是「干跑」），什么都不交给 Bridge。
 - `on`：分派，摘要交给 Bridge。
 
-段的模式在建段时定下，改了 `BUTLER_ROUTING` 并重启加工端以后，新的段按新的模式。分派需要 `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY` 和 `BUTLER_BRIDGE_BOT_ID`，和新需求群的同名配置是同一份；`BUTLER_BOT_LARK_ID` 可选，是管家机器人在 open-lark 里的 id（有了它，管家机器人发在别处的消息也不列出）。`process --once` 不分派。
+段的模式在建段时定下，改了 `BUTLER_ROUTING` 并重启加工端以后，新的段按新的模式。分派需要 `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY` 和 `BUTLER_BRIDGE_BOT_ID`，和新需求群的同名配置是同一份，还要有 `BUTLER_ROUTING_CWD`，缺了加工端不启动，预览也不运行；`BUTLER_BOT_LARK_ID` 可选，是管家机器人在 open-lark 里的 id（有了它，管家机器人发在别处的消息也不列出）。`process --once` 不分派。
 
 ### 预览
 
@@ -561,7 +565,8 @@ grep '^OPEN_LARK_AGENT_READ_TOKEN=' ~/.config/open-lark/app.env | sed 's/^OPEN_L
 | `BUTLER_BOT_APP_ID`、`BUTLER_BOT_APP_SECRET`、`BUTLER_BOT_OWNER` | 无 | 管家机器人的应用和主人的 open_id，由 `bot create` 写入；三个要么都有，要么都没有 |
 | `BUTLER_BOT_DOMAIN` | `feishu` | `feishu`（open.feishu.cn）或 `lark`（open.larksuite.com），由 `bot create` 写入 |
 | `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY`、`BUTLER_OPEN_LARK_WRITE_TOKEN`、`BUTLER_BRIDGE_BOT_ID`、`BUTLER_BYTEDCLI` | 无 | 新需求群（见「新需求群」）；有 `BUTLER_OPEN_LARK_WRITE_TOKEN` 时前四项都要有 |
-| `BUTLER_ROUTING` | `off` | 转交新消息：`off`、`dry-run` 或 `on`（见「转交新消息」）；不是 `off` 时要有 `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY`、`BUTLER_BRIDGE_BOT_ID` |
+| `BUTLER_ROUTING` | `off` | 转交新消息：`off`、`dry-run` 或 `on`（见「转交新消息」）；不是 `off` 时要有 `BUTLER_BRIDGE_URL`、`BUTLER_BRIDGE_KEY`、`BUTLER_BRIDGE_BOT_ID` 和 `BUTLER_ROUTING_CWD` |
+| `BUTLER_ROUTING_CWD` | 无 | 分派 Agent 在模型机器上运行的目录，绝对路径，一个专门的空目录，不能是 `BUTLER_MODEL_CWD`（见「转交新消息」的「分派 Agent」）；定时分派和预览都要有 |
 | `BUTLER_BOT_LARK_ID` | 无 | 管家机器人在 open-lark 里的 id，分派时不列出它的消息 |
 | `BUTLER_DIGEST_DAYS` | `1-5` | 汇总的工作日，1 是周一，7 是周日，可以写 `1-5`、`1,3,5`、`1-3,6` |
 | `BUTLER_DIGEST_HOURS` | `10:00-20:00` | 汇总的工作时间 |

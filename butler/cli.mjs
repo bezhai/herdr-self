@@ -16,6 +16,7 @@ import {
   requireBridge,
   newChatSetup,
   requireRouting,
+  requireRoutingCwd,
   routingSetup,
   storeFile,
 } from './config.mjs';
@@ -127,7 +128,7 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
   route [--since 时间] [--until 时间] [--json]
                                    预览：现在让分派 Agent 分派一段时间里收下的新消息，默认从定时分派下一段开始的地方到 1 分钟
                                    前；它写的摘要记为预览，什么都不交给 Bridge。需要 BUTLER_BRIDGE_URL、BUTLER_BRIDGE_KEY
-                                   （也可以只放在这条命令的环境变量里）和 BUTLER_BRIDGE_BOT_ID
+                                   （也可以只放在这条命令的环境变量里）、BUTLER_BRIDGE_BOT_ID 和 BUTLER_ROUTING_CWD
   route log [--since 时间] [--limit 段数] [--json]
                                    分派过的各段，新的在前：定时分派的和预览的分开列，每段的时间、状态、失败次数、每个话题的
                                    摘要和 Agent 最后说的话；还有分段以前的转交。默认最近 7 天，各最多 20 段
@@ -480,10 +481,10 @@ function routingOf(config, store) {
   };
 }
 
-// The rounds of routing, with a fresh agent allowed only its commands for each window.
+// The rounds of routing, with a fresh agent allowed only its commands for each window, in its own directory.
 function routeRounds(config, store) {
   const { windows, bridge } = routingOf(config, store);
-  const agent = herdrModel(config, { tools: commandsOnly(ROUTING_COMMANDS) });
+  const agent = herdrModel(config, { tools: commandsOnly(ROUTING_COMMANDS), cwd: requireRoutingCwd(config) });
   return new RouteRounds({ store, windows, bridge, agent, mode: config.routing, log: (line) => console.log(line) });
 }
 
