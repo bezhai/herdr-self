@@ -360,13 +360,15 @@ Bridge 里每个进行中的话题都有一个 Agent 在替我做一件事，飞
 
 它读的是别人发的消息，所以只能运行自己的几种命令：`butler route messages`、`butler route topics`、`butler route topic`、`butler route note`、`ol`（以我的身份只读飞书）和 `bridge-skill read`。启动参数是 `--tools Bash --allowedTools 'Bash(butler route messages *)' 'Bash(butler route topics)' 'Bash(butler route topics *)' 'Bash(butler route topic *)' 'Bash(butler route note *)' 'Bash(ol *)' 'Bash(bridge-skill read *)' --permission-mode dontAsk --strict-mcp-config --disable-slash-commands`：内置工具只有 Bash，Bash 里只放行这几种命令，`dontAsk` 让别的命令和工具当场被拒绝，而不是停下来等人确认，因为没有人会来确认，Agent 会一直卡到超时。系统提示词只有一句，说它能用哪几种命令；分派的做法全在 skill 里。消息里不管写了什么，它最多能做的是给一个话题写一份摘要，而 Bridge 把摘要框成别人在飞书上说的话。
 
-只放行这几种命令还不够：`dontAsk` 下，Claude Code 仍然不经规则放行只读的命令（实测 claude 2.1.332 放行了 `cat`、`grep … | head`、`tail`、`sed -n`、`wc`、`ls` 和 `echo`），只要它们读的是工作目录里的文件，或者 `~/.claude/projects/` 下对应工作目录的那个目录，claude 在那里存会话记录，也存太长、没有直接显示的命令输出；别处的（`ls ~`、`cat /etc/hostname`、`ls ~/.claude/projects`）照样拒绝。工作目录要是 `BUTLER_MODEL_CWD`，那个目录里是每一批的会话记录，也就是交给模型的每一批消息。所以分派 Agent 用一个专门的空目录 `BUTLER_ROUTING_CWD`，这些命令能读到的只有分派会话自己的记录。这个目录要先在模型机器上建好：herdr 对不存在的目录会悄悄开在主目录里，那样主目录里的文件都能读，所以管家核对 herdr 开出的目录，不对就不启动（见「模型在哪里」）。
+只放行这几种命令还不够：`dontAsk` 下，Claude Code 仍然不经规则放行只读的命令（实测 claude 2.1.332 放行了 `cat`、`grep … | head`、`tail`、`sed -n`、`wc`、`ls` 和 `echo`），只要它们读的是工作目录里的文件，或者 `~/.claude/projects/` 下对应工作目录的那个目录，claude 在那里存会话记录，也存太长、没有直接显示的命令输出；别处的（`ls ~`、`cat /etc/hostname`、`ls ~/.claude/projects`）照样拒绝。工作目录要是 `BUTLER_MODEL_CWD`，那个目录里是每一批的会话记录，也就是交给模型的每一批消息。所以分派 Agent 用一个专门的空目录 `BUTLER_ROUTING_CWD`，这些命令能读到的只有分派会话自己的记录。这个目录要先在模型机器上建好：herdr 对不存在的目录会悄悄开在主目录里，那样主目录里的文件都能读，所以管家核对 herdr 开出的目录，不对就不启动（见「模型在哪里」）。工具的输出也都不超过 claude 直接显示的上限（见「分派 Agent 的工具」），正常分派不会走到读文件这一步。
 
 `butler` 是模型机器上的一个包装命令，经 ssh 在管家所在的机器上运行这个命令行。工具放在管家的命令行里，而不是让 Agent 用 `bridge-*` 命令：Bridge 的这两个接口只认管理台的访问密钥，有管理台的全部权限，这样密钥只留在管家机器上的 `butler.env` 里，Agent 看不到；`bridge-*` 命令也只服务于本身就是一个话题的 Agent，分派 Agent 不是。
 
 ### 分派 Agent 的工具
 
-`butler route messages <段号> [--page 页码]` 列出这一段的新消息，从早到晚，每页 50 条，一页之内按聊天分组。聊天标出名称、类型（群、私聊、话题群）和 feedId；每条消息一行：消息 id、时间、发送人（我发的标「我」，机器人和 Agent 标「机器人」）、已撤回、回复了哪条或在哪个 thread 里（带那条的发送人和开头），以及正文的前 300 字。全文和上下文用 `ol GET /messages/<消息 id>`、`ol GET /messages/<消息 id>/context` 读。例如：
+claude 只把不超过 30000 字节（UTF-8）的命令输出直接给 Agent 看（claude 2.1.332 在 cpu1 上实测：29403 字节照常显示，30.1 KB 存进了文件），更长的存进它项目目录里的一个文件，Agent 再用 `cat`、`grep` 去读。所以这几个命令的输出都不超过 25000 字节，给 claude 自己加的内容留出余地；中文一个字占 3 个字节，25000 字节大约是 8000 个汉字。
+
+`butler route messages <段号> [--page 页码]` 列出这一段的新消息，从早到晚，每页最多 50 条，正文长的时候少一些，一页的输出不超过 25000 字节；一页之内按聊天分组。聊天标出名称、类型（群、私聊、话题群）和 feedId；每条消息一行：消息 id、时间、发送人（我发的标「我」，机器人和 Agent 标「机器人」）、已撤回、回复了哪条或在哪个 thread 里（带那条的发送人和开头），以及正文的前 300 字。全文和上下文用 `ol GET /messages/<消息 id>`、`ol GET /messages/<消息 id>/context` 读。例如：
 
 ```text
 第 12 段（2026-11-27 10:00 到 10:09 收下的消息）：新消息 2 条，第 1/1 页。正文超过 300 字的截断了，全文用 ol GET /messages/<消息 id> 读。
@@ -384,7 +386,7 @@ Bridge 里每个进行中的话题都有一个 Agent 在替我做一件事，飞
 
 其余的都列出，包括审批、Codebase 这类通知和我在别处发的消息。这三种是去掉而不是标出来：Agent 每次都会扔掉它们，而它们占每一段的很大一部分。
 
-`butler route topics` 列出 Bridge 里进行中的话题：8 位的短 id、标题、所在的群、开始时间、在等 Agent 空闲的摘要份数、目标（和标题不同时）和最近两条对话。`butler route topic <话题 id>` 读一个话题更长的一段近况，来自 Bridge 的 `GET /api/topics/context?topicId=`：最近 20 条我和 Agent 在话题里说的话、Agent 放进话题的飞书消息、替我起草的消息和它们的状态，以及管家最近 5 份转给它的摘要（不含预览和 Bridge 没收下的）。话题 id 写前几位就行，能认出是哪一个即可。
+`butler route topics` 列出 Bridge 里进行中的话题：8 位的短 id、标题、所在的群、开始时间、在等 Agent 空闲的摘要份数、目标（和标题不同时）和最近两条对话。`butler route topic <话题 id>` 读一个话题更长的一段近况，来自 Bridge 的 `GET /api/topics/context?topicId=`：最近 20 条我和 Agent 在话题里说的话、Agent 放进话题的飞书消息、替我起草的消息和它们的状态，以及管家最近 5 份转给它的摘要（不含预览和 Bridge 没收下的）。话题 id 写前几位就行，能认出是哪一个即可。两个命令的输出都不超过 25000 字节：`route topic` 太长时先去掉最早的对话，最新的几条说明话题现在在做什么，并在对话前面写明去掉了几条；去掉全部对话还太长时，截掉末尾，最后一行写明。`route topics` 里的目标截成一行、最多 100 字，15 个话题都写满中文也放得下，再多时截掉末尾。
 
 `butler route note <段号> <话题 id> <消息 id>... --text <摘要>` 给一个话题写一份摘要。模型抄 id 会抄错（新需求群的判断里抄错过 UUID），所以由工具检查它抄来的东西，而不是信任它：
 
@@ -658,7 +660,7 @@ node cli.mjs run        # 或 npm start；也可以直接 ./cli.mjs run
 | `ignore [list]` | 忽略名单的数组：`senderId`、`name`、`since` |
 | `route` | `{window, messages, topics, notes, error}`：预览的段（`id`、`mode`、`from`、`until`、`state`、`attempts`、`error`、`reply`）、新消息数、进行中的话题数、它的摘要（同 `route log` 的 `notes`）和失败时的错误；不需要 Agent 时是 `{skipped}`；失败时退出码是 1 |
 | `route log` | `{windows, previews, earlier}`：定时分派的段和预览的段，新的在前，每段同 `route` 的 `window`，另有 `notes`（每份摘要：`id`、`at`、`windowId`、`preview`、`topicId`、`topicTitle`、`messageIds`、`text`、`status`、`sentAt`、`error`、`key`）；`earlier` 是分段以前的摘要，形状同 `notes`，没有 `windowId` 和 `key` |
-| `route messages` | `{window, page, pages, total, messages}`：这一页的消息，每条 `id`、`chatId`、`chatName`、`chatKind`、`sender`、`mine`、`bot`、`at`、`text`（前 300 字）、`recalled`、`replyTo` 和 `thread`（`{id, brief}`） |
+| `route messages` | `{window, page, pages, total, after, messages}`：`after` 是这一页后面还有几条，`messages` 是这一页的消息，每条 `id`、`chatId`、`chatName`、`chatKind`、`sender`、`mine`、`bot`、`at`、`text`（前 300 字）、`recalled`、`replyTo` 和 `thread`（`{id, brief}`） |
 | `route topics` | Bridge 的 `GET /api/topics/context` 给的话题数组 |
 | `route topic` | `{topic, notes}`：Bridge 的一个话题（`GET /api/topics/context?topicId=`）和管家最近转给它的摘要 |
 | `route note` | `{window, mode, topicId, title, status, text, messageIds}`：记下的摘要，`text` 带着附上的消息 id |

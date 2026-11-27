@@ -7,7 +7,6 @@ import { BridgeError } from './bridge-client.mjs';
 // A refusal of a tool: its message says what to do instead.
 export class Refusal extends Error {}
 
-export const PAGE_SIZE = 50;
 // A listed message is one line; the agent reads the whole text with ol when it needs it.
 export const TEXT_CHARS = 300;
 const BRIEF_CHARS = 40;
@@ -69,15 +68,12 @@ export class RouteTools {
     return window;
   }
 
-  // One page of a window's new messages, oldest first.
-  messages(windowId, page = 1) {
+  // A window's new messages as the listing shows them, oldest first. The listing is read a page at a time (see pageOf
+  // in route-print.mjs), as a page is what fits in one output.
+  listing(windowId) {
     const window = this.#window(windowId);
-    const all = this.windows.messages(window);
-    const pages = Math.max(1, Math.ceil(all.length / PAGE_SIZE));
-    if (!Number.isInteger(page) || page < 1 || page > pages)
-      throw new Refusal(`第 ${window.id} 段只有 ${pages} 页，页码写 1 到 ${pages}`);
-    const onPage = all.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
-    return { window, page, pages, total: all.length, messages: onPage.map((record) => this.#listed(record)) };
+    const messages = this.windows.messages(window).map((record) => this.#listed(record));
+    return { window, messages };
   }
 
   // What the listing shows of a message: enough to judge it, and its ids to read it and its thread with ol.

@@ -26,7 +26,15 @@ import { NewChats } from './newchat.mjs';
 import { RouteWindows } from './route-windows.mjs';
 import { RouteTools, Refusal } from './route-tools.mjs';
 import { RouteRounds, ROUTING_COMMANDS, DEFAULTS as ROUTING } from './route-round.mjs';
-import { formatMessages, formatTopics, formatTopic, formatNote, formatLog, formatPreview } from './route-print.mjs';
+import {
+  formatMessages,
+  formatTopics,
+  formatTopic,
+  formatNote,
+  formatLog,
+  formatPreview,
+  pageOf,
+} from './route-print.mjs';
 import { bytedcliMeego, describeMaterial } from './newchat-material.mjs';
 import { CATEGORIES, LEVELS, LEVEL_NAMES } from './rules.mjs';
 import { Matters } from './matters.mjs';
@@ -495,7 +503,8 @@ async function routeTool(config, store, action, args, values) {
   const show = (data, format) => console.log(values.json ? JSON.stringify(data, null, 1) : format(data));
   if (action === 'messages') {
     const page = values.page === undefined ? 1 : number(values.page, '--page 的页码');
-    show(tools.messages(number(args[0], 'route messages 的段号'), page), formatMessages);
+    const listing = tools.listing(number(args[0], 'route messages 的段号'));
+    show(pageOf(listing, page), formatMessages);
   } else if (action === 'topics') {
     show(await tools.topics(), formatTopics);
   } else if (action === 'topic') {

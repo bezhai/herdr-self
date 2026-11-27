@@ -7,7 +7,7 @@ import { tempStore, post } from './helpers.mjs';
 import { Bridge } from '../bridge-client.mjs';
 import { RouteWindows } from '../route-windows.mjs';
 import { RouteTools, Refusal } from '../route-tools.mjs';
-import { formatMessages, formatTopics, formatTopic } from '../route-print.mjs';
+import { formatMessages, formatTopics, formatTopic, pageOf, OUTPUT_BYTES } from '../route-print.mjs';
 
 process.env.TZ = 'Asia/Shanghai';
 const BRIDGE_BOT = '7100000000000000001';
@@ -75,7 +75,8 @@ async function world(t) {
 const say = (f, n, o = {}) => post(f.store, { at: minute(n), seen: minute(n), categories: ['stored'], ...o });
 // The window of the 10 minutes after T0.
 const tenMinutes = (f, mode = 'dry-run') => f.windows.create({ from: { at: T0, id: null }, until: minute(10), mode });
-const listed = (f, window) => f.tools.messages(window.id).messages.map((m) => m.text);
+const listed = (f, window) => f.tools.listing(window.id).messages.map((m) => m.text);
+const bytesOf = (text) => Buffer.byteLength(text);
 const refusal = (pattern) => (e) => e instanceof Refusal && pattern.test(e.message);
 
 test("a window lists what butler stored in it; it leaves out only Bridge's and butler's bots, the owner in a Bridge topic thread, and history sent over a day before it was stored", async (t) => {
@@ -112,7 +113,7 @@ test('the listing groups messages by chat and gives each its id, time, sender, t
   say(f, 3, { chat: 'g1', name: '金垠廷', text: '今天下午', parentId: question });
   say(f, 4, { chat: 'g1', text: 'x'.repeat(400), rootId: question, threadRole: 'reply' });
   say(f, 5, { chat: 'g1', mine: true, text: '好的' });
-  const listing = f.tools.messages(tenMinutes(f).id);
+  const listing = pageOf(f.tools.listing(tenMinutes(f).id));
   const [first, , reply, long, mine] = listing.messages.map((m) => m.id);
   assert.equal(
     formatMessages(listing),
@@ -131,21 +132,55 @@ test('the listing groups messages by chat and gives each its id, time, sender, t
   );
 });
 
-test('a big window is read in pages of 50, and each page says how to read the next', async (t) => {
+test('a big window is read in pages of at most 50, and each page says how to read the next', async (t) => {
   const f = await world(t);
   for (let n = 0; n < 120; n++) say(f, 1 + n / 20, { text: `第 ${n + 1} 条` });
   const window = tenMinutes(f);
-  const first = f.tools.messages(window.id);
-  assert.deepEqual([first.total, first.page, first.pages, first.messages.length], [120, 1, 3, 50]);
+  const listing = f.tools.listing(window.id);
+  const first = pageOf(listing);
+  assert.deepEqual([first.total, first.page, first.pages, first.after, first.messages.length], [120, 1, 3, 70, 50]);
   assert.match(formatMessages(first), /还有 70 条：butler route messages 1 --page 2$/);
-  const last = f.tools.messages(window.id, 3);
+  const last = pageOf(listing, 3);
   assert.deepEqual(
     [last.messages.length, last.messages[0].text, last.messages.at(-1).text],
     [20, '第 101 条', '第 120 条'],
   );
   assert.doesNotMatch(formatMessages(last), /还有/);
-  assert.throws(() => f.tools.messages(window.id, 4), refusal(/第 1 段只有 3 页/));
-  assert.throws(() => f.tools.messages(9), refusal(/没有第 9 段/));
+  assert.throws(() => pageOf(listing, 4), refusal(/第 1 段只有 3 页/));
+  assert.throws(() => f.tools.listing(9), refusal(/没有第 9 段/));
+});
+
+// Claude Code shows the agent a command's output only up to about 30000 bytes; a longer one goes to a file that the
+// agent reads with cat or grep. These print the widest the tools allow: 4-byte characters wherever there is text.
+test('a page of long messages holds fewer of them, so that what it prints stays within OUTPUT_BYTES; together the pages list the window once, in order', async (t) => {
+  const f = await world(t);
+  const wide = (n) => '😀'.repeat(n);
+  const root = say(f, 0.1, { text: wide(100) });
+  const parent = say(f, 0.2, { text: wide(100), rootId: root, threadRole: 'reply' });
+  for (let n = 0; n < 120; n++)
+    say(f, 1 + n / 20, {
+      chat: `群${wide(30)}${n}`,
+      name: wide(20),
+      type: 'bot',
+      text: wide(400),
+      parentId: parent,
+      rootId: root,
+      threadRole: 'reply',
+    });
+  const listing = f.tools.listing(tenMinutes(f).id);
+  const pages = [];
+  for (let page = 1; page <= pageOf(listing).pages; page++) pages.push(pageOf(listing, page));
+  assert.ok(pages.length > 3, `${pages.length} pages, fewer than 50 messages on each`);
+  for (const page of pages) {
+    const printed = formatMessages(page);
+    assert.ok(bytesOf(printed) <= OUTPUT_BYTES, `page ${page.page} prints ${bytesOf(printed)} bytes`);
+    assert.ok(page.messages.length > 0);
+  }
+  assert.deepEqual(
+    pages.flatMap((page) => page.messages.map((m) => m.id)),
+    listing.messages.map((m) => m.id),
+  );
+  assert.equal(pages.at(-1).after, 0);
 });
 
 test('live topics are listed with short ids; one is read by a unique prefix with its longer conversation and the notes butler gave it lately', async (t) => {
@@ -196,6 +231,61 @@ test('live topics are listed with short ids; one is read by a unique prefix with
   );
   await assert.rejects(f.tools.topic('a1b2'), refusal(/有 2 个话题的 id 以 a1b2 开头：a1b2c3d4、a1b2ffff，多写几位/));
   await assert.rejects(f.tools.topic('ffff'), refusal(/没有 id 以 ffff 开头的进行中的话题.*butler route topics/));
+});
+
+test('a long topic leaves out its oldest exchanges first and says how many, so that what it prints stays within OUTPUT_BYTES', async (t) => {
+  const f = await world(t);
+  const exchanges = Array.from({ length: 20 }, (_, n) => ({
+    from: n % 2 ? 'agent' : 'owner',
+    at: minute(-60 + n),
+    text: `第${n + 1}条 ${'长'.repeat(1995)}`,
+  }));
+  f.bridge.topics[0] = { ...f.bridge.topics[0], exchanges };
+  const printed = formatTopic(await f.tools.topic('a1b2c'));
+  assert.ok(bytesOf(printed) <= OUTPUT_BYTES, `${bytesOf(printed)} bytes`);
+  const shown = exchanges.filter((e) => printed.includes(e.text.slice(0, 5)));
+  assert.ok(shown.length >= 2, 'the latest exchanges are there');
+  assert.deepEqual(shown, exchanges.slice(-shown.length), 'the ones left out are the oldest');
+  assert.match(printed, new RegExp(`== 最近的对话，从早到晚 ==\n更早的 ${20 - shown.length} 条对话太长，没有列出\n`));
+  assert.match(printed, /== 放进话题的飞书消息 ==[^]*== 替主人起草的消息 ==/, 'the rest stays');
+});
+
+test('a topic still too long without any exchange is cut at its end, with a line that says so', async (t) => {
+  const f = await world(t);
+  const wide = '😀'.repeat(500);
+  const sources = Array.from({ length: 20 }, (_, n) => ({ ...FIRE.sources[0], messageId: `73${n}`, text: wide }));
+  const drafts = Array.from({ length: 20 }, () => ({ ...FIRE.drafts[0], text: wide }));
+  f.bridge.topics[0] = {
+    ...f.bridge.topics[0],
+    exchanges: [{ from: 'owner', at: minute(-1), text: wide }],
+    sources,
+    drafts,
+  };
+  const printed = formatTopic(await f.tools.topic('a1b2c'));
+  assert.ok(bytesOf(printed) <= OUTPUT_BYTES, `${bytesOf(printed)} bytes`);
+  assert.match(printed, /更早的 1 条对话太长，没有列出/);
+  assert.match(printed, /\n……后面的没有列出：一次输出最多 25000 字节$/);
+});
+
+test('the listing of many live topics stays within OUTPUT_BYTES: each goal is cut to a line, fifteen topics of long Chinese fit whole, and past what fits the end is cut', async (t) => {
+  const topic = (n, character) => ({
+    ...FIRE,
+    id: `${String(n).padStart(8, '0')}-0000-4000-8000-000000000001`,
+    title: character.repeat(60),
+    goal: character.repeat(2000),
+    chatName: character.repeat(40),
+    exchanges: [
+      { from: 'owner', at: minute(-2), text: character.repeat(2000) },
+      { from: 'agent', at: minute(-1), text: character.repeat(2000) },
+    ],
+  });
+  const fifteen = formatTopics(Array.from({ length: 15 }, (_, n) => topic(n, '长')));
+  assert.ok(bytesOf(fifteen) <= OUTPUT_BYTES, `${bytesOf(fifteen)} bytes`);
+  assert.doesNotMatch(fifteen, /后面的没有列出/, 'fifteen topics fit whole');
+  assert.match(fifteen, new RegExp(`\\n  目标：${'长'.repeat(99)}…\\n`));
+  const many = formatTopics(Array.from({ length: 60 }, (_, n) => topic(n, '😀')));
+  assert.ok(bytesOf(many) <= OUTPUT_BYTES, `${bytesOf(many)} bytes`);
+  assert.match(many, /\n……后面的没有列出：一次输出最多 25000 字节$/);
 });
 
 test('a note is checked before anything is kept: each refusal says what to do instead', async (t) => {

@@ -1,7 +1,17 @@
 // What the route commands print (see cli.mjs route): plain text an agent or a person reads, one fact per line.
-import { PAGE_SIZE, TEXT_CHARS, oneLine, clip, shortId } from './route-tools.mjs';
+import { Refusal, TEXT_CHARS, oneLine, clip, shortId } from './route-tools.mjs';
 
+// Claude Code shows the agent a Bash command's output only up to 30000 bytes of UTF-8 (claude 2.1.332 on cpu1 showed
+// 29403 bytes and saved 30.1 KB to a file). A longer output goes to a file in its project directory, which the agent
+// then reads with cat or grep. What the routing agent's tools print stays within this, with room for what claude adds.
+export const OUTPUT_BYTES = 25_000;
+const CUT_LINE = `……后面的没有列出：一次输出最多 ${OUTPUT_BYTES} 字节`;
+// A page of a window's listing has at most PAGE_SIZE messages, fewer when their lines would take more than PAGE_BYTES;
+// the page's first line and its pointer to the next page take the rest of OUTPUT_BYTES.
+const PAGE_SIZE = 50;
+const PAGE_BYTES = OUTPUT_BYTES - 1000;
 const EXCHANGE_CHARS = 100;
+const GOAL_CHARS = 100;
 const REPLY_CHARS = 200;
 const KIND_WORDS = { group: '群', direct: '私聊', topic: '话题群' };
 const DRAFT_STATES = {
@@ -19,6 +29,25 @@ const localTime = (ms) => new Date(ms).toLocaleString('sv-SE');
 const fullTime = (ms) => localTime(ms).slice(0, 16);
 const shortTime = (ms) => localTime(ms).slice(5, 16);
 const indented = (text, by = '  ') => String(text).replaceAll('\n', `\n${by}`);
+const bytesOf = (text) => Buffer.byteLength(text);
+
+// The text as it is when it fits in OUTPUT_BYTES; else as many of its first lines as fit, and a line that says the rest
+// was cut.
+function withinOutput(text) {
+  if (bytesOf(text) <= OUTPUT_BYTES) return text;
+  const room = OUTPUT_BYTES - bytesOf(CUT_LINE) - 1;
+  let used = 0;
+  let end = 0;
+  for (const character of text) {
+    used += bytesOf(character);
+    if (used > room) break;
+    end += character.length;
+  }
+  const start = text.slice(0, end);
+  const lastBreak = start.lastIndexOf('\n');
+  const kept = lastBreak > 0 ? start.slice(0, lastBreak) : start;
+  return `${kept}\n${CUT_LINE}`;
+}
 
 // "2026-11-27 10:00 到 10:10", or with the date of the end when it is another day.
 export function spanText(window, joiner = ' 到 ') {
@@ -39,6 +68,8 @@ function messageLine(message) {
 }
 
 const briefText = (reference) => (reference.brief ? `（${reference.brief}）` : '');
+const chatHeading = ({ chatId, chatName, chatKind }) =>
+  `== ${chatName ?? chatId} · ${KIND_WORDS[chatKind] ?? '聊天'} · feedId ${chatId} ==`;
 
 // Messages of one chat stay together, chats in the order of their first message.
 function byChat(messages) {
@@ -50,30 +81,73 @@ function byChat(messages) {
   return [...chats.values()];
 }
 
-export function formatMessages({ window, page, pages, total, messages }) {
+// What a message takes on a page at most: its line, and its chat's heading with the blank line before it, as if it were
+// the first of its chat there.
+const bytesOnPage = (message) => bytesOf(chatHeading(message)) + bytesOf(messageLine(message)) + 3;
+
+// A window's listing split into pages, in its order, so that the same window always splits the same way.
+function pagesOf(messages) {
+  const pages = [];
+  let page = [];
+  let used = 0;
+  for (const message of messages) {
+    const bytes = bytesOnPage(message);
+    const full = page.length === PAGE_SIZE || used + bytes > PAGE_BYTES;
+    if (page.length && full) {
+      pages.push(page);
+      page = [];
+      used = 0;
+    }
+    page.push(message);
+    used += bytes;
+  }
+  pages.push(page);
+  return pages;
+}
+
+// One page of a window's listing (see RouteTools.listing): its messages, how many pages there are and how many messages
+// come after it. A page the window does not have is refused, as the agent asked for it.
+export function pageOf({ window, messages }, page = 1) {
+  const pages = pagesOf(messages);
+  if (!Number.isInteger(page) || page < 1 || page > pages.length)
+    throw new Refusal(`第 ${window.id} 段只有 ${pages.length} 页，页码写 1 到 ${pages.length}`);
+  const upToThisPage = pages.slice(0, page).flat().length;
+  return {
+    window,
+    page,
+    pages: pages.length,
+    total: messages.length,
+    after: messages.length - upToThisPage,
+    messages: pages[page - 1],
+  };
+}
+
+export function formatMessages({ window, page, pages, total, after, messages }) {
   const lines = [
     `第 ${window.id} 段（${spanText(window)} 收下的消息）：新消息 ${total} 条，第 ${page}/${pages} 页。正文超过 ${TEXT_CHARS} 字的截断了，全文用 ol GET /messages/<消息 id> 读。`,
   ];
   for (const chat of byChat(messages)) {
-    const { chatId, chatName, chatKind } = chat[0];
-    lines.push('', `== ${chatName ?? chatId} · ${KIND_WORDS[chatKind] ?? '聊天'} · feedId ${chatId} ==`);
+    lines.push('', chatHeading(chat[0]));
     for (const message of chat) lines.push(messageLine(message));
   }
-  const after = total - page * PAGE_SIZE;
   if (after > 0) lines.push('', `还有 ${after} 条：butler route messages ${window.id} --page ${page + 1}`);
   return lines.join('\n');
 }
 
 const speaker = (exchange) => (exchange.from === 'owner' ? '主人' : 'Agent');
 
-function topicHeading(topic) {
+// goalChars: when given, the goal is cut to one line of that many characters.
+function topicHeading(topic, goalChars) {
   const adopted = topic.adopted ? '（接管的 Agent）' : '';
   const waiting = topic.pending ? ` · 在等 Agent 空闲的转交 ${topic.pending} 份` : '';
   const lines = [
     `${shortId(topic.id)}  ${topic.title}${adopted}`,
     `群：${topic.chatName || topic.chatId} · ${shortTime(topic.createdAt)} 开始${waiting}`,
   ];
-  if (topic.goal && topic.goal !== topic.title) lines.push(`目标：${topic.goal}`);
+  if (topic.goal && topic.goal !== topic.title) {
+    const goal = goalChars ? clip(oneLine(topic.goal), goalChars) : topic.goal;
+    lines.push(`目标：${goal}`);
+  }
   return lines;
 }
 
@@ -81,14 +155,14 @@ export function formatTopics(topics) {
   if (!topics.length) return '现在没有进行中的话题';
   const lines = [`进行中的话题 ${topics.length} 个（话题 id 写前几位就行，能认出是哪一个即可）：`];
   for (const topic of topics) {
-    const [first, ...rest] = topicHeading(topic);
+    const [first, ...rest] = topicHeading(topic, GOAL_CHARS);
     const latest = (topic.exchanges ?? [])
       .slice(-2)
       .map((e) => `${shortTime(e.at)} ${speaker(e)}：${clip(oneLine(e.text), EXCHANGE_CHARS)}`);
     lines.push('', first, ...[...rest, ...latest].map((line) => `  ${line}`));
   }
   lines.push('', '读一个话题最近的对话：butler route topic <话题 id>');
-  return lines.join('\n');
+  return withinOutput(lines.join('\n'));
 }
 
 function sourceLine(source) {
@@ -110,9 +184,24 @@ function noteLine(note) {
   return `${when}（${NOTE_STATES[note.status] ?? note.status}）：${indented(note.text)}`;
 }
 
+// One topic's recent state, within OUTPUT_BYTES. A long one leaves out its oldest exchanges first, as the latest ones
+// say what the topic is doing now, and says how many; when it is still too long without any, its end is cut.
 export function formatTopic({ topic, notes }) {
+  let leftOut = 0;
+  let text = topicText({ topic, notes, leftOut });
+  while (bytesOf(text) > OUTPUT_BYTES && leftOut < topic.exchanges.length) {
+    leftOut += 1;
+    text = topicText({ topic, notes, leftOut });
+  }
+  return withinOutput(text);
+}
+
+// The topic with its exchanges after the leftOut oldest.
+function topicText({ topic, notes, leftOut }) {
+  const exchanges = topic.exchanges.slice(leftOut).map((e) => `${shortTime(e.at)} ${speaker(e)}：${indented(e.text)}`);
+  if (leftOut) exchanges.unshift(`更早的 ${leftOut} 条对话太长，没有列出`);
   const sections = [
-    ['最近的对话，从早到晚', topic.exchanges.map((e) => `${shortTime(e.at)} ${speaker(e)}：${indented(e.text)}`)],
+    ['最近的对话，从早到晚', exchanges],
     ['放进话题的飞书消息', topic.sources.map(sourceLine)],
     ['替主人起草的消息', topic.drafts.map(draftLine)],
     ['管家最近转给它的', notes.map(noteLine)],
