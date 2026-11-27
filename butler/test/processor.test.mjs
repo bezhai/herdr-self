@@ -39,8 +39,8 @@ const none = { new: [], updates: [] };
 // profile writes one in its first round, and one without a review reviews).
 const PROFILE = '角色：GEO 服务的后端';
 // changes: how often the processor said the matters changed (onMattersChanged); profiles: what it said of each 关于TA
-// it wrote (onProfile), unless onProfile is given. router: what hands new messages to Bridge's topics (see route.mjs), none by default.
-function setup(t, { answer, options, now, profiled = true, reviewed = true, onProfile, router } = {}) {
+// it wrote (onProfile), unless onProfile is given.
+function setup(t, { answer, options, now, profiled = true, reviewed = true, onProfile } = {}) {
   const { store } = tempStore(t),
     matters = new Matters(store),
     model = fakeModel(answer ?? (() => none)),
@@ -54,7 +54,6 @@ function setup(t, { answer, options, now, profiled = true, reviewed = true, onPr
     ...(now && { now }),
     onMattersChanged: () => changes.push(model.calls.length),
     onProfile: onProfile ?? ((p) => profiles.push(p)),
-    router,
   });
   const t0 = (now ?? Date.now)();
   if (profiled) store.setMeta('profile', { text: PROFILE, at: t0, notes: [], messages: 1 });
@@ -1270,52 +1269,4 @@ test('the processor says when a batch or a review has made, changed or closed ma
   const r = await p.runOnce();
   assert.deepEqual([r.failures, thrown.length], [0, 1], 'a hook that throws breaks nothing');
   assert.ok(store.errors().some((e) => /卡片坏了/.test(e.message)));
-});
-
-test("a round hands new messages to Bridge's topics right after its batches when routing is due; one whose batch failed does not, and a routing that fails is recorded and holds up nothing", async (t) => {
-  const order = [],
-    router = {
-      now: true,
-      fails: 0,
-      due() {
-        return router.now;
-      },
-      async route() {
-        order.push('route');
-        if (router.fails) {
-          router.fails -= 1;
-          throw Error('意外的错误');
-        }
-        return { messages: 2, runs: 1, digests: 1 };
-      },
-    };
-  const { store, model, processor } = setup(t, {
-    answer: () => {
-      order.push('batch');
-      return none;
-    },
-    router,
-  });
-  post(store, { text: '@原智鸿 看下', at: min(1), categories: ['mention'] });
-  let r = await processor.runOnce();
-  assert.deepEqual(order, ['batch', 'route']);
-  assert.deepEqual(r.route, { messages: 2, runs: 1, digests: 1 });
-  order.length = 0;
-  router.now = false;
-  post(store, { text: '@原智鸿 再看下', at: min(2), categories: ['mention'] });
-  r = await processor.runOnce();
-  assert.deepEqual([order, r.route], [['batch'], undefined], 'not due');
-  router.now = true;
-  router.fails = 1;
-  post(store, { text: '@原智鸿 第三条', at: min(3), categories: ['mention'] });
-  r = await processor.runOnce();
-  assert.deepEqual(r.route, { error: '意外的错误' });
-  assert.match(store.errors(1)[0].message, /转交新消息没有完成，下一轮再试：意外的错误/);
-  order.length = 0;
-  model.ask = async () => {
-    throw Error('模型没有回复');
-  };
-  post(store, { text: '@原智鸿 第四条', at: min(4), categories: ['mention'] });
-  r = await processor.runOnce();
-  assert.deepEqual([order, r.route], [[], undefined], 'a round whose batch failed leaves routing for later');
 });

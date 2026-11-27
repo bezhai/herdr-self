@@ -6,7 +6,8 @@ import { FakeBridge, KEY } from './fake-bridge.mjs';
 import { tempStore, post } from './helpers.mjs';
 import { Bridge } from '../bridge-client.mjs';
 import { RouteWindows } from '../route-windows.mjs';
-import { RouteTools, Refusal, formatMessages, formatTopics, formatTopic } from '../route-tools.mjs';
+import { RouteTools, Refusal } from '../route-tools.mjs';
+import { formatMessages, formatTopics, formatTopic } from '../route-print.mjs';
 
 process.env.TZ = 'Asia/Shanghai';
 const BRIDGE_BOT = '7100000000000000001';

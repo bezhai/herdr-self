@@ -3,8 +3,8 @@
 // how the agent I talk to butler through (see cards.mjs AGENT_GROUP) works butler, over ssh: it shows the status, what
 // was collected, a chat's messages, the matters made of it, the daily read's topics, 关于TA and my notes; sets chat
 // levels and has the model grade chats; closes and reopens matters; keeps my notes, my corrections of the daily read
-// and the ignored-sender list; shows what routing my new messages to Bridge's topics would hand over, and what it did; and
-// creates and updates the bot's Feishu app. Every
+// and the ignored-sender list; is the routing agent's tools for handing my new messages to Bridge's topics, previews one
+// routing round and shows what the rounds did; and creates and updates the bot's Feishu app. Every
 // command that reads prints the store's records as JSON with --json, and every one that writes prints what it changed,
 // before and after, in words or with --json as JSON: the agent reads the one and tells me the other.
 import { parseArgs } from 'node:util';
@@ -22,14 +22,15 @@ import {
 import { OpenLark, addBotOnly } from './open-lark.mjs';
 import { Bridge } from './bridge-client.mjs';
 import { NewChats } from './newchat.mjs';
-import { Router } from './route.mjs';
 import { RouteWindows } from './route-windows.mjs';
-import { RouteTools, Refusal, formatMessages, formatTopics, formatTopic, formatNote } from './route-tools.mjs';
+import { RouteTools, Refusal } from './route-tools.mjs';
+import { RouteRounds, ROUTING_COMMANDS, DEFAULTS as ROUTING } from './route-round.mjs';
+import { formatMessages, formatTopics, formatTopic, formatNote, formatLog, formatPreview } from './route-print.mjs';
 import { bytedcliMeego, describeMaterial } from './newchat-material.mjs';
 import { CATEGORIES, LEVELS, LEVEL_NAMES } from './rules.mjs';
 import { Matters } from './matters.mjs';
 import { Processor, DEFAULTS as PROCESSOR, aboutOf } from './processor.mjs';
-import { HerdrModel } from './herdr-model.mjs';
+import { HerdrModel, commandsOnly } from './herdr-model.mjs';
 import { Grader } from './grader.mjs';
 import { Reader, dayOf, startOf, nextDay } from './reading.mjs';
 import { Topics } from './topics.mjs';
@@ -93,8 +94,9 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
                                    写一次「关于TA」，每 3 小时把未结束的事项交给模型整理一遍，在另一条模型通道上
                                    给活跃的聊天分级，每天早上 6 点把前一天每日和即时的聊天读一遍、拆成话题存下；
                                    配置了机器人时也运行机器人：定时汇总、分级的卡片；BUTLER_ROUTING 是 dry-run 或 on 时
-                                   每 5 分钟把新消息转给 Bridge 里进行中的话题（dry-run 只记下会转什么）；--once 只运行一轮
-                                   （处理完积压，到了时间也转交、写「关于TA」、整理事项）就退出，不运行机器人，不分级，不读
+                                   每 10 分钟让分派 Agent 把一段时间里的新消息转给 Bridge 里进行中的话题（dry-run 只记下）；
+                                   --once 只运行一轮（处理完积压，到了时间也写「关于TA」、整理事项）就退出，不运行机器人，
+                                   不分派，不分级，不读
   matters [list] [--all] [--json]  未结束的事项，紧急的在前；--all 连同已结束的
   matters close <编号> [--reason 文字] [--json]
                                    由我关掉一个未结束的事项，和卡片上的「完成」一样记为我关掉的；--reason 是我的理由，
@@ -122,13 +124,13 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
   route note <段号> <话题 id> <消息 id>... --text <摘要> [--json]
                                    分派 Agent 的工具：把这一段里的几条消息写成摘要转给一个话题，消息 id 附在摘要后面；每段
                                    每个话题只转一份。这一段是 BUTLER_ROUTING=on 时分的，就交给 Bridge；干跑和预览时只记下
-  route --dry-run [--since 时间] [--json]
-                                   干跑：现在把新消息转给 Bridge 里进行中的话题会怎么转：从加工端上一轮转到的地方（或 --since）
-                                   起的新消息、进行中的话题、模型给每个话题写的摘要。只运行模型，什么都不发、不写、不记。需要
-                                   BUTLER_BRIDGE_URL、BUTLER_BRIDGE_KEY（也可以只放在这条命令的环境变量里）和 BUTLER_BRIDGE_BOT_ID
-  route log [--since 时间] [--limit 条数] [--json]
-                                   加工端转给各个话题的摘要，新的在前：时间、状态（干跑、等着交、已交给 Bridge、Bridge 没收下）、
-                                   话题、消息和摘要；默认最近 7 天，最多 50 份
+  route [--since 时间] [--until 时间] [--json]
+                                   预览：现在让分派 Agent 分派一段时间里收下的新消息，默认从定时分派下一段开始的地方到 1 分钟
+                                   前；它写的摘要记为预览，什么都不交给 Bridge。需要 BUTLER_BRIDGE_URL、BUTLER_BRIDGE_KEY
+                                   （也可以只放在这条命令的环境变量里）和 BUTLER_BRIDGE_BOT_ID
+  route log [--since 时间] [--limit 段数] [--json]
+                                   分派过的各段，新的在前：定时分派的和预览的分开列，每段的时间、状态、失败次数、每个话题的
+                                   摘要和 Agent 最后说的话；还有分段以前的转交。默认最近 7 天，各最多 20 段
   bot create [--name 名称]          通过飞书的官方流程创建管家机器人的应用，凭证写进配置文件
   bot update                       通过飞书的官方流程给已经配置的应用加上它还没有的权限和回调（卡片上的按钮要用的回调）
 
@@ -457,21 +459,37 @@ function pick(items, query, { key, noun, missing, line } = GROUPS) {
   throw new UsageError(`“${query}”对应多个${noun}，请用完整名称或 id：\n${found.map(line).join('\n')}`);
 }
 
-// A row of route log: when, what became of it, the topic, its messages and the digest.
-const ROUTED = { dry: '干跑', pending: '等着交', given: '已交给 Bridge', dropped: 'Bridge 没收下' };
-function printRouted(r) {
-  console.log(
-    `${time(r.at)}  ${ROUTED[r.status] ?? r.status}  话题「${r.title}」  ${r.messageIds.length} 条消息${r.error ? `  （${r.error}）` : ''}\n  ${r.text.replaceAll('\n', '\n  ')}`,
-  );
+// Routing my new messages to topics (see route-round.mjs): the routing agent's tools, the preview of one round run by
+// hand, and what the windows did.
+const ROUTE_USAGE =
+  '用法：butler route [--since 时间] [--until 时间]、butler route log，或分派 Agent 的工具 butler route messages|topics|topic|note（见 butler --help）';
+const ROUTE_TOOLS = ['messages', 'topics', 'topic', 'note'];
+async function routeCommand(config, store, [action, ...args], values) {
+  if (action === 'log') return routeLog(store, values);
+  if (action === undefined) return routePreview(config, store, values);
+  if (ROUTE_TOOLS.includes(action)) return routeTool(config, store, action, args, values);
+  throw new UsageError(ROUTE_USAGE);
 }
 
-// The routing agent's tools (see route-tools.mjs), which it runs through the butler command on its machine. A refusal is
-// printed as it is, for the agent to act on.
-const ROUTE_TOOLS = ['messages', 'topics', 'topic', 'note'];
-async function routeTool(config, store, [action, ...args], values) {
+// What the route commands work with: the windows in the store, with the bots their listing leaves out, and Bridge.
+function routingOf(config, store) {
   const routing = requireRouting(config);
-  const windows = new RouteWindows(store, { bridgeBotId: routing.botId, ownBotId: routing.ownBotId });
-  const bridge = new Bridge({ url: routing.bridgeUrl, key: routing.bridgeKey });
+  return {
+    windows: new RouteWindows(store, { bridgeBotId: routing.botId, ownBotId: routing.ownBotId }),
+    bridge: new Bridge({ url: routing.bridgeUrl, key: routing.bridgeKey }),
+  };
+}
+
+// The rounds of routing, with a fresh agent allowed only its commands for each window.
+function routeRounds(config, store) {
+  const { windows, bridge } = routingOf(config, store);
+  const agent = herdrModel(config, { tools: commandsOnly(ROUTING_COMMANDS) });
+  return new RouteRounds({ store, windows, bridge, agent, mode: config.routing, log: (line) => console.log(line) });
+}
+
+// The agent runs these through the butler command on its machine. A refusal is printed as it is, for it to act on.
+async function routeTool(config, store, action, args, values) {
+  const { windows, bridge } = routingOf(config, store);
   const tools = new RouteTools({ store, windows, bridge });
   const show = (data, format) => console.log(values.json ? JSON.stringify(data, null, 1) : format(data));
   if (action === 'messages') {
@@ -491,8 +509,28 @@ async function routeTool(config, store, [action, ...args], values) {
   return 0;
 }
 
-// The model as herdr reaches it on the model machine (see herdr-model.mjs).
-const herdrModel = (config) =>
+// By default the stretch the timer would take next.
+async function routePreview(config, store, values) {
+  const rounds = routeRounds(config, store);
+  const since = parseTime(values.since, '--since') ?? rounds.windows.cursor()?.at ?? Date.now() - ROUTING.firstMs;
+  const until = parseTime(values.until, '--until') ?? Date.now() - ROUTING.settleMs;
+  if (until <= since) throw new UsageError('--until 要晚于 --since');
+  const result = await rounds.preview({ since, until });
+  console.log(values.json ? JSON.stringify(result, null, 1) : formatPreview(result));
+  return result.error ? 1 : 0;
+}
+
+function routeLog(store, values) {
+  const log = new RouteWindows(store).log({
+    since: parseTime(values.since, '--since') ?? Date.now() - 7 * 86400e3,
+    limit: limitOf(values.limit, 20),
+  });
+  console.log(values.json ? JSON.stringify(log, null, 1) : formatLog(log));
+  return 0;
+}
+
+// The model as herdr reaches it on the model machine (see herdr-model.mjs); extra: more of its options, such as tools.
+const herdrModel = (config, extra = {}) =>
   new HerdrModel({
     machine: requireModel(config),
     cwd: config.modelCwd,
@@ -500,6 +538,7 @@ const herdrModel = (config) =>
     effort: config.modelEffort,
     command: [config.herdr],
     log: (m) => console.error(m),
+    ...extra,
   });
 
 const URGENCY = { high: '紧急', normal: '一般', low: '不急' };
@@ -534,7 +573,6 @@ async function main(argv) {
       search: { type: 'string' },
       picked: { type: 'boolean' },
       'not-picked': { type: 'boolean' },
-      'dry-run': { type: 'boolean' },
       page: { type: 'string' },
       text: { type: 'string' },
       name: { type: 'string' },
@@ -875,65 +913,8 @@ async function main(argv) {
         );
         return 0;
       }
-      // Routing my new messages to topics: what a round would hand over now (the dry run, which keeps nothing), and what the
-      // processor's rounds did.
-      case 'route': {
-        if (ROUTE_TOOLS.includes(rest[0])) return await routeTool(config, store, rest, values);
-        const [action] = rest,
-          usage =
-            '用法：butler route --dry-run [--since 时间] [--json]，或 butler route log [--since 时间] [--limit 条数] [--json]';
-        if (action === 'log') {
-          const list = new Router({ store, matters }).log({
-            since: parseTime(values.since, '--since') ?? Date.now() - 7 * 86400e3,
-            limit: limitOf(values.limit, 50),
-          });
-          if (values.json) {
-            json(list);
-            return 0;
-          }
-          if (!list.length) console.log('这段时间没有转交过（加工端的 BUTLER_ROUTING 是 dry-run 或 on 时才转）');
-          for (const r of list) printRouted(r);
-          return 0;
-        }
-        if (action !== undefined || !values['dry-run']) throw new UsageError(usage);
-        const need = requireRouting(config);
-        const router = new Router({
-          store,
-          matters,
-          lark: openLark(),
-          bridge: new Bridge({ url: need.bridgeUrl, key: need.bridgeKey }),
-          model: herdrModel(config),
-          botId: need.botId,
-          ownBotId: need.ownBotId,
-          mode: 'dry-run',
-        });
-        const p = await router.preview({ since: parseTime(values.since, '--since') });
-        const routed = new Set(p.digests.flatMap((d) => d.messageIds)),
-          unrouted = p.messages.filter((m) => !routed.has(m.id)).length;
-        if (values.json) {
-          json({
-            from: p.from,
-            until: p.until,
-            messages: p.messages.length,
-            unrouted,
-            topics: p.topics,
-            digests: p.digests,
-            problems: p.problems,
-            runs: p.runs,
-            ...(p.error && { error: p.error }),
-          });
-          return p.error ? 1 : 0;
-        }
-        console.log(
-          `${time(p.from)} 到 ${time(p.until)}：${p.messages.length} 条新消息，${p.topics.length} 个进行中的话题${p.topics.length ? `（${p.topics.map((t) => `「${t.title}」`).join('、')}）` : ''}，模型运行 ${p.runs} 次`,
-        );
-        for (const d of p.digests) console.log(`\n== 话题「${d.title}」：${d.messageIds.length} 条消息 ==\n${d.text}`);
-        console.log(`\n没有转给任何话题的消息：${unrouted} 条`);
-        for (const problem of p.problems) console.log(`没有采纳：${problem}`);
-        if (p.error) console.log(`没有做完：${p.error}`);
-        console.log('干跑：什么都没有发，也没有记下');
-        return p.error ? 1 : 0;
-      }
+      case 'route':
+        return await routeCommand(config, store, rest, values);
       case 'groups': {
         await refreshGroups(store, openLark());
         const levels = new Map(store.levels().map((l) => [l.feedId, l])),
@@ -1106,8 +1087,9 @@ async function main(argv) {
 }
 
 // The processor, as a service or (once) for one round: the backlog, and 关于TA and the review of the open matters when
-// they are due, as a round of the service would. As a service it also grades the chats and reads the day before, each
-// on a timer of its own, and runs the bot, when one is configured: digests and the level cards.
+// they are due, as a round of the service would. As a service it also grades the chats, reads the day before and routes
+// my new messages to Bridge's topics, each on a timer of its own, and runs the bot, when one is configured: digests and
+// the level cards.
 async function processCommand(config, once) {
   const model = herdrModel(config),
     store = new Store(storeFile(config), { linkBase: config.linkBase, log: (m) => console.error(m) }),
@@ -1136,20 +1118,9 @@ async function processCommand(config, once) {
       botId: setup.botId,
       meego: bytedcliMeego(config.bytedcli),
     });
-  // Routing my new messages to Bridge's topics, when BUTLER_ROUTING is dry-run or on (see config.mjs routingSetup); it needs no bot.
-  const routing = routingSetup(config);
-  const router =
-    routing &&
-    new Router({
-      store,
-      matters,
-      lark: new OpenLark({ url: config.openLarkUrl, token: requireToken(config), gapMs: 0 }),
-      bridge: new Bridge({ url: routing.bridgeUrl, key: routing.bridgeKey }),
-      model,
-      botId: routing.botId,
-      ownBotId: routing.ownBotId,
-      mode: routing.mode,
-    });
+  // Routing my new messages to Bridge's topics runs on its own timer, as a service only, when BUTLER_ROUTING is dry-run or
+  // on (see config.mjs routingSetup); it needs no bot.
+  const rounds = !once && routingSetup(config) ? routeRounds(config, store) : undefined;
   const options = {
     ...(config.reviewEveryMs && { reviewEveryMs: config.reviewEveryMs }),
     ...(config.profileEveryMs && { profileEveryMs: config.profileEveryMs }),
@@ -1166,7 +1137,6 @@ async function processCommand(config, once) {
     onMattersChanged: () => digests?.refresh(),
     onProfile: (p) => levels?.inferred(p),
     newChats,
-    router,
   });
   if (once) {
     try {
@@ -1184,7 +1154,7 @@ async function processCommand(config, once) {
       console.log(
         `加工完成：模型运行 ${r.runs} 次，失败 ${r.failures} 次；${profiled}${reviewed}待加工 ${matters.pendingCount()} 条，未结束的事项 ${matters.list().length} 个`,
       );
-      return r.failures || p?.error || v?.error || r.route?.error ? 1 : 0;
+      return r.failures || p?.error || v?.error ? 1 : 0;
     } finally {
       store.close();
     }
@@ -1212,6 +1182,7 @@ async function processCommand(config, once) {
         digests?.stop(),
         levels?.stop(),
         newChats?.settled(),
+        rounds?.stop(),
       ]),
       new Promise((r) => setTimeout(r, 20_000)),
     ]);
@@ -1226,6 +1197,7 @@ async function processCommand(config, once) {
   await processor.start();
   grader.start();
   reader.start();
+  rounds?.start();
   if (bot) {
     console.log(`管家机器人（${config.bot.appId}）正在连接飞书`);
     bot.start().catch((e) => store.addError('机器人', `机器人停了：${e?.message ?? e}`));

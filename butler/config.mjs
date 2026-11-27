@@ -41,8 +41,8 @@ function bot(v, file) {
   if (!['feishu', 'lark'].includes(domain)) throw Error(`BUTLER_BOT_DOMAIN 只能是 feishu 或 lark：${domain}`);
   return { appId: v.BUTLER_BOT_APP_ID, appSecret: v.BUTLER_BOT_APP_SECRET, owner: v.BUTLER_BOT_OWNER, domain };
 }
-// Whether butler hands my new messages to Bridge's topics (see route.mjs): off, dry-run (decides and keeps what it would hand
-// over, sends nothing) or on.
+// Whether butler hands my new messages to Bridge's topics (see route-round.mjs): off, dry-run (the routing agent decides and
+// butler keeps its notes, sends nothing) or on.
 const ROUTING = ['off', 'dry-run', 'on'];
 function routing(value) {
   if (value && !ROUTING.includes(value)) throw Error(`BUTLER_ROUTING 只能是 off、dry-run 或 on：${value}`);
