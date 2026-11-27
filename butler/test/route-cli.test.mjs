@@ -4,10 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { setup, post } from './helpers.mjs';
+import { setup, tempStore, post } from './helpers.mjs';
 import { FakeBridge, KEY } from './fake-bridge.mjs';
 import { loadConfig, routingSetup } from '../config.mjs';
+import { RouteWindows } from '../route-windows.mjs';
 
+process.env.TZ = 'Asia/Shanghai';
 const CLI = fileURLToPath(new URL('../cli.mjs', import.meta.url));
 const BOT = '7100000000000000001',
   OC1 = `oc_${'1'.repeat(32)}`;
@@ -173,4 +175,93 @@ test("config: BUTLER_ROUTING is off, dry-run or on, off by default; routing need
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+const TOOL_TOPIC = {
+  id: 'a1b2c3d4-0000-4000-8000-000000000001',
+  title: '火山发文平台映射',
+  goal: '改火山发文的接口',
+  chatId: 'oc_1',
+  chatName: '火山发文 - [需求同步群]',
+  createdAt: Date.parse('2026-11-26T15:00:00+08:00'),
+  adopted: false,
+  pending: 0,
+  exchanges: [{ from: 'owner', at: Date.parse('2026-11-27T09:00:00+08:00'), text: '把接口改好' }],
+  sources: [],
+  drafts: [],
+};
+
+// A store with one message in window 1 (the 10 minutes before a minute ago, dry-run), a fake Bridge with TOPIC live, and
+// a config that names both.
+async function toolWorld(t) {
+  const { store, dir } = tempStore(t);
+  const bridge = await new FakeBridge().listen();
+  t.after(() => bridge.close());
+  bridge.topics = [structuredClone(TOOL_TOPIC)];
+  const now = Date.now();
+  const id = post(store, { name: '金垠廷', text: '接口文档更新了', at: now - 5 * 60e3, seen: now - 5 * 60e3 });
+  const windows = new RouteWindows(store, { bridgeBotId: BOT });
+  windows.create({ from: { at: now - 11 * 60e3, id: null }, until: now - 60e3, mode: 'dry-run' });
+  const config = path.join(dir, 'butler.env');
+  fs.writeFileSync(
+    config,
+    `BUTLER_OPEN_LARK_TOKEN=r\nBUTLER_DATA_DIR=${dir}\nBUTLER_BRIDGE_URL=${bridge.url}\nBUTLER_BRIDGE_KEY=${KEY}\nBUTLER_BRIDGE_BOT_ID=${BOT}\nBUTLER_ROUTING=dry-run\n`,
+    { mode: 0o600 },
+  );
+  return { store, dir, bridge, windows, id, config };
+}
+
+test("help lists the routing agent's tools", async (t) => {
+  const w = await toolWorld(t);
+  const r = await run(w.config, {}, '--help');
+  for (const usage of [
+    'route messages <段号> [--page 页码] [--json]',
+    'route topics [--json]',
+    'route topic <话题 id> [--json]',
+    'route note <段号> <话题 id> <消息 id>... --text <摘要> [--json]',
+  ])
+    assert.ok(r.stdout.includes(usage), `help shows: ${usage}`);
+});
+
+test("the routing agent's tools through the command line: the window's messages, the topics, one topic and a note, each refusal on stderr with exit code 1", async (t) => {
+  const w = await toolWorld(t);
+  let r = await run(w.config, {}, 'route', 'messages', '1');
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /^第 1 段（.* 收下的消息）：新消息 1 条，第 1\/1 页/);
+  assert.match(
+    r.stdout,
+    new RegExp(`== 项目群 · 群 · feedId g1 ==\n${w.id}  \\d\\d-\\d\\d \\d\\d:\\d\\d  金垠廷：接口文档更新了`),
+  );
+  r = await run(w.config, {}, 'route', 'messages', '1', '--json');
+  assert.deepEqual(
+    JSON.parse(r.stdout).messages.map((m) => [m.id, m.sender, m.text]),
+    [[w.id, '金垠廷', '接口文档更新了']],
+  );
+  r = await run(w.config, {}, 'route', 'topics');
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /a1b2c3d4  火山发文平台映射\n  群：火山发文 - \[需求同步群\]/);
+  r = await run(w.config, {}, 'route', 'topic', 'a1b2');
+  assert.equal(r.code, 0, r.stderr);
+  assert.match(r.stdout, /== 最近的对话，从早到晚 ==\n11-27 09:00 主人：把接口改好/);
+  r = await run(w.config, {}, 'route', 'note', '1', 'a1b2', w.id, '--text', '金垠廷更新了接口文档\n下午评审');
+  assert.equal(r.code, 0, r.stderr);
+  assert.equal(
+    r.stdout.trim(),
+    '已记下转给话题 a1b2c3d4「火山发文平台映射」的摘要（1 条消息）；现在是干跑，不交给 Bridge',
+  );
+  assert.deepEqual(
+    w.windows.notesOf(1).map((n) => [n.topicId, n.status, n.text]),
+    [[TOOL_TOPIC.id, 'dry', `金垠廷更新了接口文档\n下午评审\n涉及的消息：${w.id}`]],
+  );
+  assert.deepEqual(w.bridge.digests(), []);
+  r = await run(w.config, {}, 'route', 'note', '1', 'a1b2', w.id, '--text', '再一份');
+  assert.equal(r.code, 1);
+  assert.equal(r.stderr.trim(), '第 1 段已经给话题 a1b2c3d4 转过一份了，每段时间每个话题只转一份');
+  r = await run(w.config, {}, 'route', 'note', '1', 'a1b2', w.id);
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /要用 --text 写摘要/);
+  r = await run(w.config, {}, 'route', 'messages', 'x');
+  assert.equal(r.code, 1);
+  assert.match(r.stderr, /段号要写编号/);
+  assert.doesNotMatch(r.stdout + r.stderr, new RegExp(KEY), 'the key is never printed');
 });

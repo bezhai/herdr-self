@@ -97,3 +97,20 @@ test('topicContext reads the live topics; giveDigest hands one a digest and retu
   );
   assert.equal(bridge.requests.at(-1).authorization, `Bearer ${KEY}`);
 });
+
+test('topic reads one live topic with its longer conversation; an unknown or ended topic is an error with its code', async (t) => {
+  const bridge = await start(t),
+    b = client(bridge);
+  bridge.topics = [{ id: 'T 1', title: '火山发文', chatId: 'oc_1' }];
+  bridge.ended = ['T2'];
+  assert.deepEqual(await b.topic('T 1'), { id: 'T 1', title: '火山发文', chatId: 'oc_1' });
+  assert.equal(bridge.requests.at(-1).query, 'topicId=T%201');
+  await assert.rejects(
+    () => b.topic('T2'),
+    (e) => e.status === 409 && e.code === 'topic_not_live',
+  );
+  await assert.rejects(
+    () => b.topic('gone'),
+    (e) => e.status === 404 && e.code === 'unknown_topic',
+  );
+});

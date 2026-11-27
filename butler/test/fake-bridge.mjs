@@ -1,9 +1,10 @@
-// A stand-in for Bridge's control plane as butler uses it: GET /api/state, POST /api/topics/open, GET /api/topics/context and
-// POST /api/topics/digest, all with the bearer access key (anything else is 401), as bridge/README.md documents them. The test
-// sets what /api/state lists (state), what opening a topic answers (script: one answer per request, {status, body}, in order;
-// none left: the success answer), the ready topics of the context (topics) and what a digest answers (digestScript, the same
-// way), and reads every request in `requests`. A repeated key returns the first result with created: false, as the real one
-// does; a digest for a topic that is not in topics is 404 unknown_topic.
+// A stand-in for Bridge's control plane as butler uses it: GET /api/state, POST /api/topics/open, GET /api/topics/context
+// (all live topics, or one with ?topicId=) and POST /api/topics/digest, all with the bearer access key (anything else is
+// 401), as bridge/README.md documents them. The test sets what /api/state lists (state), what opening a topic answers
+// (script: one answer per request, {status, body}, in order; none left: the success answer), the live topics (topics), the
+// ids of topics that ended (ended), and what a digest answers (digestScript, the same way), and reads every request in
+// `requests`. A repeated key returns the first result with created: false, as the real one does; a topic that is neither
+// live nor ended is 404 unknown_topic, an ended one 409 topic_not_live.
 import http from 'node:http';
 
 export const KEY = 'bridge-key';
@@ -17,6 +18,7 @@ export class FakeBridge {
     this.topics = [];
     this.digestScript = [];
     this.digestKeys = new Set();
+    this.ended = [];
     this.server = http.createServer((req, res) => this.#handle(req, res));
   }
   async listen() {
@@ -39,20 +41,32 @@ export class FakeBridge {
   async #handle(req, res) {
     let raw = '';
     for await (const chunk of req) raw += chunk;
-    const body = raw ? JSON.parse(raw) : undefined,
-      path = new URL(req.url, 'http://fake').pathname;
-    this.requests.push({ method: req.method, path, body, authorization: req.headers.authorization });
+    const url = new URL(req.url, 'http://fake');
+    const body = raw ? JSON.parse(raw) : undefined;
+    const path = url.pathname;
+    const query = url.search.slice(1);
+    this.requests.push({ method: req.method, path, query, body, authorization: req.headers.authorization });
     const send = (status, data) => {
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(data));
     };
     if (req.headers.authorization !== `Bearer ${KEY}`) return send(401, { error: '未授权' });
     if (path === '/api/state' && req.method === 'GET') return send(200, this.state);
-    if (path === '/api/topics/context' && req.method === 'GET') return send(200, { topics: this.topics });
+    if (path === '/api/topics/context' && req.method === 'GET') {
+      const topicId = url.searchParams.get('topicId');
+      if (topicId === null) return send(200, { topics: this.topics });
+      const topic = this.topics.find((x) => x.id === topicId);
+      if (topic) return send(200, { topic });
+      if (this.ended.includes(topicId))
+        return send(409, { error: '话题当前没有运行中的 Agent 会话', code: 'topic_not_live' });
+      return send(404, { error: '话题不存在', code: 'unknown_topic' });
+    }
     if (path === '/api/topics/digest' && req.method === 'POST') {
       const scripted = this.digestScript.shift();
       if (scripted) return send(scripted.status, scripted.body);
       const t = this.topics.find((x) => x.id === body.topicId);
+      if (!t && this.ended.includes(body.topicId))
+        return send(409, { error: '话题当前没有运行中的 Agent 会话', code: 'topic_not_live' });
       if (!t) return send(404, { error: '话题不存在', code: 'unknown_topic' });
       const id = `${body.topicId} ${body.key}`,
         created = !this.digestKeys.has(id);

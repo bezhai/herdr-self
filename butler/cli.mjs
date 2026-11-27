@@ -23,6 +23,8 @@ import { OpenLark, addBotOnly } from './open-lark.mjs';
 import { Bridge } from './bridge-client.mjs';
 import { NewChats } from './newchat.mjs';
 import { Router } from './route.mjs';
+import { RouteWindows } from './route-windows.mjs';
+import { RouteTools, Refusal, formatMessages, formatTopics, formatTopic, formatNote } from './route-tools.mjs';
 import { bytedcliMeego, describeMaterial } from './newchat-material.mjs';
 import { CATEGORIES, LEVELS, LEVEL_NAMES } from './rules.mjs';
 import { Matters } from './matters.mjs';
@@ -112,6 +114,14 @@ before 和 after（没有时是 null）。时间写 ISO 时间（只写日期时
                                    什么都不发、不写、不记。需要 Bridge 的地址和密钥（配置里的 BUTLER_BRIDGE_URL 和
                                    BUTLER_BRIDGE_KEY，也可以只放在这条命令的环境变量里）。加工端自己会判断没见过的群，
                                    配置了机器人和「新需求群」的四项配置时才运行
+  route messages <段号> [--page 页码] [--json]
+                                   分派 Agent 的工具：这一段时间里收下的新消息，按聊天分组，每页 50 条；不列 Bridge 的机器人
+                                   和管家机器人发的、我在 Bridge 话题 thread 里发的、发出一天以后才收下的
+  route topics [--json]            分派 Agent 的工具：Bridge 里进行中的话题，带短 id
+  route topic <话题 id> [--json]    分派 Agent 的工具：一个话题最近的对话、来源、草稿和管家最近转给它的；话题 id 写前几位即可
+  route note <段号> <话题 id> <消息 id>... --text <摘要> [--json]
+                                   分派 Agent 的工具：把这一段里的几条消息写成摘要转给一个话题，消息 id 附在摘要后面；每段
+                                   每个话题只转一份。这一段是 BUTLER_ROUTING=on 时分的，就交给 Bridge；干跑和预览时只记下
   route --dry-run [--since 时间] [--json]
                                    干跑：现在把新消息转给 Bridge 里进行中的话题会怎么转：从加工端上一轮转到的地方（或 --since）
                                    起的新消息、进行中的话题、模型给每个话题写的摘要。只运行模型，什么都不发、不写、不记。需要
@@ -455,6 +465,32 @@ function printRouted(r) {
   );
 }
 
+// The routing agent's tools (see route-tools.mjs), which it runs through the butler command on its machine. A refusal is
+// printed as it is, for the agent to act on.
+const ROUTE_TOOLS = ['messages', 'topics', 'topic', 'note'];
+async function routeTool(config, store, [action, ...args], values) {
+  const routing = requireRouting(config);
+  const windows = new RouteWindows(store, { bridgeBotId: routing.botId, ownBotId: routing.ownBotId });
+  const bridge = new Bridge({ url: routing.bridgeUrl, key: routing.bridgeKey });
+  const tools = new RouteTools({ store, windows, bridge });
+  const show = (data, format) => console.log(values.json ? JSON.stringify(data, null, 1) : format(data));
+  if (action === 'messages') {
+    const page = values.page === undefined ? 1 : number(values.page, '--page 的页码');
+    show(tools.messages(number(args[0], 'route messages 的段号'), page), formatMessages);
+  } else if (action === 'topics') {
+    show(await tools.topics(), formatTopics);
+  } else if (action === 'topic') {
+    show(await tools.topic(args[0]), formatTopic);
+  } else {
+    const [windowId, topic, ...messageIds] = args;
+    if (values.text === undefined)
+      throw new UsageError('要用 --text 写摘要：route note <段号> <话题 id> <消息 id>... --text <摘要>');
+    const note = { windowId: number(windowId, 'route note 的段号'), topic, messageIds, text: values.text };
+    show(await tools.note(note), formatNote);
+  }
+  return 0;
+}
+
 // The model as herdr reaches it on the model machine (see herdr-model.mjs).
 const herdrModel = (config) =>
   new HerdrModel({
@@ -499,6 +535,8 @@ async function main(argv) {
       picked: { type: 'boolean' },
       'not-picked': { type: 'boolean' },
       'dry-run': { type: 'boolean' },
+      page: { type: 'string' },
+      text: { type: 'string' },
       name: { type: 'string' },
       reason: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
@@ -840,6 +878,7 @@ async function main(argv) {
       // Routing my new messages to topics: what a round would hand over now (the dry run, which keeps nothing), and what the
       // processor's rounds did.
       case 'route': {
+        if (ROUTE_TOOLS.includes(rest[0])) return await routeTool(config, store, rest, values);
         const [action] = rest,
           usage =
             '用法：butler route --dry-run [--since 时间] [--json]，或 butler route log [--since 时间] [--limit 条数] [--json]';
@@ -1259,7 +1298,9 @@ main(process.argv.slice(2)).then(
   },
   (e) => {
     console.error(
-      e instanceof UsageError || e?.message?.startsWith('配置文件') ? e.message : `butler：${e?.message ?? e}`,
+      e instanceof UsageError || e instanceof Refusal || e?.message?.startsWith('配置文件')
+        ? e.message
+        : `butler：${e?.message ?? e}`,
     );
     process.exitCode = 1;
   },

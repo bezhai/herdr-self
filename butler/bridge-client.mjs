@@ -1,7 +1,7 @@
 // Client of Bridge's control plane, with its access key: the lists a new group's judgment chooses from (GET /api/state), the
 // call that starts the work (POST /api/topics/open), and for routing my new messages, the live topics with what they work on
-// (GET /api/topics/context) and the call that hands one a digest (POST /api/topics/digest); see bridge/README.md. butler asks
-// Bridge for nothing else.
+// (GET /api/topics/context, one of them with ?topicId=) and the call that hands one a digest (POST /api/topics/digest); see
+// bridge/README.md. butler asks Bridge for nothing else.
 
 // The error code with which Bridge refuses to open a topic because its bot cannot post in the chat yet: the bot was just
 // added to the group, and Feishu takes a moment to let it speak. Every other refusal (invalid input, unknown project or agent
@@ -57,6 +57,11 @@ export class Bridge {
   // The live topics, each with its title, goal, chat and what it did lately (exchanges, sources, drafts).
   async topicContext() {
     return (await this.#request('GET', '/api/topics/context'))?.topics ?? [];
+  }
+  // One live topic with a longer stretch of its conversation than the list shows.
+  async topic(topicId) {
+    const answer = await this.#request('GET', `/api/topics/context?topicId=${encodeURIComponent(topicId)}`);
+    return answer.topic;
   }
   // Hands topic topicId a digest (fields: topicId, key, text), which Bridge gives its agent once the agent is free; resolves with
   // {topicId, key, created, pending}. The key makes asking again safe: Bridge takes a digest once.
