@@ -1,622 +1,1321 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {tempStore,post,waitFor,LINK_BASE} from './helpers.mjs';
-import {Matters,NOT_MINE} from '../matters.mjs';
-import {Processor} from '../processor.mjs';
+import { tempStore, post, waitFor, LINK_BASE } from './helpers.mjs';
+import { Matters, NOT_MINE } from '../matters.mjs';
+import { Processor } from '../processor.mjs';
 
-const T0=Date.parse('2026-10-23T09:00:00+08:00'),min=n=>T0+n*60e3;
+const T0 = Date.parse('2026-10-23T09:00:00+08:00'),
+  min = (n) => T0 + n * 60e3;
 // A fake model: answer(data, call) returns the reply object for one prompt; every prompt it saw is kept.
-function fakeModel(answer){
- const model={calls:[],busy:0,overlapped:false,
-  async ask({system,prompt}){
-   if(model.busy++)model.overlapped=true;
-   try{const data=JSON.parse(prompt.slice(prompt.indexOf('{')));model.calls.push({system,prompt,data});await new Promise(r=>setTimeout(r,5));
-    const out=await answer(data,model.calls.length);return typeof out==='string'?out:JSON.stringify(out);}
-   finally{model.busy-=1;}
-  }};
- return model;
+function fakeModel(answer) {
+  const model = {
+    calls: [],
+    busy: 0,
+    overlapped: false,
+    async ask({ system, prompt }) {
+      if (model.busy++) model.overlapped = true;
+      try {
+        const data = JSON.parse(prompt.slice(prompt.indexOf('{')));
+        model.calls.push({ system, prompt, data });
+        await new Promise((r) => setTimeout(r, 5));
+        const out = await answer(data, model.calls.length);
+        return typeof out === 'string' ? out : JSON.stringify(out);
+      } finally {
+        model.busy -= 1;
+      }
+    },
+  };
+  return model;
 }
-const messagesOf=data=>data.chats.flatMap(c=>c.messages);
-const ref=(data,text)=>{const m=messagesOf(data).find(m=>m.text.includes(text));assert.ok(m,`message in prompt: ${text}`);return m.ref;};
-const none={new:[],updates:[]};
+const messagesOf = (data) => data.chats.flatMap((c) => c.messages);
+const ref = (data, text) => {
+  const m = messagesOf(data).find((m) => m.text.includes(text));
+  assert.ok(m, `message in prompt: ${text}`);
+  return m.ref;
+};
+const none = { new: [], updates: [] };
 // now: the processor's clock. profiled: 关于TA has just been written (with no note), and reviewed: a review of the open
 // matters has just been done (by that profile, if there is one), so a round runs only its batches (a store without a
 // profile writes one in its first round, and one without a review reviews).
-const PROFILE='角色：GEO 服务的后端';
+const PROFILE = '角色：GEO 服务的后端';
 // changes: how often the processor said the matters changed (onMattersChanged); profiles: what it said of each 关于TA
 // it wrote (onProfile), unless onProfile is given. router: what hands new messages to Bridge's topics (see route.mjs), none by default.
-function setup(t,{answer,options,now,profiled=true,reviewed=true,onProfile,router}={}){
- const {store}=tempStore(t),matters=new Matters(store),model=fakeModel(answer??(()=>none)),changes=[],profiles=[];
- const processor=new Processor({store,matters,model,options:{maxMessages:40,...options},...now&&{now},onMattersChanged:()=>changes.push(model.calls.length),
-  onProfile:onProfile??(p=>profiles.push(p)),router});
- const t0=(now??Date.now)();
- if(profiled)store.setMeta('profile',{text:PROFILE,at:t0,notes:[],messages:1});
- if(reviewed)store.setMeta('review',{at:t0,reviewed:0,closed:0,...profiled&&{profileAt:t0},notes:[]});
- return {store,matters,model,processor,t0,changes,profiles};
+function setup(t, { answer, options, now, profiled = true, reviewed = true, onProfile, router } = {}) {
+  const { store } = tempStore(t),
+    matters = new Matters(store),
+    model = fakeModel(answer ?? (() => none)),
+    changes = [],
+    profiles = [];
+  const processor = new Processor({
+    store,
+    matters,
+    model,
+    options: { maxMessages: 40, ...options },
+    ...(now && { now }),
+    onMattersChanged: () => changes.push(model.calls.length),
+    onProfile: onProfile ?? ((p) => profiles.push(p)),
+    router,
+  });
+  const t0 = (now ?? Date.now)();
+  if (profiled) store.setMeta('profile', { text: PROFILE, at: t0, notes: [], messages: 1 });
+  if (reviewed)
+    store.setMeta('review', { at: t0, reviewed: 0, closed: 0, ...(profiled && { profileAt: t0 }), notes: [] });
+  return { store, matters, model, processor, t0, changes, profiles };
 }
 
-test('new messages become matters: the model decides, butler keeps the sources and makes the links',async t=>{
- const {store,matters,model,processor}=setup(t,{answer:d=>({new:[{title:'评审接口方案',who:'陈帆',ask:'看一下接口方案并给意见',due:'2026-10-24 18:00',urgency:'high',
-  messages:[ref(d,'帮忙看下'),ref(d,'文档在这')]}],updates:[]})});
- const ask=post(store,{text:'@原智鸿 帮忙看下接口方案，明天下班前要',at:min(1),categories:['mention','instant']});
- const doc=post(store,{text:'文档在这',at:min(2)});
- post(store,{chat:'g2',name:'李四',text:'中午吃啥',at:min(3)});
- const before=JSON.stringify(store.list({limit:100}));
- const r=await processor.runOnce();
- assert.equal(r.runs,1);assert.equal(model.calls.length,1);
- const [m]=matters.list();
- assert.deepEqual({title:m.title,who:m.who,ask:m.ask,due:m.due,urgency:m.urgency,status:m.status},
-  {title:'评审接口方案',who:'陈帆',ask:'看一下接口方案并给意见',due:'2026-10-24 18:00',urgency:'high',status:'open'});
- assert.deepEqual(m.messageIds,[ask,doc]);assert.deepEqual(m.chats,['项目群']);
- assert.equal(m.since,min(1),'a matter dates from its earliest message, not from when butler made it');assert.ok(m.openedAt>min(3));
- assert.equal(m.link,store.message(ask).link);assert.ok(m.link.startsWith(`${LINK_BASE}/messenger/g1?message=${ask}`));
- assert.equal(matters.pendingCount(),0,'every message of the batch was processed, the ones that are no matter too');
- assert.equal(JSON.stringify(store.list({limit:100})),before,'the collector\'s messages are only read');
- assert.equal((await processor.runOnce()).runs,0,'nothing new, no model run');
+test('new messages become matters: the model decides, butler keeps the sources and makes the links', async (t) => {
+  const { store, matters, model, processor } = setup(t, {
+    answer: (d) => ({
+      new: [
+        {
+          title: '评审接口方案',
+          who: '陈帆',
+          ask: '看一下接口方案并给意见',
+          due: '2026-10-24 18:00',
+          urgency: 'high',
+          messages: [ref(d, '帮忙看下'), ref(d, '文档在这')],
+        },
+      ],
+      updates: [],
+    }),
+  });
+  const ask = post(store, {
+    text: '@原智鸿 帮忙看下接口方案，明天下班前要',
+    at: min(1),
+    categories: ['mention', 'instant'],
+  });
+  const doc = post(store, { text: '文档在这', at: min(2) });
+  post(store, { chat: 'g2', name: '李四', text: '中午吃啥', at: min(3) });
+  const before = JSON.stringify(store.list({ limit: 100 }));
+  const r = await processor.runOnce();
+  assert.equal(r.runs, 1);
+  assert.equal(model.calls.length, 1);
+  const [m] = matters.list();
+  assert.deepEqual(
+    { title: m.title, who: m.who, ask: m.ask, due: m.due, urgency: m.urgency, status: m.status },
+    {
+      title: '评审接口方案',
+      who: '陈帆',
+      ask: '看一下接口方案并给意见',
+      due: '2026-10-24 18:00',
+      urgency: 'high',
+      status: 'open',
+    },
+  );
+  assert.deepEqual(m.messageIds, [ask, doc]);
+  assert.deepEqual(m.chats, ['项目群']);
+  assert.equal(m.since, min(1), 'a matter dates from its earliest message, not from when butler made it');
+  assert.ok(m.openedAt > min(3));
+  assert.equal(m.link, store.message(ask).link);
+  assert.ok(m.link.startsWith(`${LINK_BASE}/messenger/g1?message=${ask}`));
+  assert.equal(matters.pendingCount(), 0, 'every message of the batch was processed, the ones that are no matter too');
+  assert.equal(JSON.stringify(store.list({ limit: 100 })), before, "the collector's messages are only read");
+  assert.equal((await processor.runOnce()).runs, 0, 'nothing new, no model run');
 });
 
-test('a follow-up goes to the open matter it belongs to, which the model sees with its earlier messages',async t=>{
- const {store,matters,model,processor}=setup(t,{answer:(d,n)=>n===1
-  ?{new:[{title:'评审方案',who:'陈帆',ask:'看方案',due:null,urgency:'normal',messages:[ref(d,'看下方案')]}],updates:[]}
-  :{new:[],updates:[{matter:d.openMatters[0].matter,messages:[ref(d,'方案更新了')],due:'今天 18:00',status:'open'}]}});
- const first=post(store,{text:'@原智鸿 看下方案',at:min(1)});
- await processor.runOnce();
- const follow=post(store,{text:'方案更新了，按新的看，今天 18:00 前',at:min(30)});
- await processor.runOnce();
- const d=model.calls[1].data;
- assert.equal(d.openMatters.length,1);assert.equal(d.openMatters[0].title,'评审方案');
- const earlier=messagesOf(d).find(m=>m.text.includes('看下方案'));
- assert.ok(earlier&&!earlier.new,'the earlier message comes along as context');assert.deepEqual(d.openMatters[0].messages,[earlier.ref]);
- const [m]=matters.list();
- assert.deepEqual(m.messageIds,[first,follow]);assert.equal(m.due,'今天 18:00');assert.equal(m.status,'open');
- assert.equal(matters.list({all:true}).length,1,'no second matter');
+test('a follow-up goes to the open matter it belongs to, which the model sees with its earlier messages', async (t) => {
+  const { store, matters, model, processor } = setup(t, {
+    answer: (d, n) =>
+      n === 1
+        ? {
+            new: [
+              {
+                title: '评审方案',
+                who: '陈帆',
+                ask: '看方案',
+                due: null,
+                urgency: 'normal',
+                messages: [ref(d, '看下方案')],
+              },
+            ],
+            updates: [],
+          }
+        : {
+            new: [],
+            updates: [
+              { matter: d.openMatters[0].matter, messages: [ref(d, '方案更新了')], due: '今天 18:00', status: 'open' },
+            ],
+          },
+  });
+  const first = post(store, { text: '@原智鸿 看下方案', at: min(1) });
+  await processor.runOnce();
+  const follow = post(store, { text: '方案更新了，按新的看，今天 18:00 前', at: min(30) });
+  await processor.runOnce();
+  const d = model.calls[1].data;
+  assert.equal(d.openMatters.length, 1);
+  assert.equal(d.openMatters[0].title, '评审方案');
+  const earlier = messagesOf(d).find((m) => m.text.includes('看下方案'));
+  assert.ok(earlier && !earlier.new, 'the earlier message comes along as context');
+  assert.deepEqual(d.openMatters[0].messages, [earlier.ref]);
+  const [m] = matters.list();
+  assert.deepEqual(m.messageIds, [first, follow]);
+  assert.equal(m.due, '今天 18:00');
+  assert.equal(m.status, 'open');
+  assert.equal(matters.list({ all: true }).length, 1, 'no second matter');
 });
 
-test('a matter ends when the model says so, with its reason; my own messages are context and never a matter',async t=>{
- const {store,matters,model,processor}=setup(t,{answer:(d,n)=>n===1
-  ?{new:[{title:'确认上线时间',who:'陈帆',ask:'确认周五能否上线',due:'周五',urgency:'normal',messages:[ref(d,'周五能上线吗')]}],updates:[]}
-  :{new:[{title:'我自己说的',who:'我',ask:'x',urgency:'low',messages:[ref(d,'可以，周五上')]}],
-    updates:[{matter:d.openMatters[0].matter,messages:[ref(d,'可以，周五上')],status:'closed',reason:'我已回复周五可以上线'}]}});
- post(store,{text:'@原智鸿 周五能上线吗',at:min(1)});
- await processor.runOnce();
- const reply=post(store,{mine:true,text:'可以，周五上',at:min(5)});
- await processor.runOnce();
- const mine=messagesOf(model.calls[1].data).find(m=>m.text.includes('可以，周五上'));
- assert.equal(mine.mine,true);assert.equal(mine.new,true);assert.match(model.calls[1].system,/上下文/);
- const all=matters.list({all:true});
- assert.equal(all.length,1,'a matter made only of my messages is refused');
- assert.equal(all[0].status,'closed');assert.equal(all[0].reason,'我已回复周五可以上线');assert.ok(all[0].closedAt);
- assert.ok(all[0].messageIds.includes(reply));assert.deepEqual(matters.list(),[],'closed matters are not open');
- assert.ok(store.errors().some(e=>/我自己说的/.test(e.message)),'the refused part is on record');
+test('a matter ends when the model says so, with its reason; my own messages are context and never a matter', async (t) => {
+  const { store, matters, model, processor } = setup(t, {
+    answer: (d, n) =>
+      n === 1
+        ? {
+            new: [
+              {
+                title: '确认上线时间',
+                who: '陈帆',
+                ask: '确认周五能否上线',
+                due: '周五',
+                urgency: 'normal',
+                messages: [ref(d, '周五能上线吗')],
+              },
+            ],
+            updates: [],
+          }
+        : {
+            new: [{ title: '我自己说的', who: '我', ask: 'x', urgency: 'low', messages: [ref(d, '可以，周五上')] }],
+            updates: [
+              {
+                matter: d.openMatters[0].matter,
+                messages: [ref(d, '可以，周五上')],
+                status: 'closed',
+                reason: '我已回复周五可以上线',
+              },
+            ],
+          },
+  });
+  post(store, { text: '@原智鸿 周五能上线吗', at: min(1) });
+  await processor.runOnce();
+  const reply = post(store, { mine: true, text: '可以，周五上', at: min(5) });
+  await processor.runOnce();
+  const mine = messagesOf(model.calls[1].data).find((m) => m.text.includes('可以，周五上'));
+  assert.equal(mine.mine, true);
+  assert.equal(mine.new, true);
+  assert.match(model.calls[1].system, /上下文/);
+  const all = matters.list({ all: true });
+  assert.equal(all.length, 1, 'a matter made only of my messages is refused');
+  assert.equal(all[0].status, 'closed');
+  assert.equal(all[0].reason, '我已回复周五可以上线');
+  assert.ok(all[0].closedAt);
+  assert.ok(all[0].messageIds.includes(reply));
+  assert.deepEqual(matters.list(), [], 'closed matters are not open');
+  assert.ok(
+    store.errors().some((e) => /我自己说的/.test(e.message)),
+    'the refused part is on record',
+  );
 });
 
-test('ignored senders never reach the model, not even as context, and un-ignoring does not bring old messages back',async t=>{
- const {store,matters,model,processor}=setup(t);
- post(store,{chat:'g1',sender:'zebra',name:'Zebra2.0自动化投放平台',type:'bot',text:'投放任务完成 #1',at:min(0)});
- const colleague=post(store,{chat:'g1',text:'@原智鸿 这个投放结果对吗',at:min(1)});
- post(store,{chat:'bot',sender:'zebra',name:'Zebra2.0自动化投放平台',type:'bot',text:'投放任务完成 #2',at:min(2)});
- matters.ignore('zebra','Zebra2.0自动化投放平台');
- assert.deepEqual(matters.ignoredSenders().map(s=>[s.senderId,s.name]),[['zebra','Zebra2.0自动化投放平台']]);
- await processor.runOnce();
- assert.equal(model.calls.length,1);
- assert.doesNotMatch(model.calls[0].prompt,/投放任务完成|Zebra/);
- assert.deepEqual(messagesOf(model.calls[0].data).map(m=>m.text),['@原智鸿 这个投放结果对吗']);
- matters.unignore('zebra');assert.deepEqual(matters.ignoredSenders(),[]);
- assert.equal(matters.pendingCount(),0,'skipped while ignored, so they stay skipped');
- assert.ok(colleague);
+test('ignored senders never reach the model, not even as context, and un-ignoring does not bring old messages back', async (t) => {
+  const { store, matters, model, processor } = setup(t);
+  post(store, {
+    chat: 'g1',
+    sender: 'zebra',
+    name: 'Zebra2.0自动化投放平台',
+    type: 'bot',
+    text: '投放任务完成 #1',
+    at: min(0),
+  });
+  const colleague = post(store, { chat: 'g1', text: '@原智鸿 这个投放结果对吗', at: min(1) });
+  post(store, {
+    chat: 'bot',
+    sender: 'zebra',
+    name: 'Zebra2.0自动化投放平台',
+    type: 'bot',
+    text: '投放任务完成 #2',
+    at: min(2),
+  });
+  matters.ignore('zebra', 'Zebra2.0自动化投放平台');
+  assert.deepEqual(
+    matters.ignoredSenders().map((s) => [s.senderId, s.name]),
+    [['zebra', 'Zebra2.0自动化投放平台']],
+  );
+  await processor.runOnce();
+  assert.equal(model.calls.length, 1);
+  assert.doesNotMatch(model.calls[0].prompt, /投放任务完成|Zebra/);
+  assert.deepEqual(
+    messagesOf(model.calls[0].data).map((m) => m.text),
+    ['@原智鸿 这个投放结果对吗'],
+  );
+  matters.unignore('zebra');
+  assert.deepEqual(matters.ignoredSenders(), []);
+  assert.equal(matters.pendingCount(), 0, 'skipped while ignored, so they stay skipped');
+  assert.ok(colleague);
 });
 
 // What the collector keeps of a chat beyond what is about me, and not at the instant level, is only stored (see rules.mjs).
-test('batches take what is about me and what instant chats say; what is only stored never waits and comes only as context',async t=>{
- const {store,matters,model,processor}=setup(t);
- const chatter=[post(store,{chat:'g2',sender:'u5',name:'王五',text:'别人的闲聊',at:min(0),categories:['stored']}),post(store,{chat:'g2',sender:'u5',name:'王五',text:'还在闲聊',at:min(1),categories:['stored']})];
- post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:min(2)});
- post(store,{text:'即时群里的讨论',at:min(3)});
- post(store,{chat:'bot',sender:'zebra',name:'Zebra',type:'bot',text:'投放完成',at:min(4),categories:['stored']});
- post(store,{chat:'g2',text:'@原智鸿 帮忙看下',at:min(5),categories:['mention']});
- post(store,{chat:'g2',sender:'u5',name:'王五',text:'之后的闲聊',at:min(6),categories:['stored']});
- assert.equal(matters.pendingCount(),3,'a person\'s direct message, the instant chat\'s and the mention');
- assert.deepEqual(matters.senders().map(s=>s.name).sort(),['张三','陈帆'].sort(),'senders whose messages could reach the model');
- matters.ignore('u5','王五');assert.equal(matters.skipIgnored(),0,'nothing of theirs waits, so nothing is passed by');matters.unignore('u5');
- await processor.runOnce();
- assert.equal(model.calls.length,1);const d=model.calls[0].data;
- assert.deepEqual(newTexts(d),['在吗','即时群里的讨论','@原智鸿 帮忙看下']);
- const context=messagesOf(d).filter(m=>!m.new).map(m=>[m.text,m.categories]);
- assert.deepEqual(context,[['别人的闲聊',['stored']],['还在闲聊',['stored']]],'the chat\'s earlier messages, only stored, are context');
- assert.doesNotMatch(model.calls[0].prompt,/投放完成|之后的闲聊/);
- assert.equal(matters.pendingCount(),0);assert.equal((await processor.runOnce()).runs,0,'what is only stored never comes up');
- assert.ok(chatter.every(id=>store.message(id)));
+test('batches take what is about me and what instant chats say; what is only stored never waits and comes only as context', async (t) => {
+  const { store, matters, model, processor } = setup(t);
+  const chatter = [
+    post(store, { chat: 'g2', sender: 'u5', name: '王五', text: '别人的闲聊', at: min(0), categories: ['stored'] }),
+    post(store, { chat: 'g2', sender: 'u5', name: '王五', text: '还在闲聊', at: min(1), categories: ['stored'] }),
+  ];
+  post(store, { chat: 'd1', name: '张三', sender: 'u3', text: '在吗', at: min(2) });
+  post(store, { text: '即时群里的讨论', at: min(3) });
+  post(store, {
+    chat: 'bot',
+    sender: 'zebra',
+    name: 'Zebra',
+    type: 'bot',
+    text: '投放完成',
+    at: min(4),
+    categories: ['stored'],
+  });
+  post(store, { chat: 'g2', text: '@原智鸿 帮忙看下', at: min(5), categories: ['mention'] });
+  post(store, { chat: 'g2', sender: 'u5', name: '王五', text: '之后的闲聊', at: min(6), categories: ['stored'] });
+  assert.equal(matters.pendingCount(), 3, "a person's direct message, the instant chat's and the mention");
+  assert.deepEqual(
+    matters
+      .senders()
+      .map((s) => s.name)
+      .sort(),
+    ['张三', '陈帆'].sort(),
+    'senders whose messages could reach the model',
+  );
+  matters.ignore('u5', '王五');
+  assert.equal(matters.skipIgnored(), 0, 'nothing of theirs waits, so nothing is passed by');
+  matters.unignore('u5');
+  await processor.runOnce();
+  assert.equal(model.calls.length, 1);
+  const d = model.calls[0].data;
+  assert.deepEqual(newTexts(d), ['在吗', '即时群里的讨论', '@原智鸿 帮忙看下']);
+  const context = messagesOf(d)
+    .filter((m) => !m.new)
+    .map((m) => [m.text, m.categories]);
+  assert.deepEqual(
+    context,
+    [
+      ['别人的闲聊', ['stored']],
+      ['还在闲聊', ['stored']],
+    ],
+    "the chat's earlier messages, only stored, are context",
+  );
+  assert.doesNotMatch(model.calls[0].prompt, /投放完成|之后的闲聊/);
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal((await processor.runOnce()).runs, 0, 'what is only stored never comes up');
+  assert.ok(chatter.every((id) => store.message(id)));
 });
 
-test('only my own messages and nothing open: no model run',async t=>{
- const {store,matters,model,processor}=setup(t,{answer:(d,n)=>n===1?{new:[{title:'回复张三',who:'张三',ask:'回复他',urgency:'normal',messages:[ref(d,'在吗')]}],updates:[]}:none});
- post(store,{chat:'d1',mine:true,text:'我发的第一条',at:min(1)});
- await processor.runOnce();
- assert.equal(model.calls.length,0);assert.equal(matters.pendingCount(),0);
- post(store,{chat:'d1',name:'张三',sender:'u3',text:'在吗',at:min(2)});
- await processor.runOnce();
- assert.equal(model.calls.length,1);assert.equal(matters.list().length,1);
- post(store,{chat:'g2',mine:true,text:'我在别的群说的',at:min(3)});
- await processor.runOnce();
- assert.equal(model.calls.length,2,'with a matter open, my messages go to the model: they may end it');
+test('only my own messages and nothing open: no model run', async (t) => {
+  const { store, matters, model, processor } = setup(t, {
+    answer: (d, n) =>
+      n === 1
+        ? {
+            new: [{ title: '回复张三', who: '张三', ask: '回复他', urgency: 'normal', messages: [ref(d, '在吗')] }],
+            updates: [],
+          }
+        : none,
+  });
+  post(store, { chat: 'd1', mine: true, text: '我发的第一条', at: min(1) });
+  await processor.runOnce();
+  assert.equal(model.calls.length, 0);
+  assert.equal(matters.pendingCount(), 0);
+  post(store, { chat: 'd1', name: '张三', sender: 'u3', text: '在吗', at: min(2) });
+  await processor.runOnce();
+  assert.equal(model.calls.length, 1);
+  assert.equal(matters.list().length, 1);
+  post(store, { chat: 'g2', mine: true, text: '我在别的群说的', at: min(3) });
+  await processor.runOnce();
+  assert.equal(model.calls.length, 2, 'with a matter open, my messages go to the model: they may end it');
 });
 
 // ---- my reactions (the collector records the first time it sees one of mine on a message, see store.mjs)
-const GET=[{key:'Get',count:1,isMine:true,userNames:['原智鸿']}];
-const actionsOf=data=>messagesOf(data).filter(m=>m.reaction);
-const asking=text=>d=>({new:[{title:text,who:'陈帆',ask:text,urgency:'normal',messages:[ref(d,text)]}],updates:[]});
-
-test('a reaction of mine on a message already processed reaches the model once, as an action on that message, and may end its matter',async t=>{
- const {store,matters,model,processor}=setup(t,{answer:(d,n)=>n===1?asking('周五前给下排期')(d)
-  :{new:[],updates:[{matter:d.openMatters[0].matter,status:'closed',reason:'TA已回应：加了 Get'}]}});
- post(store,{chat:'d1',mine:true,text:'早',at:min(0)});
- const ask=post(store,{text:'@原智鸿 周五前给下排期',at:min(1),parts:[{kind:'at',refId:'me',text:'@原智鸿'},{kind:'text',text:' 周五前给下排期'}]});
- await processor.runOnce();
- assert.deepEqual(messagesOf(model.calls[0].data).find(m=>m.text.includes('排期')).mentions,['TA'],'@ of me, known from my own messages');
- store.setReactions(ask,GET);
- assert.equal(matters.pendingCount(),1,'the reaction waits to be processed');
- await processor.runOnce();
- assert.equal(model.calls.length,2);const d=model.calls[1].data;
- const shown=messagesOf(d).find(m=>m.text?.includes('排期'));
- assert.ok(!shown.new,'the message is context');assert.deepEqual(shown.myReactions,['Get']);
- assert.deepEqual(actionsOf(d),[{new:true,time:actionsOf(d)[0].time,mine:true,reaction:'Get',on:shown.ref}]);
- assert.deepEqual(d.openMatters[0].messages,[shown.ref]);
- const [m]=matters.list({all:true});assert.deepEqual([m.status,m.reason],['closed','TA已回应：加了 Get']);
- assert.equal(matters.pendingCount(),0);assert.equal((await processor.runOnce()).runs,0,'once');
- store.setReactions(ask,[]);store.setReactions(ask,GET);assert.equal(matters.pendingCount(),0,'taken back and added again is nothing new');
+const GET = [{ key: 'Get', count: 1, isMine: true, userNames: ['原智鸿'] }];
+const actionsOf = (data) => messagesOf(data).filter((m) => m.reaction);
+const asking = (text) => (d) => ({
+  new: [{ title: text, who: '陈帆', ask: text, urgency: 'normal', messages: [ref(d, text)] }],
+  updates: [],
 });
 
-test('a reaction of mine on a message not processed yet comes with that message\'s facts, not as an item of its own',async t=>{
- const {store,matters,model,processor}=setup(t,{answer:asking('帮忙看下')});
- post(store,{text:'帮忙看下',at:min(1),reactions:GET});
- await processor.runOnce();
- assert.equal(model.calls.length,1);assert.deepEqual(actionsOf(model.calls[0].data),[]);
- assert.deepEqual(messagesOf(model.calls[0].data)[0].myReactions,['Get']);
- assert.equal(matters.pendingCount(),0);assert.equal((await processor.runOnce()).runs,0);
+test('a reaction of mine on a message already processed reaches the model once, as an action on that message, and may end its matter', async (t) => {
+  const { store, matters, model, processor } = setup(t, {
+    answer: (d, n) =>
+      n === 1
+        ? asking('周五前给下排期')(d)
+        : { new: [], updates: [{ matter: d.openMatters[0].matter, status: 'closed', reason: 'TA已回应：加了 Get' }] },
+  });
+  post(store, { chat: 'd1', mine: true, text: '早', at: min(0) });
+  const ask = post(store, {
+    text: '@原智鸿 周五前给下排期',
+    at: min(1),
+    parts: [
+      { kind: 'at', refId: 'me', text: '@原智鸿' },
+      { kind: 'text', text: ' 周五前给下排期' },
+    ],
+  });
+  await processor.runOnce();
+  assert.deepEqual(
+    messagesOf(model.calls[0].data).find((m) => m.text.includes('排期')).mentions,
+    ['TA'],
+    '@ of me, known from my own messages',
+  );
+  store.setReactions(ask, GET);
+  assert.equal(matters.pendingCount(), 1, 'the reaction waits to be processed');
+  await processor.runOnce();
+  assert.equal(model.calls.length, 2);
+  const d = model.calls[1].data;
+  const shown = messagesOf(d).find((m) => m.text?.includes('排期'));
+  assert.ok(!shown.new, 'the message is context');
+  assert.deepEqual(shown.myReactions, ['Get']);
+  assert.deepEqual(actionsOf(d), [
+    { new: true, time: actionsOf(d)[0].time, mine: true, reaction: 'Get', on: shown.ref },
+  ]);
+  assert.deepEqual(d.openMatters[0].messages, [shown.ref]);
+  const [m] = matters.list({ all: true });
+  assert.deepEqual([m.status, m.reason], ['closed', 'TA已回应：加了 Get']);
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal((await processor.runOnce()).runs, 0, 'once');
+  store.setReactions(ask, []);
+  store.setReactions(ask, GET);
+  assert.equal(matters.pendingCount(), 0, 'taken back and added again is nothing new');
 });
 
-test('a reaction of mine seen while its message is with the model comes in a later batch',async t=>{
- let ask;
- const {store,model,processor}=setup(t,{answer:(d,n)=>{if(n===1){store.setReactions(ask,GET);return asking('帮忙看下')(d);}return none;}});
- ask=post(store,{text:'帮忙看下',at:min(1)});
- await processor.runOnce();
- assert.equal(model.calls.length,2,'the same round takes it once its message is done');
- assert.deepEqual(actionsOf(model.calls[1].data).map(a=>a.reaction),['Get']);
+test("a reaction of mine on a message not processed yet comes with that message's facts, not as an item of its own", async (t) => {
+  const { store, matters, model, processor } = setup(t, { answer: asking('帮忙看下') });
+  post(store, { text: '帮忙看下', at: min(1), reactions: GET });
+  await processor.runOnce();
+  assert.equal(model.calls.length, 1);
+  assert.deepEqual(actionsOf(model.calls[0].data), []);
+  assert.deepEqual(messagesOf(model.calls[0].data)[0].myReactions, ['Get']);
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal((await processor.runOnce()).runs, 0);
 });
 
-test('reactions and messages go in one time order, and with nothing open my reactions need no model run',async t=>{
- const {store,matters,model,processor}=setup(t,{options:{maxMessages:1},answer:(d,n)=>n===1?asking('早先的事')(d):none});
- const a=post(store,{text:'早先的事',at:min(1)});
- await processor.runOnce();
- store.setReactions(a,GET);const later=post(store,{text:'后来的消息',at:Date.now()+60e3});
- await processor.runOnce();
- assert.deepEqual(model.calls.slice(1).map(c=>[actionsOf(c.data).length,newTexts(c.data)]),[[1,[]],[0,['后来的消息']]],'the reaction, seen first, goes first');
- assert.ok(later);
- const {store:s2,matters:m2,model:model2,processor:p2}=setup(t);
- const b=post(s2,{text:'通知',at:min(1)}),z=post(s2,{sender:'zebra',name:'Zebra',type:'bot',text:'投放完成',at:min(2)});m2.ignore('zebra','Zebra');
- await p2.runOnce();assert.equal(model2.calls.length,1);
- s2.setReactions(b,GET);s2.setReactions(z,GET);
- await p2.runOnce();assert.equal(model2.calls.length,1,'nothing open: no run');assert.equal(m2.pendingCount(),0);
- m2.apply({created:[{title:'通知',who:'陈帆',ask:'看',urgency:'low',messageIds:[b]}]});
- s2.setReactions(z,[...GET,{key:'DONE',count:1,isMine:true,userNames:[]}]);
- await p2.runOnce();assert.equal(model2.calls.length,1,'a reaction on an ignored sender\'s message is never shown');assert.equal(m2.pendingCount(),0);
+test('a reaction of mine seen while its message is with the model comes in a later batch', async (t) => {
+  let ask;
+  const { store, model, processor } = setup(t, {
+    answer: (d, n) => {
+      if (n === 1) {
+        store.setReactions(ask, GET);
+        return asking('帮忙看下')(d);
+      }
+      return none;
+    },
+  });
+  ask = post(store, { text: '帮忙看下', at: min(1) });
+  await processor.runOnce();
+  assert.equal(model.calls.length, 2, 'the same round takes it once its message is done');
+  assert.deepEqual(
+    actionsOf(model.calls[1].data).map((a) => a.reaction),
+    ['Get'],
+  );
 });
 
-test('an open matter comes with my latest messages and reactions in its chat since it started, past the chat\'s latest messages',async t=>{
- const {store,matters,model,processor}=setup(t,{options:{contextMessages:3,ownerMessages:2}});
- const done=[post(store,{mine:true,text:'事项之前我说的',at:min(0)}),post(store,{text:'@原智鸿 帮忙排查下',at:min(1)}),
-  post(store,{mine:true,text:'最早的回应',at:min(2)}),post(store,{text:'日志在这',at:min(3),reactions:GET}),post(store,{mine:true,text:'我在看了',at:min(4)})];
- for(let i=0;i<5;i++)done.push(post(store,{text:`闲聊${i}`,at:min(10+i)}));
- const elsewhere=[post(store,{chat:'g2',text:'别的群的事',at:min(1)}),post(store,{chat:'g2',mine:true,text:'别的群里我说的',at:min(2)})];
- matters.apply({created:[{title:'排查',who:'陈帆',ask:'排查',urgency:'normal',messageIds:[done[1]]},{title:'别的',who:'陈帆',ask:'看',urgency:'normal',messageIds:[elsewhere[0]]}],
-  processedIds:[...done,...elsewhere]});
- post(store,{text:'新消息',at:min(20)});
- await processor.runOnce();
- const shown=messagesOf(model.calls[0].data),texts=shown.map(m=>m.text);
- for(const x of ['@原智鸿 帮忙排查下','日志在这','我在看了','闲聊2','闲聊3','闲聊4','新消息'])assert.ok(texts.includes(x),x);
- for(const x of ['事项之前我说的','最早的回应','闲聊1','别的群里我说的'])assert.ok(!texts.includes(x),`not ${x}`);
- assert.deepEqual(shown.find(m=>m.text==='日志在这').myReactions,['Get']);
+test('reactions and messages go in one time order, and with nothing open my reactions need no model run', async (t) => {
+  const { store, matters, model, processor } = setup(t, {
+    options: { maxMessages: 1 },
+    answer: (d, n) => (n === 1 ? asking('早先的事')(d) : none),
+  });
+  const a = post(store, { text: '早先的事', at: min(1) });
+  await processor.runOnce();
+  store.setReactions(a, GET);
+  const later = post(store, { text: '后来的消息', at: Date.now() + 60e3 });
+  await processor.runOnce();
+  assert.deepEqual(
+    model.calls.slice(1).map((c) => [actionsOf(c.data).length, newTexts(c.data)]),
+    [
+      [1, []],
+      [0, ['后来的消息']],
+    ],
+    'the reaction, seen first, goes first',
+  );
+  assert.ok(later);
+  const { store: s2, matters: m2, model: model2, processor: p2 } = setup(t);
+  const b = post(s2, { text: '通知', at: min(1) }),
+    z = post(s2, { sender: 'zebra', name: 'Zebra', type: 'bot', text: '投放完成', at: min(2) });
+  m2.ignore('zebra', 'Zebra');
+  await p2.runOnce();
+  assert.equal(model2.calls.length, 1);
+  s2.setReactions(b, GET);
+  s2.setReactions(z, GET);
+  await p2.runOnce();
+  assert.equal(model2.calls.length, 1, 'nothing open: no run');
+  assert.equal(m2.pendingCount(), 0);
+  m2.apply({ created: [{ title: '通知', who: '陈帆', ask: '看', urgency: 'low', messageIds: [b] }] });
+  s2.setReactions(z, [...GET, { key: 'DONE', count: 1, isMine: true, userNames: [] }]);
+  await p2.runOnce();
+  assert.equal(model2.calls.length, 1, "a reaction on an ignored sender's message is never shown");
+  assert.equal(m2.pendingCount(), 0);
 });
 
-test('when the model cannot be reached the messages wait, and a later run takes them in smaller batches until one succeeds',async t=>{
- let down=true;
- const {store,matters,model,processor}=setup(t,{options:{maxMessages:4},answer:()=>{if(down)throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');return none;}});
- for(let i=0;i<6;i++)post(store,{text:`消息${i}`,at:min(i)});
- let r=await processor.runOnce();
- assert.equal(r.runs,1);assert.equal(r.failures,1);assert.equal(matters.pendingCount(),6,'nothing is lost');
- assert.ok(store.errors().some(e=>e.source==='加工'&&/Connection refused/.test(e.message)));
- r=await processor.runOnce();
- assert.equal(messagesOf(model.calls[1].data).filter(m=>m.new).length,2,'a failure halves the next batch');
- down=false;r=await processor.runOnce();
- assert.equal(r.failures,0);assert.equal(matters.pendingCount(),0);
- assert.deepEqual(model.calls.slice(2).map(c=>messagesOf(c.data).filter(m=>m.new).length),[1,4,1],'a success restores the batch size');
- const runs=matters.runs();
- assert.deepEqual(runs.map(x=>x.ok),[false,false,true,true,true]);assert.ok(runs.every(x=>x.messages>0&&x.finishedAt>=x.startedAt));
+test("an open matter comes with my latest messages and reactions in its chat since it started, past the chat's latest messages", async (t) => {
+  const { store, matters, model, processor } = setup(t, { options: { contextMessages: 3, ownerMessages: 2 } });
+  const done = [
+    post(store, { mine: true, text: '事项之前我说的', at: min(0) }),
+    post(store, { text: '@原智鸿 帮忙排查下', at: min(1) }),
+    post(store, { mine: true, text: '最早的回应', at: min(2) }),
+    post(store, { text: '日志在这', at: min(3), reactions: GET }),
+    post(store, { mine: true, text: '我在看了', at: min(4) }),
+  ];
+  for (let i = 0; i < 5; i++) done.push(post(store, { text: `闲聊${i}`, at: min(10 + i) }));
+  const elsewhere = [
+    post(store, { chat: 'g2', text: '别的群的事', at: min(1) }),
+    post(store, { chat: 'g2', mine: true, text: '别的群里我说的', at: min(2) }),
+  ];
+  matters.apply({
+    created: [
+      { title: '排查', who: '陈帆', ask: '排查', urgency: 'normal', messageIds: [done[1]] },
+      { title: '别的', who: '陈帆', ask: '看', urgency: 'normal', messageIds: [elsewhere[0]] },
+    ],
+    processedIds: [...done, ...elsewhere],
+  });
+  post(store, { text: '新消息', at: min(20) });
+  await processor.runOnce();
+  const shown = messagesOf(model.calls[0].data),
+    texts = shown.map((m) => m.text);
+  for (const x of ['@原智鸿 帮忙排查下', '日志在这', '我在看了', '闲聊2', '闲聊3', '闲聊4', '新消息'])
+    assert.ok(texts.includes(x), x);
+  for (const x of ['事项之前我说的', '最早的回应', '闲聊1', '别的群里我说的'])
+    assert.ok(!texts.includes(x), `not ${x}`);
+  assert.deepEqual(shown.find((m) => m.text === '日志在这').myReactions, ['Get']);
 });
 
-test('a reply that is not the asked-for JSON leaves the batch pending and is kept for inspection',async t=>{
- const {store,matters,processor}=setup(t,{answer:()=>'抱歉，我不能处理'});
- post(store,{text:'在吗',at:min(1)});
- const r=await processor.runOnce();
- assert.equal(r.failures,1);assert.equal(matters.pendingCount(),1);
- const [run]=matters.runs();assert.equal(run.ok,false);assert.equal(run.output,'抱歉，我不能处理');assert.match(run.error,/JSON/);
+test('when the model cannot be reached the messages wait, and a later run takes them in smaller batches until one succeeds', async (t) => {
+  let down = true;
+  const { store, matters, model, processor } = setup(t, {
+    options: { maxMessages: 4 },
+    answer: () => {
+      if (down) throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');
+      return none;
+    },
+  });
+  for (let i = 0; i < 6; i++) post(store, { text: `消息${i}`, at: min(i) });
+  let r = await processor.runOnce();
+  assert.equal(r.runs, 1);
+  assert.equal(r.failures, 1);
+  assert.equal(matters.pendingCount(), 6, 'nothing is lost');
+  assert.ok(store.errors().some((e) => e.source === '加工' && /Connection refused/.test(e.message)));
+  r = await processor.runOnce();
+  assert.equal(messagesOf(model.calls[1].data).filter((m) => m.new).length, 2, 'a failure halves the next batch');
+  down = false;
+  r = await processor.runOnce();
+  assert.equal(r.failures, 0);
+  assert.equal(matters.pendingCount(), 0);
+  assert.deepEqual(
+    model.calls.slice(2).map((c) => messagesOf(c.data).filter((m) => m.new).length),
+    [1, 4, 1],
+    'a success restores the batch size',
+  );
+  const runs = matters.runs();
+  assert.deepEqual(
+    runs.map((x) => x.ok),
+    [false, false, true, true, true],
+  );
+  assert.ok(runs.every((x) => x.messages > 0 && x.finishedAt >= x.startedAt));
 });
 
-test('batches run one at a time, oldest messages first, within the size limit',async t=>{
- const {store,model,processor}=setup(t,{options:{maxMessages:3}});
- for(let i=0;i<7;i++)post(store,{chat:i%2?'g1':'g2',text:`第${i}条`,at:min(10-i)});
- const r=await processor.runOnce();
- assert.equal(r.runs,3);assert.equal(model.overlapped,false);
- const order=model.calls.map(c=>messagesOf(c.data).filter(m=>m.new).map(m=>Number(/第(\d)条/.exec(m.text)[1])));
- assert.deepEqual(order.map(b=>b.length),[3,3,1]);
- assert.deepEqual(order.map(b=>Math.max(...b)),[6,3,0],'the oldest (highest number here) go first');
+test('a reply that is not the asked-for JSON leaves the batch pending and is kept for inspection', async (t) => {
+  const { store, matters, processor } = setup(t, { answer: () => '抱歉，我不能处理' });
+  post(store, { text: '在吗', at: min(1) });
+  const r = await processor.runOnce();
+  assert.equal(r.failures, 1);
+  assert.equal(matters.pendingCount(), 1);
+  const [run] = matters.runs();
+  assert.equal(run.ok, false);
+  assert.equal(run.output, '抱歉，我不能处理');
+  assert.match(run.error, /JSON/);
 });
 
-test('a prompt too large for one run is split',async t=>{
- const {store,model,processor}=setup(t,{options:{maxMessages:10,maxPromptBytes:6000}});
- for(let i=0;i<6;i++)post(store,{text:`${i}${'长'.repeat(1400)}`,at:min(i)});
- await processor.runOnce();
- assert.ok(model.calls.length>1);assert.ok(model.calls.every(c=>Buffer.byteLength(c.prompt)<=6000));
- assert.equal(model.calls.reduce((n,c)=>n+messagesOf(c.data).filter(m=>m.new).length,0),6);
+test('batches run one at a time, oldest messages first, within the size limit', async (t) => {
+  const { store, model, processor } = setup(t, { options: { maxMessages: 3 } });
+  for (let i = 0; i < 7; i++) post(store, { chat: i % 2 ? 'g1' : 'g2', text: `第${i}条`, at: min(10 - i) });
+  const r = await processor.runOnce();
+  assert.equal(r.runs, 3);
+  assert.equal(model.overlapped, false);
+  const order = model.calls.map((c) =>
+    messagesOf(c.data)
+      .filter((m) => m.new)
+      .map((m) => Number(/第(\d)条/.exec(m.text)[1])),
+  );
+  assert.deepEqual(
+    order.map((b) => b.length),
+    [3, 3, 1],
+  );
+  assert.deepEqual(
+    order.map((b) => Math.max(...b)),
+    [6, 3, 0],
+    'the oldest (highest number here) go first',
+  );
 });
 
-test('a second processor on the same store refuses to start while the first runs',async t=>{
- const {store,matters,model,processor}=setup(t);
- await processor.start();t.after(()=>processor.stop());
- // Another process (pid) on the same store: this one is alive and its heartbeat is fresh.
- const other=new Processor({store,matters,model,pid:process.pid+1});
- await assert.rejects(other.start(),/已经在运行/);
- await processor.stop();await other.start();await other.stop();
+test('a prompt too large for one run is split', async (t) => {
+  const { store, model, processor } = setup(t, { options: { maxMessages: 10, maxPromptBytes: 6000 } });
+  for (let i = 0; i < 6; i++) post(store, { text: `${i}${'长'.repeat(1400)}`, at: min(i) });
+  await processor.runOnce();
+  assert.ok(model.calls.length > 1);
+  assert.ok(model.calls.every((c) => Buffer.byteLength(c.prompt) <= 6000));
+  assert.equal(
+    model.calls.reduce((n, c) => n + messagesOf(c.data).filter((m) => m.new).length, 0),
+    6,
+  );
+});
+
+test('a second processor on the same store refuses to start while the first runs', async (t) => {
+  const { store, matters, model, processor } = setup(t);
+  await processor.start();
+  t.after(() => processor.stop());
+  // Another process (pid) on the same store: this one is alive and its heartbeat is fresh.
+  const other = new Processor({ store, matters, model, pid: process.pid + 1 });
+  await assert.rejects(other.start(), /已经在运行/);
+  await processor.stop();
+  await other.start();
+  await other.stop();
 });
 
 // A model that cannot use one message: whenever that message is among the new ones it answers, but not with the
 // asked-for JSON; everything else it handles. failOthers: what it does with the rest instead (a function that may throw).
-const newTexts=d=>messagesOf(d).filter(m=>m.new&&!m.reaction).map(m=>m.text);
-function poisoned(text,failOthers){return (d,n)=>{if(newTexts(d).some(x=>x.includes(text)))return '我没法处理这条';return failOthers?failOthers(d,n):none;};}
+const newTexts = (d) =>
+  messagesOf(d)
+    .filter((m) => m.new && !m.reaction)
+    .map((m) => m.text);
+function poisoned(text, failOthers) {
+  return (d, n) => {
+    if (newTexts(d).some((x) => x.includes(text))) return '我没法处理这条';
+    return failOthers ? failOthers(d, n) : none;
+  };
+}
 
-test('a message that alone keeps getting an unusable answer is skipped after three such failures, and the rest is not held up',async t=>{
- const {store,matters,model,processor}=setup(t,{options:{maxMessages:4},answer:poisoned('坏消息')});
- const bad=post(store,{chat:'g2',name:'李四',text:'坏消息',at:min(0)});
- for(let i=1;i<=5;i++)post(store,{text:`好消息${i}`,at:min(i)});
- // Halving brings the batch down to the one message.
- assert.deepEqual([await processor.runOnce(),await processor.runOnce()].map(r=>r.failures),[1,1]);
- assert.equal(matters.pendingCount(),6);
- // Alone it fails again; the next run, on other messages, succeeds, so the failure is the message's own.
- let r=await processor.runOnce();
- assert.equal(matters.pendingCount(),1,'the messages behind it went on');assert.deepEqual([...matters.struck()],[bad]);
- const third=model.calls.slice(2);
- assert.deepEqual(newTexts(third[0].data),['坏消息']);assert.ok(third.length>1&&third.slice(1).every(c=>!c.prompt.includes('坏消息')),'it is no context for the others');
- // Each round it goes alone first; a success after it counts the failure. The third one skips it.
- for(let round=2;round<=3;round++){
-  post(store,{text:`新消息${round}`,at:min(10+round)});r=await processor.runOnce();
-  assert.deepEqual(newTexts(model.calls.at(-2).data),['坏消息']);
- }
- assert.equal(matters.pendingCount(),0);assert.equal(matters.skippedCount(),1);
- const skipped=store.errors().filter(e=>/跳过/.test(e.message));
- assert.equal(skipped.length,1,'one error for the skip');
- assert.match(skipped[0].message,new RegExp(bad));assert.match(skipped[0].message,/坏消息/);assert.match(skipped[0].message,/大群/);assert.match(skipped[0].message,/不是 JSON/);
- post(store,{chat:'g2',text:'之后的消息',at:min(20)});await processor.runOnce();
- assert.doesNotMatch(model.calls.at(-1).prompt,/坏消息/,'a skipped message is no context either');
-});
-
-test('a model that fails as a whole never skips a message',async t=>{
- const scenarios={
-  unreachable:()=>{throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');},
-  'no reply':()=>{throw Error('模型结束了这一轮，但没有回复');},
-  'unusable answers to everything':()=>'服务繁忙',
-  'unreachable after the bad one':poisoned('坏消息',()=>{throw Error('herdr agent prompt：timed out waiting for agent status（timeout）');}),
- };
- for(const [name,answer] of Object.entries(scenarios)){
-  const {store,matters,model,processor}=setup(t,{options:{maxMessages:4},answer});
-  post(store,{text:'坏消息',at:min(0)});for(let i=1;i<=3;i++)post(store,{text:`消息${i}`,at:min(i)});
-  for(let round=0;round<10;round++){
-   post(store,{text:`第${round}轮的新消息`,at:min(10+round)});const before=model.calls.length,r=await processor.runOnce();
-   assert.ok(model.calls.length-before<=2,`${name}: at most one more run after a failure`);assert.ok(r.failures>=1,name);
+test('a message that alone keeps getting an unusable answer is skipped after three such failures, and the rest is not held up', async (t) => {
+  const { store, matters, model, processor } = setup(t, { options: { maxMessages: 4 }, answer: poisoned('坏消息') });
+  const bad = post(store, { chat: 'g2', name: '李四', text: '坏消息', at: min(0) });
+  for (let i = 1; i <= 5; i++) post(store, { text: `好消息${i}`, at: min(i) });
+  // Halving brings the batch down to the one message.
+  assert.deepEqual(
+    [await processor.runOnce(), await processor.runOnce()].map((r) => r.failures),
+    [1, 1],
+  );
+  assert.equal(matters.pendingCount(), 6);
+  // Alone it fails again; the next run, on other messages, succeeds, so the failure is the message's own.
+  let r = await processor.runOnce();
+  assert.equal(matters.pendingCount(), 1, 'the messages behind it went on');
+  assert.deepEqual([...matters.struck()], [bad]);
+  const third = model.calls.slice(2);
+  assert.deepEqual(newTexts(third[0].data), ['坏消息']);
+  assert.ok(
+    third.length > 1 && third.slice(1).every((c) => !c.prompt.includes('坏消息')),
+    'it is no context for the others',
+  );
+  // Each round it goes alone first; a success after it counts the failure. The third one skips it.
+  for (let round = 2; round <= 3; round++) {
+    post(store, { text: `新消息${round}`, at: min(10 + round) });
+    r = await processor.runOnce();
+    assert.deepEqual(newTexts(model.calls.at(-2).data), ['坏消息']);
   }
-  assert.equal(matters.skippedCount(),0,name);assert.equal(matters.pendingCount(),14,`${name}: every message still waits`);
-  assert.ok(!store.errors().some(e=>/跳过/.test(e.message)),name);
- }
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal(matters.skippedCount(), 1);
+  const skipped = store.errors().filter((e) => /跳过/.test(e.message));
+  assert.equal(skipped.length, 1, 'one error for the skip');
+  assert.match(skipped[0].message, new RegExp(bad));
+  assert.match(skipped[0].message, /坏消息/);
+  assert.match(skipped[0].message, /大群/);
+  assert.match(skipped[0].message, /不是 JSON/);
+  post(store, { chat: 'g2', text: '之后的消息', at: min(20) });
+  await processor.runOnce();
+  assert.doesNotMatch(model.calls.at(-1).prompt, /坏消息/, 'a skipped message is no context either');
 });
 
-test('a message that gets through after failing loses its strikes',async t=>{
- let healed=false;
- const {store,matters,processor}=setup(t,{options:{maxMessages:1},answer:d=>!healed&&newTexts(d).includes('时好时坏')?'嗯？':none});
- post(store,{text:'时好时坏',at:min(0)});post(store,{text:'后面的',at:min(1)});
- await processor.runOnce();assert.equal(matters.struck().size,1);
- healed=true;post(store,{text:'又来一条',at:min(2)});await processor.runOnce();
- assert.equal(matters.struck().size,0);assert.equal(matters.pendingCount(),0);assert.equal(matters.skippedCount(),0);
+test('a model that fails as a whole never skips a message', async (t) => {
+  const scenarios = {
+    unreachable: () => {
+      throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');
+    },
+    'no reply': () => {
+      throw Error('模型结束了这一轮，但没有回复');
+    },
+    'unusable answers to everything': () => '服务繁忙',
+    'unreachable after the bad one': poisoned('坏消息', () => {
+      throw Error('herdr agent prompt：timed out waiting for agent status（timeout）');
+    }),
+  };
+  for (const [name, answer] of Object.entries(scenarios)) {
+    const { store, matters, model, processor } = setup(t, { options: { maxMessages: 4 }, answer });
+    post(store, { text: '坏消息', at: min(0) });
+    for (let i = 1; i <= 3; i++) post(store, { text: `消息${i}`, at: min(i) });
+    for (let round = 0; round < 10; round++) {
+      post(store, { text: `第${round}轮的新消息`, at: min(10 + round) });
+      const before = model.calls.length,
+        r = await processor.runOnce();
+      assert.ok(model.calls.length - before <= 2, `${name}: at most one more run after a failure`);
+      assert.ok(r.failures >= 1, name);
+    }
+    assert.equal(matters.skippedCount(), 0, name);
+    assert.equal(matters.pendingCount(), 14, `${name}: every message still waits`);
+    assert.ok(!store.errors().some((e) => /跳过/.test(e.message)), name);
+  }
+});
+
+test('a message that gets through after failing loses its strikes', async (t) => {
+  let healed = false;
+  const { store, matters, processor } = setup(t, {
+    options: { maxMessages: 1 },
+    answer: (d) => (!healed && newTexts(d).includes('时好时坏') ? '嗯？' : none),
+  });
+  post(store, { text: '时好时坏', at: min(0) });
+  post(store, { text: '后面的', at: min(1) });
+  await processor.runOnce();
+  assert.equal(matters.struck().size, 1);
+  healed = true;
+  post(store, { text: '又来一条', at: min(2) });
+  await processor.runOnce();
+  assert.equal(matters.struck().size, 0);
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal(matters.skippedCount(), 0);
 });
 
 // ---- the review of the open matters (see review.mjs), which a round runs after its batches when it is due
-const kinds=model=>model.calls.map(c=>c.data.openMatters?'batch':c.data.matters?'review':'profile');
+const kinds = (model) => model.calls.map((c) => (c.data.openMatters ? 'batch' : c.data.matters ? 'review' : 'profile'));
 // A model that makes a matter of every new message, titled with its text, answers reviews with review(data) and
 // writes 关于TA with profile(data).
-const making=(review,profile=()=>({work:PROFILE,interests:'',added:[]}))=>d=>d.matters?review(d):d.openMatters?{new:newTexts(d).map(text=>({title:text,who:'陈帆',ask:'处理',urgency:'normal',messages:[ref(d,text)]})),updates:[]}:profile(d);
+const making =
+  (review, profile = () => ({ work: PROFILE, interests: '', added: [] })) =>
+  (d) =>
+    d.matters
+      ? review(d)
+      : d.openMatters
+        ? {
+            new: newTexts(d).map((text) => ({
+              title: text,
+              who: '陈帆',
+              ask: '处理',
+              urgency: 'normal',
+              messages: [ref(d, text)],
+            })),
+            updates: [],
+          }
+        : profile(d);
 
-test('a round reviews the open matters after its batches when there has been no review, and again reviewEveryMs after the last',async t=>{
- let clock=T0+3600e3;
- const {store,matters,model,processor,t0}=setup(t,{reviewed:false,now:()=>clock,
-  answer:making(d=>({updates:d.matters.filter(m=>m.title.includes('方案')).map(m=>({matter:m.matter,status:'closed',reason:'TA已经看过了'}))}))});
- post(store,{text:'@原智鸿 看下方案',at:min(1)});
- let r=await processor.runOnce();
- assert.deepEqual(kinds(model),['batch','review'],'the first round reviews, after its batch');
- assert.deepEqual(model.calls[1].data.matters.map(m=>m.title),['@原智鸿 看下方案'],'the review sees what the batch made');
- assert.deepEqual(r.review,{runs:1,reviewed:1,closed:1,complete:true});
- assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:1,profileAt:t0,notes:[]},'with what it judged by: 关于TA and my notes');
- const [ended]=matters.list({all:true});assert.deepEqual([ended.status,ended.closedBy,ended.reason],['closed','model','TA已经看过了']);
- post(store,{text:'在吗',at:min(2)});clock+=3600e3;
- r=await processor.runOnce();
- assert.deepEqual(kinds(model),['batch','review','batch'],'not again within reviewEveryMs');assert.equal(r.review,undefined);
- clock+=2*3600e3;
- r=await processor.runOnce();
- assert.equal(r.runs,0);assert.deepEqual(kinds(model).at(-1),'review','three hours on, a round reviews with nothing new to process');
- assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:0,profileAt:t0,notes:[]});
+test('a round reviews the open matters after its batches when there has been no review, and again reviewEveryMs after the last', async (t) => {
+  let clock = T0 + 3600e3;
+  const { store, matters, model, processor, t0 } = setup(t, {
+    reviewed: false,
+    now: () => clock,
+    answer: making((d) => ({
+      updates: d.matters
+        .filter((m) => m.title.includes('方案'))
+        .map((m) => ({ matter: m.matter, status: 'closed', reason: 'TA已经看过了' })),
+    })),
+  });
+  post(store, { text: '@原智鸿 看下方案', at: min(1) });
+  let r = await processor.runOnce();
+  assert.deepEqual(kinds(model), ['batch', 'review'], 'the first round reviews, after its batch');
+  assert.deepEqual(
+    model.calls[1].data.matters.map((m) => m.title),
+    ['@原智鸿 看下方案'],
+    'the review sees what the batch made',
+  );
+  assert.deepEqual(r.review, { runs: 1, reviewed: 1, closed: 1, complete: true });
+  assert.deepEqual(
+    store.meta('review'),
+    { at: clock, reviewed: 1, closed: 1, profileAt: t0, notes: [] },
+    'with what it judged by: 关于TA and my notes',
+  );
+  const [ended] = matters.list({ all: true });
+  assert.deepEqual([ended.status, ended.closedBy, ended.reason], ['closed', 'model', 'TA已经看过了']);
+  post(store, { text: '在吗', at: min(2) });
+  clock += 3600e3;
+  r = await processor.runOnce();
+  assert.deepEqual(kinds(model), ['batch', 'review', 'batch'], 'not again within reviewEveryMs');
+  assert.equal(r.review, undefined);
+  clock += 2 * 3600e3;
+  r = await processor.runOnce();
+  assert.equal(r.runs, 0);
+  assert.deepEqual(kinds(model).at(-1), 'review', 'three hours on, a round reviews with nothing new to process');
+  assert.deepEqual(store.meta('review'), { at: clock, reviewed: 1, closed: 0, profileAt: t0, notes: [] });
 });
 
-test('a failed review is on record and goes again on the next round, never twice in one; it holds up no message',async t=>{
- let down=true;
- const {store,matters,model,processor}=setup(t,{reviewed:false,answer:making(()=>{if(down)throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');return {updates:[]};})});
- post(store,{text:'第一件',at:min(1)});
- let r=await processor.runOnce();
- assert.equal(r.failures,0);assert.match(r.review.error,/Connection refused/);assert.deepEqual(kinds(model),['batch','review']);
- assert.equal(matters.pendingCount(),0);assert.equal(matters.list().length,1);
- const failed=store.meta('review');
- assert.equal(failed.at,undefined);assert.ok(failed.failedAt);assert.match(failed.error,/Connection refused/);
- assert.ok(store.errors().some(e=>e.source==='加工'&&/整理.*下一轮再试.*Connection refused/.test(e.message)));
- post(store,{text:'第二件',at:min(2)});
- r=await processor.runOnce();
- assert.equal(matters.pendingCount(),0,'messages are processed as before');assert.equal(matters.list().length,2);
- assert.deepEqual(kinds(model),['batch','review','batch','review'],'tried again on the next round');
- down=false;r=await processor.runOnce();
- assert.deepEqual(r.review,{runs:1,reviewed:2,closed:0,complete:true});
- const done=store.meta('review');assert.ok(done.at);assert.deepEqual(Object.keys(done).sort(),['at','closed','notes','profileAt','reviewed'],'the failure is cleared');
+test('a failed review is on record and goes again on the next round, never twice in one; it holds up no message', async (t) => {
+  let down = true;
+  const { store, matters, model, processor } = setup(t, {
+    reviewed: false,
+    answer: making(() => {
+      if (down) throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');
+      return { updates: [] };
+    }),
+  });
+  post(store, { text: '第一件', at: min(1) });
+  let r = await processor.runOnce();
+  assert.equal(r.failures, 0);
+  assert.match(r.review.error, /Connection refused/);
+  assert.deepEqual(kinds(model), ['batch', 'review']);
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal(matters.list().length, 1);
+  const failed = store.meta('review');
+  assert.equal(failed.at, undefined);
+  assert.ok(failed.failedAt);
+  assert.match(failed.error, /Connection refused/);
+  assert.ok(store.errors().some((e) => e.source === '加工' && /整理.*下一轮再试.*Connection refused/.test(e.message)));
+  post(store, { text: '第二件', at: min(2) });
+  r = await processor.runOnce();
+  assert.equal(matters.pendingCount(), 0, 'messages are processed as before');
+  assert.equal(matters.list().length, 2);
+  assert.deepEqual(kinds(model), ['batch', 'review', 'batch', 'review'], 'tried again on the next round');
+  down = false;
+  r = await processor.runOnce();
+  assert.deepEqual(r.review, { runs: 1, reviewed: 2, closed: 0, complete: true });
+  const done = store.meta('review');
+  assert.ok(done.at);
+  assert.deepEqual(
+    Object.keys(done).sort(),
+    ['at', 'closed', 'notes', 'profileAt', 'reviewed'],
+    'the failure is cleared',
+  );
 });
 
-test('no profile and no review after a round whose batch failed: the model is not there',async t=>{
- const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,answer:()=>{throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');}});
- const id=post(store,{text:'旧事',at:min(0)});matters.apply({created:[{title:'旧事',who:'陈帆',ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id]});
- post(store,{text:'在吗',at:min(1)});matters.addNote('审批不归我管');
- const r=await processor.runOnce();
- assert.equal(r.failures,1);assert.equal(r.review,undefined);assert.equal(r.profile,undefined);assert.deepEqual(kinds(model),['batch']);
- assert.equal(store.meta('review'),undefined);assert.equal(store.meta('profile'),undefined);
+test('no profile and no review after a round whose batch failed: the model is not there', async (t) => {
+  const { store, matters, model, processor } = setup(t, {
+    profiled: false,
+    reviewed: false,
+    answer: () => {
+      throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');
+    },
+  });
+  const id = post(store, { text: '旧事', at: min(0) });
+  matters.apply({
+    created: [{ title: '旧事', who: '陈帆', ask: '处理', urgency: 'normal', messageIds: [id] }],
+    processedIds: [id],
+  });
+  post(store, { text: '在吗', at: min(1) });
+  matters.addNote('审批不归我管');
+  const r = await processor.runOnce();
+  assert.equal(r.failures, 1);
+  assert.equal(r.review, undefined);
+  assert.equal(r.profile, undefined);
+  assert.deepEqual(kinds(model), ['batch']);
+  assert.equal(store.meta('review'), undefined);
+  assert.equal(store.meta('profile'), undefined);
 });
 
-test('a review cut short by stopping is not recorded as done',async t=>{
- let release;const gate=new Promise(r=>{release=r;});
- const {store,matters,model,processor}=setup(t,{reviewed:false,options:{maxPromptBytes:5000},answer:async()=>{await gate;return {updates:[]};}});
- for(let i=0;i<4;i++){const id=post(store,{chat:`c${i}`,text:`${i}${'长'.repeat(700)}`,at:min(i)});matters.apply({created:[{title:`事项${i}`,who:'陈帆',ask:'处理',urgency:'low',messageIds:[id]}],processedIds:[id]});}
- await processor.start({periodic:false});t.after(()=>{release();return processor.stop();});
- const round=processor.runOnce();await waitFor(()=>model.calls.length===1,{message:'the first part with the model'});
- const stopping=processor.stop();release();await stopping;
- const r=await round;
- assert.equal(r.review.complete,false);assert.equal(model.calls.length,1,'no part after the stop');assert.equal(store.meta('review'),undefined);
+test('a review cut short by stopping is not recorded as done', async (t) => {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const { store, matters, model, processor } = setup(t, {
+    reviewed: false,
+    options: { maxPromptBytes: 5000 },
+    answer: async () => {
+      await gate;
+      return { updates: [] };
+    },
+  });
+  for (let i = 0; i < 4; i++) {
+    const id = post(store, { chat: `c${i}`, text: `${i}${'长'.repeat(700)}`, at: min(i) });
+    matters.apply({
+      created: [{ title: `事项${i}`, who: '陈帆', ask: '处理', urgency: 'low', messageIds: [id] }],
+      processedIds: [id],
+    });
+  }
+  await processor.start({ periodic: false });
+  t.after(() => {
+    release();
+    return processor.stop();
+  });
+  const round = processor.runOnce();
+  await waitFor(() => model.calls.length === 1, { message: 'the first part with the model' });
+  const stopping = processor.stop();
+  release();
+  await stopping;
+  const r = await round;
+  assert.equal(r.review.complete, false);
+  assert.equal(model.calls.length, 1, 'no part after the stop');
+  assert.equal(store.meta('review'), undefined);
 });
 
 // ---- 关于TA (see profile.mjs), which a round writes after its batches and before its review when it is due
-test('a round with no 关于TA yet writes it after its batches, and the review that follows and later batches judge by it',async t=>{
- let clock=T0+3600e3;
- const {store,matters,model,processor}=setup(t,{profiled:false,now:()=>clock,answer:making(()=>({updates:[]}),()=>({work:'角色：GEO 服务的后端\n通常不归TA：审批',interests:'AI 编程工具',added:['TA对 AI 编程工具感兴趣']}))});
- post(store,{mine:true,text:'GEO 的接口我来看',at:min(0)});post(store,{text:'@原智鸿 帮忙审批一下',at:min(1)});
- const note=matters.addNote('审批不归我管',min(2));
- const r=await processor.runOnce();
- assert.deepEqual(kinds(model),['batch','profile','review'],'after the batch, before the review, which the new profile makes due');
- assert.deepEqual([model.calls[0].data.profile,model.calls[0].data.notes],[null,['审批不归我管']],'no profile for the first batch yet, but my notes');
- assert.deepEqual(messagesOf(model.calls[1].data).map(m=>m.text),['GEO 的接口我来看']);assert.deepEqual(model.calls[1].data.notes,['审批不归我管']);
- const profile=store.meta('profile');
- const text='【工作】\n角色：GEO 服务的后端\n通常不归TA：审批\n【兴趣】\nAI 编程工具';
- assert.deepEqual(profile,{text,at:clock,notes:[note],messages:1,added:['TA对 AI 编程工具感兴趣']});
- assert.deepEqual(r.profile,{text,added:['TA对 AI 编程工具感兴趣'],messages:1});
- assert.deepEqual([model.calls[2].data.profile,model.calls[2].data.notes],[profile.text,['审批不归我管']]);
- assert.deepEqual(store.meta('review'),{at:clock,reviewed:1,closed:0,profileAt:clock,notes:[note]});
- const [,run]=matters.runs();assert.deepEqual([run.kind,run.ok,run.messages],['profile',true,1]);
- post(store,{text:'在吗',at:min(3)});clock+=600e3;
- await processor.runOnce();
- assert.deepEqual(kinds(model).slice(3),['batch'],'neither again so soon');assert.equal(model.calls[3].data.profile,profile.text);
+test('a round with no 关于TA yet writes it after its batches, and the review that follows and later batches judge by it', async (t) => {
+  let clock = T0 + 3600e3;
+  const { store, matters, model, processor } = setup(t, {
+    profiled: false,
+    now: () => clock,
+    answer: making(
+      () => ({ updates: [] }),
+      () => ({
+        work: '角色：GEO 服务的后端\n通常不归TA：审批',
+        interests: 'AI 编程工具',
+        added: ['TA对 AI 编程工具感兴趣'],
+      }),
+    ),
+  });
+  post(store, { mine: true, text: 'GEO 的接口我来看', at: min(0) });
+  post(store, { text: '@原智鸿 帮忙审批一下', at: min(1) });
+  const note = matters.addNote('审批不归我管', min(2));
+  const r = await processor.runOnce();
+  assert.deepEqual(
+    kinds(model),
+    ['batch', 'profile', 'review'],
+    'after the batch, before the review, which the new profile makes due',
+  );
+  assert.deepEqual(
+    [model.calls[0].data.profile, model.calls[0].data.notes],
+    [null, ['审批不归我管']],
+    'no profile for the first batch yet, but my notes',
+  );
+  assert.deepEqual(
+    messagesOf(model.calls[1].data).map((m) => m.text),
+    ['GEO 的接口我来看'],
+  );
+  assert.deepEqual(model.calls[1].data.notes, ['审批不归我管']);
+  const profile = store.meta('profile');
+  const text = '【工作】\n角色：GEO 服务的后端\n通常不归TA：审批\n【兴趣】\nAI 编程工具';
+  assert.deepEqual(profile, { text, at: clock, notes: [note], messages: 1, added: ['TA对 AI 编程工具感兴趣'] });
+  assert.deepEqual(r.profile, { text, added: ['TA对 AI 编程工具感兴趣'], messages: 1 });
+  assert.deepEqual([model.calls[2].data.profile, model.calls[2].data.notes], [profile.text, ['审批不归我管']]);
+  assert.deepEqual(store.meta('review'), { at: clock, reviewed: 1, closed: 0, profileAt: clock, notes: [note] });
+  const [, run] = matters.runs();
+  assert.deepEqual([run.kind, run.ok, run.messages], ['profile', true, 1]);
+  post(store, { text: '在吗', at: min(3) });
+  clock += 600e3;
+  await processor.runOnce();
+  assert.deepEqual(kinds(model).slice(3), ['batch'], 'neither again so soon');
+  assert.equal(model.calls[3].data.profile, profile.text);
 });
 
-test('batches, reviews and 关于TA are shown the matters I marked as not mine, the latest first, at most notMine of them',async t=>{
- let clock=T0+3600e3;
- const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,now:()=>clock,options:{notMine:2},answer:making(()=>({updates:[]}))});
- const made=(title,who,chat)=>{const id=post(store,{chat,text:title,at:min(0)});return matters.apply({created:[{title,who,ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id]})[0];};
- const budget=made('审批预算','黄凯熙','g2'),alarm=made('看告警','值班机器人','g1'),report=made('填周报','陈帆','g1'),back=made('又拿回来的事','张三','g1');
- matters.close(budget,NOT_MINE,min(1));matters.close(alarm,NOT_MINE,min(2));matters.close(report,'完成',min(3));matters.close(back,NOT_MINE,min(4));matters.reopen(back,min(5));
- matters.close(made('更早的','李四','g1'),NOT_MINE,min(0));
- post(store,{text:'@原智鸿 新的事',at:min(6)});
- await processor.runOnce();
- assert.deepEqual(kinds(model),['batch','profile','review'],'with nothing but them to write 关于TA from, it is written all the same');
- for(const call of model.calls)assert.deepEqual(call.data.notMine,[{title:'看告警',who:'值班机器人',chats:['项目群']},{title:'审批预算',who:'黄凯熙',chats:['大群']}],
-  'closed as 不归我 and still closed; not 完成, not reopened; the latest two');
+test('batches, reviews and 关于TA are shown the matters I marked as not mine, the latest first, at most notMine of them', async (t) => {
+  let clock = T0 + 3600e3;
+  const { store, matters, model, processor } = setup(t, {
+    profiled: false,
+    reviewed: false,
+    now: () => clock,
+    options: { notMine: 2 },
+    answer: making(() => ({ updates: [] })),
+  });
+  const made = (title, who, chat) => {
+    const id = post(store, { chat, text: title, at: min(0) });
+    return matters.apply({
+      created: [{ title, who, ask: '处理', urgency: 'normal', messageIds: [id] }],
+      processedIds: [id],
+    })[0];
+  };
+  const budget = made('审批预算', '黄凯熙', 'g2'),
+    alarm = made('看告警', '值班机器人', 'g1'),
+    report = made('填周报', '陈帆', 'g1'),
+    back = made('又拿回来的事', '张三', 'g1');
+  matters.close(budget, NOT_MINE, min(1));
+  matters.close(alarm, NOT_MINE, min(2));
+  matters.close(report, '完成', min(3));
+  matters.close(back, NOT_MINE, min(4));
+  matters.reopen(back, min(5));
+  matters.close(made('更早的', '李四', 'g1'), NOT_MINE, min(0));
+  post(store, { text: '@原智鸿 新的事', at: min(6) });
+  await processor.runOnce();
+  assert.deepEqual(
+    kinds(model),
+    ['batch', 'profile', 'review'],
+    'with nothing but them to write 关于TA from, it is written all the same',
+  );
+  for (const call of model.calls)
+    assert.deepEqual(
+      call.data.notMine,
+      [
+        { title: '看告警', who: '值班机器人', chats: ['项目群'] },
+        { title: '审批预算', who: '黄凯熙', chats: ['大群'] },
+      ],
+      'closed as 不归我 and still closed; not 完成, not reopened; the latest two',
+    );
 });
 
-test('关于TA is written again once profileEveryMs have passed and whenever my notes change, and each new one re-judges the open matters at once',async t=>{
- let clock=T0+3600e3,version=0;
- const {store,matters,model,processor}=setup(t,{now:()=>clock,options:{reviewEveryMs:7*86400e3},answer:making(()=>({updates:[]}),d=>({work:`第${++version}版`,interests:'',added:d.previous?[]:['第一版']}))});
- const id=post(store,{text:'旧事',at:min(0)}),mine=post(store,{mine:true,text:'我负责 GEO',at:min(1)});
- matters.apply({created:[{title:'旧事',who:'陈帆',ask:'处理',urgency:'normal',messageIds:[id]}],processedIds:[id,mine]});
- clock+=23*3600e3;await processor.runOnce();
- assert.deepEqual(kinds(model),[],'not within a day');
- clock+=3600e3;await processor.runOnce();
- assert.deepEqual(kinds(model),['profile','review'],'a day on it is written again, and the open matters are judged by it');
- assert.deepEqual([store.meta('profile').text,model.calls[1].data.profile],['【工作】\n第1版','【工作】\n第1版']);
- const note=matters.addNote('审批不归我管',clock);clock+=60e3;await processor.runOnce();
- assert.deepEqual(kinds(model).slice(2),['profile','review'],'a new note: at once');
- assert.deepEqual(model.calls[2].data.notes,['审批不归我管']);assert.deepEqual([model.calls[3].data.profile,model.calls[3].data.notes],['【工作】\n第2版',['审批不归我管']]);
- assert.deepEqual([model.calls[0].data.previous,model.calls[2].data.previous],[PROFILE,'【工作】\n第1版'],'each is written beside the last one');
- assert.deepEqual(store.meta('profile').notes,[note]);
- clock+=60e3;await processor.runOnce();assert.equal(model.calls.length,4,'and once');
- matters.removeNote(note);clock+=60e3;await processor.runOnce();
- assert.deepEqual(kinds(model).slice(4),['profile','review'],'a note removed: the same');assert.deepEqual([model.calls[4].data.notes,model.calls[5].data.notes],[[],[]]);
+test('关于TA is written again once profileEveryMs have passed and whenever my notes change, and each new one re-judges the open matters at once', async (t) => {
+  let clock = T0 + 3600e3,
+    version = 0;
+  const { store, matters, model, processor } = setup(t, {
+    now: () => clock,
+    options: { reviewEveryMs: 7 * 86400e3 },
+    answer: making(
+      () => ({ updates: [] }),
+      (d) => ({ work: `第${++version}版`, interests: '', added: d.previous ? [] : ['第一版'] }),
+    ),
+  });
+  const id = post(store, { text: '旧事', at: min(0) }),
+    mine = post(store, { mine: true, text: '我负责 GEO', at: min(1) });
+  matters.apply({
+    created: [{ title: '旧事', who: '陈帆', ask: '处理', urgency: 'normal', messageIds: [id] }],
+    processedIds: [id, mine],
+  });
+  clock += 23 * 3600e3;
+  await processor.runOnce();
+  assert.deepEqual(kinds(model), [], 'not within a day');
+  clock += 3600e3;
+  await processor.runOnce();
+  assert.deepEqual(
+    kinds(model),
+    ['profile', 'review'],
+    'a day on it is written again, and the open matters are judged by it',
+  );
+  assert.deepEqual([store.meta('profile').text, model.calls[1].data.profile], ['【工作】\n第1版', '【工作】\n第1版']);
+  const note = matters.addNote('审批不归我管', clock);
+  clock += 60e3;
+  await processor.runOnce();
+  assert.deepEqual(kinds(model).slice(2), ['profile', 'review'], 'a new note: at once');
+  assert.deepEqual(model.calls[2].data.notes, ['审批不归我管']);
+  assert.deepEqual([model.calls[3].data.profile, model.calls[3].data.notes], ['【工作】\n第2版', ['审批不归我管']]);
+  assert.deepEqual(
+    [model.calls[0].data.previous, model.calls[2].data.previous],
+    [PROFILE, '【工作】\n第1版'],
+    'each is written beside the last one',
+  );
+  assert.deepEqual(store.meta('profile').notes, [note]);
+  clock += 60e3;
+  await processor.runOnce();
+  assert.equal(model.calls.length, 4, 'and once');
+  matters.removeNote(note);
+  clock += 60e3;
+  await processor.runOnce();
+  assert.deepEqual(kinds(model).slice(4), ['profile', 'review'], 'a note removed: the same');
+  assert.deepEqual([model.calls[4].data.notes, model.calls[5].data.notes], [[], []]);
 });
 
-test('a profile that fails is on record and goes again on the next round, never twice in one; it holds up no message, and the review goes on',async t=>{
- let down=true;
- const {store,matters,model,processor}=setup(t,{profiled:false,reviewed:false,answer:making(()=>({updates:[]}),()=>down?'我说不清TA是做什么的':{work:'角色：后端',added:[]})});
- post(store,{mine:true,text:'我负责 GEO',at:min(0)});post(store,{text:'@原智鸿 看下',at:min(1)});
- let r=await processor.runOnce();
- assert.equal(r.failures,0);assert.match(r.profile.error,/不是 JSON/);assert.deepEqual(kinds(model),['batch','profile','review']);
- assert.equal(matters.pendingCount(),0);assert.equal(matters.list().length,1);assert.deepEqual(r.review,{runs:1,reviewed:1,closed:0,complete:true});
- const failed=store.meta('profile');
- assert.equal(failed.at,undefined);assert.ok(failed.failedAt);assert.match(failed.error,/不是 JSON/);
- assert.ok(store.errors().some(e=>e.source==='加工'&&/关于TA.*下一轮再试.*不是 JSON/.test(e.message)));
- assert.deepEqual(matters.runs().map(x=>[x.kind,x.ok]),[['batch',true],['profile',false],['review',true]]);
- r=await processor.runOnce();
- assert.deepEqual(kinds(model).slice(3),['profile'],'tried again on the next round');
- down=false;r=await processor.runOnce();
- assert.deepEqual(kinds(model).slice(4),['profile','review'],'and once written, the open matters are judged by it');
- assert.deepEqual(Object.keys(store.meta('profile')).sort(),['added','at','messages','notes','text'],'the failure is cleared');
+test('a profile that fails is on record and goes again on the next round, never twice in one; it holds up no message, and the review goes on', async (t) => {
+  let down = true;
+  const { store, matters, model, processor } = setup(t, {
+    profiled: false,
+    reviewed: false,
+    answer: making(
+      () => ({ updates: [] }),
+      () => (down ? '我说不清TA是做什么的' : { work: '角色：后端', added: [] }),
+    ),
+  });
+  post(store, { mine: true, text: '我负责 GEO', at: min(0) });
+  post(store, { text: '@原智鸿 看下', at: min(1) });
+  let r = await processor.runOnce();
+  assert.equal(r.failures, 0);
+  assert.match(r.profile.error, /不是 JSON/);
+  assert.deepEqual(kinds(model), ['batch', 'profile', 'review']);
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal(matters.list().length, 1);
+  assert.deepEqual(r.review, { runs: 1, reviewed: 1, closed: 0, complete: true });
+  const failed = store.meta('profile');
+  assert.equal(failed.at, undefined);
+  assert.ok(failed.failedAt);
+  assert.match(failed.error, /不是 JSON/);
+  assert.ok(store.errors().some((e) => e.source === '加工' && /关于TA.*下一轮再试.*不是 JSON/.test(e.message)));
+  assert.deepEqual(
+    matters.runs().map((x) => [x.kind, x.ok]),
+    [
+      ['batch', true],
+      ['profile', false],
+      ['review', true],
+    ],
+  );
+  r = await processor.runOnce();
+  assert.deepEqual(kinds(model).slice(3), ['profile'], 'tried again on the next round');
+  down = false;
+  r = await processor.runOnce();
+  assert.deepEqual(kinds(model).slice(4), ['profile', 'review'], 'and once written, the open matters are judged by it');
+  assert.deepEqual(
+    Object.keys(store.meta('profile')).sort(),
+    ['added', 'at', 'messages', 'notes', 'text'],
+    'the failure is cleared',
+  );
 });
 
-test('whoever shows 关于TA is told of each one written, with what the model newly inferred; not of one that failed or could not be written',async t=>{
- let clock=T0+3600e3,down=false;
- const {store,matters,processor,profiles}=setup(t,{profiled:false,reviewed:false,now:()=>clock,
-  answer:making(()=>({updates:[]}),d=>down?'说不清':{work:'角色：后端',interests:'',added:d.previous?[]:['TA是做后端的']})});
- await processor.runOnce();
- assert.deepEqual(profiles,[],'nothing to write it from');
- post(store,{mine:true,text:'GEO 的接口我来看',at:min(0)});
- await processor.runOnce();
- assert.deepEqual(profiles,[{text:'【工作】\n角色：后端',added:['TA是做后端的'],at:clock}]);
- matters.addNote('审批不归我管',clock);clock+=60e3;await processor.runOnce();
- assert.deepEqual(profiles.at(-1),{text:'【工作】\n角色：后端',added:[],at:clock},'told even when nothing is new: whoever shows it decides');
- down=true;matters.addNote('Meego 的通知不用管',clock);clock+=60e3;await processor.runOnce();
- assert.equal(profiles.length,2,'not of one that failed');
+test('whoever shows 关于TA is told of each one written, with what the model newly inferred; not of one that failed or could not be written', async (t) => {
+  let clock = T0 + 3600e3,
+    down = false;
+  const { store, matters, processor, profiles } = setup(t, {
+    profiled: false,
+    reviewed: false,
+    now: () => clock,
+    answer: making(
+      () => ({ updates: [] }),
+      (d) => (down ? '说不清' : { work: '角色：后端', interests: '', added: d.previous ? [] : ['TA是做后端的'] }),
+    ),
+  });
+  await processor.runOnce();
+  assert.deepEqual(profiles, [], 'nothing to write it from');
+  post(store, { mine: true, text: 'GEO 的接口我来看', at: min(0) });
+  await processor.runOnce();
+  assert.deepEqual(profiles, [{ text: '【工作】\n角色：后端', added: ['TA是做后端的'], at: clock }]);
+  matters.addNote('审批不归我管', clock);
+  clock += 60e3;
+  await processor.runOnce();
+  assert.deepEqual(
+    profiles.at(-1),
+    { text: '【工作】\n角色：后端', added: [], at: clock },
+    'told even when nothing is new: whoever shows it decides',
+  );
+  down = true;
+  matters.addNote('Meego 的通知不用管', clock);
+  clock += 60e3;
+  await processor.runOnce();
+  assert.equal(profiles.length, 2, 'not of one that failed');
 });
 
-test('what the hook for 关于TA throws or rejects with is recorded and changes nothing',async t=>{
- for(const onProfile of [()=>{throw Error('飞书连不上');},async()=>{throw Error('飞书连不上');}]){
-  const {store,processor}=setup(t,{profiled:false,reviewed:false,onProfile,answer:making(()=>({updates:[]}))});
-  post(store,{mine:true,text:'GEO 的接口我来看',at:min(0)});
-  const r=await processor.runOnce();await new Promise(r=>setImmediate(r));
-  assert.equal(r.profile.text,`【工作】\n${PROFILE}`);assert.equal(store.meta('profile').text,r.profile.text);assert.ok(r.review.complete);
-  assert.ok(store.errors().some(e=>e.source==='加工'&&/关于TA.*通知出错.*飞书连不上/.test(e.message)));
- }
+test('what the hook for 关于TA throws or rejects with is recorded and changes nothing', async (t) => {
+  for (const onProfile of [
+    () => {
+      throw Error('飞书连不上');
+    },
+    async () => {
+      throw Error('飞书连不上');
+    },
+  ]) {
+    const { store, processor } = setup(t, {
+      profiled: false,
+      reviewed: false,
+      onProfile,
+      answer: making(() => ({ updates: [] })),
+    });
+    post(store, { mine: true, text: 'GEO 的接口我来看', at: min(0) });
+    const r = await processor.runOnce();
+    await new Promise((r) => setImmediate(r));
+    assert.equal(r.profile.text, `【工作】\n${PROFILE}`);
+    assert.equal(store.meta('profile').text, r.profile.text);
+    assert.ok(r.review.complete);
+    assert.ok(store.errors().some((e) => e.source === '加工' && /关于TA.*通知出错.*飞书连不上/.test(e.message)));
+  }
 });
 
 // ---- what I do about an open matter is processed within seconds, not on the next cycle
 // An open matter in g1, made from a message already processed; returns that message.
-const opened=(store,matters,text='@原智鸿 帮忙看下日志')=>{
- const id=post(store,{text,at:min(1)});matters.apply({created:[{title:text,who:'陈帆',ask:'看日志',urgency:'normal',messageIds:[id]}],processedIds:[id]});return id;
+const opened = (store, matters, text = '@原智鸿 帮忙看下日志') => {
+  const id = post(store, { text, at: min(1) });
+  matters.apply({
+    created: [{ title: text, who: '陈帆', ask: '看日志', urgency: 'normal', messageIds: [id] }],
+    processedIds: [id],
+  });
+  return id;
 };
 
-test('my message or reaction in the chat of an open matter starts a round at once; others\' messages, and mine elsewhere, wait for the cycle',async t=>{
- const {store,matters,model,processor}=setup(t);
- post(store,{chat:'d1',mine:true,text:'还没有事项时我说的',at:min(0)});
- assert.equal(processor.checkOwner(),undefined,'nothing open: nothing of mine can end anything');
- const ask=opened(store,matters);
- post(store,{text:'日志在群文件里',at:min(2)});post(store,{chat:'g2',mine:true,text:'别的群里我说的',at:min(3)});
- assert.equal(processor.checkOwner(),undefined,'others\' messages, and mine in a chat with nothing open, wait');
- assert.equal(model.calls.length,0);
- post(store,{mine:true,text:'我看下',at:min(4)});
- let r=await processor.checkOwner();
- assert.equal(r.runs,1);
- assert.deepEqual(newTexts(model.calls[0].data).sort(),['还没有事项时我说的','日志在群文件里','别的群里我说的','我看下'].sort(),'a normal round: whatever waits goes, in the usual batches');
- assert.equal(matters.pendingCount(),0);assert.equal(processor.checkOwner(),undefined,'and then nothing waits');
- store.setReactions(ask,GET);
- r=await processor.checkOwner();
- assert.equal(r.runs,1);assert.deepEqual(actionsOf(model.calls[1].data).map(a=>a.reaction),['Get'],'a reaction of mine on a message processed before');
- post(store,{text:'也看下这个',at:min(5),reactions:GET});
- r=await processor.checkOwner();
- assert.equal(r.runs,1);assert.deepEqual(newTexts(model.calls[2].data),['也看下这个'],'a new message that carries a reaction of mine');
- matters.ignore('u9','广告机器人');post(store,{sender:'u9',name:'广告机器人',type:'bot',text:'广告',at:min(6),reactions:GET});
- assert.equal(processor.checkOwner(),undefined,'not my reaction on an ignored sender\'s message');
+test("my message or reaction in the chat of an open matter starts a round at once; others' messages, and mine elsewhere, wait for the cycle", async (t) => {
+  const { store, matters, model, processor } = setup(t);
+  post(store, { chat: 'd1', mine: true, text: '还没有事项时我说的', at: min(0) });
+  assert.equal(processor.checkOwner(), undefined, 'nothing open: nothing of mine can end anything');
+  const ask = opened(store, matters);
+  post(store, { text: '日志在群文件里', at: min(2) });
+  post(store, { chat: 'g2', mine: true, text: '别的群里我说的', at: min(3) });
+  assert.equal(processor.checkOwner(), undefined, "others' messages, and mine in a chat with nothing open, wait");
+  assert.equal(model.calls.length, 0);
+  post(store, { mine: true, text: '我看下', at: min(4) });
+  let r = await processor.checkOwner();
+  assert.equal(r.runs, 1);
+  assert.deepEqual(
+    newTexts(model.calls[0].data).sort(),
+    ['还没有事项时我说的', '日志在群文件里', '别的群里我说的', '我看下'].sort(),
+    'a normal round: whatever waits goes, in the usual batches',
+  );
+  assert.equal(matters.pendingCount(), 0);
+  assert.equal(processor.checkOwner(), undefined, 'and then nothing waits');
+  store.setReactions(ask, GET);
+  r = await processor.checkOwner();
+  assert.equal(r.runs, 1);
+  assert.deepEqual(
+    actionsOf(model.calls[1].data).map((a) => a.reaction),
+    ['Get'],
+    'a reaction of mine on a message processed before',
+  );
+  post(store, { text: '也看下这个', at: min(5), reactions: GET });
+  r = await processor.checkOwner();
+  assert.equal(r.runs, 1);
+  assert.deepEqual(newTexts(model.calls[2].data), ['也看下这个'], 'a new message that carries a reaction of mine');
+  matters.ignore('u9', '广告机器人');
+  post(store, { sender: 'u9', name: '广告机器人', type: 'bot', text: '广告', at: min(6), reactions: GET });
+  assert.equal(processor.checkOwner(), undefined, "not my reaction on an ignored sender's message");
 });
 
-test('a message only stored that carries a reaction of mine starts no round and never waits, and comes along as what I did there',async t=>{
- const {store,matters,model,processor}=setup(t);
- opened(store,matters);
- const chatter=post(store,{text:'群里别人的闲聊',at:min(2),categories:['stored'],reactions:GET}),later=post(store,{text:'另一句闲聊',at:min(3),categories:['stored']});
- store.setReactions(later,GET);
- assert.equal(processor.checkOwner(),undefined,'it would never be processed: a quick round every few seconds for good');
- assert.equal(matters.pendingCount(),0);
- post(store,{text:'日志在群文件里',at:min(4)});
- await processor.runOnce();
- const shown=messagesOf(model.calls[0].data).filter(m=>m.myReactions).map(m=>[m.text,Boolean(m.new)]);
- assert.deepEqual(shown,[['群里别人的闲聊',false],['另一句闲聊',false]],'context, never new');
- assert.equal(processor.checkOwner(),undefined);assert.ok(chatter);
+test('a message only stored that carries a reaction of mine starts no round and never waits, and comes along as what I did there', async (t) => {
+  const { store, matters, model, processor } = setup(t);
+  opened(store, matters);
+  const chatter = post(store, { text: '群里别人的闲聊', at: min(2), categories: ['stored'], reactions: GET }),
+    later = post(store, { text: '另一句闲聊', at: min(3), categories: ['stored'] });
+  store.setReactions(later, GET);
+  assert.equal(
+    processor.checkOwner(),
+    undefined,
+    'it would never be processed: a quick round every few seconds for good',
+  );
+  assert.equal(matters.pendingCount(), 0);
+  post(store, { text: '日志在群文件里', at: min(4) });
+  await processor.runOnce();
+  const shown = messagesOf(model.calls[0].data)
+    .filter((m) => m.myReactions)
+    .map((m) => [m.text, Boolean(m.new)]);
+  assert.deepEqual(
+    shown,
+    [
+      ['群里别人的闲聊', false],
+      ['另一句闲聊', false],
+    ],
+    'context, never new',
+  );
+  assert.equal(processor.checkOwner(), undefined);
+  assert.ok(chatter);
 });
 
-test('the quick check starts no round while one runs; the round under way takes my message along',async t=>{
- let release;const gate=new Promise(r=>{release=r;});
- const {store,matters,model,processor}=setup(t,{answer:async()=>{await gate;return none;}});
- opened(store,matters);post(store,{text:'在吗',at:min(2)});
- const round=processor.runOnce();await waitFor(()=>model.calls.length===1,{message:'a batch with the model'});
- post(store,{mine:true,text:'我在',at:min(3)});
- assert.equal(processor.checkOwner(),undefined,'a round is running');
- release();const r=await round;
- assert.equal(r.runs,2,'the round goes on to my message');assert.equal(model.overlapped,false);assert.equal(matters.pendingCount(),0);
+test('the quick check starts no round while one runs; the round under way takes my message along', async (t) => {
+  let release;
+  const gate = new Promise((r) => {
+    release = r;
+  });
+  const { store, matters, model, processor } = setup(t, {
+    answer: async () => {
+      await gate;
+      return none;
+    },
+  });
+  opened(store, matters);
+  post(store, { text: '在吗', at: min(2) });
+  const round = processor.runOnce();
+  await waitFor(() => model.calls.length === 1, { message: 'a batch with the model' });
+  post(store, { mine: true, text: '我在', at: min(3) });
+  assert.equal(processor.checkOwner(), undefined, 'a round is running');
+  release();
+  const r = await round;
+  assert.equal(r.runs, 2, 'the round goes on to my message');
+  assert.equal(model.overlapped, false);
+  assert.equal(matters.pendingCount(), 0);
 });
 
-test('after a round that failed, the quick check waits until a round of the cycle gets through: a failing model is not asked every few seconds',async t=>{
- let down=true;
- const {store,matters,model,processor}=setup(t,{answer:()=>{if(down)throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');return none;}});
- opened(store,matters);post(store,{mine:true,text:'我看下',at:min(2)});
- assert.equal((await processor.checkOwner()).failures,1);
- post(store,{mine:true,text:'看完了',at:min(3)});
- assert.equal(processor.checkOwner(),undefined,'not again before the cycle');assert.equal(model.calls.length,1);
- assert.equal((await processor.runOnce()).failures,1,'the cycle tries as before');
- down=false;assert.equal((await processor.runOnce()).failures,0);
- post(store,{mine:true,text:'好了',at:min(4)});
- assert.equal((await processor.checkOwner()).runs,1,'once a round gets through, at once again');
- // A review that fails counts the same: the next quick round would try it again.
- const s=setup(t,{reviewed:false,answer:making(()=>{throw Error('herdr agent prompt：timed out waiting for agent status（timeout）');})});
- opened(s.store,s.matters);post(s.store,{mine:true,text:'我看下',at:min(2)});
- const r=await s.processor.checkOwner();assert.equal(r.failures,0);assert.match(r.review.error,/timeout/);
- post(s.store,{mine:true,text:'看完了',at:min(3)});
- assert.equal(s.processor.checkOwner(),undefined);
+test('after a round that failed, the quick check waits until a round of the cycle gets through: a failing model is not asked every few seconds', async (t) => {
+  let down = true;
+  const { store, matters, model, processor } = setup(t, {
+    answer: () => {
+      if (down) throw Error('herdr --machine cpu1-butler：ssh: connect to host port 22: Connection refused');
+      return none;
+    },
+  });
+  opened(store, matters);
+  post(store, { mine: true, text: '我看下', at: min(2) });
+  assert.equal((await processor.checkOwner()).failures, 1);
+  post(store, { mine: true, text: '看完了', at: min(3) });
+  assert.equal(processor.checkOwner(), undefined, 'not again before the cycle');
+  assert.equal(model.calls.length, 1);
+  assert.equal((await processor.runOnce()).failures, 1, 'the cycle tries as before');
+  down = false;
+  assert.equal((await processor.runOnce()).failures, 0);
+  post(store, { mine: true, text: '好了', at: min(4) });
+  assert.equal((await processor.checkOwner()).runs, 1, 'once a round gets through, at once again');
+  // A review that fails counts the same: the next quick round would try it again.
+  const s = setup(t, {
+    reviewed: false,
+    answer: making(() => {
+      throw Error('herdr agent prompt：timed out waiting for agent status（timeout）');
+    }),
+  });
+  opened(s.store, s.matters);
+  post(s.store, { mine: true, text: '我看下', at: min(2) });
+  const r = await s.processor.checkOwner();
+  assert.equal(r.failures, 0);
+  assert.match(r.review.error, /timeout/);
+  post(s.store, { mine: true, text: '看完了', at: min(3) });
+  assert.equal(s.processor.checkOwner(), undefined);
 });
 
-test('a running processor checks for what I did every ownerCheckMs',async t=>{
- const {store,matters,model,processor}=setup(t,{options:{everyMs:3600e3,ownerCheckMs:20}});
- opened(store,matters);
- await processor.start();t.after(()=>processor.stop());
- post(store,{text:'在吗',at:min(2)});await new Promise(r=>setTimeout(r,100));
- assert.equal(model.calls.length,0,'others\' messages wait for the cycle');
- post(store,{mine:true,text:'我在',at:min(3)});
- await waitFor(()=>matters.pendingCount()===0,{message:'a round for my message'});
- assert.deepEqual(newTexts(model.calls[0].data),['在吗','我在']);
- await processor.stop();
+test('a running processor checks for what I did every ownerCheckMs', async (t) => {
+  const { store, matters, model, processor } = setup(t, { options: { everyMs: 3600e3, ownerCheckMs: 20 } });
+  opened(store, matters);
+  await processor.start();
+  t.after(() => processor.stop());
+  post(store, { text: '在吗', at: min(2) });
+  await new Promise((r) => setTimeout(r, 100));
+  assert.equal(model.calls.length, 0, "others' messages wait for the cycle");
+  post(store, { mine: true, text: '我在', at: min(3) });
+  await waitFor(() => matters.pendingCount() === 0, { message: 'a round for my message' });
+  assert.deepEqual(newTexts(model.calls[0].data), ['在吗', '我在']);
+  await processor.stop();
 });
 
-test('matters changed on the command line, another process, are told to whoever shows them at the next quick check, once; a change from before the start is not',async t=>{
- const {store,matters,processor,changes}=setup(t);
- const a=opened(store,matters);
- matters.close(a,'不用管');matters.markChanged();
- await processor.start({periodic:false});t.after(()=>processor.stop());
- assert.equal(processor.checkMark(),false,'from before the start');assert.deepEqual(changes,[]);
- matters.reopen(a);matters.markChanged();
- assert.equal(processor.checkMark(),true);assert.equal(changes.length,1);
- assert.equal(processor.checkMark(),false,'once');assert.equal(changes.length,1);
- matters.markChanged();matters.markChanged();
- assert.equal(processor.checkMark(),true,'changes in one millisecond count');assert.equal(changes.length,2);
- await processor.stop();
+test('matters changed on the command line, another process, are told to whoever shows them at the next quick check, once; a change from before the start is not', async (t) => {
+  const { store, matters, processor, changes } = setup(t);
+  const a = opened(store, matters);
+  matters.close(a, '不用管');
+  matters.markChanged();
+  await processor.start({ periodic: false });
+  t.after(() => processor.stop());
+  assert.equal(processor.checkMark(), false, 'from before the start');
+  assert.deepEqual(changes, []);
+  matters.reopen(a);
+  matters.markChanged();
+  assert.equal(processor.checkMark(), true);
+  assert.equal(changes.length, 1);
+  assert.equal(processor.checkMark(), false, 'once');
+  assert.equal(changes.length, 1);
+  matters.markChanged();
+  matters.markChanged();
+  assert.equal(processor.checkMark(), true, 'changes in one millisecond count');
+  assert.equal(changes.length, 2);
+  await processor.stop();
 });
 
-test('the processor says when a batch or a review has made, changed or closed matters, and not otherwise',async t=>{
- const {store,model,processor,changes}=setup(t,{reviewed:false,answer:d=>d.matters?{updates:d.matters.map(m=>({matter:m.matter,status:'closed',reason:'TA已经看过了'}))}
-  :{new:newTexts(d).filter(x=>x.includes('方案')).map(text=>({title:text,who:'陈帆',ask:'看',urgency:'normal',messages:[ref(d,text)]})),updates:[]}});
- post(store,{text:'@原智鸿 看下方案',at:min(1)});
- await processor.runOnce();
- assert.deepEqual(kinds(model),['batch','review']);
- assert.deepEqual(changes,[1,2],'after the batch that made a matter, and after the review that closed it');
- post(store,{text:'中午吃啥',at:min(2)});post(store,{chat:'d1',mine:true,text:'我说的',at:min(3)});
- await processor.runOnce();
- assert.equal(model.calls.length,3);assert.deepEqual(changes,[1,2],'a batch that changed nothing says nothing');
- const thrown=[];
- const p=new Processor({store,matters:new Matters(store),model:fakeModel(asking('新的方案')),onMattersChanged:()=>{thrown.push(1);throw Error('卡片坏了');}});
- post(store,{text:'新的方案',at:min(4)});
- const r=await p.runOnce();
- assert.deepEqual([r.failures,thrown.length],[0,1],'a hook that throws breaks nothing');assert.ok(store.errors().some(e=>/卡片坏了/.test(e.message)));
+test('the processor says when a batch or a review has made, changed or closed matters, and not otherwise', async (t) => {
+  const { store, model, processor, changes } = setup(t, {
+    reviewed: false,
+    answer: (d) =>
+      d.matters
+        ? { updates: d.matters.map((m) => ({ matter: m.matter, status: 'closed', reason: 'TA已经看过了' })) }
+        : {
+            new: newTexts(d)
+              .filter((x) => x.includes('方案'))
+              .map((text) => ({ title: text, who: '陈帆', ask: '看', urgency: 'normal', messages: [ref(d, text)] })),
+            updates: [],
+          },
+  });
+  post(store, { text: '@原智鸿 看下方案', at: min(1) });
+  await processor.runOnce();
+  assert.deepEqual(kinds(model), ['batch', 'review']);
+  assert.deepEqual(changes, [1, 2], 'after the batch that made a matter, and after the review that closed it');
+  post(store, { text: '中午吃啥', at: min(2) });
+  post(store, { chat: 'd1', mine: true, text: '我说的', at: min(3) });
+  await processor.runOnce();
+  assert.equal(model.calls.length, 3);
+  assert.deepEqual(changes, [1, 2], 'a batch that changed nothing says nothing');
+  const thrown = [];
+  const p = new Processor({
+    store,
+    matters: new Matters(store),
+    model: fakeModel(asking('新的方案')),
+    onMattersChanged: () => {
+      thrown.push(1);
+      throw Error('卡片坏了');
+    },
+  });
+  post(store, { text: '新的方案', at: min(4) });
+  const r = await p.runOnce();
+  assert.deepEqual([r.failures, thrown.length], [0, 1], 'a hook that throws breaks nothing');
+  assert.ok(store.errors().some((e) => /卡片坏了/.test(e.message)));
 });
 
-test('a round hands new messages to Bridge\'s topics right after its batches when routing is due; one whose batch failed does not, and a routing that fails is recorded and holds up nothing',async t=>{
- const order=[],router={now:true,fails:0,due(){return router.now;},async route(){order.push('route');if(router.fails){router.fails-=1;throw Error('意外的错误');}return {messages:2,runs:1,digests:1};}};
- const {store,model,processor}=setup(t,{answer:()=>{order.push('batch');return none;},router});
- post(store,{text:'@原智鸿 看下',at:min(1),categories:['mention']});
- let r=await processor.runOnce();
- assert.deepEqual(order,['batch','route']);assert.deepEqual(r.route,{messages:2,runs:1,digests:1});
- order.length=0;router.now=false;post(store,{text:'@原智鸿 再看下',at:min(2),categories:['mention']});r=await processor.runOnce();
- assert.deepEqual([order,r.route],[['batch'],undefined],'not due');
- router.now=true;router.fails=1;post(store,{text:'@原智鸿 第三条',at:min(3),categories:['mention']});r=await processor.runOnce();
- assert.deepEqual(r.route,{error:'意外的错误'});assert.match(store.errors(1)[0].message,/转交新消息没有完成，下一轮再试：意外的错误/);
- order.length=0;model.ask=async()=>{throw Error('模型没有回复');};post(store,{text:'@原智鸿 第四条',at:min(4),categories:['mention']});r=await processor.runOnce();
- assert.deepEqual([order,r.route],[[],undefined],'a round whose batch failed leaves routing for later');
+test("a round hands new messages to Bridge's topics right after its batches when routing is due; one whose batch failed does not, and a routing that fails is recorded and holds up nothing", async (t) => {
+  const order = [],
+    router = {
+      now: true,
+      fails: 0,
+      due() {
+        return router.now;
+      },
+      async route() {
+        order.push('route');
+        if (router.fails) {
+          router.fails -= 1;
+          throw Error('意外的错误');
+        }
+        return { messages: 2, runs: 1, digests: 1 };
+      },
+    };
+  const { store, model, processor } = setup(t, {
+    answer: () => {
+      order.push('batch');
+      return none;
+    },
+    router,
+  });
+  post(store, { text: '@原智鸿 看下', at: min(1), categories: ['mention'] });
+  let r = await processor.runOnce();
+  assert.deepEqual(order, ['batch', 'route']);
+  assert.deepEqual(r.route, { messages: 2, runs: 1, digests: 1 });
+  order.length = 0;
+  router.now = false;
+  post(store, { text: '@原智鸿 再看下', at: min(2), categories: ['mention'] });
+  r = await processor.runOnce();
+  assert.deepEqual([order, r.route], [['batch'], undefined], 'not due');
+  router.now = true;
+  router.fails = 1;
+  post(store, { text: '@原智鸿 第三条', at: min(3), categories: ['mention'] });
+  r = await processor.runOnce();
+  assert.deepEqual(r.route, { error: '意外的错误' });
+  assert.match(store.errors(1)[0].message, /转交新消息没有完成，下一轮再试：意外的错误/);
+  order.length = 0;
+  model.ask = async () => {
+    throw Error('模型没有回复');
+  };
+  post(store, { text: '@原智鸿 第四条', at: min(4), categories: ['mention'] });
+  r = await processor.runOnce();
+  assert.deepEqual([order, r.route], [[], undefined], 'a round whose batch failed leaves routing for later');
 });

@@ -5,7 +5,7 @@
 // line edits the ignore list and my notes and closes and reopens matters through this same class, from a process of
 // its own; the buttons on the bot's cards close matters through it in the processor's process.
 
-const SCHEMA=`
+const SCHEMA = `
 CREATE TABLE IF NOT EXISTS ignored_senders(sender_id TEXT PRIMARY KEY, name TEXT, since INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT NOT NULL, at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS processed(
@@ -29,287 +29,628 @@ CREATE TABLE IF NOT EXISTS exam_answers(
  exam_id INTEGER NOT NULL REFERENCES exams(id), feed_id TEXT NOT NULL, name TEXT, owner_level TEXT NOT NULL, model_level TEXT, reason TEXT,
  PRIMARY KEY(exam_id,feed_id));
 `;
-const DAY=86400e3;
+const DAY = 86400e3;
 // The reason of a matter I closed as not mine (on a card, or on the command line in those words).
-export const NOT_MINE='不归我';
+export const NOT_MINE = '不归我';
 // Columns added after a store's processor tables were first created, added when it is opened. closed_by: model (it
 // judged the matter ended) or owner (I closed it, on a card or on the command line). A model run's kind: batch (of
 // new messages), review (of the open matters, see review.mjs), profile (关于TA, see profile.mjs), grade or exam (see
 // grader.mjs), or read (the daily read, see reading.mjs); runs from before reviews were batches. Its matters: how many open matters it was shown, unknown for
 // runs from before. Its model: the name of the model claude was asked for (BUTLER_MODEL_NAME), unknown for claude's
 // default and for runs from before.
-const ADDED_COLUMNS=[['matters','closed_by','TEXT'],['model_runs','kind',"TEXT NOT NULL DEFAULT 'batch'"],['model_runs','matters','INTEGER'],['model_runs','model','TEXT']];
-const UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
-const NOT_IGNORED='NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
+const ADDED_COLUMNS = [
+  ['matters', 'closed_by', 'TEXT'],
+  ['model_runs', 'kind', "TEXT NOT NULL DEFAULT 'batch'"],
+  ['model_runs', 'matters', 'INTEGER'],
+  ['model_runs', 'model', 'TEXT'],
+];
+const UNPROCESSED = 'NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=m.id)';
+const NOT_IGNORED = 'NOT EXISTS(SELECT 1 FROM ignored_senders i WHERE i.sender_id=m.sender_id)';
 // What batches take: a message with a category other than stored, that is, about me, from an instant chat since it
 // became instant, or flagged by the daily read (see rules.mjs). Everything else the collector keeps, which is most of the store, is only ever
 // context. WAITING goes through the index on those categories (see store.mjs), named so that no plan reads the rest;
 // a message with several of them comes once per category, hence DISTINCT. BATCHED is the same for one message (m)
 // found otherwise.
-const WAITING=`message_categories c INDEXED BY categories_batched JOIN messages m ON m.id=c.message_id WHERE c.category<>'stored' AND NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=c.message_id)`;
-const BATCHED=`EXISTS(SELECT 1 FROM message_categories b WHERE b.message_id=m.id AND b.category<>'stored')`;
-const NOT_IN='m.id NOT IN (SELECT value FROM json_each(?))';
-const IN_LIST=column=>`${column} IN (SELECT value FROM json_each(?))`;
+const WAITING = `message_categories c INDEXED BY categories_batched JOIN messages m ON m.id=c.message_id WHERE c.category<>'stored' AND NOT EXISTS(SELECT 1 FROM processed p WHERE p.message_id=c.message_id)`;
+const BATCHED = `EXISTS(SELECT 1 FROM message_categories b WHERE b.message_id=m.id AND b.category<>'stored')`;
+const NOT_IN = 'm.id NOT IN (SELECT value FROM json_each(?))';
+const IN_LIST = (column) => `${column} IN (SELECT value FROM json_each(?))`;
 // My reactions (owner_reactions o, on messages m) not processed yet.
-const REACTION_UNPROCESSED='NOT EXISTS(SELECT 1 FROM processed_reactions pr WHERE pr.message_id=o.message_id AND pr.key=o.key)';
+const REACTION_UNPROCESSED =
+  'NOT EXISTS(SELECT 1 FROM processed_reactions pr WHERE pr.message_id=o.message_id AND pr.key=o.key)';
 // One of them waits for the model only once its message has been processed: until then the message's own facts show it.
-const REACTION_PENDING=`${REACTION_UNPROCESSED} AND NOT (${UNPROCESSED}) AND ${NOT_IGNORED}`;
+const REACTION_PENDING = `${REACTION_UNPROCESSED} AND NOT (${UNPROCESSED}) AND ${NOT_IGNORED}`;
 // From my reactions to the messages they are on, in that order (SQLite keeps the tables of a CROSS JOIN in place): my
 // reactions are few, the messages of a chat many.
-const REACTIONS='owner_reactions o CROSS JOIN messages m ON m.id=o.message_id';
+const REACTIONS = 'owner_reactions o CROSS JOIN messages m ON m.id=o.message_id';
 
-export class Matters{
- constructor(store){
-  this.store=store;this.db=store.db;this.db.exec(SCHEMA);
-  for(const [table,column,definition] of ADDED_COLUMNS)if(!this.#all(`PRAGMA table_info(${table})`).some(c=>c.name===column))this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
- }
- #all(sql,...p){return this.db.prepare(sql).all(...p);}
- #get(sql,...p){return this.db.prepare(sql).get(...p);}
- #run(sql,...p){return this.db.prepare(sql).run(...p);}
- #tx(fn){this.db.exec('BEGIN IMMEDIATE');try{const r=fn();this.db.exec('COMMIT');return r;}catch(e){this.db.exec('ROLLBACK');throw e;}}
+export class Matters {
+  constructor(store) {
+    this.store = store;
+    this.db = store.db;
+    this.db.exec(SCHEMA);
+    for (const [table, column, definition] of ADDED_COLUMNS)
+      if (!this.#all(`PRAGMA table_info(${table})`).some((c) => c.name === column))
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+  #all(sql, ...p) {
+    return this.db.prepare(sql).all(...p);
+  }
+  #get(sql, ...p) {
+    return this.db.prepare(sql).get(...p);
+  }
+  #run(sql, ...p) {
+    return this.db.prepare(sql).run(...p);
+  }
+  #tx(fn) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      const r = fn();
+      this.db.exec('COMMIT');
+      return r;
+    } catch (e) {
+      this.db.exec('ROLLBACK');
+      throw e;
+    }
+  }
 
- // ---- the ignore list: senders whose messages never go to the model
- // Everyone but me who sent a message batches take (see WAITING), with the name and type of their latest message: the
- // senders whose messages could reach the model, not everyone in every chat whose messages are only kept.
- senders(){
-  return this.#all(`SELECT sender_id,sender_name,sender_type,max(created_at) last,count(*) n FROM messages
-   WHERE id IN (SELECT message_id FROM message_categories WHERE category<>'stored') AND is_mine=0 AND sender_id IS NOT NULL GROUP BY sender_id ORDER BY n DESC`)
-   .map(r=>({senderId:r.sender_id,name:r.sender_name??'',type:r.sender_type,messages:r.n,lastAt:r.last}));
- }
- ignoredSenders(){return this.#all('SELECT * FROM ignored_senders ORDER BY since,name').map(r=>({senderId:r.sender_id,name:r.name??'',since:r.since}));}
- ignore(senderId,name,now=Date.now()){this.#run('INSERT INTO ignored_senders(sender_id,name,since) VALUES(?,?,?) ON CONFLICT(sender_id) DO UPDATE SET name=excluded.name',senderId,name??null,now);}
- unignore(senderId){this.#run('DELETE FROM ignored_senders WHERE sender_id=?',senderId);}
- // Messages of ignored senders that batches would take, and my reactions on them, count as processed when they are
- // passed by, so taking a sender off the list later does not hand the model everything it sent while it was on it.
- skipIgnored(now=Date.now()){
-  this.#run(`INSERT INTO processed_reactions(message_id,key,outcome,at) SELECT o.message_id,o.key,'ignored',? FROM ${REACTIONS} WHERE ${REACTION_UNPROCESSED} AND NOT (${NOT_IGNORED})`,now);
-  return Number(this.#run(`INSERT INTO processed(message_id,outcome,at) SELECT DISTINCT c.message_id,'ignored',? FROM ${WAITING} AND NOT (${NOT_IGNORED})`,now).changes);
- }
+  // ---- the ignore list: senders whose messages never go to the model
+  // Everyone but me who sent a message batches take (see WAITING), with the name and type of their latest message: the
+  // senders whose messages could reach the model, not everyone in every chat whose messages are only kept.
+  senders() {
+    return this.#all(
+      `SELECT sender_id,sender_name,sender_type,max(created_at) last,count(*) n FROM messages
+   WHERE id IN (SELECT message_id FROM message_categories WHERE category<>'stored') AND is_mine=0 AND sender_id IS NOT NULL GROUP BY sender_id ORDER BY n DESC`,
+    ).map((r) => ({
+      senderId: r.sender_id,
+      name: r.sender_name ?? '',
+      type: r.sender_type,
+      messages: r.n,
+      lastAt: r.last,
+    }));
+  }
+  ignoredSenders() {
+    return this.#all('SELECT * FROM ignored_senders ORDER BY since,name').map((r) => ({
+      senderId: r.sender_id,
+      name: r.name ?? '',
+      since: r.since,
+    }));
+  }
+  ignore(senderId, name, now = Date.now()) {
+    this.#run(
+      'INSERT INTO ignored_senders(sender_id,name,since) VALUES(?,?,?) ON CONFLICT(sender_id) DO UPDATE SET name=excluded.name',
+      senderId,
+      name ?? null,
+      now,
+    );
+  }
+  unignore(senderId) {
+    this.#run('DELETE FROM ignored_senders WHERE sender_id=?', senderId);
+  }
+  // Messages of ignored senders that batches would take, and my reactions on them, count as processed when they are
+  // passed by, so taking a sender off the list later does not hand the model everything it sent while it was on it.
+  skipIgnored(now = Date.now()) {
+    this.#run(
+      `INSERT INTO processed_reactions(message_id,key,outcome,at) SELECT o.message_id,o.key,'ignored',? FROM ${REACTIONS} WHERE ${REACTION_UNPROCESSED} AND NOT (${NOT_IGNORED})`,
+      now,
+    );
+    return Number(
+      this.#run(
+        `INSERT INTO processed(message_id,outcome,at) SELECT DISTINCT c.message_id,'ignored',? FROM ${WAITING} AND NOT (${NOT_IGNORED})`,
+        now,
+      ).changes,
+    );
+  }
 
- // ---- my notes: corrections in my own words to what butler takes as mine (see profile.mjs), oldest first. A note
- // is never changed, only added or removed, and its number is never given again: the numbers of the notes stand for
- // them, so the processor can tell what a profile or a review was made with (see processor.mjs).
- notes(){return this.#all('SELECT * FROM notes ORDER BY id').map(r=>({id:r.id,text:r.text,at:r.at}));}
- addNote(text,now=Date.now()){return Number(this.#run('INSERT INTO notes(text,at) VALUES(?,?)',text,now).lastInsertRowid);}
- // Returns the note removed, if there was one.
- removeNote(id){const note=this.notes().find(n=>n.id===id);if(note)this.#run('DELETE FROM notes WHERE id=?',id);return note;}
+  // ---- my notes: corrections in my own words to what butler takes as mine (see profile.mjs), oldest first. A note
+  // is never changed, only added or removed, and its number is never given again: the numbers of the notes stand for
+  // them, so the processor can tell what a profile or a review was made with (see processor.mjs).
+  notes() {
+    return this.#all('SELECT * FROM notes ORDER BY id').map((r) => ({ id: r.id, text: r.text, at: r.at }));
+  }
+  addNote(text, now = Date.now()) {
+    return Number(this.#run('INSERT INTO notes(text,at) VALUES(?,?)', text, now).lastInsertRowid);
+  }
+  // Returns the note removed, if there was one.
+  removeNote(id) {
+    const note = this.notes().find((n) => n.id === id);
+    if (note) this.#run('DELETE FROM notes WHERE id=?', id);
+    return note;
+  }
 
- // ---- what the model is given
- #records(ids){return ids.map(r=>this.store.message(r.id)).filter(Boolean);}
- // Unprocessed messages batches take (see WAITING), oldest first, ignored senders and exclude (ids) left out.
- pending(limit,exclude=[]){
-  return this.#records(this.#all(`SELECT DISTINCT c.created_at,c.message_id id FROM ${WAITING} AND ${NOT_IGNORED} AND ${NOT_IN} ORDER BY c.created_at,c.message_id LIMIT ?`,JSON.stringify(exclude),limit));
- }
- // Messages that wait for the model, and reactions of mine that do (see REACTION_PENDING). Messages that are only
- // kept never wait.
- pendingCount(){return this.#get(`SELECT count(DISTINCT c.message_id) n FROM ${WAITING} AND ${NOT_IGNORED}`).n+this.#get(`SELECT count(*) n FROM ${REACTIONS} WHERE ${REACTION_PENDING}`).n;}
- // How many messages batches take (processed or not) each chat has had since since (ms), ignored senders left out: how
- // much of the batches a chat makes (see grader.mjs). A Map by chat.
- batchedByChat(since){
-  return new Map(this.#all(`SELECT m.feed_id,count(DISTINCT c.message_id) n FROM message_categories c INDEXED BY categories_batched JOIN messages m ON m.id=c.message_id
-   WHERE c.category<>'stored' AND c.created_at>=? AND ${NOT_IGNORED} GROUP BY m.feed_id`,since).map(r=>[r.feed_id,r.n]));
- }
- // My reactions that wait for the model, in the order butler saw them: {kind: 'reaction', messageId, key, at, chatId}.
- pendingReactions(limit){
-  return this.#all(`SELECT o.message_id,o.key,o.at,m.feed_id FROM ${REACTIONS} WHERE ${REACTION_PENDING} ORDER BY o.at,o.message_id,o.key LIMIT ?`,limit)
-   .map(r=>({kind:'reaction',messageId:r.message_id,key:r.key,at:r.at,chatId:r.feed_id}));
- }
- // Whether something of mine waits that could end an open matter: in the chat of one, since the earliest open one
- // started, a message of mine not processed yet, a message batches take, not processed yet, that carries a reaction of
- // mine, or a reaction of mine that waits for the model. A message that is only kept never waits, or this would hold
- // for good. The processor asks every few seconds (see processor.mjs checkOwner), so it reads only my messages (their
- // index) and my reactions, never the chats' other messages.
- ownerWaiting(){
-  return this.#get(`WITH sources AS (SELECT m.feed_id,m.created_at FROM matters x JOIN matter_messages mm ON mm.matter_id=x.id JOIN messages m ON m.id=mm.message_id WHERE x.status='open'),
+  // ---- what the model is given
+  #records(ids) {
+    return ids.map((r) => this.store.message(r.id)).filter(Boolean);
+  }
+  // Unprocessed messages batches take (see WAITING), oldest first, ignored senders and exclude (ids) left out.
+  pending(limit, exclude = []) {
+    return this.#records(
+      this.#all(
+        `SELECT DISTINCT c.created_at,c.message_id id FROM ${WAITING} AND ${NOT_IGNORED} AND ${NOT_IN} ORDER BY c.created_at,c.message_id LIMIT ?`,
+        JSON.stringify(exclude),
+        limit,
+      ),
+    );
+  }
+  // Messages that wait for the model, and reactions of mine that do (see REACTION_PENDING). Messages that are only
+  // kept never wait.
+  pendingCount() {
+    return (
+      this.#get(`SELECT count(DISTINCT c.message_id) n FROM ${WAITING} AND ${NOT_IGNORED}`).n +
+      this.#get(`SELECT count(*) n FROM ${REACTIONS} WHERE ${REACTION_PENDING}`).n
+    );
+  }
+  // How many messages batches take (processed or not) each chat has had since since (ms), ignored senders left out: how
+  // much of the batches a chat makes (see grader.mjs). A Map by chat.
+  batchedByChat(since) {
+    return new Map(
+      this.#all(
+        `SELECT m.feed_id,count(DISTINCT c.message_id) n FROM message_categories c INDEXED BY categories_batched JOIN messages m ON m.id=c.message_id
+   WHERE c.category<>'stored' AND c.created_at>=? AND ${NOT_IGNORED} GROUP BY m.feed_id`,
+        since,
+      ).map((r) => [r.feed_id, r.n]),
+    );
+  }
+  // My reactions that wait for the model, in the order butler saw them: {kind: 'reaction', messageId, key, at, chatId}.
+  pendingReactions(limit) {
+    return this.#all(
+      `SELECT o.message_id,o.key,o.at,m.feed_id FROM ${REACTIONS} WHERE ${REACTION_PENDING} ORDER BY o.at,o.message_id,o.key LIMIT ?`,
+      limit,
+    ).map((r) => ({ kind: 'reaction', messageId: r.message_id, key: r.key, at: r.at, chatId: r.feed_id }));
+  }
+  // Whether something of mine waits that could end an open matter: in the chat of one, since the earliest open one
+  // started, a message of mine not processed yet, a message batches take, not processed yet, that carries a reaction of
+  // mine, or a reaction of mine that waits for the model. A message that is only kept never waits, or this would hold
+  // for good. The processor asks every few seconds (see processor.mjs checkOwner), so it reads only my messages (their
+  // index) and my reactions, never the chats' other messages.
+  ownerWaiting() {
+    return (
+      this
+        .#get(`WITH sources AS (SELECT m.feed_id,m.created_at FROM matters x JOIN matter_messages mm ON mm.matter_id=x.id JOIN messages m ON m.id=mm.message_id WHERE x.status='open'),
    chats AS (SELECT DISTINCT feed_id FROM sources),since AS (SELECT min(created_at) t FROM sources)
    SELECT EXISTS(SELECT 1 FROM messages m INDEXED BY messages_mine WHERE m.is_mine=1 AND m.created_at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${UNPROCESSED} AND ${NOT_IGNORED})
     OR EXISTS(SELECT 1 FROM ${REACTIONS} WHERE m.created_at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${UNPROCESSED} AND ${NOT_IGNORED} AND ${BATCHED})
-    OR EXISTS(SELECT 1 FROM ${REACTIONS} WHERE o.at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${REACTION_PENDING}) waiting`).waiting===1;
- }
- // My reactions on these messages not processed yet, as owner reaction records ({messageId, key, at}).
- reactionsOn(ids){
-  return this.#all(`SELECT o.message_id,o.key,o.at FROM owner_reactions o WHERE ${IN_LIST('o.message_id')} AND ${REACTION_UNPROCESSED} ORDER BY o.at`,JSON.stringify(ids))
-   .map(r=>({messageId:r.message_id,key:r.key,at:r.at}));
- }
- // The latest messages of a chat before a time, oldest first, ignored senders left out.
- before(feedId,t,limit){
-  return this.#records(this.#all(`SELECT id FROM messages m WHERE feed_id=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at DESC,id DESC LIMIT ?`,feedId,t,limit)).reverse();
- }
- // What I did in these chats from since to before until: my latest messages and the latest messages that carry a
- // reaction of mine, oldest first, ignored senders left out. Read from my messages (their index) and my reactions
- // (any message I reacted to has one), not from everything said in these chats in the meantime.
- responses(feedIds,since,until,limit){
-  const where=`${IN_LIST('m.feed_id')} AND m.created_at>=? AND m.created_at<? AND ${NOT_IGNORED}`,args=[JSON.stringify(feedIds),since,until];
-  return this.#records(this.#all(`SELECT id FROM (SELECT m.id,m.created_at FROM messages m INDEXED BY messages_mine WHERE m.is_mine=1 AND ${where}
+    OR EXISTS(SELECT 1 FROM ${REACTIONS} WHERE o.at>=(SELECT t FROM since) AND m.feed_id IN (SELECT feed_id FROM chats) AND ${REACTION_PENDING}) waiting`)
+        .waiting === 1
+    );
+  }
+  // My reactions on these messages not processed yet, as owner reaction records ({messageId, key, at}).
+  reactionsOn(ids) {
+    return this.#all(
+      `SELECT o.message_id,o.key,o.at FROM owner_reactions o WHERE ${IN_LIST('o.message_id')} AND ${REACTION_UNPROCESSED} ORDER BY o.at`,
+      JSON.stringify(ids),
+    ).map((r) => ({ messageId: r.message_id, key: r.key, at: r.at }));
+  }
+  // The latest messages of a chat before a time, oldest first, ignored senders left out.
+  before(feedId, t, limit) {
+    return this.#records(
+      this.#all(
+        `SELECT id FROM messages m WHERE feed_id=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at DESC,id DESC LIMIT ?`,
+        feedId,
+        t,
+        limit,
+      ),
+    ).reverse();
+  }
+  // What I did in these chats from since to before until: my latest messages and the latest messages that carry a
+  // reaction of mine, oldest first, ignored senders left out. Read from my messages (their index) and my reactions
+  // (any message I reacted to has one), not from everything said in these chats in the meantime.
+  responses(feedIds, since, until, limit) {
+    const where = `${IN_LIST('m.feed_id')} AND m.created_at>=? AND m.created_at<? AND ${NOT_IGNORED}`,
+      args = [JSON.stringify(feedIds), since, until];
+    return this.#records(
+      this.#all(
+        `SELECT id FROM (SELECT m.id,m.created_at FROM messages m INDEXED BY messages_mine WHERE m.is_mine=1 AND ${where}
    UNION SELECT m.id,m.created_at FROM ${REACTIONS} WHERE ${where} AND EXISTS(SELECT 1 FROM json_each(m.reactions) j WHERE j.value->>'isMine')) ORDER BY created_at DESC,id DESC LIMIT ?`,
-   ...args,...args,limit)).reverse();
- }
- // A chat's messages from since up to until (ms, not included), oldest first, ignored senders left out.
- between(feedId,since,until){
-  return this.#records(this.#all(`SELECT id FROM messages m WHERE feed_id=? AND created_at>=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at,id`,feedId,since,until));
- }
- // The chats with messages from since up to until, ignored senders left out, the busiest first: how many, and what
- // butler knows of each (no name yet for a chat seen only through push; its kind then from its messages).
- chatsBetween(since,until){
-  return this.#all(`SELECT m.feed_id,max(m.chat_kind) chat_kind,count(*) n,c.name,c.chat_mode FROM messages m INDEXED BY messages_created LEFT JOIN chats c ON c.feed_id=m.feed_id
-   WHERE m.created_at>=? AND m.created_at<? AND ${NOT_IGNORED} GROUP BY m.feed_id ORDER BY n DESC,m.feed_id`,since,until)
-   .map(r=>({feedId:r.feed_id,name:r.name??undefined,kind:r.chat_mode??r.chat_kind,messages:r.n}));
- }
- // A chat's messages as the command line reads them (see cli.mjs messages): from since up to until (ms, not included),
- // those whose text holds search (in any case) when it is given, the latest limit of them, oldest first (records), and
- // how many there are in all (total). Ignored senders' too: the agent reads a chat to answer me, which is not what the
- // ignore list is about.
- chatMessages(feedId,{since=0,until=Number.MAX_SAFE_INTEGER,search,limit}){
-  const where=`feed_id=? AND created_at>=? AND created_at<?${search?' AND instr(lower(text),lower(?))>0':''}`,p=[feedId,since,until,...search?[search]:[]];
-  return {total:this.#get(`SELECT count(*) n FROM messages WHERE ${where}`,...p).n,
-   records:this.#records(this.#all(`SELECT id FROM messages WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT ?`,...p,limit)).reverse()};
- }
- // My own latest messages, newest first.
- mine(limit){return this.#records(this.#all('SELECT id FROM messages WHERE is_mine=1 ORDER BY created_at DESC,id DESC LIMIT ?',limit));}
- // One message for the model, unless it is unknown or its sender is ignored.
- visible(id){return this.#get(`SELECT id FROM messages m WHERE id=? AND ${NOT_IGNORED}`,id)?this.store.message(id):undefined;}
- // My name as my own messages carry it.
- me(){return this.#get('SELECT sender_name FROM messages WHERE is_mine=1 AND sender_name IS NOT NULL ORDER BY created_at DESC LIMIT 1')?.sender_name??'我';}
- // My user id, the same way; undefined before I have sent anything.
- meId(){return this.#get('SELECT sender_id FROM messages WHERE is_mine=1 AND sender_id IS NOT NULL ORDER BY created_at DESC LIMIT 1')?.sender_id;}
+        ...args,
+        ...args,
+        limit,
+      ),
+    ).reverse();
+  }
+  // A chat's messages from since up to until (ms, not included), oldest first, ignored senders left out.
+  between(feedId, since, until) {
+    return this.#records(
+      this.#all(
+        `SELECT id FROM messages m WHERE feed_id=? AND created_at>=? AND created_at<? AND ${NOT_IGNORED} ORDER BY created_at,id`,
+        feedId,
+        since,
+        until,
+      ),
+    );
+  }
+  // The chats with messages from since up to until, ignored senders left out, the busiest first: how many, and what
+  // butler knows of each (no name yet for a chat seen only through push; its kind then from its messages).
+  chatsBetween(since, until) {
+    return this.#all(
+      `SELECT m.feed_id,max(m.chat_kind) chat_kind,count(*) n,c.name,c.chat_mode FROM messages m INDEXED BY messages_created LEFT JOIN chats c ON c.feed_id=m.feed_id
+   WHERE m.created_at>=? AND m.created_at<? AND ${NOT_IGNORED} GROUP BY m.feed_id ORDER BY n DESC,m.feed_id`,
+      since,
+      until,
+    ).map((r) => ({ feedId: r.feed_id, name: r.name ?? undefined, kind: r.chat_mode ?? r.chat_kind, messages: r.n }));
+  }
+  // A chat's messages as the command line reads them (see cli.mjs messages): from since up to until (ms, not included),
+  // those whose text holds search (in any case) when it is given, the latest limit of them, oldest first (records), and
+  // how many there are in all (total). Ignored senders' too: the agent reads a chat to answer me, which is not what the
+  // ignore list is about.
+  chatMessages(feedId, { since = 0, until = Number.MAX_SAFE_INTEGER, search, limit }) {
+    const where = `feed_id=? AND created_at>=? AND created_at<?${search ? ' AND instr(lower(text),lower(?))>0' : ''}`,
+      p = [feedId, since, until, ...(search ? [search] : [])];
+    return {
+      total: this.#get(`SELECT count(*) n FROM messages WHERE ${where}`, ...p).n,
+      records: this.#records(
+        this.#all(`SELECT id FROM messages WHERE ${where} ORDER BY created_at DESC,id DESC LIMIT ?`, ...p, limit),
+      ).reverse(),
+    };
+  }
+  // My own latest messages, newest first.
+  mine(limit) {
+    return this.#records(
+      this.#all('SELECT id FROM messages WHERE is_mine=1 ORDER BY created_at DESC,id DESC LIMIT ?', limit),
+    );
+  }
+  // One message for the model, unless it is unknown or its sender is ignored.
+  visible(id) {
+    return this.#get(`SELECT id FROM messages m WHERE id=? AND ${NOT_IGNORED}`, id)
+      ? this.store.message(id)
+      : undefined;
+  }
+  // My name as my own messages carry it.
+  me() {
+    return (
+      this.#get(
+        'SELECT sender_name FROM messages WHERE is_mine=1 AND sender_name IS NOT NULL ORDER BY created_at DESC LIMIT 1',
+      )?.sender_name ?? '我'
+    );
+  }
+  // My user id, the same way; undefined before I have sent anything.
+  meId() {
+    return this.#get(
+      'SELECT sender_id FROM messages WHERE is_mine=1 AND sender_id IS NOT NULL ORDER BY created_at DESC LIMIT 1',
+    )?.sender_id;
+  }
 
- // ---- what the model is shown of chats: grading's (see grader.mjs) and 关于TA's (see profile.mjs)
- // These chats (feed ids), but for their messages: what butler knows of each and its level (see Store.activity); how
- // busy it has been, in messages per day from from on, or from its first message when that is later, and how many of
- // them a bot or an agent sent (botShare, a percentage); and what I did there since mineSince (Store.involvement). A
- // chat with no message since since (one I asked to grade, say) has none counted.
- chatFacts(ids,{now,since,from=since,mineSince}){return this.#facts(ids,{now,from,active:this.store.activity(since,from),mine:this.store.involvement(mineSince)});}
- // The chats where I did something since mineSince, where I did most first (my messages, then @ of me, then my
- // reactions), then the chats with messages since since that I muted, the busiest first; at most limit of them, as
- // chatFacts shows them.
- involvedChats({now,since,mineSince,limit}){
-  const active=this.store.activity(since),mine=this.store.involvement(mineSince);
-  const ids=[...[...mine].sort(([,a],[,b])=>b.mine-a.mine||b.mentions-a.mentions||b.reactions-a.reactions).map(([id])=>id),...active.filter(c=>c.muted).map(c=>c.feedId)];
-  return this.#facts([...new Set(ids)].slice(0,limit),{now,from:since,active,mine});
- }
- #facts(ids,{now,from,active,mine}){
-  const byId=new Map(active.map(c=>[c.feedId,c]));
-  return ids.map(feedId=>{
-   const c=byId.get(feedId)??this.#quiet(feedId),days=Math.max(1,(now-Math.max(from,c.firstAt??from))/DAY);
-   return {...c,perDay:Math.round(c.messages/days*10)/10,botShare:c.messages?Math.round(100*c.bots/c.messages):undefined,...mine.get(feedId)??{mine:0,mentions:0,reactions:0}};
-  });
- }
- // A chat with no message in the window: what butler knows of it.
- #quiet(feedId){
-  const c=this.store.chat(feedId);
-  return {feedId,name:c?.name??undefined,kind:c?.chatMode??undefined,members:c?.memberCount??undefined,muted:c?.isMuted,messages:0,bots:0,level:this.store.level(feedId)};
- }
+  // ---- what the model is shown of chats: grading's (see grader.mjs) and 关于TA's (see profile.mjs)
+  // These chats (feed ids), but for their messages: what butler knows of each and its level (see Store.activity); how
+  // busy it has been, in messages per day from from on, or from its first message when that is later, and how many of
+  // them a bot or an agent sent (botShare, a percentage); and what I did there since mineSince (Store.involvement). A
+  // chat with no message since since (one I asked to grade, say) has none counted.
+  chatFacts(ids, { now, since, from = since, mineSince }) {
+    return this.#facts(ids, {
+      now,
+      from,
+      active: this.store.activity(since, from),
+      mine: this.store.involvement(mineSince),
+    });
+  }
+  // The chats where I did something since mineSince, where I did most first (my messages, then @ of me, then my
+  // reactions), then the chats with messages since since that I muted, the busiest first; at most limit of them, as
+  // chatFacts shows them.
+  involvedChats({ now, since, mineSince, limit }) {
+    const active = this.store.activity(since),
+      mine = this.store.involvement(mineSince);
+    const ids = [
+      ...[...mine]
+        .sort(([, a], [, b]) => b.mine - a.mine || b.mentions - a.mentions || b.reactions - a.reactions)
+        .map(([id]) => id),
+      ...active.filter((c) => c.muted).map((c) => c.feedId),
+    ];
+    return this.#facts([...new Set(ids)].slice(0, limit), { now, from: since, active, mine });
+  }
+  #facts(ids, { now, from, active, mine }) {
+    const byId = new Map(active.map((c) => [c.feedId, c]));
+    return ids.map((feedId) => {
+      const c = byId.get(feedId) ?? this.#quiet(feedId),
+        days = Math.max(1, (now - Math.max(from, c.firstAt ?? from)) / DAY);
+      return {
+        ...c,
+        perDay: Math.round((c.messages / days) * 10) / 10,
+        botShare: c.messages ? Math.round((100 * c.bots) / c.messages) : undefined,
+        ...(mine.get(feedId) ?? { mine: 0, mentions: 0, reactions: 0 }),
+      };
+    });
+  }
+  // A chat with no message in the window: what butler knows of it.
+  #quiet(feedId) {
+    const c = this.store.chat(feedId);
+    return {
+      feedId,
+      name: c?.name ?? undefined,
+      kind: c?.chatMode ?? undefined,
+      members: c?.memberCount ?? undefined,
+      muted: c?.isMuted,
+      messages: 0,
+      bots: 0,
+      level: this.store.level(feedId),
+    };
+  }
 
- // ---- matters
- #matter(row){
-  if(!row)return undefined;
-  const sources=this.#all('SELECT mm.message_id,m.feed_id,m.created_at,c.name FROM matter_messages mm JOIN messages m ON m.id=mm.message_id LEFT JOIN chats c ON c.feed_id=m.feed_id WHERE mm.matter_id=? ORDER BY m.created_at,m.id',row.id);
-  const chatIds=[...new Set(sources.map(s=>s.feed_id))];
-  return {id:row.id,title:row.title,who:row.who,ask:row.ask,due:row.due,urgency:row.urgency,status:row.status,reason:row.reason,
-   // since: when it started, by its earliest message; lastAt: its latest message; openedAt: when butler made it.
-   since:sources[0]?.created_at??row.opened_at,lastAt:sources.at(-1)?.created_at??row.opened_at,openedAt:row.opened_at,updatedAt:row.updated_at,closedAt:row.closed_at,closedBy:row.closed_by,messageIds:sources.map(s=>s.message_id),chatIds,
-   chats:chatIds.map(id=>sources.find(s=>s.feed_id===id).name??id),link:sources.length?this.store.message(sources[0].message_id)?.link:undefined};
- }
- matter(id){return this.#matter(this.#get('SELECT * FROM matters WHERE id=?',id));}
- // Open matters, most urgent first, newest first within one urgency; all: closed ones too, after them.
- list({all=false}={}){
-  return this.#all(`SELECT * FROM matters ${all?'':"WHERE status='open'"} ORDER BY status='closed',CASE urgency WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,opened_at DESC,id DESC`).map(r=>this.#matter(r));
- }
- // Matters that ended after t, in the order they ended.
- closedSince(t){return this.#all("SELECT * FROM matters WHERE status='closed' AND closed_at>? ORDER BY closed_at,id",t??-1).map(r=>this.#matter(r));}
- // The latest matters to end, latest first.
- recentlyClosed(limit){return this.#all("SELECT * FROM matters WHERE status='closed' ORDER BY closed_at DESC,id DESC LIMIT ?",limit).map(r=>this.#matter(r));}
- // I closed an open matter myself, with my reason if I gave one; returns whether it was open.
- close(id,reason,now=Date.now()){
-  return Number(this.#run(`UPDATE matters SET status='closed',reason=?,closed_at=?,closed_by='owner',updated_at=? WHERE id=? AND status='open'`,reason||null,now,now,id).changes)>0;
- }
- // The matters I closed as not mine and have not reopened, the latest first: the model is shown them as what is not
- // mine (see prompt.mjs).
- notMine(limit){
-  return this.#all("SELECT * FROM matters WHERE status='closed' AND closed_by='owner' AND reason=? ORDER BY closed_at DESC,id DESC LIMIT ?",NOT_MINE,limit).map(r=>this.#matter(r));
- }
- // An ended matter is open again; returns whether it had ended.
- reopen(id,now=Date.now()){
-  return Number(this.#run(`UPDATE matters SET status='open',reason=NULL,closed_at=NULL,closed_by=NULL,updated_at=? WHERE id=? AND status='closed'`,now,id).changes)>0;
- }
- // The mark of changes made in another process: the command line closes and reopens matters, and only the processor's
- // process shows them (the latest digest, see digest.mjs), so the command line counts its changes in meta matters and
- // the processor looks at the count every few seconds (see Processor.checkMark). A count, not a time: two changes
- // within a millisecond still differ, and the count goes up in one transaction, so two command lines at once never
- // lose one.
- markChanged(){this.#tx(()=>this.store.setMeta('matters',{changes:this.changeMark()+1}));}
- changeMark(){return this.store.meta('matters')?.changes??0;}
- // A model answer (see prompt.mjs readReply) and the messages it covered, in one transaction. outcome: how the
- // messages were processed (model, or context for my own messages that needed no model). reactions: my reactions it
- // covered, each with its own outcome: model (the model was shown it), covered (its message was shown with it among its
- // reactions), context (nothing was open that it could end), unshown (its message could not be shown).
- apply({runId=null,created=[],updated=[],processedIds=[],reactions=[],outcome='model',now=Date.now()}){
-  return this.#tx(()=>{
-   const link=this.db.prepare('INSERT OR IGNORE INTO matter_messages(matter_id,message_id,added_at) VALUES(?,?,?)'),ids=[];
-   for(const m of created){
-    const id=Number(this.#run(`INSERT INTO matters(title,who,ask,due,urgency,status,opened_at,updated_at) VALUES(?,?,?,?,?,'open',?,?)`,m.title,m.who,m.ask,m.due??null,m.urgency,now,now).lastInsertRowid);
-    for(const message of m.messageIds)link.run(id,message,now);ids.push(id);
-   }
-   for(const u of updated){
-    const c=u.changes??{};
-    this.#run('UPDATE matters SET title=COALESCE(?,title),who=COALESCE(?,who),ask=COALESCE(?,ask),due=COALESCE(?,due),urgency=COALESCE(?,urgency),updated_at=? WHERE id=?',
-     c.title??null,c.who??null,c.ask??null,c.due??null,c.urgency??null,now,u.matterId);
-    if(u.close)this.#run(`UPDATE matters SET status='closed',reason=?,closed_at=?,closed_by='model' WHERE id=? AND status='open'`,u.close,now,u.matterId);
-    for(const message of u.messageIds)link.run(u.matterId,message,now);
-   }
-   const done=this.db.prepare('INSERT OR IGNORE INTO processed(message_id,outcome,run_id,at) VALUES(?,?,?,?)');
-   for(const id of processedIds)done.run(id,outcome,runId,now);
-   const reacted=this.db.prepare('INSERT OR IGNORE INTO processed_reactions(message_id,key,outcome,run_id,at) VALUES(?,?,?,?,?)');
-   for(const r of reactions)reacted.run(r.messageId,r.key,r.outcome,runId,now);
-   return ids;
-  });
- }
+  // ---- matters
+  #matter(row) {
+    if (!row) return undefined;
+    const sources = this.#all(
+      'SELECT mm.message_id,m.feed_id,m.created_at,c.name FROM matter_messages mm JOIN messages m ON m.id=mm.message_id LEFT JOIN chats c ON c.feed_id=m.feed_id WHERE mm.matter_id=? ORDER BY m.created_at,m.id',
+      row.id,
+    );
+    const chatIds = [...new Set(sources.map((s) => s.feed_id))];
+    return {
+      id: row.id,
+      title: row.title,
+      who: row.who,
+      ask: row.ask,
+      due: row.due,
+      urgency: row.urgency,
+      status: row.status,
+      reason: row.reason,
+      // since: when it started, by its earliest message; lastAt: its latest message; openedAt: when butler made it.
+      since: sources[0]?.created_at ?? row.opened_at,
+      lastAt: sources.at(-1)?.created_at ?? row.opened_at,
+      openedAt: row.opened_at,
+      updatedAt: row.updated_at,
+      closedAt: row.closed_at,
+      closedBy: row.closed_by,
+      messageIds: sources.map((s) => s.message_id),
+      chatIds,
+      chats: chatIds.map((id) => sources.find((s) => s.feed_id === id).name ?? id),
+      link: sources.length ? this.store.message(sources[0].message_id)?.link : undefined,
+    };
+  }
+  matter(id) {
+    return this.#matter(this.#get('SELECT * FROM matters WHERE id=?', id));
+  }
+  // Open matters, most urgent first, newest first within one urgency; all: closed ones too, after them.
+  list({ all = false } = {}) {
+    return this.#all(
+      `SELECT * FROM matters ${all ? '' : "WHERE status='open'"} ORDER BY status='closed',CASE urgency WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END,opened_at DESC,id DESC`,
+    ).map((r) => this.#matter(r));
+  }
+  // Matters that ended after t, in the order they ended.
+  closedSince(t) {
+    return this.#all("SELECT * FROM matters WHERE status='closed' AND closed_at>? ORDER BY closed_at,id", t ?? -1).map(
+      (r) => this.#matter(r),
+    );
+  }
+  // The latest matters to end, latest first.
+  recentlyClosed(limit) {
+    return this.#all("SELECT * FROM matters WHERE status='closed' ORDER BY closed_at DESC,id DESC LIMIT ?", limit).map(
+      (r) => this.#matter(r),
+    );
+  }
+  // I closed an open matter myself, with my reason if I gave one; returns whether it was open.
+  close(id, reason, now = Date.now()) {
+    return (
+      Number(
+        this.#run(
+          `UPDATE matters SET status='closed',reason=?,closed_at=?,closed_by='owner',updated_at=? WHERE id=? AND status='open'`,
+          reason || null,
+          now,
+          now,
+          id,
+        ).changes,
+      ) > 0
+    );
+  }
+  // The matters I closed as not mine and have not reopened, the latest first: the model is shown them as what is not
+  // mine (see prompt.mjs).
+  notMine(limit) {
+    return this.#all(
+      "SELECT * FROM matters WHERE status='closed' AND closed_by='owner' AND reason=? ORDER BY closed_at DESC,id DESC LIMIT ?",
+      NOT_MINE,
+      limit,
+    ).map((r) => this.#matter(r));
+  }
+  // An ended matter is open again; returns whether it had ended.
+  reopen(id, now = Date.now()) {
+    return (
+      Number(
+        this.#run(
+          `UPDATE matters SET status='open',reason=NULL,closed_at=NULL,closed_by=NULL,updated_at=? WHERE id=? AND status='closed'`,
+          now,
+          id,
+        ).changes,
+      ) > 0
+    );
+  }
+  // The mark of changes made in another process: the command line closes and reopens matters, and only the processor's
+  // process shows them (the latest digest, see digest.mjs), so the command line counts its changes in meta matters and
+  // the processor looks at the count every few seconds (see Processor.checkMark). A count, not a time: two changes
+  // within a millisecond still differ, and the count goes up in one transaction, so two command lines at once never
+  // lose one.
+  markChanged() {
+    this.#tx(() => this.store.setMeta('matters', { changes: this.changeMark() + 1 }));
+  }
+  changeMark() {
+    return this.store.meta('matters')?.changes ?? 0;
+  }
+  // A model answer (see prompt.mjs readReply) and the messages it covered, in one transaction. outcome: how the
+  // messages were processed (model, or context for my own messages that needed no model). reactions: my reactions it
+  // covered, each with its own outcome: model (the model was shown it), covered (its message was shown with it among its
+  // reactions), context (nothing was open that it could end), unshown (its message could not be shown).
+  apply({
+    runId = null,
+    created = [],
+    updated = [],
+    processedIds = [],
+    reactions = [],
+    outcome = 'model',
+    now = Date.now(),
+  }) {
+    return this.#tx(() => {
+      const link = this.db.prepare(
+          'INSERT OR IGNORE INTO matter_messages(matter_id,message_id,added_at) VALUES(?,?,?)',
+        ),
+        ids = [];
+      for (const m of created) {
+        const id = Number(
+          this.#run(
+            `INSERT INTO matters(title,who,ask,due,urgency,status,opened_at,updated_at) VALUES(?,?,?,?,?,'open',?,?)`,
+            m.title,
+            m.who,
+            m.ask,
+            m.due ?? null,
+            m.urgency,
+            now,
+            now,
+          ).lastInsertRowid,
+        );
+        for (const message of m.messageIds) link.run(id, message, now);
+        ids.push(id);
+      }
+      for (const u of updated) {
+        const c = u.changes ?? {};
+        this.#run(
+          'UPDATE matters SET title=COALESCE(?,title),who=COALESCE(?,who),ask=COALESCE(?,ask),due=COALESCE(?,due),urgency=COALESCE(?,urgency),updated_at=? WHERE id=?',
+          c.title ?? null,
+          c.who ?? null,
+          c.ask ?? null,
+          c.due ?? null,
+          c.urgency ?? null,
+          now,
+          u.matterId,
+        );
+        if (u.close)
+          this.#run(
+            `UPDATE matters SET status='closed',reason=?,closed_at=?,closed_by='model' WHERE id=? AND status='open'`,
+            u.close,
+            now,
+            u.matterId,
+          );
+        for (const message of u.messageIds) link.run(u.matterId, message, now);
+      }
+      const done = this.db.prepare('INSERT OR IGNORE INTO processed(message_id,outcome,run_id,at) VALUES(?,?,?,?)');
+      for (const id of processedIds) done.run(id, outcome, runId, now);
+      const reacted = this.db.prepare(
+        'INSERT OR IGNORE INTO processed_reactions(message_id,key,outcome,run_id,at) VALUES(?,?,?,?,?)',
+      );
+      for (const r of reactions) reacted.run(r.messageId, r.key, r.outcome, runId, now);
+      return ids;
+    });
+  }
 
- // ---- messages the model failed on by themselves (see processor.mjs): their strikes, and those given up
- struck(){return new Set(this.#all('SELECT message_id FROM message_failures').map(r=>r.message_id));}
- // One more strike against a message; returns how many it has.
- strike(id,error,now=Date.now()){
-  this.#run('INSERT INTO message_failures(message_id,strikes,last_error,at) VALUES(?,1,?,?) ON CONFLICT(message_id) DO UPDATE SET strikes=strikes+1,last_error=excluded.last_error,at=excluded.at',id,String(error).slice(0,500),now);
-  return this.#get('SELECT strikes FROM message_failures WHERE message_id=?',id).strikes;
- }
- clearStrikes(ids){this.#run(`DELETE FROM message_failures WHERE message_id IN (SELECT value FROM json_each(?))`,JSON.stringify(ids));}
- skippedCount(){return this.#get(`SELECT count(*) n FROM processed WHERE outcome='failed'`).n;}
+  // ---- messages the model failed on by themselves (see processor.mjs): their strikes, and those given up
+  struck() {
+    return new Set(this.#all('SELECT message_id FROM message_failures').map((r) => r.message_id));
+  }
+  // One more strike against a message; returns how many it has.
+  strike(id, error, now = Date.now()) {
+    this.#run(
+      'INSERT INTO message_failures(message_id,strikes,last_error,at) VALUES(?,1,?,?) ON CONFLICT(message_id) DO UPDATE SET strikes=strikes+1,last_error=excluded.last_error,at=excluded.at',
+      id,
+      String(error).slice(0, 500),
+      now,
+    );
+    return this.#get('SELECT strikes FROM message_failures WHERE message_id=?', id).strikes;
+  }
+  clearStrikes(ids) {
+    this.#run(`DELETE FROM message_failures WHERE message_id IN (SELECT value FROM json_each(?))`, JSON.stringify(ids));
+  }
+  skippedCount() {
+    return this.#get(`SELECT count(*) n FROM processed WHERE outcome='failed'`).n;
+  }
 
- // ---- exams: the model grades the chats whose level I set again, without being shown my level (see grader.mjs)
- // answers: one per chat, {feedId, name, owner: my level, model: its answer (undefined when it gave none), reason: its}.
- // Returns the exam's number.
- addExam({at,answers}){
-  return this.#tx(()=>{
-   const id=Number(this.#run('INSERT INTO exams(at,total,correct) VALUES(?,?,?)',at,answers.length,answers.filter(a=>a.model===a.owner).length).lastInsertRowid);
-   const add=this.db.prepare('INSERT INTO exam_answers(exam_id,feed_id,name,owner_level,model_level,reason) VALUES(?,?,?,?,?,?)');
-   for(const a of answers)add.run(id,a.feedId,a.name??null,a.owner,a.model??null,a.reason??null);
-   return id;
-  });
- }
- // The latest exams, newest first: when, how many chats, how many it got right, and the answers it got wrong.
- exams(limit){
-  return this.#all('SELECT * FROM exams ORDER BY id DESC LIMIT ?',limit).map(e=>({at:e.at,total:e.total,correct:e.correct,
-   wrong:this.#all('SELECT * FROM exam_answers WHERE exam_id=? AND model_level IS NOT owner_level ORDER BY rowid',e.id)
-    .map(a=>({feedId:a.feed_id,name:a.name??undefined,owner:a.owner_level,model:a.model_level??undefined,reason:a.reason??undefined}))}));
- }
+  // ---- exams: the model grades the chats whose level I set again, without being shown my level (see grader.mjs)
+  // answers: one per chat, {feedId, name, owner: my level, model: its answer (undefined when it gave none), reason: its}.
+  // Returns the exam's number.
+  addExam({ at, answers }) {
+    return this.#tx(() => {
+      const id = Number(
+        this.#run(
+          'INSERT INTO exams(at,total,correct) VALUES(?,?,?)',
+          at,
+          answers.length,
+          answers.filter((a) => a.model === a.owner).length,
+        ).lastInsertRowid,
+      );
+      const add = this.db.prepare(
+        'INSERT INTO exam_answers(exam_id,feed_id,name,owner_level,model_level,reason) VALUES(?,?,?,?,?,?)',
+      );
+      for (const a of answers) add.run(id, a.feedId, a.name ?? null, a.owner, a.model ?? null, a.reason ?? null);
+      return id;
+    });
+  }
+  // The latest exams, newest first: when, how many chats, how many it got right, and the answers it got wrong.
+  exams(limit) {
+    return this.#all('SELECT * FROM exams ORDER BY id DESC LIMIT ?', limit).map((e) => ({
+      at: e.at,
+      total: e.total,
+      correct: e.correct,
+      wrong: this.#all(
+        'SELECT * FROM exam_answers WHERE exam_id=? AND model_level IS NOT owner_level ORDER BY rowid',
+        e.id,
+      ).map((a) => ({
+        feedId: a.feed_id,
+        name: a.name ?? undefined,
+        owner: a.owner_level,
+        model: a.model_level ?? undefined,
+        reason: a.reason ?? undefined,
+      })),
+    }));
+  }
 
- // ---- model runs, kept with the raw reply so a decision can be looked into later
- // messages: the new messages it was given to process (none for a review); matters: the open matters it was shown;
- // model: the name of the model asked, undefined for claude's default.
- startRun({kind='batch',messages,matters,model,promptBytes,now=Date.now()}){
-  return Number(this.#run('INSERT INTO model_runs(started_at,kind,messages,matters,model,prompt_bytes) VALUES(?,?,?,?,?,?)',now,kind,messages,matters??null,model??null,promptBytes).lastInsertRowid);
- }
- finishRun(id,{ok,error,output,now=Date.now()}){this.#run('UPDATE model_runs SET finished_at=?,ok=?,error=?,output=? WHERE id=?',now,ok?1:0,error??null,output??null,id);}
- // One model run, recorded with model.name: model.ask({system, prompt}), and its reply to use(output, runId), which
- // throws when it cannot use it. A failure, the model's or use's, is recorded with the reply if there was one, and
- // passes on. Resolves with what use returns. now: the clock.
- async recordRun({model,kind,messages,matters,system,prompt,now=Date.now},use){
-  const runId=this.startRun({kind,messages,matters,model:model.name,promptBytes:Buffer.byteLength(prompt),now:now()});let output;
-  try{output=await model.ask({system,prompt});const r=await use(output,runId);this.finishRun(runId,{ok:true,output,now:now()});return r;}
-  catch(e){this.finishRun(runId,{ok:false,error:e?.message??String(e),output,now:now()});throw e;}
- }
- runs(limit=1000){
-  return this.#all('SELECT * FROM (SELECT * FROM model_runs ORDER BY id DESC LIMIT ?) ORDER BY id',limit)
-   .map(r=>({id:r.id,kind:r.kind,startedAt:r.started_at,finishedAt:r.finished_at,messages:r.messages,matters:r.matters??undefined,model:r.model??undefined,promptBytes:r.prompt_bytes,ok:r.ok===null?undefined:Boolean(r.ok),error:r.error,output:r.output}));
- }
+  // ---- model runs, kept with the raw reply so a decision can be looked into later
+  // messages: the new messages it was given to process (none for a review); matters: the open matters it was shown;
+  // model: the name of the model asked, undefined for claude's default.
+  startRun({ kind = 'batch', messages, matters, model, promptBytes, now = Date.now() }) {
+    return Number(
+      this.#run(
+        'INSERT INTO model_runs(started_at,kind,messages,matters,model,prompt_bytes) VALUES(?,?,?,?,?,?)',
+        now,
+        kind,
+        messages,
+        matters ?? null,
+        model ?? null,
+        promptBytes,
+      ).lastInsertRowid,
+    );
+  }
+  finishRun(id, { ok, error, output, now = Date.now() }) {
+    this.#run(
+      'UPDATE model_runs SET finished_at=?,ok=?,error=?,output=? WHERE id=?',
+      now,
+      ok ? 1 : 0,
+      error ?? null,
+      output ?? null,
+      id,
+    );
+  }
+  // One model run, recorded with model.name: model.ask({system, prompt}), and its reply to use(output, runId), which
+  // throws when it cannot use it. A failure, the model's or use's, is recorded with the reply if there was one, and
+  // passes on. Resolves with what use returns. now: the clock.
+  async recordRun({ model, kind, messages, matters, system, prompt, now = Date.now }, use) {
+    const runId = this.startRun({
+      kind,
+      messages,
+      matters,
+      model: model.name,
+      promptBytes: Buffer.byteLength(prompt),
+      now: now(),
+    });
+    let output;
+    try {
+      output = await model.ask({ system, prompt });
+      const r = await use(output, runId);
+      this.finishRun(runId, { ok: true, output, now: now() });
+      return r;
+    } catch (e) {
+      this.finishRun(runId, { ok: false, error: e?.message ?? String(e), output, now: now() });
+      throw e;
+    }
+  }
+  runs(limit = 1000) {
+    return this.#all('SELECT * FROM (SELECT * FROM model_runs ORDER BY id DESC LIMIT ?) ORDER BY id', limit).map(
+      (r) => ({
+        id: r.id,
+        kind: r.kind,
+        startedAt: r.started_at,
+        finishedAt: r.finished_at,
+        messages: r.messages,
+        matters: r.matters ?? undefined,
+        model: r.model ?? undefined,
+        promptBytes: r.prompt_bytes,
+        ok: r.ok === null ? undefined : Boolean(r.ok),
+        error: r.error,
+        output: r.output,
+      }),
+    );
+  }
 }
